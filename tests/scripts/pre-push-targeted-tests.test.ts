@@ -436,6 +436,49 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(rePush.status).toBe(1);
 	});
 
+	// Recurrence (#4726 verify F8): `after.dirty` had no witness once the
+	// pre-run check joined it; a tree that is clean when the run starts and
+	// dirty when it ends must not bind the committed bytes either.
+	it("never trusts a pass from a run that left the tree dirty (#4724)", () => {
+		const { git, commit, hook } = gitFixture();
+		write(
+			"tests/clients/first.test.ts",
+			[
+				"import { writeFileSync } from 'node:fs';",
+				"import { expect, it } from 'vitest';",
+				// The run lands a fix and leaves it uncommitted, then reads it.
+				"it('first', async () => {",
+				"  writeFileSync('clients/first.ts', 'export const first = true;\\n');",
+				"  const mod = await import('../../clients/first.ts?run');",
+				"  expect(mod.first).toBe(true);",
+				"});",
+				"",
+			].join("\n"),
+		);
+		git(["add", "tests/clients/first.test.ts"]);
+		git(["commit", "--quiet", "-m", "dirtying test"]);
+		git([
+			"update-ref",
+			"refs/remotes/origin/master",
+			git(["rev-parse", "HEAD"]),
+		]);
+		const bad = commit("clients/first.ts", "export const first = false;\n");
+		const push = `refs/heads/main ${bad} refs/heads/main ${zero}\n`;
+		const run = hook(push);
+		expect(run.status).toBe(0);
+		expect(run.stdout).toContain("1 passed");
+		expect(git(["status", "--porcelain", "--untracked-files=no"])).not.toBe("");
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			bad,
+		);
+		expect(record?.outcome).not.toBe("tests-complete");
+		expect(record?.treeBound).toBeUndefined();
+		const rePush = hook(push);
+		expect(rePush.stdout).not.toContain("already passed");
+		expect(rePush.stdout).toContain("1 passed");
+	});
+
 	// Recurrence (#4726 verify F6, HEAD axis): clean at both ends is not enough
 	// when the run moved HEAD from another commit onto the pushed one.
 	it("never trusts a pass from a run that started on a different HEAD (#4724)", () => {
