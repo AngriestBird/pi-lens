@@ -352,16 +352,6 @@ jobs:
       - name: Build dist
         run: npm run build:dist
 
-      # #3405 TEMPORARY measurement arm C (reverted in the next commit): didSave
-      # is sent, but the seeded error sits at the Mix root, outside elixirc_paths.
-      - name: Probe arm C (seed at the project root)
-        run: |
-          set -euo pipefail
-          mv tests/fixtures/tool-smoke/expert/lib/bad.ex tests/fixtures/tool-smoke/expert/bad.ex
-          sed -i 's#file: "lib/bad.ex"#file: "bad.ex"#' scripts/smoke-tools.mjs
-          grep -c 'file: "bad.ex",' scripts/smoke-tools.mjs
-          ls tests/fixtures/tool-smoke/expert tests/fixtures/tool-smoke/expert/lib
-
       # #3939: the official Docker server has no installer-registry entry. Keep
       # this release pinned to the GitHub asset digest, install it under the
       # runner's disposable TMPDIR, and add only that directory to PATH so the
