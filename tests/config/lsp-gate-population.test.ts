@@ -117,6 +117,30 @@ const repoRoot = path.resolve(
 );
 const fixtures = LSP_FIXTURES as Fixture[];
 
+// #3405 review r1 F1/F3: both helpers parse structure, not prose. A prose
+// substring of a manifest or a result line satisfied the census while the
+// project no longer compiled the seed (a commented-out Compile item) or a
+// failed row padded the sample floor (`still unanswered` contains `answered`).
+// Admitted forms: a `<Compile Include="X"` item outside XML comments and
+// CDATA, closed by `/>` or `>`. Every other spelling (single quotes, an
+// attribute before Include, a wildcard, a property reference) is refused.
+function fsprojCompileIncludes(xml: string): string[] {
+	const live = xml
+		.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "")
+		.replace(/<!--[\s\S]*?-->/g, "")
+		.replace(/<!--[\s\S]*$/, "");
+	return [...live.matchAll(/<Compile Include="([^"]*)"\s*\/?>/g)].map(
+		(match) => match[1],
+	);
+}
+
+function answeredSamples(rows: { line: string }[]): number[] {
+	return rows.flatMap((row) => {
+		const match = /^✓.*\banswered on call \d+, (\d+) ms/.exec(row.line);
+		return match ? [Number(match[1])] : [];
+	});
+}
+
 describe("LSP clean-gate population (#3217)", () => {
 	it("gives every gate-eligible fixture exactly one of lspGate / lspGateExempt", () => {
 		const { eligible } = lspGatePopulation() as { eligible: Fixture[] };
@@ -230,14 +254,61 @@ describe("LSP clean-gate population (#3217)", () => {
 			if (fsproj) {
 				const project = readFileSync(path.join(dir, fsproj), "utf8");
 				expect(
-					project.includes(`<Compile Include="${fixture.file}"`),
-					`${fixture.lang}: ${fsproj} lists no Compile item for ${fixture.file}`,
-				).toBe(true);
+					fsprojCompileIncludes(project),
+					`${fixture.lang}: ${fsproj} lists no live Compile item for ${fixture.file}`,
+				).toContain(fixture.file);
 				checked += 1;
 			}
 		}
 		// Floor: elixir, expert and fsharp. An empty scan would pass vacuously.
 		expect(checked).toBeGreaterThanOrEqual(3);
+	});
+
+	// #3405 review r1 F1 recurrence (Greptile): the census matched a substring
+	// of the manifest, so a commented-out `<Compile Include="Program.fs" />` kept
+	// it green after the project stopped compiling the seed. Each plant is a
+	// spelling the first design did not name.
+	it.each([
+		[
+			"a commented-out item",
+			`<Project><!-- <Compile Include="Program.fs" /> --></Project>`,
+		],
+		[
+			"an item in an unterminated comment",
+			`<Project><!-- <Compile Include="Program.fs" />`,
+		],
+		[
+			"an item inside CDATA",
+			`<Project><![CDATA[<Compile Include="Program.fs" />]]></Project>`,
+		],
+		[
+			"a single-quoted Include",
+			`<Project><Compile Include='Program.fs' /></Project>`,
+		],
+		[
+			"an attribute before Include",
+			`<Project><Compile Condition="false" Include="Program.fs" /></Project>`,
+		],
+		["a wildcard", `<Project><Compile Include="*.fs" /></Project>`],
+		[
+			"a property reference",
+			`<Project><Compile Include="$(Seed)" /></Project>`,
+		],
+		["a Remove item", `<Project><Compile Remove="Program.fs" /></Project>`],
+		[
+			"a longer file name",
+			`<Project><Compile Include="Program.fs.bak" /></Project>`,
+		],
+	])("refuses %s as a Compile item for Program.fs", (_name, xml) => {
+		expect(fsprojCompileIncludes(xml)).not.toContain("Program.fs");
+	});
+
+	it("admits a live Compile item next to a commented-out one", () => {
+		expect(
+			fsprojCompileIncludes(
+				`<Project><!-- <Compile Include="Old.fs" /> --><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Project>`,
+			),
+		).toEqual(["Program.fs"]);
 	});
 
 	// #3405: the readiness deadline is a measured constant (#3648). The raw Expert
@@ -254,19 +325,19 @@ describe("LSP clean-gate population (#3217)", () => {
 				"utf8",
 			),
 		) as { arms: Record<string, { run: number; line: string }[]> };
-		const answered = (rows: { line: string }[]) =>
-			rows.map((row) =>
-				Number(/answered on call \d+, (\d+) ms/.exec(row.line)?.[1]),
-			);
 		const expert = fixtures.find((fixture) => fixture.lang === "expert") as {
 			lspGateReadiness: { deadlineMs: number };
 		};
-		const samples = [
-			...answered(artifact.arms["A-didSave-lib-seed"]),
-			...answered(artifact.arms["B-no-didSave-lib-seed"]),
-		];
+		// every row of a measured arm is a passing answer: a row that is not
+		// cannot be dropped silently and shrink the sample set
+		const samplesA = answeredSamples(artifact.arms["A-didSave-lib-seed"]);
+		const samplesB = answeredSamples(artifact.arms["B-no-didSave-lib-seed"]);
+		expect(samplesA).toHaveLength(artifact.arms["A-didSave-lib-seed"].length);
+		expect(samplesB).toHaveLength(
+			artifact.arms["B-no-didSave-lib-seed"].length,
+		);
+		const samples = [...samplesA, ...samplesB];
 		expect(samples.length).toBeGreaterThanOrEqual(6);
-		expect(samples.every(Number.isFinite)).toBe(true);
 		expect(expert.lspGateReadiness.deadlineMs).toBeGreaterThanOrEqual(
 			2 * Math.max(...samples),
 		);
@@ -275,6 +346,25 @@ describe("LSP clean-gate population (#3217)", () => {
 			/still unanswered on call \d+, (\d+) ms/.exec(root.line)?.[1],
 		);
 		expect(waited).toBeGreaterThanOrEqual(expert.lspGateReadiness.deadlineMs);
+	});
+
+	// #3405 review r1 F3 recurrence (CodeRabbit): `answered on call` also
+	// matches inside `still unanswered on call`, so an unanswered row parsed as
+	// a sample and could pad the sample floor.
+	it("counts only passing rows as answer-time samples", () => {
+		expect(
+			answeredSamples([
+				{
+					line: "✓  expert  x  1  lsp_diagnostics returned 1 primary finding (answered on call 6, 10955 ms after the cold call)",
+				},
+				{
+					line: "✗  expert  x  0  lsp_diagnostics returned 0 diagnostic(s) but 0 primary findings (auxiliary=0) (still unanswered on call 61, 151521 ms after the cold call)",
+				},
+				{
+					line: "⚠  expert  x  0  probe server unavailable (answered on call 2, 5 ms after the cold call)",
+				},
+			]),
+		).toEqual([10955]);
 	});
 
 	it("requires every exemption to state a reason, not just carry the key", () => {

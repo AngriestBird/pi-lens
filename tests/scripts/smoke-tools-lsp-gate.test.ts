@@ -300,6 +300,46 @@ describe("smoke-tools --lsp-gate readiness rung (#3405)", () => {
 		expect(execute).toHaveBeenCalledOnce();
 	});
 
+	// #3405 review r1 F2: the rung's entry is "the cold call FAILED", not "did
+	// not pass". An unavailable server answered nothing to wait for; polling it
+	// would burn the whole deadline (150 s for Expert) and could turn a skip
+	// into a pass. Neutering the entry to `!== "pass"` makes this red.
+	it("does not poll a cold call that answered unavailable", async () => {
+		const execute = vi.fn(async () => ({
+			details: { unavailable: "probe server unavailable" },
+		}));
+		const { output } = await runGateWithCensus("pass", execute, {
+			lspGateReadiness: READINESS,
+		});
+
+		expect(execute).toHaveBeenCalledOnce();
+		expect(output).toContain("⚠  typescript");
+		expect(output).not.toContain("unanswered");
+		expect(output).not.toContain("after the cold call");
+	});
+
+	// #3405 review r1 F4: a cold call that ran and produced no finding is a
+	// recorded red. A later poll that answers unavailable (the server crashed
+	// while its project was booting) must not turn that red into a skip, which
+	// exits 0 on a mixed population.
+	it("keeps the cold hard failure when a later poll answers unavailable", async () => {
+		let call = 0;
+		const execute = vi.fn(async () =>
+			++call === 1
+				? silent
+				: { details: { unavailable: "probe server unavailable" } },
+		);
+		const { output } = await runGateWithCensus("pass", execute, {
+			lspGateReadiness: READINESS,
+		});
+
+		expect(execute.mock.calls.length).toBeGreaterThan(2);
+		expect(output).toContain("✗  typescript");
+		expect(output).not.toContain("⚠  typescript");
+		expect(output).toContain("lsp_diagnostics returned 0 diagnostic(s)");
+		expect(output).toContain("still unanswered");
+	});
+
 	it("does not poll once the cold call already passed", async () => {
 		const execute = vi.fn(async () => finding);
 		await runGateWithCensus("pass", execute, { lspGateReadiness: READINESS });

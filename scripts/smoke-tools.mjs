@@ -2712,10 +2712,14 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 				// witness's seam), never a fixed sleep: a server that never publishes
 				// still reds, and the detail names the calls it took.
 				const ready = await pollUntil(async () => {
-					verdict = classify(await diagnose());
+					const next = classify(await diagnose());
 					if (verbose)
-						console.error(`[${fx.lang}] readiness poll: ${verdict.detail}`);
-					return verdict.state === "pass";
+						console.error(`[${fx.lang}] readiness poll: ${next.detail}`);
+					// An unavailable poll never replaces the cold failure: a red the
+					// gate recorded must not become a skip (exit 0) because the server
+					// died while its project booted.
+					if (next.state !== "skip") verdict = next;
+					return next.state === "pass";
 				}, fx.lspGateReadiness);
 				verdict = {
 					...verdict,
