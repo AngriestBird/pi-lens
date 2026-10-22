@@ -2599,10 +2599,11 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 			syncGitGuardRecord(runtime, cache, env.tmpDir, shared);
 
 			expect(owners(storedData(cache, env.tmpDir))).toEqual([EARLIER]);
-			expect(storedData(cache, env.tmpDir)?.affectedFiles).toContain(shared);
+			// The other session's own gate: its a.ts section still refuses.
 			expect(evaluateGitGuard(earlier, cache, env.tmpDir)).toMatchObject({
 				block: true,
 			});
+			expect(storedData(cache, env.tmpDir)?.affectedFiles).toContain(shared);
 		} finally {
 			env.cleanup();
 		}
@@ -2675,6 +2676,50 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 			expect(storedData(cache, env.tmpDir)?.blockerContent).toBe(
 				data.blockerContent,
 			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps another session's text no file owns, byte for byte, when a settled turn end drops this session's sections", () => {
+		// RECURRENCE GUARDED: #4738, the partition retire on text it cannot
+		// attribute. Another session's turn end leads the record with a project
+		// lane's report beside its file sections; dropping it as "nothing left"
+		// deleted the record once this session's own sections left.
+		const env = setupTestEnvironment("pi-lens-git-guard-4738-retire-lane-");
+		try {
+			const [theirs, mine] = ["a.ts", "b.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const file of [theirs, mine]) fs.writeFileSync(file, "x;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const theirText = `${composerSections([theirs])}\n\n🔴 STOP — CRITICAL dependency CVEs (trivy, 1h old). Upgrade before shipping:\n  CVE-2026-0001 (pkg@1.0.0) — upgrade to 1.0.1 or later`;
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					...foreignRecord([theirs]),
+					content: theirText,
+					blockerContent: theirText,
+					affectedFiles: [theirs, mine],
+					carriedBlockers: [
+						{
+							sessionId: "session-A",
+							blockerContent: composerSections([mine]),
+							blockingFiles: [mine],
+						},
+					],
+				}),
+			);
+
+			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+				false,
+			);
+			const after = storedData(cache, env.tmpDir);
+			expect(owners(after)).toEqual([EARLIER]);
+			expect(after?.blockerContent).toBe(theirText);
 		} finally {
 			env.cleanup();
 		}

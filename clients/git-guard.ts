@@ -1537,7 +1537,7 @@ function unconfirmedRecordRemedy(
 			`The record names blockers in ${shown} that pi-lens cannot confirm. Fix them and write each file again: a clean pi-lens check of a file clears its part of the record.`,
 		);
 	}
-	if (!record && makesNoClaim(fields)) {
+	if (makesNoClaim(fields)) {
 		parts.push(
 			"The record makes no blocker claim pi-lens can check, so no re-check of one file clears it; a turn that ends with no blocker clears it.",
 		);
