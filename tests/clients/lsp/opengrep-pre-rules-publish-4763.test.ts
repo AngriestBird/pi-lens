@@ -481,9 +481,10 @@ describe("#4764 x #4763 an auxiliary's publish acceptance table", () => {
 	});
 
 	it("a language-role server is never gated by the failure", () => {
-		const arm = armHandler("opengrep", "language");
+		// A server without the #4763 marker, so only the #4764 gate is in play.
+		const arm = armHandler("fake-language", "language");
+		arm.state.documentVersions.set(KEY, 9);
 		arm.showMessage(1, FATAL);
-		arm.rulesRefreshed();
 		arm.publish({ uri: uri(FILE), diagnostics: [] });
 		settle();
 
