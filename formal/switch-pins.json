@@ -1755,6 +1755,21 @@
 					"value": "TRUE",
 					"test": "tests/index-4554-last-member-teardown.test.ts",
 					"title": "keeps the LSP fleet at a full start while another session in the process is live"
+				},
+				"PrimaryClaims": {
+					"value": "TRUE",
+					"test": "tests/index-4751-newsession-turn-end-scope.test.ts",
+					"title": "delivers the new session's turn-end findings for its own write and records its section under its id"
+				},
+				"ClaimEmpty": {
+					"value": "TRUE",
+					"test": "tests/clients/turn-state-primary-claim.test.ts",
+					"title": "takes an empty ownerless worklist, so a no-turn secondary's leave cannot strand the primary's next write"
+				},
+				"SecondaryClaims": {
+					"value": "FALSE",
+					"test": "tests/index-4751-newsession-turn-end-scope.test.ts",
+					"title": "keeps the primary's worklist when a subagent runs a turn inside the primary's writing turn"
 				}
 			},
 			"notCodeChoice": [
@@ -1765,7 +1780,8 @@
 						"Writers",
 						"FileLess",
 						"MaxSteps",
-						"MaxTurns"
+						"MaxTurns",
+						"WithSubagent"
 					]
 				},
 				{

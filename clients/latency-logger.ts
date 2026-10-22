@@ -161,7 +161,8 @@ let recentPhases: Array<{
  * #3873: `session_handoff_slot`, `session_handoff_adopt`,
  * `session_store_action` and `session_end_fence_rollup` are zero-duration
  * decision and rollup rows written inside the session transition that owns any
- * real stall. `format_late_resync_chained` marks a formatter give-up and its
+ * real stall; #4751's `session_handoff_turn_state` is the same kind of row,
+ * written at turn_start. `format_late_resync_chained` marks a formatter give-up and its
  * `durationMs` is the formatter's age at the give-up, not work of its own.
  *
  * #4368 r1 F3: `lsp_created_import_scan_rollup` is a zero-duration session-end
@@ -202,6 +203,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"session_handoff_adopt",
 	"session_store_action",
 	"session_end_fence_rollup",
+	"session_handoff_turn_state",
 	"format_late_resync_chained",
 	"lsp_created_import_scan_rollup",
 ]);

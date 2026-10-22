@@ -3261,6 +3261,24 @@ function activateExtension(hostPi: ExtensionAPI) {
 				getStableSessionId(ctx)!,
 			);
 		}
+		// #4751: the primary's half. The worklist writer reads the role from the
+		// envelope's owner, so the live primary takes it over from an in-process
+		// predecessor, under the id its writers and its turn end use.
+		if (ownedSessionRole === "primary") {
+			const turnStateCwd = (ctx as { cwd?: string })?.cwd ?? process.cwd();
+			const to = getStableSessionId(ctx) ?? runtime.telemetrySessionId;
+			const claim = cacheManager.claimPrimaryTurnState(turnStateCwd, to);
+			// One row per hand-off: the claim writes only while another id owns it.
+			if (claim)
+				logLatency({
+					type: "phase",
+					toolName: "turn_start",
+					filePath: turnStateCwd,
+					phase: "session_handoff_turn_state",
+					durationMs: 0,
+					metadata: { ...claim, to },
+				});
+		}
 		// Every turn, a secondary's too: clearing only re-runs a duplicate
 		// same-state analysis, while keeping it would skip a secondary's next
 		// turn (the dedupe keys on the primary's turn index).
