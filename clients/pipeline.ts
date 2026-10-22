@@ -477,6 +477,14 @@ export interface PipelineResult {
 	 */
 	currentBlockerCount?: number;
 	/**
+	 * #4733 r5 G3: how many blocking findings the observation still holds that
+	 * the #4483 seed called pre-existing (`DispatchResult.preExisting`). Absent
+	 * when there are none. Not part of `currentBlockerCount`, which governs this
+	 * session's own entry; only the verdict that clears another session's section
+	 * reads it.
+	 */
+	preExistingBlockerCount?: number;
+	/**
 	 * #4733 r1 F2: true only when this dispatch checked the whole file as far
 	 * as this checkout can (`checkedWholeFile`). Absent on every return that
 	 * dispatched nothing. The commit gate's record lets a clean write of a file
@@ -2945,6 +2953,9 @@ async function analysePipeline(
 				: undefined,
 		// #4484: what a clear must find empty, whatever the authorship.
 		currentBlockerCount: liveBlockers.length,
+		...(preExisting.length > 0 && {
+			preExistingBlockerCount: preExisting.length,
+		}),
 		...(checkedWholeFile(dispatchResult) && {
 			fileVerdictComplete: true as const,
 		}),

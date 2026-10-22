@@ -1496,7 +1496,11 @@ async function dispatchPipelineAnalysis(args: {
 	} catch (pipelineErr) {
 		if (getFlag("lens-guard")) {
 			// #4733 r2 F12: about this file, so only its own next dispatch answers it.
-			runtime.markGitGuardDispatchUnanswered(filePath, "pipeline_crash");
+			// #4733 r5 G2: in the session that dispatched it, so a replaced
+			// session's late rejection cannot latch the live one.
+			sessionGeneration.guardedWrite(filePath, () =>
+				runtime.markGitGuardDispatchUnanswered(filePath, "pipeline_crash"),
+			);
 		}
 		dbg(`runPipeline crashed: ${pipelineErr}`);
 		logReadGuardEvent({
@@ -1565,6 +1569,16 @@ async function dispatchPipelineAnalysis(args: {
 		};
 	} finally {
 		releaseInFlightPipeline(filePath, registryKey, registeredPipelines);
+	}
+	// #4733 r2 F12, r5 G1: the dispatch latch is this file's, and both callers
+	// return here, so an errored run sets it and any other returned run answers
+	// it. Fenced like the crash mark above (r5 G2).
+	if (getFlag("lens-guard")) {
+		sessionGeneration.guardedWrite(filePath, () =>
+			result.isError && !result.hasBlockers
+				? runtime.markGitGuardDispatchUnanswered(filePath, "pipeline_error")
+				: runtime.answerGitGuardDispatch(filePath),
+		);
 	}
 
 	if (!isPartialApplyResult) {
@@ -4150,11 +4164,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		if (getFlag("lens-guard")) {
 			// #4733 r1 F2: a clean verdict over the whole file, applied, with no
 			// blocker left in the observation; anything less observes nothing.
+			// #4733 r5 G3: a blocking finding the seed called pre-existing is still
+			// reported, so it is not a clean verdict for another session's section.
 			const wholeFileClean =
 				inlineVerdictApplied &&
 				!result.isError &&
 				!result.hasBlockers &&
 				result.currentBlockerCount === 0 &&
+				(result.preExistingBlockerCount ?? 0) === 0 &&
 				result.fileVerdictComplete === true;
 			syncGitGuardRecord(
 				runtime,
@@ -4169,13 +4186,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				analysisRootMode,
 				wholeFileClean,
 			);
-			// #4733 r2 F12: a dispatch latch is this file's: an errored run sets it,
-			// and a run that returned without error answers it.
-			if (result.isError && !result.hasBlockers) {
-				runtime.markGitGuardDispatchUnanswered(filePath, "pipeline_error");
-			} else {
-				runtime.answerGitGuardDispatch(filePath);
-			}
 		}
 	}
 

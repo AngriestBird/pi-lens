@@ -6035,6 +6035,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (existingGuard) {
 					writeGitGuardRecord(cacheManager, runtime, cwd, {
 						...(existingGuard as TurnEndFindingsCache),
+						// #4733 r5 F21: the blocker sections are this session's own
+						// (another session's are replaced, not kept), so is the record.
+						sessionId: runtime.telemetrySessionId,
 						content,
 						blockerContent:
 							blockerParts.length > 0

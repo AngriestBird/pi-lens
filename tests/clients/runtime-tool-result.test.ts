@@ -3636,14 +3636,31 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 	});
 
 	it.each([
-		["this session's own record", "session-A", false, false],
-		["another session's record", "an-earlier-session", false, true],
+		["this session's own record", "session-A", {}, false, false],
+		["another session's record", "an-earlier-session", {}, false, true],
 		// An errored run cleared the entry but observed nothing: the next
 		// no-verdict write would otherwise find no entry and the section gone.
-		["this session's own record, errored run", "session-A", true, true],
+		[
+			"this session's own record, errored run",
+			"session-A",
+			{ isError: true },
+			false,
+			true,
+		],
+		// #4733 r5 F20: the clear is refused (the observation still holds a
+		// blocker it rendered no summary for), so it retired nothing and the
+		// section stays. The entry is policy-suppressed, so it does not rewrite
+		// the record itself and the write's file argument alone decides.
+		[
+			"this session's own record, refused clear",
+			"session-A",
+			{ currentBlockerCount: 1 },
+			true,
+			true,
+		],
 	] as const)(
 		"%s: a file's section leaves only when the write retired that file's own blocker, without a whole-file verdict (#4733 r3 F15)",
-		async (_label, owner, errored, kept) => {
+		async (_label, owner, fix, suppress, kept) => {
 			// RECURRENCE GUARDED: #4733 r3 F15 (#4509 row 31b). The write that
 			// fixed a file's blocker while a language server was cut off reached no
 			// whole-file verdict, so the caller passed no file and the record kept a
@@ -3722,14 +3739,16 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 						tmpDir,
 					);
 
+					if (suppress) runtime.applyInlineBlockerPolicyVerdicts([filePath]);
 					// The fix: no blocker left, but no whole-file verdict either (a
 					// server went unconfirmed), so `fileVerdictComplete` is absent.
 					await write(filePath, {
 						output: "",
 						hasBlockers: false,
-						isError: errored,
+						isError: false,
 						fileModified: false,
 						currentBlockerCount: 0,
+						...fix,
 					});
 					expect(
 						stored()?.blockerContent?.includes(`${filePath}:`) ?? false,
@@ -3837,6 +3856,57 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 
 					await write(crashed, "clean");
 					expect(gate()).toEqual({ block: false });
+				},
+			);
+		},
+	);
+
+	it.each([
+		["crash", true],
+		["errored run", false],
+	] as const)(
+		"drops a replaced session's late pipeline %s instead of latching the live session (#4733 r5 G2)",
+		async (outcome, rejects) => {
+			// RECURRENCE GUARDED: #4733 r5 G2 (AGENTS.md shape 22). The crash latch
+			// was written in the catch after `await pipelinePromise` without the
+			// captured session generation, so session 1's late rejection latched
+			// session 2's gate for a file session 2 never dispatched. The errored-run
+			// mark, now on the same shared path (r5 G1), takes the same fence.
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			const entered = gatedPromise<void>();
+			const release = gatedPromise<void>();
+			vi.mocked(runPipeline).mockReset();
+			vi.mocked(runPipeline).mockImplementationOnce(async () => {
+				entered.resolve();
+				await release.promise;
+				if (rejects) throw new Error("runner exploded");
+				return {
+					output: "",
+					hasBlockers: false,
+					isError: true,
+					fileModified: false,
+				} as never;
+			});
+			await acrossReplacement(
+				`4733-late-${outcome.replace(" ", "-")}`,
+				async ({ tmpDir, filePath, runtime, cacheManager }) => {
+					const handler = handleToolResult(
+						toolResultDeps({
+							filePath,
+							runtime,
+							cacheManager,
+							flags: ["lens-guard"],
+						}),
+					);
+					await entered.promise;
+					runtime.resetForSession();
+					runtime.beginTurn();
+					release.resolve();
+					await handler;
+					expect(runtime.gitGuardUnansweredDispatches).toEqual([]);
+					expect(evaluateGitGuard(runtime, cacheManager, tmpDir).block).toBe(
+						false,
+					);
 				},
 			);
 		},
