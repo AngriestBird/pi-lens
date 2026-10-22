@@ -8,7 +8,6 @@ import {
 	LSP_FIXTURES,
 	runCreatedModuleWitness,
 	runLspGate,
-	runSaveWitness,
 } from "../../scripts/smoke-tools.mjs";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -302,114 +301,6 @@ describe("smoke-tools --lsp-gate readiness rung (#3405)", () => {
 		const execute = vi.fn(async () => finding);
 		await runGateWithCensus("pass", execute, { lspGateReadiness: READINESS });
 
-		expect(execute).toHaveBeenCalledOnce();
-	});
-});
-
-// #3405: the seeded error is compiled at project activation whether or not a
-// didSave is sent, so only an EDIT after the server is up can tell a client
-// that saves from one that does not. The witness writes a different error and
-// polls the handler for it; the language server is the process boundary.
-describe("smoke-tools save witness (#3405)", () => {
-	const witness = { text: "edited\n", match: "after_edit", deadlineMs: 400 };
-
-	function workspaceFile() {
-		const workspace = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-save-witness-"),
-		);
-		tempHomes.push(workspace);
-		const absFile = path.join(workspace, "bad.ex");
-		fs.writeFileSync(absFile, "seed\n");
-		return { workspace, absFile };
-	}
-
-	it("passes once the handler reports the edit's error, having written the edit first", async () => {
-		const { workspace, absFile } = workspaceFile();
-		const seen: string[] = [];
-		let call = 0;
-		const execute = vi.fn(async () => {
-			seen.push(fs.readFileSync(absFile, "utf8"));
-			return {
-				content: [
-					{ text: ++call < 3 ? "old_error" : "undefined after_edit()" },
-				],
-			};
-		});
-		const [row] = await runSaveWitness(
-			{ lang: "expert", serverHint: "Expert", saveWitness: witness },
-			{ absFile, workspace, execute, intervalMs: 2 },
-		);
-
-		expect(row).toMatchObject({ state: "pass" });
-		expect(row.detail).toContain("on call 3");
-		expect(seen).toEqual(["edited\n", "edited\n", "edited\n"]);
-	});
-
-	it("reds when the edit's error never arrives, as a client that sends no save leaves it", async () => {
-		const { workspace, absFile } = workspaceFile();
-		const execute = vi.fn(async () => ({ content: [{ text: "old_error" }] }));
-		const [row] = await runSaveWitness(
-			{ lang: "expert", serverHint: "Expert", saveWitness: witness },
-			{ absFile, workspace, execute, intervalMs: 2 },
-		);
-
-		expect(row).toMatchObject({ state: "fail" });
-		expect(row.detail).toContain("was not published");
-		expect(execute.mock.calls.length).toBeGreaterThan(2);
-	});
-
-	async function gateWith(execute: () => Promise<unknown>) {
-		const { workspace, absFile } = workspaceFile();
-		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-gate-census-"));
-		tempHomes.push(home);
-		process.env.PI_LENS_HOME = home;
-		fs.writeFileSync(
-			path.join(home, "lsp-handshake-census.json"),
-			JSON.stringify({ typescript: { state: "pass" } }),
-		);
-		const output: string[] = [];
-		vi.spyOn(console, "log").mockImplementation((...args) =>
-			output.push(args.join(" ")),
-		);
-		const fixtureRow = { ...gateFixture, saveWitness: witness };
-		const failures = await runLspGate({
-			langs: ["typescript"],
-			install: false,
-			verbose: false,
-			deps: {
-				...gateDeps(execute, { saveWitness: witness }),
-				bootstrapFixtureWorkspace: vi.fn(async () => ({
-					workspace,
-					absFile,
-					cleanup: vi.fn(),
-				})),
-				population: { eligible: [fixtureRow], gated: [fixtureRow], exempt: [] },
-				saveWitnessPoll: { deadlineMs: 30, intervalMs: 2 },
-			},
-		});
-		return { output: output.join("\n"), failures };
-	}
-
-	it("runs inside the clean gate after a passing seed and counts its red", async () => {
-		const execute = vi.fn(async () => ({
-			details: { totalDiagnostics: 1, primaryDiagnosticsCount: 1 },
-			content: [{ text: "old_error" }],
-		}));
-		const { output, failures } = await gateWith(execute);
-
-		expect(output).toContain("LSP save witness (#3405)");
-		expect(output).toContain("probe-primary saved edit");
-		expect(failures).toBe(1);
-	});
-
-	it("does not run when the seed itself failed", async () => {
-		const execute = vi.fn(async () => ({
-			details: { totalDiagnostics: 0, primaryDiagnosticsCount: 0 },
-			content: [{ text: "after_edit" }],
-		}));
-		const { output } = await gateWith(execute);
-
-		expect(output).not.toContain("LSP save witness");
 		expect(execute).toHaveBeenCalledOnce();
 	});
 });

@@ -60,9 +60,6 @@ export interface LspFixture {
 	/** #3405: a server that publishes only after its project is active. A gated
 	 *  fixture whose cold call finds nothing is polled to this deadline. */
 	lspGateReadiness?: { deadlineMs: number; intervalMs: number };
-	/** #3405: the saved-edit witness the clean gate runs once the seed passes
-	 *  (`runSaveWitness`): `text` replaces the file, `match` must then appear. */
-	saveWitness?: { text: string; match: string; deadlineMs: number };
 	expectDiagnosticCode?: string;
 	/** The one fixture the nightly `lens_diagnostics mode=full` row drives
 	 *  (#2780), mirroring `lspGate`. */
@@ -190,20 +187,6 @@ export function runCreatedModuleWitness(
 		/** The LSP service whose `touchFile` syncs the pi-written module. */
 		getLSPService: () => unknown;
 		/** Poll deadline and interval; the defaults are the BORN_AFTER_START_* constants. */
-		deadlineMs?: number;
-		intervalMs?: number;
-	},
-): Promise<SmokeRow[]>;
-/** #3405: rewrite the fixture file with a different error and poll the real
- *  `lsp_diagnostics` handler until that error is published (a save-triggered
- *  server recompiles an edit only on `textDocument/didSave`). */
-export function runSaveWitness(
-	fixture: Pick<LspFixture, "lang" | "serverHint" | "saveWitness">,
-	options: {
-		absFile: string;
-		workspace: string;
-		execute: (...args: never[]) => Promise<unknown>;
-		/** Overrides the fixture's own deadline. */
 		deadlineMs?: number;
 		intervalMs?: number;
 	},

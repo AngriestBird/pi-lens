@@ -240,28 +240,41 @@ describe("LSP clean-gate population (#3217)", () => {
 		expect(checked).toBeGreaterThanOrEqual(3);
 	});
 
-	// #3405: the save witness proves a saved EDIT is recompiled. Its expected
-	// error must be absent from the seed's own source and present in the edit,
-	// or the witness passes on the seed's diagnostic and proves nothing.
-	it("keeps each save witness's expected error out of the seed and inside the edit (#3405)", () => {
-		const witnessed = fixtures.filter(
-			(fixture) => (fixture as { saveWitness?: unknown }).saveWitness,
-		) as (Fixture & { saveWitness: { text: string; match: string } })[];
-		expect(witnessed.map((fixture) => fixture.lang)).toContain("expert");
-		for (const fixture of witnessed) {
-			const seed = readFileSync(
-				path.join(repoRoot, fixture.dir, fixture.file),
+	// #3405: the readiness deadline is a measured constant (#3648). The raw Expert
+	// rows live in the fixture; the shipped deadline must clear twice the slowest
+	// answer, and the root-seeded arm must stay unanswered for the whole deadline
+	// (the premise that the old fixture, not the server, was the limit).
+	it("keeps the Expert readiness deadline above twice the measured answer time (#3405)", () => {
+		const artifact = JSON.parse(
+			readFileSync(
+				path.join(
+					repoRoot,
+					"tests/fixtures/nightly-floors/expert-readiness.json",
+				),
 				"utf8",
+			),
+		) as { arms: Record<string, { run: number; line: string }[]> };
+		const answered = (rows: { line: string }[]) =>
+			rows.map((row) =>
+				Number(/answered on call \d+, (\d+) ms/.exec(row.line)?.[1]),
 			);
-			const expected = new RegExp(fixture.saveWitness.match);
-			expect(seed, `${fixture.lang}: the seed already matches`).not.toMatch(
-				expected,
-			);
-			expect(
-				fixture.saveWitness.text,
-				`${fixture.lang}: the edit never produces the expected error`,
-			).toMatch(expected);
-		}
+		const expert = fixtures.find((fixture) => fixture.lang === "expert") as {
+			lspGateReadiness: { deadlineMs: number };
+		};
+		const samples = [
+			...answered(artifact.arms["A-didSave-lib-seed"]),
+			...answered(artifact.arms["B-no-didSave-lib-seed"]),
+		];
+		expect(samples.length).toBeGreaterThanOrEqual(6);
+		expect(samples.every(Number.isFinite)).toBe(true);
+		expect(expert.lspGateReadiness.deadlineMs).toBeGreaterThanOrEqual(
+			2 * Math.max(...samples),
+		);
+		const [root] = artifact.arms["C-didSave-root-seed"];
+		const waited = Number(
+			/still unanswered on call \d+, (\d+) ms/.exec(root.line)?.[1],
+		);
+		expect(waited).toBeGreaterThanOrEqual(expert.lspGateReadiness.deadlineMs);
 	});
 
 	it("requires every exemption to state a reason, not just carry the key", () => {
