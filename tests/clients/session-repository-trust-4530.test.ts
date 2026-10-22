@@ -487,6 +487,30 @@ describe.skipIf(!POSIX)("cells the rule leaves admitted (#4530)", () => {
 		expect(trustRefusals()).toEqual([]);
 	});
 
+	it("I15/A2: a relative path the caller names is not searched for", async () => {
+		// The kernel starts `bin/<tool>` from the child's cwd and never searches
+		// PATH for it, so a PATH entry holding a same-named relative path that
+		// links into the project must not decide the start.
+		const marker = path.join(layout.root, "named-ran");
+		plant(path.join(layout.main, "bin"), marker);
+		const global = path.join(layout.outside, "global");
+		fs.mkdirSync(global);
+		const linked = plant(
+			path.join(layout.main, "tools"),
+			path.join(layout.root, "unused"),
+		);
+		fs.symlinkSync(path.dirname(linked), path.join(global, "bin"));
+
+		const result = await safeSpawnAsync(`bin/${TOOL}`, [], {
+			cwd: layout.main,
+			env: { PATH: global },
+			timeout: 10_000,
+		});
+
+		expect(result.status).toBe(0);
+		expect(ran(marker)).toBe(true);
+	});
+
 	it("I15/A2: a file the caller names is not a lookup", async () => {
 		const marker = path.join(layout.root, "named-ran");
 		const named = plant(path.join(layout.main, "node_modules", ".bin"), marker);
