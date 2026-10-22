@@ -1618,6 +1618,60 @@ describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
 	});
 });
 
+describe("#4738: a --lens-guard-off turn end keeps another session's blocker", () => {
+	// RECURRENCE GUARDED: #4738, the fourth replacing writer. With the flag off
+	// the turn end wrote its delivery record over the stored one, so a guarded
+	// session's blocker record became a record that claims nothing, and the
+	// next settled turn end of any session retired it.
+	it("keeps another session's blocker sections, owner and all, when a guard-off turn ends with findings", async () => {
+		const rig = makeRig("pi-lens-4738-guard-off-");
+		try {
+			const theirs = touch(rig, "theirs.ts", "eval(y);\n");
+			const theirText =
+				"Unresolved from this turn — theirs.ts:\n🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned";
+			rig.cacheManager.writeCache(
+				"turn-end-findings",
+				{
+					content: theirText,
+					blockerContent: theirText,
+					blockingFiles: [theirs],
+					hasBlockers: true,
+					affectedFiles: [theirs],
+					sessionId: "another-session",
+					projectSeqStart: 0,
+					projectSeqEnd: 0,
+					fileSeqByPath: {},
+					fileContentHashes: {},
+					consumed: true,
+				},
+				rig.cwd,
+			);
+			const file = touch(rig, "a.ts", "eval(x);\n");
+			rig.runtime.recordInlineBlockers(
+				file,
+				"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+				rig.runtime.nextWriteIndex(),
+				["ast-grep"],
+				[1],
+			);
+
+			expect(await endTurn(rig)).toContain("a.ts");
+
+			const after = rig.cacheManager.readCache<{
+				sessionId?: string;
+				blockerContent?: string;
+				carriedBlockers?: unknown;
+			}>("turn-end-findings", rig.cwd, Number.POSITIVE_INFINITY)?.data;
+			// This session claims nothing with the flag off; theirs stays theirs.
+			expect(after?.sessionId).toBe("another-session");
+			expect(after?.blockerContent).toBe(theirText);
+			expect(after?.carriedBlockers).toBeUndefined();
+		} finally {
+			rig.cleanup();
+		}
+	});
+});
+
 /** A blocker the agent marked false-positive: the policy suppresses it. */
 function markedBlocker(rig: Rig, name: string): string {
 	const file = touch(rig, name, "alpha();\n");
