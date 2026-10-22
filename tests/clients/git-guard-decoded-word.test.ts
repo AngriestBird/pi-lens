@@ -703,11 +703,11 @@ const ACCEPTED: ReadonlyArray<{
 
 /**
  * Round 5: one ANSI-C word per escape class and edge, run through real bash
- * (`printf %s`, C.UTF-8): the simple escapes, octal (value & 0xff), `\\x`,
- * `\\u` and `\\U` (surrogates, the 5- and 6-byte forms, a dropped value at
- * 2^31), `\\cX`, an unknown escape, a missing digit, and a NUL that ends only
- * its own quote. Recurrence: rounds 1 to 4 left an escape unread and failed
- * closed on it, which guarded read-only commands.
+ * (`printf %s`, C.UTF-8): the simple escapes, octal (value & 0xff), `\x`,
+ * `\u` and `\U` (surrogates, the 5- and 6-byte forms, a dropped value at
+ * 2^31), `\cX`, an unknown escape, a missing digit, a digit past the cap,
+ * and a NUL that ends only its own quote. Recurrence: rounds 1 to 4 left an
+ * escape unread and failed closed on it, which guarded read-only commands.
  */
 const ANSI_C_WORDS: readonly string[] = [
 	"$'\\a\\b\\e\\E\\f\\n\\r\\t\\v'",
@@ -739,6 +739,8 @@ const ANSI_C_WORDS: readonly string[] = [
 	"$'\\ud800'",
 	"$'\\uD83D\\uDE00'",
 	"$'\\u'",
+	"$'\\u00411'",
+	"$'\\U000000411'",
 	"$'\\u0000x'y",
 	"$'\\U41'",
 	"$'\\U0001F600'",
@@ -978,7 +980,7 @@ describe.skipIf(process.platform === "win32")(
 			// Floor: bash ran (a missing bash prints nothing for every word).
 			assertNonEmptyScan("words bash printed", nonEmpty, 40);
 			expect(failures).toEqual([]);
-			expect(ANSI_C_WORDS.length).toBe(57);
+			expect(ANSI_C_WORDS.length).toBe(59);
 		}, 60_000);
 
 		it("guards every launcher spelling of the state table (r4)", () => {
