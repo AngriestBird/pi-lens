@@ -1080,14 +1080,22 @@ const LSP_FIXTURES = [
 	{
 		// Expert is an alternate Elixir primary. Disabling ElixirLS makes this
 		// fixture exercise Expert's managed GitHub binary through initialize.
-		setup: "mix compile",
-		lspGateExempt:
-			"readiness limit, measured with the notification in place (#3405): pi-lens now sends textDocument/didSave here — run 36075065241 traced the real Expert v0.1.10 handshake negotiating save={includeText:false} and one didSave leaving the process for bad.ex — and the gate still collected 0 diagnostics 120s later (PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS=120000), as it did at 30s on run 36074541025 and at 8000ms/1500ms on runs 36058292424/36059988117/36054901266. So neither the notification nor the wait budget is the binding constraint: Expert only schedules a compile when its project is ACTIVE (expert-lsp/expert v0.1.10 apps/expert/lib/expert/state.ex lines 223-224), and activating a Mix project boots a separate BEAM node and compiles it — far past this gate's own 8000ms waitMs ceiling, which tests/config/lsp-gate-population.test.ts pins as the maximum any strategy may declare. Still not a proven server property: this gate records COLLECTED diagnostics, not publishes. Next step is project-activation readiness (a warm-up rung), not a notification and not a number; see #3405 and #3311",
+		// The seeded error sits under lib/ (#3405): Mix compiles only
+		// `elixirc_paths` (["lib"]), so the old fixture's root-level bad.ex was
+		// never compiled and Expert had nothing to publish for it.
+		setup: "mix deps.get",
+		lspGate: true,
+		// Expert compiles only once its Mix project is active, which boots a
+		// separate BEAM node, and a save-only send does not wait for the publish
+		// it triggers: the cold call answers 0 and a later call answers the
+		// finding (#3405, 2026-10-16 comment). The deadline is a measurement
+		// under measurement; see the PR body.
+		lspGateReadiness: { deadlineMs: 150_000, intervalMs: 1000 },
 		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
-		dir: "tests/fixtures/tool-smoke/elixir",
-		file: "bad.ex",
+		dir: "tests/fixtures/tool-smoke/expert",
+		file: "lib/bad.ex",
 		serverHint: "Expert (alternate of ElixirLS)",
 		tools: ["expert"],
 		disableServers: ["elixir"],
@@ -2674,24 +2682,45 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 					continue;
 				}
 			}
-			const result = await createLspDiagnosticsTool().execute(
-				`smoke-lsp-gate-${fx.lang}`,
-				{
-					path: absFile,
-					waitMs: LSP_DIAGNOSTICS_WAIT_MS,
-					serverScope: "primary",
-				},
-				undefined,
-				null,
-				{ cwd: workspace },
-			);
-			const verdict = fx.expectDiagnosticCode
-				? classifyOfficialDockerGateResult(
-						result,
-						deps?.hasDockerBuildx?.() ?? hasDockerBuildx(),
-						fx.expectDiagnosticCode,
-					)
-				: classifyLspGateResult(result, fx);
+			const diagnose = () =>
+				createLspDiagnosticsTool().execute(
+					`smoke-lsp-gate-${fx.lang}`,
+					{
+						path: absFile,
+						waitMs: LSP_DIAGNOSTICS_WAIT_MS,
+						serverScope: "primary",
+					},
+					undefined,
+					null,
+					{ cwd: workspace },
+				);
+			const classify = (answer) =>
+				fx.expectDiagnosticCode
+					? classifyOfficialDockerGateResult(
+							answer,
+							deps?.hasDockerBuildx?.() ?? hasDockerBuildx(),
+							fx.expectDiagnosticCode,
+						)
+					: classifyLspGateResult(answer, fx);
+			let verdict = classify(await diagnose());
+			if (fx.lspGateReadiness && verdict.state === "fail") {
+				// #3405: a save-triggered server publishes for the file only once its
+				// project is active, and a save-only send does not wait for the
+				// publish it triggers, so the cold call answers 0 and a later call
+				// answers the finding. Poll the same real handler to a deadline (the
+				// born-after-start witness's seam), never a fixed sleep: a server that
+				// never publishes still reds, and the detail names the calls it took.
+				const ready = await pollUntil(async () => {
+					verdict = classify(await diagnose());
+					if (verbose)
+						console.error(`[${fx.lang}] readiness poll: ${verdict.detail}`);
+					return verdict.state === "pass";
+				}, fx.lspGateReadiness);
+				verdict = {
+					...verdict,
+					detail: `${verdict.detail} (${ready.ok ? "answered" : "still unanswered"} on call ${ready.polls + 1}, ${ready.elapsedMs} ms after the cold call)`,
+				};
+			}
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
 			if (fx.createdModuleWitness && verdict.state === "pass") {

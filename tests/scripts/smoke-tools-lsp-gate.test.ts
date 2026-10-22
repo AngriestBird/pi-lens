@@ -252,6 +252,83 @@ describe("smoke-tools --lsp-gate census admission (#3309)", () => {
 	});
 });
 
+// #3405: a save-triggered server (Expert) answers the cold call with 0 and a
+// later call with the finding. The rung polls the same handler to a deadline;
+// these cases script the handler's answers (the language server is the process
+// boundary) and drive the real runLspGate.
+describe("smoke-tools --lsp-gate readiness rung (#3405)", () => {
+	const READINESS = { deadlineMs: 400, intervalMs: 2 };
+	const finding = {
+		details: { totalDiagnostics: 1, primaryDiagnosticsCount: 1 },
+	};
+	const silent = {
+		details: { totalDiagnostics: 0, primaryDiagnosticsCount: 0 },
+	};
+
+	it("passes a server that answers 0 on the cold call and the finding on a later one", async () => {
+		let call = 0;
+		const execute = vi.fn(async () => (++call < 3 ? silent : finding));
+		const { output } = await runGateWithCensus("pass", execute, {
+			lspGateReadiness: READINESS,
+		});
+
+		expect(output).toContain("✓  typescript");
+		expect(output).toContain("answered on call 3");
+		expect(execute).toHaveBeenCalledTimes(3);
+	});
+
+	it("reds a server that never publishes, naming that it stayed unanswered", async () => {
+		const execute = vi.fn(async () => silent);
+		const { output } = await runGateWithCensus("pass", execute, {
+			lspGateReadiness: READINESS,
+		});
+
+		expect(output).toContain("✗  typescript");
+		expect(output).toContain("still unanswered");
+		// a deadline, not one retry: the cold call plus several polls
+		expect(execute.mock.calls.length).toBeGreaterThan(2);
+	});
+
+	it("does not poll a fixture that declares no readiness rung", async () => {
+		const execute = vi.fn(async () => silent);
+		const { output } = await runGateWithCensus("pass", execute);
+
+		expect(output).toContain("✗  typescript");
+		expect(execute).toHaveBeenCalledOnce();
+	});
+
+	it("does not poll once the cold call already passed", async () => {
+		const execute = vi.fn(async () => finding);
+		await runGateWithCensus("pass", execute, { lspGateReadiness: READINESS });
+
+		expect(execute).toHaveBeenCalledOnce();
+	});
+
+	// Recurrence (#3405 H1): the Expert fixture's bad.ex sat at the Mix project
+	// root, outside the default `elixirc_paths` (["lib"]), so Expert never had a
+	// compile error to publish and the row read as a server limit for six
+	// weeks. The seeded file must live under lib/ and the project must not
+	// redirect its compile paths.
+	it("seeds the Expert error where Mix compiles it", () => {
+		const expert = LSP_FIXTURES.find((entry) => entry.lang === "expert") as {
+			dir: string;
+			file: string;
+			lspGate?: boolean;
+			lspGateReadiness?: unknown;
+		};
+		const repoRoot = path.resolve(import.meta.dirname, "../..");
+		expect(expert.file.startsWith("lib/")).toBe(true);
+		expect(fs.existsSync(path.join(repoRoot, expert.dir, expert.file))).toBe(
+			true,
+		);
+		expect(
+			fs.readFileSync(path.join(repoRoot, expert.dir, "mix.exs"), "utf8"),
+		).not.toContain("elixirc_paths");
+		expect(expert.lspGate).toBe(true);
+		expect(expert.lspGateReadiness).toBeTruthy();
+	});
+});
+
 // #4320/#4346: the witness's verdicts, through its real entry with a scripted
 // language-server answer (the server is the process boundary; the nightly
 // runs it against pyright). A witness that cannot red, or that passes when the
