@@ -772,6 +772,16 @@ function commandStringHasGuardedVerb(
 	depth: number,
 	matcher: GitVerbMatcher,
 ): boolean {
+	// An escape the model cannot read joins as empty text, so the re-lex below
+	// would read `nix-shell --run $'git\x20push'` as an empty command. A string
+	// handed to a shell that holds one fails closed for the policy gate, at the
+	// one place every launcher branch reads its string (#4739 round 3).
+	if (
+		matcher.indirectAlwaysMatches &&
+		words.some((word) => word.hidden === "escape")
+	) {
+		return true;
+	}
 	return decodeShellWords(
 		canonicalizeGuardCommand(words.map((word) => word.text).join(" ")),
 	).some((segment) => containsGuardedGitVerb(segment.words, depth, matcher));

@@ -311,6 +311,40 @@ const ROWS: readonly Row[] = [
 		bash: null,
 		guard: false,
 	},
+	// Round 3: a launcher's command string is read again, and an escape in it
+	// is a word the re-lex cannot read. Recurrence: Greptile P1 on #4752,
+	// `nix-shell --run $'git\x20push'` returned from the `--run` branch before
+	// the fail-closed rule ran, and the re-lex saw an empty string.
+	{
+		row: "nix-shell --run, plain string",
+		command: "nix-shell --run 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "nix-shell --run, escape in the string",
+		command: "nix-shell --run $'git\\x20push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "nix-shell --run, escape in the executable",
+		command: "nix-shell --run $'\\x67it push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "unknown launcher -c, escape in the string",
+		command: "launcher -c $'git\\x20push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "nix-shell --run, string names no git",
+		command: "nix-shell --run 'echo hi'",
+		bash: null,
+		guard: false,
+	},
 	{
 		row: "expansion as the executable",
 		command: "$g push",
@@ -465,6 +499,16 @@ beforeAll(() => {
 	const stub = path.join(home, "bin", "git");
 	fs.writeFileSync(stub, '#!/bin/sh\nprintf \'%s\\0\' "$1" >> "$GITLOG"\n');
 	fs.chmodSync(stub, 0o755);
+	// Command-string launchers the gate knows by name, as stand-ins that do
+	// what the real ones do with `-c` / `--run`: run the string in a shell.
+	for (const [name, script] of [
+		["nix-shell", '#!/bin/sh\n[ "$1" = --run ] && exec sh -c "$2"\n'],
+		["launcher", '#!/bin/sh\n[ "$1" = -c ] && exec sh -c "$2"\n'],
+	] as const) {
+		const launcher = path.join(home, "bin", name);
+		fs.writeFileSync(launcher, script);
+		fs.chmodSync(launcher, 0o755);
+	}
 });
 
 afterAll(() => {
