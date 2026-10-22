@@ -121,15 +121,23 @@ const fixtures = LSP_FIXTURES as Fixture[];
 // substring of a manifest or a result line satisfied the census while the
 // project no longer compiled the seed (a commented-out Compile item) or a
 // failed row padded the sample floor (`still unanswered` contains `answered`).
-// Admitted forms: a `<Compile Include="X"` item outside XML comments and
-// CDATA, closed by `/>` or `>`. Every other spelling (single quotes, an
-// attribute before Include, a wildcard, a property reference) is refused.
+// Admitted form (round 2, F6): outside XML comments and CDATA, a whole
+// manifest of `<Project>` (optional `Sdk`) holding only attribute-free
+// `<PropertyGroup>`s of simple elements and attribute-free `<ItemGroup>`s of
+// `<Compile Include="X" />` items. Anything else (a Condition, a Remove or
+// Exclude, a Target or Choose wrapper, single quotes, another attribute)
+// makes the manifest unreadable, so the census reds and a human looks. A
+// per-element reading cannot see what makes an item live.
+const FSPROJ_ADMITTED =
+	/^\s*<Project(?:\s+Sdk="[^"]*")?\s*>(?:\s*<PropertyGroup>(?:\s*<[A-Za-z]+>[^<]*<\/[A-Za-z]+>)*\s*<\/PropertyGroup>|\s*<ItemGroup>(?:\s*<Compile Include="[^"]*"\s*\/>)*\s*<\/ItemGroup>)*\s*<\/Project>\s*$/;
+
 function fsprojCompileIncludes(xml: string): string[] {
 	const live = xml
 		.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "")
 		.replace(/<!--[\s\S]*?-->/g, "")
 		.replace(/<!--[\s\S]*$/, "");
-	return [...live.matchAll(/<Compile Include="([^"]*)"\s*\/?>/g)].map(
+	if (!FSPROJ_ADMITTED.test(live)) return [];
+	return [...live.matchAll(/<Compile Include="([^"]*)"/g)].map(
 		(match) => match[1],
 	);
 }
@@ -295,6 +303,26 @@ describe("LSP clean-gate population (#3217)", () => {
 			`<Project><Compile Include="$(Seed)" /></Project>`,
 		],
 		["a Remove item", `<Project><Compile Remove="Program.fs" /></Project>`],
+		[
+			"a clean item inside a conditioned ItemGroup",
+			`<Project><ItemGroup Condition="false"><Compile Include="Program.fs" /></ItemGroup></Project>`,
+		],
+		[
+			"an Include cancelled by a later Remove",
+			`<Project><ItemGroup><Compile Include="Program.fs" /><Compile Remove="Program.fs" /></ItemGroup></Project>`,
+		],
+		[
+			"an Include with an Exclude attribute",
+			`<Project><ItemGroup><Compile Include="Program.fs" Exclude="Program.fs" /></ItemGroup></Project>`,
+		],
+		[
+			"an ItemGroup inside a Target",
+			`<Project><Target Name="T"><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Target></Project>`,
+		],
+		[
+			"an ItemGroup under a conditioned When",
+			`<Project><Choose><When Condition="false"><ItemGroup><Compile Include="Program.fs" /></ItemGroup></When></Choose></Project>`,
+		],
 		[
 			"a longer file name",
 			`<Project><Compile Include="Program.fs.bak" /></Project>`,

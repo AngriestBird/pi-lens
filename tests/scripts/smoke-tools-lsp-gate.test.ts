@@ -333,7 +333,10 @@ describe("smoke-tools --lsp-gate readiness rung (#3405)", () => {
 			lspGateReadiness: READINESS,
 		});
 
-		expect(execute.mock.calls.length).toBeGreaterThan(2);
+		// pollUntil probes once before it reads the clock, so the first
+		// unavailable answer is always delivered; how many follow is wall-clock
+		// and is not asserted (review r2 F7).
+		expect(execute.mock.calls.length).toBeGreaterThan(1);
 		expect(output).toContain("✗  typescript");
 		expect(output).not.toContain("⚠  typescript");
 		expect(output).toContain("lsp_diagnostics returned 0 diagnostic(s)");
