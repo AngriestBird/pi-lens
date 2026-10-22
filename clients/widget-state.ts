@@ -1100,7 +1100,7 @@ function retainSuppressedRows(
 	});
 	if (retained.length > MAX_RETAINED_SUPPRESSED_PER_FILE) {
 		// Freshest observations win the cap. One record per FILE, never one per
-		// dropped row (AGENTS.md "bounded observability"): the chip under-counts
+		// dropped row (docs/engineering-principles.md "Every new failure path gets bounded observability"): the chip under-counts
 		// by exactly `dropped` for this file until its content changes.
 		retained.sort((a, b) => (b.observedAt ?? 0) - (a.observedAt ?? 0));
 		recordDegradationOnce({

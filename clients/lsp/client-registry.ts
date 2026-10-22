@@ -50,6 +50,7 @@ import {
 	withLspProjectCodePermission,
 } from "./launch.js";
 import {
+	declinesLooseFileRoot,
 	enforceLspRootCeiling,
 	getServerById,
 	hasProjectBoundaryMarker,
@@ -951,6 +952,18 @@ export class ClientRegistry {
 
 		const normalizedRoot = normalizeMapKey(root);
 		const key = `${server.id}:${normalizedRoot}`;
+		if (declinesLooseFileRoot(server, root)) {
+			// #4760: a root at or above `$HOME` is too large to walk. Decline BEFORE
+			// any process starts, on the policy path (no failure-ladder count, no
+			// breaker), with one bounded record per (server, root) per session.
+			recordDegradationOnce({
+				kind: "lsp-root-declined",
+				subject: key,
+				reason: `LSP root declined for ${server.id}: root at or above $HOME`,
+			});
+			this.noteSpawnVerdict(key, "declined");
+			return undefined;
+		}
 		const adopted = this.analysisRootModeForFile(filePath) === "adopted";
 		if (adopted) {
 			const localCommand =

@@ -210,7 +210,11 @@ describe("an auxiliary's failed config is not a clean scan (#4764)", () => {
 	// The MEASURED opengrep order: the empty publish lands first, and the
 	// download error follows in the same tick. The publish is still inside its
 	// 250ms debounce, so the decision has to be made at store time.
-	it("refuses the empty publish the server sent just before it reported the failure", async () => {
+	it("never stores the empty publish the server sent just before it reported the failure", async () => {
+		// #4763 holds this pre-rules empty (the rules never loaded), so it never
+		// reaches the cache; the failure then leaves nothing to retract. The
+		// store-time gate for an empty that is NOT held is pinned in the
+		// acceptance table of opengrep-pre-rules-publish-4763.test.ts.
 		const created = await openClient({
 			FAKE_LSP_SHOW_MESSAGE: OFFLINE_MESSAGE,
 			FAKE_LSP_SHOW_MESSAGE_AFTER_FIRST_PUBLISH: "1",
@@ -218,13 +222,9 @@ describe("an auxiliary's failed config is not a clean scan (#4764)", () => {
 		});
 		const file = await openFile(created);
 
-		await waitFor(
-			() =>
-				group("lsp-server-config-load-failed")?.latestReasons.some((entry) =>
-					entry.subject.startsWith("opengrep:dropped:"),
-				) ?? false,
-			Boolean,
-			{ timeoutMs: 5_000 },
+		await awaitLedger(
+			() => messageEntries("lsp-server-config-load-failed").length > 0,
+			"the failure is recorded",
 		);
 		expect(created.getDiagnosticsVersionForPath(file)).toBe(0);
 		expect(created.getDiagnosticBinding(file)).toBeUndefined();
@@ -250,7 +250,9 @@ describe("an auxiliary's failed config is not a clean scan (#4764)", () => {
 			FAKE_LSP_SHOW_MESSAGE: OFFLINE_MESSAGE,
 			FAKE_LSP_SHOW_MESSAGE_AFTER_FIRST_PUBLISH: "1",
 			FAKE_LSP_SHOW_MESSAGE_DELAY_MS: "700",
-			FAKE_LSP_PUBLISH_SEQUENCE: "empty",
+			// Rules loaded first, so the empty is a stored clean answer (#4763
+			// holds it otherwise); the failure then arrives 700 ms later.
+			FAKE_LSP_PUBLISH_SEQUENCE: "refreshed,empty",
 		});
 		const file = await openFile(created);
 		await waitFor(
@@ -513,6 +515,14 @@ describe("the touch reports a failed auxiliary scanner as unconfirmed (#4764)", 
 				entry.subject.startsWith("opengrep:"),
 			),
 		).toBe(true);
+		// #4764: the per-touch reason carries WHY the scanner did not answer, not
+		// only that it did not. Recurrence: "no diagnostics answer" alone read
+		// like a timeout; the reason was only in the session ledger entry.
+		const gap = group("lsp-scanner-coverage-gap")?.latestReasons.find((entry) =>
+			entry.subject.startsWith("opengrep:"),
+		);
+		expect(gap?.reason).toContain("no diagnostics answer");
+		expect(gap?.reason).toContain("Failed to download config");
 	}, 45_000);
 });
 

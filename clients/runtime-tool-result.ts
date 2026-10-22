@@ -2617,7 +2617,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						lookForOutOfBandChanges(
 							entry.root,
 							"tool_result",
-							// AGENTS.md "Analysis-root invariant": the look may run at
+							// AGENTS.md "What it is" (analysis-root invariant): the look may run at
 							// an adopted root (its client must restart when its install
 							// appears), but an adopted root never receives session
 							// bookkeeping — no sequence, no receipt, no change-log entry

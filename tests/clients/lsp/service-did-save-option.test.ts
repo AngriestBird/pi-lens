@@ -178,6 +178,33 @@ describe("#3405 — touchFile forwards the caller's save declaration", () => {
 });
 
 /**
+ * #2066 round 3: the same seam, a second forwarded value. `touchFile`
+ * fingerprints every touch's bytes for its owned document `#3480` (debounce
+ * fingerprints, sibling announcements) before any client is asked to push them;
+ * passing that digest on is what stops the send from walking the document for a
+ * second sha256 of the same bytes.
+ */
+describe("#2066 — touchFile forwards the fingerprint it computed for these bytes", () => {
+	beforeEach(() => {
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("hands notify.open the #1095 fingerprint of the content it is pushing", async () => {
+		const call = await touchWith({});
+		// The eighth argument. Pinned against the caller's own content, so a
+		// missing forward reads `undefined` and a fingerprint of some other bytes
+		// reads a different digest.
+		expect(call?.[1]).toBe("const x = 1;\n");
+		expect(call?.[7]).toBe(hashDiagnosticContent("const x = 1;\n"));
+	});
+});
+
+/**
  * Touches of the same bytes inside the debounce window, on one service and one
  * client; returns every `notify.open` and `notify.save` call the client got.
  */

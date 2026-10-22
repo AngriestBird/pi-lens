@@ -24,6 +24,7 @@ import type {
 import {
 	blockerPartitionFields,
 	clearGitGuardTestFailure,
+	logCarriedDrops,
 	mergeGitGuardTestFailure,
 	readTurnEndGuardRecord,
 	resyncGitGuardAfterInlinePolicy,
@@ -6033,11 +6034,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			);
 			if (getFlag("lens-guard")) {
 				// #4738: read whatever its age; another session's sections ride along.
-				const { stored: existingGuard, carried } = readTurnEndGuardRecord(
-					cacheManager,
-					runtime,
-					cwd,
-				);
+				const {
+					stored: existingGuard,
+					carried,
+					dropped,
+				} = readTurnEndGuardRecord(cacheManager, runtime, cwd);
 				if (existingGuard) {
 					// #4733 r5 F21: this session's blocker sections lead the record, so
 					// it is this session's; another session's are carried (#4738).
@@ -6050,6 +6051,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 											blockerParts.join("\n\n"),
 										),
 										blockingFiles: existingGuard.affectedFiles ?? [],
+										blockerWrittenAt: Date.now(),
 									},
 								]
 							: [];
@@ -6060,6 +6062,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						content,
 						blockerContent: blockers.blockerContent,
 						carriedBlockers: blockers.carriedBlockers,
+						blockerWrittenAt: blockers.blockerWrittenAt,
 						hasBlockers:
 							blockers.owner !== undefined ||
 							existingGuard.testFailures === true,
@@ -6077,6 +6080,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						fileContentHashes: {},
 						consumed: false,
 					});
+					// #4750: the write, not the read, records what it left out.
+					logCarriedDrops(cwd, dropped);
 				}
 			}
 			settleHolds(true);
@@ -6096,11 +6101,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		// #4738: read whatever its age; another session's sections ride along,
 		// under either flag.
-		const { stored: existingGuard, carried } = readTurnEndGuardRecord(
-			cacheManager,
-			runtime,
-			cwd,
-		);
+		const {
+			stored: existingGuard,
+			carried,
+			dropped,
+		} = readTurnEndGuardRecord(cacheManager, runtime, cwd);
 		if (getFlag("lens-guard") || carried.length > 0) {
 			// With `--lens-guard` off this session claims nothing, so a record that
 			// holds another session's blocker keeps theirs alone.
@@ -6123,6 +6128,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							sessionId: runtime.telemetrySessionId,
 							blockerContent: blockingContent,
 							blockingFiles: affectedFiles,
+							blockerWrittenAt: Date.now(),
 						},
 					]
 				: [];
@@ -6134,6 +6140,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				blockerContent: blockers.blockerContent,
 				blockingFiles: blockers.blockingFiles,
 				carriedBlockers: blockers.carriedBlockers,
+				blockerWrittenAt: blockers.blockerWrittenAt,
 				hasBlockers:
 					blockers.owner !== undefined || existingGuard?.testFailures === true,
 				affectedFiles,
@@ -6149,6 +6156,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		} else {
 			const allAffectedFiles = [
+				// #4617: confirmed-clean checks can resolve a file without writing it.
+				...resolvedBlockerFileList.map((entry) => entry.filePath),
 				...files.map((file) => resolveRunnerPath(cwd, file)),
 				...cascadeResults.flatMap((result) =>
 					result.neighbors
@@ -6182,6 +6191,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				cwd,
 			);
 		}
+		// #4750: either write above replaced the record; it, not the read,
+		// records what it left out of the other sessions' sections.
+		logCarriedDrops(cwd, dropped);
 		cacheManager.writeCache(
 			"turn-end-findings-last",
 			{

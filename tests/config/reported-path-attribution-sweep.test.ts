@@ -955,7 +955,7 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 	});
 
 	/**
-	 * The detector's NAMED limit (AGENTS.md "detectors match code, not prose"):
+	 * The detector's NAMED limit (docs/engineering-principles.md "Detectors match code, not prose"):
 	 * it proves a `pathsEqual(` CALL exists, never that its operands are the
 	 * reported path and the dispatch target. This cell pins the hole so nobody
 	 * reads the census as stronger than it is; the direction it cannot see is

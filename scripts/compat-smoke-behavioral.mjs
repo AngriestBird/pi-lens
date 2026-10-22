@@ -15,7 +15,7 @@
  * after pi exits cleanly (the #472 orphan class #474 fixed).
  *
  * IMPORTANT — forcing full startup mode: pi-lens's cold-start-quick
- * optimization (see AGENTS.md "Session-start critical path") forces the
+ * optimization (see HISTORY.md "Session-start critical path") forces the
  * FIRST session_start of any process to the fast "quick" path regardless of
  * `--print`, which returns before the subagent-light-mode check even runs
  * (verified empirically against a locally packed tarball — see

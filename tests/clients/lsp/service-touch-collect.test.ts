@@ -221,6 +221,9 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 			false,
 			// #3481: no read stamp, so the queue keeps last-enqueued-wins.
 			undefined,
+			// #2066: the #1095 fingerprint `touchFile` computed for these exact
+			// bytes, so the send binds diagnostics without walking them again.
+			hashDiagnosticContent("print('x')\n"),
 		);
 		expect(client.waitForDiagnostics).toHaveBeenCalledWith(FILE, 25);
 		expect(result?.diags).toEqual([attributedDiagnostic]);

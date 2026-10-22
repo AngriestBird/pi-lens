@@ -465,10 +465,27 @@ function checkEveryOpenDocument() {
 		});
 }
 
+// #4763: opengrep's rule-load window. A `refreshed` element sends the param-less
+// `semgrep/rulesRefreshed` notification (opengrep@60ed3b3
+// `Scan_helpers.refresh_rules`): `empty,refreshed,dirty` is the measured cold
+// open of `--config auto` (`[]` at +10 ms, the notification at +0.7..1.0 s, the
+// findings after it). Once it has been sent the rules are loaded, so a LATER
+// open publishes only what follows the `refreshed` element (the warm shape:
+// `dirty` alone). Without a `refreshed` element nothing changes.
+let sequenceRefreshed = false;
+
 function publishSequenceFor(uri) {
 	if (PUBLISH_SEQUENCE.length === 0) return false;
-	PUBLISH_SEQUENCE.forEach((shape, index) => {
+	const sequence = sequenceRefreshed
+		? PUBLISH_SEQUENCE.slice(PUBLISH_SEQUENCE.indexOf("refreshed") + 1)
+		: PUBLISH_SEQUENCE;
+	sequence.forEach((shape, index) => {
 		const emit = () => {
+			if (shape === "refreshed") {
+				sequenceRefreshed = true;
+				send({ jsonrpc: "2.0", method: "semgrep/rulesRefreshed" });
+				return;
+			}
 			send({
 				jsonrpc: "2.0",
 				method: "textDocument/publishDiagnostics",

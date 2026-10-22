@@ -265,7 +265,7 @@ export function installTmpRootInterposer(
 	//
 	// The production owner of the Windows-shape predicate is
 	// `clients/path-utils.ts` (`isWindowsPath`, and `toPosix` for the separator
-	// fold, AGENTS.md "A core-domain rule lives in its owning module"). It cannot
+	// fold, AGENTS.md "Issue and PR design contract", core-domain rule). It cannot
 	// be shared here: the shared setup is evaluated before a test file's
 	// `vi.mock("node:fs")`, so importing `clients/path-utils.ts` would bind real
 	// fs ahead of the mock (#3703). Named deferral, review round 5 (N4-2): this

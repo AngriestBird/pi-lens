@@ -365,8 +365,22 @@ export interface LSPClientInfo {
 			 * enqueued, and resolves `false` when a later read superseded this one.
 			 */
 			readStamp?: number,
+			/**
+			 * #2066: the #1095 fingerprint of EXACTLY this `content`, for a caller that
+			 * already computed it on these same bytes (the LSP service fingerprints
+			 * every touch before it notifies). The send then binds diagnostics to that
+			 * digest instead of walking the document a second time. Omitted — or for
+			 * any caller that cannot prove it describes these bytes — the send hashes
+			 * for itself, so this is never a claim the client has to trust blindly.
+			 */
+			contentHash?: string,
 		): Promise<boolean | void>;
-		change(filePath: string, content: string): Promise<boolean | void>;
+		change(
+			filePath: string,
+			content: string,
+			/** #2066: as `open` — the caller's fingerprint of these same bytes. */
+			contentHash?: string,
+		): Promise<boolean | void>;
 		/**
 		 * #3405: send `textDocument/didSave` for the bytes this client last sent
 		 * for `filePath`, with no content push. For a touch whose push the
@@ -404,6 +418,12 @@ export interface LSPClientInfo {
 		): void;
 	};
 	getDiagnostics(filePath: string): LSPDiagnostic[];
+	/**
+	 * #4764: the server's own report that its config or rules failed to load
+	 * (the `window/showMessage` text, bounded), or `undefined`. A touch that
+	 * names this auxiliary uncovered carries the text as the reason.
+	 */
+	getConfigLoadFailure?(): string | undefined;
 	/**
 	 * #1095: the stored content binding for the diagnostics currently tracked
 	 * for `filePath` — {version?, contentHash?} of the document version those
@@ -1251,7 +1271,8 @@ export interface LSPClientState {
 	 * when it runs offline with `--config auto`. An auxiliary in that state
 	 * never evaluated the bytes it reports on, so its EMPTY publications are the
 	 * absence of a scan and must not be read as a clean one
-	 * ({@link configFailureBlocksEmptyPublish}). Per client session: a respawned
+	 * ({@link configFailureBlocksEmptyPublish}). Cleared by the server's own
+	 * `semgrep/rulesRefreshed` (its rules then loaded). Per client session: a respawned
 	 * server re-reports it, and the ledger record stays once per distinct
 	 * message for the whole session.
 	 */
@@ -1272,6 +1293,16 @@ export interface LSPClientState {
 	 * re-publishes — resolves on its first publish exactly as before.
 	 */
 	emptyFirstPublishHoldSpent: boolean;
+	/**
+	 * #4763: this client's server has sent `semgrep/rulesRefreshed`, so its rules
+	 * are loaded and an empty publish is an answer again. Set once, by that
+	 * notification, and read only for a server marked
+	 * `emptyUntilRulesRefreshed`; a respawn is a new client and starts unset.
+	 */
+	rulesRefreshed?: boolean;
+	/** #4763: empty publishes held since the last `lsp_rules_refreshed` row,
+	 *  which reports it and resets it. */
+	heldEmptyPublishes?: number;
 	/**
 	 * #3484: paths with a diagnostics fence outstanding. Each entry is its own
 	 * object, so an older fence's reply cannot lift a newer one, and counts the
@@ -2063,8 +2094,14 @@ export function rebaselineForRulesRefresh(state: LSPClientState): void {
 		phase: "lsp_rules_refreshed",
 		filePath: state.root,
 		durationMs: 0,
-		metadata: { serverId: state.serverId, rebaselinedPaths: counts.size },
+		metadata: {
+			serverId: state.serverId,
+			rebaselinedPaths: counts.size,
+			heldEmptyPublishes: state.heldEmptyPublishes ?? 0,
+		},
 	});
+	// Per refresh, not per session: a later refresh reports its own holds.
+	state.heldEmptyPublishes = 0;
 }
 
 /** #3482: expected and counted publications for a path. `sent` is the open
@@ -2249,6 +2286,13 @@ function recordSentContent(
 	version: number,
 	content: string,
 	coalescedCount = 0,
+	/**
+	 * #2066: the caller's #1095 fingerprint of these exact bytes, when it already
+	 * computed one (the LSP service fingerprints every touch before notifying).
+	 * It is the same sha256 over the same raw string, so binding it here is what
+	 * the walk below would produce — the walk is simply not paid twice.
+	 */
+	contentHash?: string,
 ): void {
 	const scan = scanDocumentContent(content);
 	const previous = state.documentContentHashes.get(normalizedPath);
@@ -2284,7 +2328,7 @@ function recordSentContent(
 	// this map in insertion order still reads "most recently sent last",
 	// matching the aux set it mirrors, rather than a stale mixed order.
 	state.documentContentHashes.delete(normalizedPath);
-	const hash = hashDiagnosticContent(content);
+	const hash = contentHash ?? hashDiagnosticContent(content);
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash,
@@ -2672,6 +2716,10 @@ function configFailureBlocksEmptyPublish(
 	if (state.serverRole !== "auxiliary") return false;
 	const failure = state.configLoadFailure;
 	if (failure === undefined) return false;
+	// A refused publication still answers the send it was owed (#3482), as a
+	// fence-dropped or held one does; otherwise the backlog keeps one send for
+	// good and the late-auxiliary drain waits for a publication already received.
+	countPublication(state, filePath);
 	emitBounded(
 		"lsp_publish_dropped_server_config_failed",
 		`${state.serverId}:dropped:${filePath}`,
@@ -2984,6 +3032,33 @@ export function setupIncomingHandlers(
 				return currentVersion !== undefined && docVersion < currentVersion;
 			};
 
+			// #4763: HOLD an empty publish that precedes `semgrep/rulesRefreshed`.
+			// Opengrep scans a just-opened document before its rules load
+			// ("Rules not loaded yet, not scanning anything"), publishes `[]` for it,
+			// and republishes the real result after the notification. That `[]`
+			// answers nothing: cached, stamped or emitted, it ended the touch as
+			// "answered" and the findings arrived after the wait (0 of 86 aux waits
+			// carried findings). Held means dropped unstored, as a fence-dropped
+			// publish is; it still counts toward #3482's backlog (the send was
+			// answered, the rules were not there), so `rebaselineForRulesRefresh`
+			// takes it back and the republish restores it. A server whose rules load
+			// before the first publish never reaches this branch, and a non-empty
+			// publish is a scan result, so neither is held. The server's own
+			// notification is the only release; the existing per-server budget stays
+			// the only bound (a server that never loads its rules waits that budget
+			// and reports `silent`, which is the truth, not a clean file).
+			if (
+				strategy.emptyUntilRulesRefreshed &&
+				!state.rulesRefreshed &&
+				newDiags.length === 0 &&
+				!state.pushDiagnostics.has(normalizedPath) &&
+				!state.pendingDiagnostics.has(normalizedPath)
+			) {
+				state.heldEmptyPublishes = (state.heldEmptyPublishes ?? 0) + 1;
+				countPublication(state, normalizedPath);
+				return;
+			}
+
 			// #3310: HOLD the empty first publish of an asynchronously-indexing
 			// server. Measured (docs/lsp-capability-matrix.md's `first-publish`
 			// column): intelephense answers `didOpen` with `[]` while its
@@ -3037,7 +3112,7 @@ export function setupIncomingHandlers(
 						emptyFirstPublish: strategy.emptyFirstPublish,
 						// `pubVersion`, the `[lsp-pub]` trace's own field name for the
 						// publish's LSP document version — not a lifecycle identity, and
-						// not the retired glossary spelling (AGENTS.md "generation").
+						// not the retired glossary spelling (AGENTS.md "session, turn or generation lifecycle").
 						pubVersion: docVersion ?? "push-unversioned",
 					},
 				});
@@ -3273,9 +3348,14 @@ export function setupIncomingHandlers(
 			noteServerShowMessage(state, params);
 		},
 	);
-	state.connection.onNotification("semgrep/rulesRefreshed", () =>
-		rebaselineForRulesRefresh(state),
-	);
+	state.connection.onNotification("semgrep/rulesRefreshed", () => {
+		state.rulesRefreshed = true;
+		// The notification is sent only after the rules loaded (opengrep
+		// `refresh_rules` sends it after `cache_session`), so an earlier config
+		// failure is resolved and its empty publishes are answers again.
+		state.configLoadFailure = undefined;
+		rebaselineForRulesRefresh(state);
+	});
 	// #1669: a server can send `workspace/diagnostic/refresh` (typically after a
 	// project-wide config change) to say every pull result it has already
 	// reported may be stale. Left unhandled, vscode-jsonrpc replies
@@ -4753,6 +4833,7 @@ async function handleNotifyOpenOnce(
 	silent = false,
 	coalescedCount = 0,
 	saved = false,
+	contentHash?: string,
 ): Promise<boolean> {
 	if (!isClientAlive(state)) return false;
 	const normalizedPath = normalizeMapKey(filePath);
@@ -4813,6 +4894,7 @@ async function handleNotifyOpenOnce(
 					version,
 					content,
 					coalescedCount,
+					contentHash,
 				);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
@@ -4837,6 +4919,7 @@ async function handleNotifyOpenOnce(
 				version,
 				content,
 				coalescedCount,
+				contentHash,
 			);
 		if (saved && changeSent)
 			await sendDidSave(state, normalizedPath, uri, content);
@@ -4893,7 +4976,14 @@ async function handleNotifyOpenOnce(
 		{ textDocument: { uri, languageId, version: 0, text: content } },
 	);
 	if (openSent)
-		recordSentContent(state, normalizedPath, 0, content, coalescedCount);
+		recordSentContent(
+			state,
+			normalizedPath,
+			0,
+			content,
+			coalescedCount,
+			contentHash,
+		);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
@@ -5112,6 +5202,8 @@ export function handleNotifyOpen(
 	silent = false,
 	saved = false,
 	readStamp?: number,
+	/** #2066: the caller's #1095 fingerprint of these same bytes, if it has one. */
+	contentHash?: string,
 ): Promise<boolean> {
 	// #3543: no dead-client check here. The queued run makes it and resolves
 	// false; an early return only duplicated that answer.
@@ -5129,6 +5221,7 @@ export function handleNotifyOpen(
 				silent,
 				coalescedCount,
 				queuedSaved,
+				contentHash,
 			),
 		saved,
 		readStamp,
@@ -5149,6 +5242,7 @@ async function handleNotifyChangeOnce(
 	normalizedPath: string,
 	coalescedCount = 0,
 	saved = false,
+	contentHash?: string,
 ): Promise<boolean> {
 	if (!isClientAlive(state)) return false;
 	const uri =
@@ -5176,7 +5270,14 @@ async function handleNotifyChangeOnce(
 		state.documentOpenedAt.set(normalizedPath, Date.now());
 		state.diagnosticPublicationCounts.set(normalizedPath, 0);
 		if (fallbackOpenSent)
-			recordSentContent(state, normalizedPath, 0, content, coalescedCount);
+			recordSentContent(
+				state,
+				normalizedPath,
+				0,
+				content,
+				coalescedCount,
+				contentHash,
+			);
 		state.openDocuments.add(normalizedPath);
 		// #3549: a re-open, like the main didOpen's. Left set, the publish
 		// handler dropped every later answer for the path.
@@ -5203,7 +5304,14 @@ async function handleNotifyChangeOnce(
 		},
 	);
 	if (changeSent)
-		recordSentContent(state, normalizedPath, version, content, coalescedCount);
+		recordSentContent(
+			state,
+			normalizedPath,
+			version,
+			content,
+			coalescedCount,
+			contentHash,
+		);
 	if (saved && changeSent)
 		await sendDidSave(state, normalizedPath, uri, content);
 	return changeSent;
@@ -5218,6 +5326,8 @@ export function handleNotifyChange(
 	state: LSPClientState,
 	filePath: string,
 	content: string,
+	/** #2066: as `handleNotifyOpen` — the caller's fingerprint of these bytes. */
+	contentHash?: string,
 ): Promise<boolean> {
 	// #3543: the queued run makes the dead-client check and resolves false.
 	const normalizedPath = normalizeMapKey(filePath);
@@ -5235,6 +5345,7 @@ export function handleNotifyChange(
 				normalizedPath,
 				coalescedCount,
 				queuedSaved,
+				contentHash,
 			),
 	);
 }
@@ -6524,6 +6635,7 @@ export async function createLSPClient(options: {
 		...(role !== undefined && { serverRole: role }),
 		// #3310: one-shot, per client session.
 		emptyFirstPublishHoldSpent: false,
+		rulesRefreshed: false,
 		diagnosticFences: new Map(),
 		closedDocuments: new Set(),
 		openDocumentUris: new Map(),
@@ -6774,6 +6886,7 @@ export async function createLSPClient(options: {
 				silent,
 				saved,
 				readStamp,
+				contentHash,
 			) {
 				return handleNotifyOpen(
 					state,
@@ -6784,10 +6897,11 @@ export async function createLSPClient(options: {
 					silent,
 					saved,
 					readStamp,
+					contentHash,
 				);
 			},
-			async change(filePath, content) {
-				return handleNotifyChange(state, filePath, content);
+			async change(filePath, content, contentHash) {
+				return handleNotifyChange(state, filePath, content, contentHash);
 			},
 			save(filePath, onlyIfOwed) {
 				return handleNotifySave(state, filePath, onlyIfOwed);
@@ -6805,6 +6919,10 @@ export async function createLSPClient(options: {
 
 		getDiagnostics(filePath) {
 			return getMergedDiagnosticsForPath(state, normalizeMapKey(filePath));
+		},
+
+		getConfigLoadFailure() {
+			return state.configLoadFailure?.message;
 		},
 
 		getDiagnosticBinding(filePath) {

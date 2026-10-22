@@ -935,7 +935,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	// #2319 survey catch: the session_start closure ALSO resets the
 	// #1999 rising-edge memory-sample cadence. Its state is two module-scope
 	// SCALARS, so the container scan cannot flag the file (SWEEP_HEURISTIC_LIMITS
-	// item 1 - the registry covers scalar session state by hand). The module's
+	// item 1 - the registry covers scalar session state by hand). #1332 adds the
+	// per-session pending turn end, cleared by the same reset. The module's
 	// own doc calls this session state reset at primary session_start, so it
 	// registers as another closure-site entry and the derived closure set maps
 	// to the registry (or a widget-state exemption) one-to-one.
@@ -943,7 +944,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "memory-sampler:cadence",
 		module: "memory-sampler.ts",
 		state:
-			"_lastSampledHeapUsedBytes, _tightenThroughTurn (rising-edge cadence)",
+			"_lastSampledHeapUsedBytes, _tightenThroughTurn (rising-edge cadence), _pendingTurnEnds (#1332 per-session pending turn end, capped BoundedFifoMap)",
 		policy: "session_start",
 		resetName: "resetMemorySamplerCadence",
 		sessionStartClosureReset: true,
@@ -1816,6 +1817,10 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// any export shape" predicate. See this file's EXEMPT_SESSION_STATE_FILES
 	// entry above.
 	"mcp/session.ts": 3,
+	// #1332 (#4761 review F4): `_pendingTurnEnds`, the per-session pending turn
+	// end, registered above under memory-sampler:cadence and cleared by
+	// resetMemorySamplerCadence (0 -> 1; the file was unflagged before).
+	"memory-sampler.ts": 1,
 	"module-report-lsp.ts": 1,
 	// #2423: the frozen built-in tool-name table plus the call-scoped
 	// resolved-range carry. Both are argued in EXEMPT_SESSION_STATE_FILES.
