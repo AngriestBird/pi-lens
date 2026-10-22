@@ -67,6 +67,7 @@ import {
 	evaluateGitGuard,
 	syncGitGuardRecord,
 } from "../../clients/git-guard.js";
+import { getProjectDataDir } from "../../clients/file-utils.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { beginScope, retireScope } from "../../clients/session-scope.js";
@@ -1670,6 +1671,84 @@ describe("#4738: a --lens-guard-off turn end keeps another session's blocker", (
 			rig.cleanup();
 		}
 	});
+});
+
+describe("#4738: the turn-end composer reads another session's record at any age", () => {
+	// RECURRENCE GUARDED: #4738 (the #4725 read). The composer read the record
+	// through the cache's freshness window, so a day-old record from another
+	// session was invisible to it, and its write replaced the record whole: the
+	// other session's blocker was gone without any re-check of its file.
+	for (const lensGuard of [true, false]) {
+		it(`keeps a day-old blocker of another session's (--lens-guard ${lensGuard ? "on" : "off"})`, async () => {
+			const rig = makeRig(`pi-lens-4738-day-old-${lensGuard}-`);
+			try {
+				rig.lensGuard = lensGuard;
+				const theirs = touch(rig, "theirs.ts", "eval(y);\n");
+				const theirText =
+					"Unresolved from this turn — theirs.ts:\n🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned";
+				rig.cacheManager.writeCache(
+					"turn-end-findings",
+					{
+						content: theirText,
+						blockerContent: theirText,
+						blockingFiles: [theirs],
+						hasBlockers: true,
+						affectedFiles: [theirs],
+						sessionId: "another-session",
+						projectSeqStart: 0,
+						projectSeqEnd: 0,
+						fileSeqByPath: {},
+						fileContentHashes: {},
+						consumed: true,
+					},
+					rig.cwd,
+				);
+				fs.writeFileSync(
+					path.join(
+						getProjectDataDir(rig.cwd),
+						"cache",
+						"turn-end-findings.meta.json",
+					),
+					JSON.stringify({
+						timestamp: new Date(Date.now() - 86_400_000).toISOString(),
+					}),
+				);
+				const file = touch(rig, "a.ts", "eval(x);\n");
+				rig.runtime.recordInlineBlockers(
+					file,
+					"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+					rig.runtime.nextWriteIndex(),
+					["ast-grep"],
+					[1],
+				);
+
+				expect(await endTurn(rig)).toContain("a.ts");
+
+				const after = rig.cacheManager.readCache<{
+					sessionId?: string;
+					blockerContent?: string;
+					carriedBlockers?: Array<{
+						sessionId: string;
+						blockerContent: string;
+					}>;
+				}>("turn-end-findings", rig.cwd, Number.POSITIVE_INFINITY)?.data;
+				const sections = [
+					[after?.sessionId, after?.blockerContent],
+					...(after?.carriedBlockers ?? []).map((partition) => [
+						partition.sessionId,
+						partition.blockerContent,
+					]),
+				];
+				// Theirs stays theirs, beside this session's own when it claims one.
+				expect(sections).toContainEqual(["another-session", theirText]);
+				expect(sections.map(([owner]) => owner)).toEqual(
+					lensGuard ? [SESSION, "another-session"] : ["another-session"],
+				);
+			} finally {
+				rig.cleanup();
+			}
+		});
+	}
 });
 
 /** A blocker the agent marked false-positive: the policy suppresses it. */

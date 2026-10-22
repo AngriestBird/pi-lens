@@ -1839,7 +1839,9 @@ export function syncGitGuardRecord(
 	// #4725: what is left of another session's record is still that session's,
 	// and so is its delivery state: this session re-checked one file, not the
 	// rest. A record whose blocker sections are all gone keeps its owner for the
-	// test failures it still holds.
+	// test failures it still holds. #4738: a record this session no longer
+	// leads holds only sections already in it, so it keeps the stored delivery
+	// state too, as the settled turn end's partition retire does.
 	const owner = fields.owner ?? existing?.sessionId ?? me;
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
 		content: content || existing?.content || "",
@@ -1853,10 +1855,7 @@ export function syncGitGuardRecord(
 		projectSeqEnd: runtime.projectSeq,
 		fileSeqByPath,
 		fileContentHashes: {},
-		consumed:
-			owner !== me &&
-			owner === existing?.sessionId &&
-			existing.consumed === true,
+		consumed: owner !== me && existing?.consumed === true,
 		testFailures: existing?.testFailures,
 		testFailureContent: existing?.testFailureContent,
 		testFailureFiles: existing?.testFailureFiles,

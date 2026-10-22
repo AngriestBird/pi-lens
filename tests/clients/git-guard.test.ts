@@ -20,6 +20,7 @@ import { formatDiagnostics } from "../../clients/dispatch/utils/format-utils.js"
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { getRecentLoggedPhases } from "../../clients/latency-logger.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
+import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { tokenizeShellCommand } from "../../clients/bash-file-access.js";
 
@@ -2456,11 +2457,22 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 			expect(shared?.carriedBlockers?.[0]?.blockerContent).toBe(
 				composerSections([theirs]),
 			);
+			// This session's new blocker is delivered, though the record it was
+			// written over had been.
+			expect(
+				consumeTurnEndFindings(cache, env.tmpDir, runtime)?.messages?.[0]
+					?.content,
+			).toContain("own issue is unsafe");
 
 			ownFix(runtime, mine);
 			syncGitGuardRecord(runtime, cache, env.tmpDir, mine);
 
 			expect(owners(storedData(cache, env.tmpDir))).toEqual([EARLIER]);
+			// What is left is the other session's, already in the record: nothing
+			// is delivered again (#4725's delivery rule).
+			expect(
+				consumeTurnEndFindings(cache, env.tmpDir, runtime),
+			).toBeUndefined();
 			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
 			expect(refusal).toMatchObject({ block: true, unknown: true });
 			expect(refusal.reason).toContain("session_mismatch");
@@ -2522,6 +2534,7 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 				writeGitGuardRecord(cache, runtime, env.tmpDir, data);
 				const retired = retireSettledGitGuardRecord(runtime, cache, env.tmpDir);
 				const after = storedData(cache, env.tmpDir);
+				const delivered = consumeTurnEndFindings(cache, env.tmpDir, runtime);
 				cache.clearCache("turn-end-findings", env.tmpDir);
 				return [
 					label,
@@ -2529,6 +2542,7 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 					owners(after),
 					after?.blockerContent,
 					phaseRows("sections_dropped")[0],
+					delivered,
 				];
 			});
 			expect(observed).toEqual(
@@ -2538,7 +2552,128 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 					[EARLIER],
 					composerSections([theirs]),
 					{ by: "turn_end", basis: "own_session" },
+					// Nothing new to deliver: the sections kept were delivered.
+					undefined,
 				]),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps a file another session still blocks on among the affected files after this session's own fix of it", () => {
+		// RECURRENCE GUARDED: #4738, the affected-files trim. This session's fix
+		// of a.ts took a.ts out of `affectedFiles` while the other session's a.ts
+		// section stayed; with the record's other file deleted, that session's
+		// gate read every affected file as resolved and ALLOWED its commit.
+		const env = setupTestEnvironment("pi-lens-git-guard-4738-affected-");
+		try {
+			const [shared, deleted] = ["a.ts", "d.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const file of [shared, deleted]) fs.writeFileSync(file, "x;\n");
+			const runtime = sessionA(env.tmpDir);
+			const earlier = new RuntimeCoordinator();
+			earlier.projectRoot = env.tmpDir;
+			earlier.setTelemetryIdentity({ sessionId: EARLIER });
+			for (const owner of [runtime, earlier]) owner.bumpFileSeq(deleted);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					...foreignRecord([shared]),
+					affectedFiles: [shared, deleted],
+					carriedBlockers: [
+						{
+							sessionId: "session-A",
+							blockerContent: composerSections([shared]),
+							blockingFiles: [shared],
+						},
+					],
+				}),
+			);
+			fs.rmSync(deleted);
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, shared);
+
+			expect(owners(storedData(cache, env.tmpDir))).toEqual([EARLIER]);
+			expect(storedData(cache, env.tmpDir)?.affectedFiles).toContain(shared);
+			expect(evaluateGitGuard(earlier, cache, env.tmpDir)).toMatchObject({
+				block: true,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("takes this session's own fixed section out of another session's record it rides in", () => {
+		// RECURRENCE GUARDED: #4738, the latch beside a carried own section. A
+		// write to another session's record that took nothing of THEIRS back
+		// latched `session_mismatch` and wrote nothing, so this session's own
+		// fixed section stayed in the record, refusing on a blocker it answered.
+		const env = setupTestEnvironment("pi-lens-git-guard-4738-own-carried-");
+		try {
+			const [theirs, mine] = ["a.ts", "b.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const file of [theirs, mine]) fs.writeFileSync(file, "x;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					...foreignRecord([theirs]),
+					affectedFiles: [theirs, mine],
+					carriedBlockers: [
+						{
+							sessionId: "session-A",
+							blockerContent: composerSections([mine]),
+							blockingFiles: [mine],
+						},
+					],
+				}),
+			);
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, mine);
+
+			const after = storedData(cache, env.tmpDir);
+			expect(owners(after)).toEqual([EARLIER]);
+			expect(after?.blockerContent).toBe(composerSections([theirs]));
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
+				"The record names blockers in a.ts ",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("leaves this session's own record that holds a test failure to the rule before #4738", () => {
+		// RECURRENCE GUARDED: #4738, the partition retire's scope. It runs for a
+		// record shared between sessions; on a record this session owns whole the
+		// rule before it decides (a test failure keeps the record untouched), so
+		// the partition retire must not strip its blocker text.
+		const env = setupTestEnvironment("pi-lens-git-guard-4738-own-tests-");
+		try {
+			const mine = path.join(env.tmpDir, "b.ts");
+			fs.writeFileSync(mine, "x;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const data = record({
+				...foreignRecord([mine], "session-A"),
+				testFailures: true,
+				testFailureContent: "FAIL 0p/1f",
+			});
+			writeGitGuardRecord(cache, runtime, env.tmpDir, data);
+
+			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+				false,
+			);
+			expect(storedData(cache, env.tmpDir)?.blockerContent).toBe(
+				data.blockerContent,
 			);
 		} finally {
 			env.cleanup();
@@ -2566,6 +2701,24 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 			expect(storedData(cache, env.tmpDir)).toBeUndefined();
 			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
 			expect(phaseRows("record_retired")[0]).toEqual({
+				by: "write",
+				basis: "file_gone",
+			});
+
+			fs.writeFileSync(gone, "x;\n");
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				foreignRecord([gone, live]),
+			);
+			fs.rmSync(gone);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, clean, "session", true);
+			const trimmed = storedData(cache, env.tmpDir);
+			expect(owners(trimmed)).toEqual([EARLIER]);
+			expect(trimmed?.blockerContent).not.toContain("issue 1 is unsafe");
+			expect(trimmed?.blockerContent).toContain("issue 2 is unsafe");
+			expect(phaseRows("sections_dropped")[0]).toEqual({
 				by: "write",
 				basis: "file_gone",
 			});
@@ -2750,6 +2903,27 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 				[
 					"no top-level section",
 					{ ...own, blockerContent: "", carriedBlockers: [partition] },
+				],
+				[
+					"one file not a string",
+					{
+						...own,
+						carriedBlockers: [{ ...partition, blockingFiles: [file, 7] }],
+					},
+				],
+				["a null partition", { ...own, carriedBlockers: [null] }],
+				[
+					// The gate ALLOWS on a no-blocker claim before any shape check, so
+					// a carried section must void the claim, not only the shape.
+					"a no-blocker claim beside a carried section",
+					{
+						...own,
+						content: "",
+						blockerContent: "",
+						blockingFiles: [],
+						hasBlockers: false,
+						carriedBlockers: [partition],
+					},
 				],
 			];
 			const observed = forms.map(([label, data]) => {
