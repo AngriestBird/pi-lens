@@ -206,7 +206,7 @@ export function loadModelCosts(root) {
  * separator is not: keyed by hand, `<root>`-relative paths carry `\` on a
  * Windows runner, every lookup misses, and a miss costs the table's MAXIMUM --
  * so all configs become equal-cost and the balance this shard prints reads a
- * flat 1.00x by construction (AGENTS.md "Windows path shapes" 1 and 2; the
+ * flat 1.00x by construction (docs/pi-lens-reviewer.md "Windows path shapes"; the
  * #4356 recurrence: a host-default separator reddening the Windows lane).
  * `pathImpl` is injectable so a posix lane can prove the win32 shape
  * (AGENTS.md shape 35) instead of trusting it.

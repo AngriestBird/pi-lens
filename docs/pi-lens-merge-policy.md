@@ -186,12 +186,12 @@ bound helper because the brief deferred the fold without a reason.
 
 ## External reports (orchestrator)
 
-The contract lives in AGENTS.md, "Issue triage (standing rule)" — assess the
+This section is the contract; AGENTS.md "Issue triage & labels" holds the labels only. Assess the
 report against the code before accepting or dispatching, ask the one or two
 facts that would change the design, **do not dispatch work that depends on an
 unanswered load-bearing question**, mirror the answer on the issue and point
 the worker there rather than at a paraphrase, and cite the reporter's reasoning
-as authority. Read it there; this section only points at it.
+as authority. The steps above are the whole contract.
 
 The train-specific consequence: an external lane's first dispatch is often
 worth delaying by one exchange. On 2026-09-12 a fixer was dispatched on #3000
