@@ -221,6 +221,7 @@ function createState(files) {
 			toolResults: counter(),
 			phaseCounts: counter(),
 			phaseTimeouts: counter(),
+			skillsResolved: counter(),
 			// D1: every latency row timestamp (ms) in window, for the coverage-gap
 			// scan. Sorted after all files are read.
 			rowTs: [],
@@ -474,6 +475,8 @@ async function analyzeLatency(files, state) {
 			} else if (entry.type === "phase") {
 				const phase = entry.phase ?? "unknown";
 				state.latency.phaseCounts.inc(phase);
+				if (phase === "skills_resolved")
+					state.latency.skillsResolved.inc(entry.metadata?.status);
 				if (phase.endsWith("_timeout")) state.latency.phaseTimeouts.inc(phase);
 				if (phase === "test_runner_verdict_delivery") {
 					const sessionId = entry.metadata?.sessionId ?? "unknown";
@@ -2630,6 +2633,7 @@ function buildReport(state) {
 			toolResults: state.latency.toolResults.toJSON(),
 			phaseCounts: state.latency.phaseCounts.top(limit),
 			phaseTimeouts: state.latency.phaseTimeouts.toJSON(),
+			skillsResolved: state.latency.skillsResolved.toJSON(),
 			workspaceDiagnostics: {
 				started: ws.started,
 				completed: ws.completed,
@@ -2870,6 +2874,11 @@ function printReport(report) {
 		"Diagnostic files",
 		report.diagnostics.byFile,
 		(x) => `${x.count.toString().padStart(5)}  ${x.key}`,
+	);
+	section(
+		"Skills resolution",
+		Object.entries(report.latency.skillsResolved),
+		([status, count]) => `${count.toString().padStart(5)}  ${status}`,
 	);
 	section(
 		"Runner statuses",
