@@ -22,8 +22,9 @@
 // rule fails closed and asks for evidence rather than reading clean.
 //
 // The reader is dependency-free on purpose: the PR-body lane runs
-// `node scripts/check-pr-body.mjs` with no `npm install`, so js-yaml is not
-// available there. tests/config/workflow-pull-request-reachability.test.ts
+// `node scripts/check-pr-body.mjs` with no `npm install` (it installs only
+// `marked`, the markdown lexer `blankHtmlComments` reads through, #4717), so
+// js-yaml is not available there. tests/config/workflow-pull-request-reachability.test.ts
 // pins this reader against js-yaml over every workflow in the tree.
 import { matchGlob } from "./tla-coverage.mjs";
 import { blankHtmlComments } from "./defect-shapes.mjs";

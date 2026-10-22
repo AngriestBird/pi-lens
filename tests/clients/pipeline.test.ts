@@ -1693,6 +1693,183 @@ describe("Pipeline", () => {
 			expect(result.hasBlockers).toBe(false);
 			expect(result.isError).toBe(false);
 		});
+
+		// Recurrence: #4734 review F1 and Greptile "Unchecked edits look checked".
+		// `tool_result` read "found nothing" off `output` being empty, but a clean
+		// run's output is the all-clear line, and an empty output is a format-only
+		// change whose primary may never have answered. #4734 r3: the all-clear
+		// line is not the verdict either; it also ends a run with only warnings,
+		// one no language server answered, and one without authorship holding a
+		// blocker. Each cell below is a row of the round-3 state table.
+		const cleanDispatch = (
+			shape: {
+				unconfirmedStatus?: string;
+				primaryLspChecked?: true;
+				warnings?: Diagnostic[];
+				heldBackBlockers?: Diagnostic[];
+			} = {},
+		) =>
+			({
+				diagnostics: shape.warnings ?? [],
+				blockers: [],
+				warnings: shape.warnings ?? [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+				...(shape.unconfirmedStatus !== undefined && {
+					unconfirmedStatus: shape.unconfirmedStatus,
+				}),
+				...(shape.primaryLspChecked && { primaryLspChecked: true }),
+				...(shape.heldBackBlockers && {
+					heldBackBlockers: shape.heldBackBlockers,
+				}),
+			}) as Awaited<ReturnType<typeof dispatchLintWithResult>>;
+		const answered = { primaryLspChecked: true } as const;
+		const verdictOf = async (
+			filePath: string,
+			dispatched: Awaited<ReturnType<typeof dispatchLintWithResult>>,
+			overrides?: Partial<PipelineContext>,
+		) => {
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(dispatched);
+			const result = await runPipeline(
+				createMockContext(filePath, overrides),
+				createMockDeps(),
+			);
+			return [result.output.split(" · ")[0], result.checkedClean];
+		};
+
+		it("reports a checked clean verdict with the clean line, and none for an unconfirmed one", async () => {
+			const filePath = createTempFile(tmpDir, "app.ts", "const x = 1;");
+			// A file no language covers ends with a bare timing line, no "clean".
+			const unknownPath = createTempFile(tmpDir, "notes.zzz", "x\n");
+
+			expect({
+				// Row 14, the one cell: a language server answered, nothing recorded.
+				clean: await verdictOf(filePath, cleanDispatch(answered)),
+				// Row 7.
+				unconfirmed: (
+					await verdictOf(
+						filePath,
+						cleanDispatch({
+							unconfirmedStatus: "no language server answered (disabled)",
+						}),
+					)
+				).map((v) => (typeof v === "string" ? v.split(" — ")[0] : v)),
+				// Row 9: the dispatcher sets no language-server verdict without a kind.
+				unknown: (await verdictOf(unknownPath, cleanDispatch())).map((v) =>
+					typeof v === "string" ? v.includes("clean") : v,
+				),
+			}).toEqual({
+				clean: ["✓ JavaScript/TypeScript clean", true],
+				unconfirmed: ["⚠ JavaScript/TypeScript unconfirmed", false],
+				unknown: [false, false],
+			});
+		});
+
+		it("reports no checked clean verdict for a run with only a warning behind the clean line", async () => {
+			// Row 6 (verify r2 F1): the dispatcher renders no text for a warning, so
+			// the run ends with the clean line while it recorded a finding.
+			const filePath = createTempFile(tmpDir, "warn.ts", "const x = 1;");
+			const warning: Diagnostic = {
+				id: "lsp-unused",
+				message: "'x' is declared but never read",
+				filePath,
+				line: 1,
+				severity: "warning",
+				semantic: "warning",
+				tool: "lsp",
+			};
+
+			expect(
+				await verdictOf(
+					filePath,
+					cleanDispatch({ ...answered, warnings: [warning] }),
+				),
+			).toEqual(["✓ JavaScript/TypeScript clean", false]);
+		});
+
+		it("reports no checked clean verdict for a clean line no language server answered", async () => {
+			// Rows 8 and 10-13 (verify r2 F4): `--no-lsp`, a CLI primary, a fallback
+			// linter, a deferred or a latched silent server all reach the pipeline
+			// as this shape, no `unconfirmedStatus` and no language-server verdict
+			// (the dispatcher cells in coverage-notice-runner-outcome.test.ts).
+			const filePath = createTempFile(tmpDir, "nolsp.ts", "const x = 1;");
+
+			expect(await verdictOf(filePath, cleanDispatch())).toEqual([
+				"✓ JavaScript/TypeScript clean",
+				false,
+			]);
+		});
+
+		it("reports no checked clean verdict for a run without authorship that keeps a blocker", async () => {
+			// Row 5: without authorship (#3226) a held-back blocker renders no text,
+			// so the run ends with the clean line while the file's record keeps it.
+			const filePath = createTempFile(
+				tmpDir,
+				"held.ts",
+				"const x: number = 'a';",
+			);
+			const blocker: Diagnostic = {
+				id: "lsp-2322",
+				message: "Type 'string' is not assignable to type 'number'.",
+				filePath,
+				line: 1,
+				severity: "error",
+				semantic: "blocking",
+				tool: "lsp",
+			};
+
+			expect(
+				await verdictOf(
+					filePath,
+					cleanDispatch({ ...answered, heldBackBlockers: [blocker] }),
+					{ allowAutonomousWriters: false },
+				),
+			).toEqual(["✓ JavaScript/TypeScript clean", false]);
+		});
+
+		it("reports no checked clean verdict for a format-only change whose primary did not answer", async () => {
+			const filePath = createTempFile(tmpDir, "fmt.ts", "const x=1;\n");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(
+				cleanDispatch({
+					unconfirmedStatus: "no language server answered (disabled)",
+				}),
+			);
+			const formatFile = vi.fn(async (fp: string) => {
+				fs.writeFileSync(fp, "const x = 1;\n");
+				return {
+					filePath: fp,
+					formatters: [
+						{
+							name: "biome",
+							success: true,
+							changed: true,
+							outcome: "formatted" as const,
+						},
+					],
+					anyChanged: true,
+					allSucceeded: true,
+				};
+			});
+
+			const result = await runPipeline(
+				createMockContext(filePath, {
+					getFlag: (name) => name === "immediate-format",
+				}),
+				createMockDeps({
+					getFormatService: () => ({ recordRead: vi.fn(), formatFile }) as any,
+				}),
+			);
+
+			// The shape the consumer used to read as "found nothing": no output.
+			expect(formatFile).toHaveBeenCalled();
+			expect(result.output).toBe("");
+			expect(result.postAutofixNotice).toBeDefined();
+			expect(result.checkedClean).toBe(false);
+		});
 	});
 
 	// #1641 review F1/F2: `inlineBlockerLines` is the structured field the

@@ -1177,6 +1177,39 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 				"budget many times over.",
 			owner: "#2523 slice 2",
 		},
+	"clients/runtime-tool-call.ts#captureOpaqueBaseline:1b678fc6~6558e937": {
+		family: "hook-await",
+		site: "unbudgeted-hook",
+		reason:
+			"On the `tool_call` path. #2523's contract table declares no wall budget " +
+			"for tool_call, so this await has no number to be measured against. It is " +
+			"the pre-command opaque baseline: the command has not run yet, so the read " +
+			"cannot be taken later, and each leaf bounds itself (`isGitWorktree` 3s, " +
+			"`captureGitDirtyPaths` 5s, the stat walk's own budget).",
+		owner: "#2050",
+	},
+	"clients/runtime-tool-call.ts#captureOpaqueBaseline:39656d5c~a8d2852f": {
+		family: "hook-await",
+		site: "unbudgeted-hook",
+		reason:
+			"On the `tool_call` path. #2523's contract table declares no wall budget " +
+			"for tool_call, so this await has no number to be measured against. It is " +
+			"the pre-command opaque baseline: the command has not run yet, so the read " +
+			"cannot be taken later, and each leaf bounds itself (`isGitWorktree` 3s, " +
+			"`captureGitDirtyPaths` 5s, the stat walk's own budget).",
+		owner: "#2050",
+	},
+	"clients/runtime-tool-call.ts#captureOpaqueBaseline:98e63c47~d6d00a8b": {
+		family: "hook-await",
+		site: "unbudgeted-hook",
+		reason:
+			"On the `tool_call` path. #2523's contract table declares no wall budget " +
+			"for tool_call, so this await has no number to be measured against. It is " +
+			"the pre-command opaque baseline: the command has not run yet, so the read " +
+			"cannot be taken later, and each leaf bounds itself (`isGitWorktree` 3s, " +
+			"`captureGitDirtyPaths` 5s, the stat walk's own budget).",
+		owner: "#2050",
+	},
 	"clients/runtime-tool-call.ts#handleToolCall:a2e5cf7a~ab927364": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
@@ -1207,7 +1240,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"an invented one.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-call.ts#handleToolCallImpl:1a767ae6~924dc100": {
+	"clients/runtime-tool-call.ts#handleToolCallImpl:1f887b0e~81c1d77f": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
 		reason:
@@ -1237,16 +1270,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"ALWAYS undefined. Fixing it is AC4's job, not slice 1's.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-call.ts#handleToolCallImpl:4d186e4d~6342f07d": {
-		family: "hook-await",
-		site: "unbudgeted-hook",
-		reason:
-			"On the `tool_call` path. #2523's contract table declares no " +
-			"wall budget for tool_call, so this await has no number to be " +
-			"measured against yet; recorded as the gap rather than assigned " +
-			"an invented one.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-tool-call.ts#handleToolCallImpl:65d1c872~921c1ea5": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
@@ -1257,17 +1280,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"an invented one.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-call.ts#handleToolCallImpl:750505ab~c899dd87": {
+	"clients/runtime-tool-call.ts#handleToolCallImpl:6845dabe~79a8d019": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
 		reason:
-			"On the `tool_call` path. #2523's contract table declares no " +
-			"wall budget for tool_call, so this await has no number to be " +
-			"measured against yet; recorded as the gap rather than assigned " +
-			"an invented one.",
-		owner: "#2523 slice 2",
+			"On the `tool_call` path. #2523's contract table declares no wall budget " +
+			"for tool_call, so this await has no number to be measured against. It is " +
+			"the pre-command opaque baseline: the command has not run yet, so the read " +
+			"cannot be taken later, and each leaf bounds itself (`isGitWorktree` 3s, " +
+			"`captureGitDirtyPaths` 5s, the stat walk's own budget).",
+		owner: "#2050",
 	},
-	"clients/runtime-tool-call.ts#handleToolCallImpl:7d560cfc~fce36234": {
+	"clients/runtime-tool-call.ts#handleToolCallImpl:750505ab~c899dd87": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
 		reason:
@@ -1286,19 +1310,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"measured against yet; recorded as the gap rather than assigned " +
 			"an invented one.",
 		owner: "#2523 slice 2",
-	},
-	"clients/runtime-tool-call.ts#handleToolCallImpl:a2647826~85840855": {
-		family: "hook-await",
-		site: "unbudgeted-hook",
-		reason:
-			"Inside `handleToolCallImpl`, the pre-command dirty set a same-HEAD " +
-			"discard is detected from (#4502): one `git status --porcelain` " +
-			"through safeSpawnAsync with its own 5s timeout, awaited exactly as " +
-			"the opaque baseline beside it is (a baseline the command's own " +
-			"`tool_result` diffs against, and which cannot be taken after the " +
-			"command ran). It holds no hook signal by the same #2523 AC4 limit " +
-			"the other one-hop rows name.",
-		owner: "#4502",
 	},
 	"clients/runtime-tool-call.ts#handleToolCallImpl:ce0d3f2f~51275360": {
 		family: "hook-await",
@@ -1363,6 +1374,16 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"bound without reading the tree after the look's own bound began.",
 		owner: "#4502",
 	},
+	"clients/runtime-tool-result.ts#handleToolResult:3558e68d~2dc0b6be": {
+		family: "hook-await",
+		site: "tool_result_edit",
+		reason:
+			"Inside the edit `tool_result` body — the one path #2523 lets block the " +
+			"host, under the 10000ms edit budget. It is the recovery this result's " +
+			"dispatch consumes, and each leaf bounds itself (`git status` 5s, the stat " +
+			"walk's own budget), so the aggregate is the dispatch's work, not a wait.",
+		owner: "#2050",
+	},
 	"clients/runtime-tool-result.ts#handleToolResult:39fdd082~e70743cd": {
 		family: "hook-await",
 		site: "tool_result_edit",
@@ -1372,15 +1393,15 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"observed path above.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-result.ts#handleToolResult:3c46b254~2a5bfb5e": {
+	"clients/runtime-tool-result.ts#handleToolResult:3c46b254~67153899": {
 		family: "hook-await",
 		site: "tool_result_edit",
 		reason:
-			"The edit tool_result body — the ONE path #2523's contract " +
-			"allows to block the host, and only for 10000ms. Measured write " +
-			"p90 2614ms / edit p90 3199ms today, so the budget is a ceiling " +
-			"rather than a change.",
-		owner: "#2523 slice 2",
+			"Inside the edit `tool_result` body — the one path #2523 lets block the " +
+			"host, under the 10000ms edit budget. It is the recovery this result's " +
+			"dispatch consumes, and each leaf bounds itself (`git status` 5s, the stat " +
+			"walk's own budget), so the aggregate is the dispatch's work, not a wait.",
+		owner: "#2050",
 	},
 	"clients/runtime-tool-result.ts#handleToolResult:734a21b6~69a83146": {
 		family: "hook-await",
@@ -1389,16 +1410,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"Observed-mutation settle and dispatch on the edit path. " +
 			"`OBSERVED_TURN_BUDGET_MS` (600ms) bounds the CAPTURE, not this " +
 			"join.",
-		owner: "#2523 slice 2",
-	},
-	"clients/runtime-tool-result.ts#handleToolResult:7d560cfc~f14ecaea": {
-		family: "hook-await",
-		site: "tool_result_edit",
-		reason:
-			"The edit tool_result body — the ONE path #2523's contract " +
-			"allows to block the host, and only for 10000ms. Measured write " +
-			"p90 2614ms / edit p90 3199ms today, so the budget is a ceiling " +
-			"rather than a change.",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-tool-result.ts#handleToolResult:a1bef279~57385903": {
@@ -1421,6 +1432,16 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"and `deps.signal`, so this await is bounded one frame up; the " +
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4535",
+	},
+	"clients/runtime-tool-result.ts#handleToolResult:bf707aea~937f45e8": {
+		family: "hook-await",
+		site: "tool_result_edit",
+		reason:
+			"Inside the edit `tool_result` body — the one path #2523 lets block the " +
+			"host, under the 10000ms edit budget. It is the recovery this result's " +
+			"dispatch consumes, and each leaf bounds itself (`git status` 5s, the stat " +
+			"walk's own budget), so the aggregate is the dispatch's work, not a wait.",
+		owner: "#2050",
 	},
 	"clients/runtime-tool-result.ts#lookAtHead:6c9224dd~45cd3f56": {
 		family: "hook-await",

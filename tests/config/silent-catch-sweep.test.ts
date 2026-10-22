@@ -88,6 +88,7 @@ import {
 	type CatchSite,
 	scanSilentCatches,
 } from "../support/silent-catch-scan.js";
+import { currentPeakRssMb, reportPeakRss } from "../support/worker-peak-rss.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -1390,7 +1391,7 @@ interface Census {
 	scannedFiles: number;
 }
 
-function scanShippedTrees(): Census {
+async function scanShippedTrees(): Promise<Census> {
 	const files = [
 		...SHIPPED_TREES.flatMap((dir) =>
 			listSourceFiles(path.join(REPO_ROOT, dir), { skipTests: true }),
@@ -1424,11 +1425,19 @@ function scanShippedTrees(): Census {
 				census.byFile.set(rel, sites);
 			}
 		}
+		// #4736: turn the event loop between files. `@ast-grep/napi` frees a
+		// dropped tree's native arena from a finalizer that only runs once the
+		// loop turns, so the synchronous walk held every one of the ~530 parsed
+		// trees at once (1,902 MB peak RSS against 44 MB of V8 heap, 4% under
+		// the #3058 budget). One turn per file brings the peak to ~340 MB with
+		// the same finding list (the same fix `vi-mock-export-sweep.test.ts`
+		// and `flake-shape-scan.ts` took, #3565).
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 	return census;
 }
 
-const census = scanShippedTrees();
+const census = await scanShippedTrees();
 const printPins = process.env.PI_LENS_PRINT_PINS === "1";
 
 function sortedByFile<T>(entries: Iterable<[string, T]>): Array<[string, T]> {
@@ -1565,6 +1574,29 @@ const ADMITTED: Admission = admitted();
 describe("silent-catch sweep", () => {
 	it("scans the shipped trees", () => {
 		assertNonEmptyScan("silent-catch sweep", census.scannedFiles, 300);
+	});
+
+	// Recurrence (#4736): the walk parsed ~530 files in one synchronous loop, so
+	// `@ast-grep/napi` kept every native tree until the file ended and the
+	// worker peaked at 1,902 MB, 4% under the 2,048 MB budget (#3058); +0.34% of
+	// source (#4713) crossed it and redded Unit shard 2/5. With the loop turned
+	// per file the peak is ~340 MB. This ceiling is the issue's acceptance bar
+	// and sits 1,000 MB above the fixed peak, below the first red, so growth
+	// of the source cannot walk the sweep back to the budget unseen.
+	// The ceiling check belongs to the peak-RSS seam, which enforces on linux
+	// only (darwin's `ru_maxrss` is bytes): this case asks it instead of
+	// dividing `maxRSS` itself.
+	it("holds the walk's peak RSS under 1,600 MB (#4736)", () => {
+		expect(() =>
+			reportPeakRss({
+				file: "tests/config/silent-catch-sweep.test.ts",
+				peakRssMb: currentPeakRssMb(),
+				heapUsedMb: 0,
+				externalMb: 0,
+				write: () => {},
+				ceilingMb: 1600,
+			}),
+		).not.toThrow();
 	});
 
 	it("pins existing unresolved delegations and refuses every new one", () => {

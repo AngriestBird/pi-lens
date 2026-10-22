@@ -1152,6 +1152,15 @@ export type DegradationKind =
 	| "opaque-baseline-lost"
 	/** Opaque mutation was analyzed without granting autonomous writer rights. */
 	| "opaque-mutation-ownership-boundary"
+	/**
+	 * #2050: a bash command named a git checkout that got NO opaque baseline, so
+	 * its writes were not observed. Subject is the normalized root (once per
+	 * root per session), or `cap` when the command named more checkouts than
+	 * `OPAQUE_RECOVERY_ROOT_CAP`. Deliberately not `opaque-baseline-lost`, which
+	 * is a baseline that WAS taken and then dropped: this one was never taken,
+	 * because the root is not a linked worktree of the session's repository.
+	 */
+	| "opaque-recovery-root-refused"
 	/** Opengrep completed with partial parsing warnings (#2943). */
 	| "opengrep-partial-scan"
 	/** Opengrep refused the requested root or reported a scan error (#2943). */
@@ -1800,6 +1809,18 @@ export type DegradationKind =
 	/** A loader request named a configured-disabled tool. */
 	| "tool-disabled"
 	| "tool-result-adopted-project"
+	/**
+	 * An edit in a linked worktree of this repository was analysed with the full
+	 * pipeline. Once per worktree root per session: the row exists so "analysis
+	 * ran and the root was foreign to the session" is never only in `latency.log`
+	 * (#2050 AC3).
+	 */
+	| "tool-result-linked-worktree"
+	/**
+	 * That analysis produced no finding at all, so the agent gets one advisory
+	 * instead of an ambiguous silence. Once per worktree root per session.
+	 */
+	| "tool-result-linked-worktree-clean"
 	/** A project edit was outside the session root and skipped analysis (#4218). */
 	| "tool-result-outside-project-root"
 	/** #3612: a lazy-tool activation arrived before its activation's session scope began. */

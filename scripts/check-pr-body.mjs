@@ -6,10 +6,15 @@ import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	blankMarkdown,
 	blankHtmlComments,
+	codeSpanMasked,
 	HEADING,
 	parseDefectShapes,
 	sourceWithoutFencedBlocks,
 } from "./lib/defect-shapes.mjs";
+import {
+	blankMarkdownRegions,
+	markdownHeadings,
+} from "./lib/markdown-lexer.mjs";
 import { githubGet } from "./lib/github-rest.mjs";
 import {
 	changedHookAnchors,
@@ -46,6 +51,7 @@ const REQUIRED_SECTIONS = [
 	"Blast radius",
 	"Class sweep",
 	"Observability",
+	"Fold check",
 ];
 // The PR footer the template requires (.github/PULL_REQUEST_TEMPLATE.md).
 const GENERATED_FOOTER =
@@ -66,6 +72,9 @@ const REPAIR_HEADINGS = [
 	"Test assessment",
 	"Blast radius",
 	"Class sweep",
+	// #4711: a required section the flattened-body repair does not recognize
+	// cannot be recovered, so a flattened body would owe it forever.
+	"Fold check",
 	"Observability",
 	"Fix round \\d+",
 	"Review round \\d+",
@@ -104,6 +113,9 @@ const SECTION_SYNONYMS = new Map([
 	["verification", "tests"],
 	["blast radius", "blast radius"],
 	["class sweep", "class sweep"],
+	// #4711: AGENTS.md's fold check is recorded here, so the body lint reads the
+	// same heading the maintainer's local script gates on.
+	["fold check", "fold check"],
 	["behavior equivalence", "behavior equivalence"],
 	["observability", "observability"],
 	["test assessment", "test assessment"],
@@ -152,20 +164,120 @@ function templatePlaceholderLines() {
 	return placeholders;
 }
 
-function hasRealContent(lines, section, placeholders) {
+/**
+ * Does a section hold content the reader sees? `lines` is a slice of the
+ * blanked body starting at absolute line `startLine`, and `structure` maps a
+ * heading line's index to its name (`headingLines(...).name`). Structure is
+ * answered by the line a heading occupies, in the same reading the slice came
+ * from (#4717 F5): a body-wide set of heading *text* both counted a commented
+ * heading as content, because the slice is comment-blanked and the heading's
+ * raw line is not, and dropped an answer whose words repeat a setext heading's
+ * title.
+ */
+function hasRealContent(
+	lines,
+	section,
+	placeholders,
+	structure,
+	startLine = 0,
+) {
 	const templateLines = placeholders.get(section) ?? new Set();
-	return lines.some((line) => {
+	return lines.some((line, offset) => {
 		const value = line.trim();
 		// A nested heading is structure, not content: counting it let an empty
 		// "## Tests" pass on the strength of its own "### Test assessment" line
-		// (#2124 review F1).
+		// (#2124 review F1). `structure` is the lexer's heading lines, so a
+		// family the `HEADING` regex cannot spell is structure too (#4717 F1).
 		return (
 			value &&
-			!HEADING.test(value) &&
+			!structure.has(startLine + offset) &&
 			!/^[-*+] \[ \]/.test(value) &&
 			!templateLines.has(value)
 		);
 	});
+}
+
+/**
+ * The lines the reader sees as headings, from the lexer (#4717 F1). `name`
+ * maps each of a heading's line indices to its text, for a caller scanning the
+ * body's rows and for `hasRealContent`, which asks whether a line of its slice
+ * is one. A setext heading's underline and an indented ATX heading are
+ * structure here exactly as a plain ATX one is, so no reader of a body needs a
+ * heading regex of its own.
+ */
+function headingLines(body, headings = bodyHeadings(body)) {
+	const name = new Map();
+	for (const heading of headings) {
+		for (let line = heading.index; line < heading.contentIndex; line += 1) {
+			name.set(line, heading.name);
+		}
+	}
+	return { name };
+}
+
+/**
+ * Every heading of the body AS THE READER SEES IT, from the lexer (#4717): a
+ * heading inside a comment, a raw-HTML block, a list item or a block quote is
+ * not a section, a setext or indented ATX heading is one, and a heading's name
+ * is its text without closing marks. Every level ends the sections below it;
+ * levels 2 to 4 name one (#1844 accepts H3 and H4 section headings). `index`
+ * is its first line and `contentIndex` the first line of its section, over
+ * `body.split(/\r?\n/)`.
+ */
+function bodyHeadings(body) {
+	return markdownHeadings(body).map((heading) => ({
+		index: heading.line,
+		contentIndex: heading.contentLine,
+		name: heading.text,
+		level: heading.depth,
+		section:
+			heading.depth >= 2 && heading.depth <= 4
+				? SECTION_SYNONYMS.get(heading.text.toLowerCase())
+				: undefined,
+	}));
+}
+
+/**
+ * The lines the reader sees as a section's text, from its heading to the next
+ * heading of the same or a higher level. Every raw-HTML block and inline
+ * comment is dropped (fail closed: GitHub renders no section inside one, and
+ * an answer written there is not a visible answer). `text` keeps code, because
+ * a search command is quoted in one; `visible` blanks code blocks too. `null`
+ * when the heading is absent, so the missing-section message stays owned by
+ * `lintPrBody`. Every section linter reads a section this way.
+ */
+function sectionLines(body, headings = bodyHeadings(body)) {
+	const text = blankMarkdownRegions(body, { html: "blocks" }).split(/\r?\n/);
+	const visible = blankMarkdown(body, { htmlBlocks: true }).split(/\r?\n/);
+	const of = (heading) => {
+		const next = headings.find(
+			(candidate) =>
+				candidate.index > heading.index && candidate.level <= heading.level,
+		);
+		const end = next?.index ?? text.length;
+		return {
+			start: heading.contentIndex,
+			raw: String(body ?? "")
+				.split(/\r?\n/)
+				.slice(heading.contentIndex, end),
+			text: text.slice(heading.contentIndex, end),
+			visible: visible.slice(heading.contentIndex, end),
+		};
+	};
+	return { text, visible, of };
+}
+
+function sectionContent(body, section) {
+	const headings = bodyHeadings(body);
+	const heading = headings.find((candidate) => hasSection(candidate, section));
+	if (!heading) return null;
+	const lines = sectionLines(body, headings).of(heading);
+	return {
+		start: lines.start,
+		raw: lines.raw.join("\n"),
+		text: lines.text.join("\n"),
+		visible: lines.visible.join("\n"),
+	};
 }
 
 function blankCommentsAndStrings(source) {
@@ -601,7 +713,9 @@ function observabilitySectionContent(lines, headings) {
 		(candidate) =>
 			candidate.index > heading.index && candidate.level <= heading.level,
 	);
-	return lines.slice(heading.index + 1, next?.index ?? lines.length).join("\n");
+	return lines
+		.slice(heading.contentIndex, next?.index ?? lines.length)
+		.join("\n");
 }
 
 function lineAt(source, index) {
@@ -994,12 +1108,6 @@ function markdownBlocks(body, { tilde = false } = {}) {
 		text: block.lines.join("\n"),
 		table: !block.fence && block.lines.every((line) => /^\s*\|/.test(line)),
 	}));
-}
-
-function codeSpanMasked(text) {
-	return String(text).replace(/(`+)([\s\S]*?)\1/g, (span) =>
-		" ".repeat(span.length),
-	);
 }
 
 function endsSentence(text, index, original = text) {
@@ -2919,12 +3027,12 @@ function lintBehaviorEquivalence(body, headings, title) {
 		(candidate) =>
 			candidate.index > heading.index && candidate.level <= heading.level,
 	);
-	const sectionLines = lines.slice(
-		heading.index + 1,
+	const tableLines = lines.slice(
+		heading.contentIndex,
 		nextHeading?.index ?? lines.length,
 	);
-	for (let index = 0; index + 1 < sectionLines.length; index += 1) {
-		const headers = behaviorTableCells(sectionLines[index]);
+	for (let index = 0; index + 1 < tableLines.length; index += 1) {
+		const headers = behaviorTableCells(tableLines[index]);
 		if (!headers) continue;
 		const normalizedHeaders = headers.map((header) => header.toLowerCase());
 		const site = normalizedHeaders.indexOf("site");
@@ -2934,7 +3042,7 @@ function lintBehaviorEquivalence(body, headings, title) {
 			site < 0 ||
 			before < 0 ||
 			after < 0 ||
-			!/^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$/.test(sectionLines[index + 1])
+			!/^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$/.test(tableLines[index + 1])
 		)
 			continue;
 		// The table ends at the first line that is not a table row: a blank line,
@@ -2942,10 +3050,10 @@ function lintBehaviorEquivalence(body, headings, title) {
 		// unrelated table's cells (even its header) as this table's data row.
 		for (
 			let rowIndex = index + 2;
-			rowIndex < sectionLines.length;
+			rowIndex < tableLines.length;
 			rowIndex += 1
 		) {
-			const row = behaviorTableCells(sectionLines[rowIndex]);
+			const row = behaviorTableCells(tableLines[rowIndex]);
 			if (!row) break;
 			if (row.length < headers.length) continue;
 			if (
@@ -3175,31 +3283,10 @@ export function shapeCatalogReader(cwd = process.cwd(), git = gitExecFileSync) {
  * satisfies the requirement (issue #4288, "Red first").
  */
 export function lintDetectionSection(body = "", options = {}) {
-	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
-	const headings = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = HEADING.exec(lines[index]);
-		if (match)
-			headings.push({
-				index,
-				level: match[0].match(/^#+/)[0].length,
-				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
-			});
-	}
-	const heading = headings.find((candidate) =>
-		hasSection(candidate, "detection"),
-	);
-	if (!heading) return [];
-	const nextHeading = headings.find(
-		(candidate) =>
-			candidate.index > heading.index && candidate.level <= heading.level,
-	);
+	const section = sectionContent(body, "detection");
+	if (!section) return [];
 	// An HTML comment is not an answer: lines quoted in one never count (#4439).
-	const content = blankMarkdown(
-		lines
-			.slice(heading.index + 1, nextHeading?.index ?? lines.length)
-			.join("\n"),
-	);
+	const content = section.visible;
 	// A non-bug PR may leave the template's optional hint in place; that is an
 	// unanswered section, not a malformed answer.
 	// The mandatory footer is the last line of the body, so it lands inside
@@ -3207,9 +3294,15 @@ export function lintDetectionSection(body = "", options = {}) {
 	if (
 		options.ignoreUnfilled &&
 		!hasRealContent(
-			content.split("\n").filter((line) => !GENERATED_FOOTER.test(line.trim())),
+			// Blank the footer rather than drop it, so every line keeps its index
+			// in the section slice `hasRealContent` reads structure by (#4717 F5).
+			content
+				.split("\n")
+				.map((line) => (GENERATED_FOOTER.test(line.trim()) ? "" : line)),
 			"detection",
 			templatePlaceholderLines(),
+			headingLines(body).name,
+			section.start,
 		)
 	)
 		return [];
@@ -3300,21 +3393,94 @@ const CLASS_SWEEP_TABLE_ROW = /^\s*\|.*\|\s*$/;
 // is deliberately not a verdict: PR #4248 used it while enumerating changed
 // files. `unaffected` is excluded because `TLA+ unaffected: <family>` is a
 // different governance statement (#4273 F3).
-function classSweepVerdict(text) {
+const CLASS_SWEEP_DECISION =
+	/\b(?:fold|folds|folded|folding|consolidat\w*|verdict|widen\w*)\b|\b(?:stays?|stayed|staying)\b/i;
+const CLASS_SWEEP_OUTCOME =
+	/(?:→|->|=>|\bcovered\b|\buncovered\b|\bnot a member\b|\bnot a runtime\b|\bno member\b|\bexcluded\b|\bout of scope\b|\bin scope\b|\bclean\b|\bsame target\b|\bnot found\b)/i;
+
+// #4711: `## Fold check` and `## Class sweep` share ONE verdict parser and its
+// `none:` escape, so one body answers both the repository lint and the
+// maintainer's local script. Their admitted vocabularies differ, so each branch
+// keeps its own tokens. A fold-check decision line names its candidate (`#N`)
+// FIRST, then one of the three decisions, then a reason: the local gate
+// (`pr-create.sh`'s `fold_gate`) reads the same three facts, in the same order,
+// with two words of reason.
+//
+// It fails closed (#4717 F2/F3/F4/F5/N1): every line in the section that names a
+// candidate must be such a line, so a malformed sibling is not excused by a
+// well-formed neighbour; the decision is one of the three listed spellings, so
+// `not-folded` and `re-sequenced` refuse; and a `folded` candidate is one this
+// body closes. The candidate token has one spelling, read as a match and as a
+// count.
+const FOLD_CHECK_CANDIDATE_SOURCE = "(?:^|[^0-9A-Za-z&])#(\\d+)(?![0-9])";
+const FOLD_CHECK_CANDIDATE = new RegExp(FOLD_CHECK_CANDIDATE_SOURCE);
+const FOLD_CHECK_CANDIDATE_ALL = new RegExp(FOLD_CHECK_CANDIDATE_SOURCE, "g");
+// The three listed spellings, as whole tokens: a hyphenated `not-folded` or
+// `re-sequenced` is not one of them, and its `folded`/`sequenced` tail is not a
+// decision either.
+const FOLD_CHECK_DECISION =
+	/(?<![-\w])(?:not\s+folded|folded|sequenced)(?![-\w])/i;
+const FOLD_CHECK_FOLDED = /^folded$/i;
+const FOLD_CHECK_REASON_WORDS = 2;
+// The `none: <reason>` escape both sections accept.
+const NONE_LINE = /^\s*none\s*:\s*(.+?)\s*$/im;
+
+/**
+ * The issues this body closes, read with the lexer's code structure (#4717
+ * N1): a `Closes #N` in a backtick or tilde fence, indented code or a code
+ * span closes nothing. `parseCloseKeywords` keeps its own dependency-free
+ * reading for the close-keyword jobs, which run with no install.
+ */
+function closedIssues(body) {
+	return parseCloseKeywords(
+		blankMarkdownRegions(body, { code: "blocks", codeSpans: true }),
+	).issues;
+}
+
+function sectionVerdict(section, text, { closes = [] } = {}) {
 	const source = String(text ?? "");
-	if (
-		/\b(?:fold|folds|folded|folding|consolidat\w*|verdict|widen\w*)\b/i.test(
-			source,
-		) ||
-		/\b(?:stays?|stayed|staying)\b/i.test(source)
-	)
-		return true;
-	const outcome =
-		/(?:→|->|=>|\bcovered\b|\buncovered\b|\bnot a member\b|\bnot a runtime\b|\bno member\b|\bexcluded\b|\bout of scope\b|\bin scope\b|\bclean\b|\bsame target\b|\bnot found\b)/i;
+	if (section === "fold check") {
+		const candidates = source
+			.split(/\r?\n/)
+			.filter((line) => FOLD_CHECK_CANDIDATE.test(line));
+		// `none:` says the search listed no candidate, so a line naming one
+		// contradicts it whatever that line says (#4717 F4).
+		// The contradiction is judged before the reason's length, so a short
+		// `none: no` beside a candidate refuses too (#4717 N3).
+		const none = NONE_LINE.exec(source);
+		if (none) return candidates.length === 0 && wordCount(none[1]) >= 3;
+		if (candidates.length === 0) return false;
+		return candidates.every((line) => {
+			const decision = FOLD_CHECK_DECISION.exec(line);
+			if (!decision) return false;
+			// The candidate comes first, and it is the only one named before the
+			// decision, so the reason and the close rule read one candidate
+			// (#4717 F3).
+			const named = [
+				...line.slice(0, decision.index).matchAll(FOLD_CHECK_CANDIDATE_ALL),
+			];
+			if (named.length !== 1) return false;
+			const reason = line
+				.slice(decision.index + decision[0].length)
+				.replace(FOLD_CHECK_CANDIDATE_ALL, " ");
+			if (
+				(reason.match(/[A-Za-z0-9]+/g) ?? []).length < FOLD_CHECK_REASON_WORDS
+			)
+				return false;
+			// A `folded` candidate is one this body closes: the record claims the
+			// issue lands here, and the post-merge verifier reads
+			// `parseCloseKeywords` (#4717 F5).
+			return (
+				!FOLD_CHECK_FOLDED.test(decision[0].trim()) ||
+				closes.includes(Number(named[0][1]))
+			);
+		});
+	}
+	if (CLASS_SWEEP_DECISION.test(source)) return true;
 	return source.split(/\r?\n/).some((line) => {
 		const perMember =
 			CLASS_SWEEP_MEMBER_LINE.test(line) || CLASS_SWEEP_TABLE_ROW.test(line);
-		return perMember && outcome.test(line);
+		return perMember && CLASS_SWEEP_OUTCOME.test(line);
 	});
 }
 
@@ -3380,32 +3546,11 @@ function wordCount(text) {
  * local caller with no upstream ref) only the reason check applies.
  */
 export function lintClassSweep(body = "", { diff } = {}) {
-	const rawLines = String(body ?? "").split(/\r?\n/);
-	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
-	const headings = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = HEADING.exec(lines[index]);
-		if (match)
-			headings.push({
-				index,
-				level: match[0].match(/^#+/)[0].length,
-				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
-			});
-	}
-	const heading = headings.find((candidate) =>
-		hasSection(candidate, "class sweep"),
-	);
-	if (!heading) return [];
-	const nextHeading = headings.find(
-		(candidate) =>
-			candidate.index > heading.index && candidate.level <= heading.level,
-	);
-	const content = rawLines
-		.slice(heading.index + 1, nextHeading?.index ?? lines.length)
-		.join("\n")
-		.trim();
+	const section = sectionContent(body, "class sweep");
+	if (!section) return [];
+	const content = section.text.trim();
 	if (!content) return [];
-	const none = /^\s*none\s*:\s*(.+?)\s*$/im.exec(content);
+	const none = NONE_LINE.exec(content);
 	if (none) {
 		if (wordCount(none[1]) < 3) return [CLASS_SWEEP_MESSAGE];
 		if (diff && classSweepRuntimeTouched(diff)) return [CLASS_SWEEP_MESSAGE];
@@ -3414,10 +3559,42 @@ export function lintClassSweep(body = "", { diff } = {}) {
 	if (
 		classSweepShape(content) &&
 		classSweepSearchCommand(content) &&
-		classSweepVerdict(content)
+		sectionVerdict("class sweep", content)
 	)
 		return [];
 	return [CLASS_SWEEP_MESSAGE];
+}
+
+const FOLD_CHECK_MESSAGE =
+	'PR body "## Fold check" must decide each candidate: `#N` first, then one ' +
+	"of folded / not folded / sequenced, then a reason of at least two words " +
+	"(issue numbers do not count), and a `folded` candidate's `Closes #N` in the " +
+	'body; or say "none: <reason>" (three words minimum) when the search found ' +
+	"no candidate. Every line that names a candidate must be a decision line. " +
+	`See ${TEMPLATE_PATH}.`;
+
+/**
+ * #4711: AGENTS.md's fold check, as a body section. Every candidate issue is
+ * decided `folded`, `not folded` or `sequenced` with its reason, or the search
+ * found none and the section says `none: <reason>`. The candidate list itself
+ * is the maintainer's local script's to compute (it reads the issue tracker);
+ * this lint owns the form, so a raw `gh pr create` cannot skip the record. The
+ * missing and empty section cases stay owned by `lintPrBody`.
+ */
+export function lintFoldCheck(body = "") {
+	const section = sectionContent(body, "fold check");
+	if (!section) return [];
+	// An empty section is `lintPrBody`'s to report. Content that survives only
+	// inside a fence or a raw-HTML block is not a decision either, so the
+	// blanked copy is judged and an empty one refuses here (#4711).
+	if (!section.raw.trim()) return [];
+	const content = section.visible.trim();
+	// A `folded` candidate must be closed by this body (#4717 F5), so the
+	// verdict is judged against the body's own close keywords.
+	const closes = closedIssues(body);
+	return sectionVerdict("fold check", content, { closes })
+		? []
+		: [FOLD_CHECK_MESSAGE];
 }
 
 // A failing-test line names its own title: a `FAIL`/`❯` line carries a runner
@@ -3480,14 +3657,14 @@ function transcriptNamesFile(fence, file) {
 // A Controls row names the file it covers and gives a reason: a `Control: ...`
 // line, or a row of a Controls table. A row that names no file, or gives no
 // reason, proves nothing.
-function controlRows(visibleRows) {
+function controlRows(visibleRows, headingByLine) {
 	let inSection = false;
 	let controlTable = false;
 	const rows = [];
-	for (const row of visibleRows) {
-		const heading = HEADING.exec(row);
-		if (heading) {
-			inSection = /\bcontrols?\b/i.test(heading[1]);
+	for (const [index, row] of visibleRows.entries()) {
+		const name = headingByLine.get(index);
+		if (name !== undefined) {
+			inSection = /\bcontrols?\b/i.test(name);
 			controlTable = false;
 			continue;
 		}
@@ -3597,14 +3774,14 @@ function mutationHeaderProves(header, file) {
 // A table row in the mutation section may name its file in the row, or sit
 // under a one-file opener. The label on the last cell lets a row point at a
 // failing fence below it, the shape `scripts/mutate.mjs` writes.
-function mutationTableRows(visibleRows) {
+function mutationTableRows(visibleRows, headingByLine) {
 	let mutationSection = false;
 	let mutationScope = "";
 	const rows = [];
-	for (const row of visibleRows) {
-		const heading = HEADING.exec(row);
-		if (heading) {
-			mutationSection = /\bmutations?\b/i.test(heading[1]);
+	for (const [index, row] of visibleRows.entries()) {
+		const name = headingByLine.get(index);
+		if (name !== undefined) {
+			mutationSection = /\bmutations?\b/i.test(name);
 			mutationScope = "";
 			continue;
 		}
@@ -3638,26 +3815,19 @@ function mutationTableRows(visibleRows) {
 // Row 3 (model fidelity) remains reviewer judgement per issuecomment 6241755363.
 function lintDiffCompliance(body, options) {
 	const errors = [];
-	// A literal `<!--` inside a fence or an inline code span is quoted text, not
-	// a comment opener: the body of a PR that documents comment ends reads it as
-	// text, and blanking from it would hide every fence below (#4585 row 1 hit
-	// exactly that). Both a backticked span and a fence restore their literal
-	// `<!--`, and a real comment still hides what it contains.
+	// A literal `<!--` inside a fence or a code span is quoted text, not a
+	// comment opener (#4585 row 1, #4717 V1): the lexer reads it as code, so
+	// neither blanker hides what follows it. `visibleRows` hides fenced
+	// examples (a quoted heading, control or table is an example, not a
+	// claim). `evidenceRows` keeps fence content, because an honest body
+	// quotes the Windows advisory row in a fence (#4605 F5).
 	const source = String(body);
-	const quotedSpans = codeSpanMasked(source);
-	const fencedSpans = sourceWithoutFencedBlocks(source, {
-		indentedCode: false,
-	});
-	const guarded = source.replace(/<!--/g, (marker, offset) =>
-		quotedSpans[offset] === " " || fencedSpans[offset] === " "
-			? "    "
-			: marker,
-	);
-	// `visibleRows` hides fenced examples (a quoted heading, control or table
-	// is an example, not a claim). `evidenceRows` keeps fence content, because
-	// an honest body quotes the Windows advisory row in a fence (#4605 F5).
-	const rawRows = blankHtmlComments(guarded).split(/\r?\n/);
-	const visibleRows = blankMarkdown(guarded).split(/\r?\n/);
+	const rawRows = blankHtmlComments(source).split(/\r?\n/);
+	const visibleRows = blankMarkdown(source).split(/\r?\n/);
+	// A row belongs to a section the lexer named (#4717 F1): the heading lines
+	// come from the same reader `sectionLines` uses, so a heading family the
+	// section list accepts cannot leave a row in the previous section.
+	const headingByLine = headingLines(source).name;
 	const evidenceRows = rawRows;
 	const transcriptFences = [];
 	for (const block of markdownBlocks(body, { tilde: true })) {
@@ -3679,7 +3849,7 @@ function lintDiffCompliance(body, options) {
 	// Only a failing fence can vouch for a run, and a fence inside a real
 	// comment was removed above.
 	const transcripts = transcriptFences.filter((fence) => fence.failure);
-	const mutationRows = mutationTableRows(visibleRows);
+	const mutationRows = mutationTableRows(visibleRows, headingByLine);
 	const windowsReads = [];
 	for (const row of evidenceRows) {
 		if (!/\bWindows\b/i.test(row)) continue;
@@ -3830,7 +4000,10 @@ function lintDiffCompliance(body, options) {
 				const proved = transcripts.some((fence) =>
 					transcriptNamesFile(fence, file.post),
 				);
-				const control = controlsNameFile(controlRows(visibleRows), file.post);
+				const control = controlsNameFile(
+					controlRows(visibleRows, headingByLine),
+					file.post,
+				);
 				if (!proved && !control)
 					errors.push(
 						`PR body compliance row 1: ${file.post} adds or edits test declarations; the body needs one fenced red-first transcript naming that file with a failure from it, or a Controls row naming it with a reason.`,
@@ -3914,20 +4087,14 @@ function lintDiffCompliance(body, options) {
 }
 
 export function lintPrBody(body = "", options = {}) {
-	const rawLines = String(body ?? "").split(/\r?\n/);
-	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
-	const headings = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = HEADING.exec(lines[index]);
-		if (match)
-			headings.push({
-				index,
-				name: match[1],
-				level: match[0].match(/^#+/)[0].length,
-				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
-			});
-	}
+	// The same lexer headings and section text `sectionContent` reads (#4717):
+	// a section GitHub hides in a comment or a raw-HTML block is a missing
+	// section here too, and text inside one is not content. `rawLines` keeps
+	// code (a fenced transcript is content); `lines` blanks it.
+	const headings = bodyHeadings(body);
+	const { text: rawLines, visible: lines } = sectionLines(body, headings);
 	const placeholders = templatePlaceholderLines();
+	const structure = headingLines(body, headings).name;
 	const errors = options.diff ? lintDiffCompliance(body, options) : [];
 	const summary = headings.find((heading) => hasSection(heading, "summary"));
 	const firstHeading = headings[0]?.index ?? lines.length;
@@ -3942,11 +4109,18 @@ export function lintPrBody(body = "", options = {}) {
 	if (
 		(!summary ||
 			!hasRealContent(
-				lines.slice(summary.index + 1, summaryEnd),
+				lines.slice(summary.contentIndex, summaryEnd),
 				"summary",
 				placeholders,
+				structure,
+				summary.contentIndex,
 			)) &&
-		!hasRealContent(lines.slice(0, firstHeading), "summary", placeholders)
+		!hasRealContent(
+			lines.slice(0, firstHeading),
+			"summary",
+			placeholders,
+			structure,
+		)
 	) {
 		errors.push(`PR body is missing a Summary section. See ${TEMPLATE_PATH}.`);
 	}
@@ -3978,10 +4152,18 @@ export function lintPrBody(body = "", options = {}) {
 		}
 		const nextHeading = nextSectionHeading(heading);
 		const rawContent = rawLines.slice(
-			heading.index + 1,
+			heading.contentIndex,
 			nextHeading?.index ?? lines.length,
 		);
-		if (!hasRealContent(rawContent, name.toLowerCase(), placeholders))
+		if (
+			!hasRealContent(
+				rawContent,
+				name.toLowerCase(),
+				placeholders,
+				structure,
+				heading.contentIndex,
+			)
+		)
 			errors.push(
 				sectionMessage(name, "has no content before the next heading"),
 			);
@@ -3990,7 +4172,7 @@ export function lintPrBody(body = "", options = {}) {
 	if (why) {
 		const nextHeading = nextSectionHeading(why);
 		const whyLines = rawLines.slice(
-			why.index + 1,
+			why.contentIndex,
 			nextHeading?.index ?? lines.length,
 		);
 		if (countSentenceTerminators(whyLines) !== 1)
@@ -4121,7 +4303,7 @@ export async function resolveTouchesTests(
  * justify (issue #4288, "Detecting the bug label").
  */
 export async function resolveBugClosing(body, fetchImpl = globalThis.fetch) {
-	const issues = parseCloseKeywords(body).issues;
+	const issues = closedIssues(body);
 	if (issues.length === 0) return false;
 	// A missing env makes githubGet reject, which anyIssueLabelledBug reads as
 	// "cannot read the label" (null), as the old early return did.
@@ -4142,7 +4324,7 @@ export async function resolveBugClosingViaGh(
 	cwd = process.cwd(),
 	exec = execFileSync,
 ) {
-	return anyIssueLabelledBug(parseCloseKeywords(body).issues, (number) => {
+	return anyIssueLabelledBug(closedIssues(body), (number) => {
 		const raw = exec("gh", ["api", `repos/{owner}/{repo}/issues/${number}`], {
 			cwd,
 			encoding: "utf8",
@@ -4228,7 +4410,7 @@ export async function lintPullRequestEvent(
 	} catch {
 		bugClosing = null;
 	}
-	if (bugClosing === null && parseCloseKeywords(body).issues.length > 0)
+	if (bugClosing === null && closedIssues(body).length > 0)
 		console.warn(
 			'::warning::PR body check could not read the closed issue label(s), so the "## Detection" section is not required (#4288).',
 		);
@@ -4255,6 +4437,11 @@ export async function lintPullRequestEvent(
 	if (classSweep.length) {
 		result.valid = false;
 		result.errors.push(...classSweep);
+	}
+	const foldCheck = lintFoldCheck(body);
+	if (foldCheck.length) {
+		result.valid = false;
+		result.errors.push(...foldCheck);
 	}
 	const coverage = lintTlaCoverage(body, { diff });
 	result.errors.push(...coverage.errors);
@@ -4476,7 +4663,7 @@ export function lintLocalPrBody(
 			typeof options.resolveBugClosing === "function"
 				? options.resolveBugClosing(body)
 				: null;
-	if (bugClosing === null && parseCloseKeywords(body).issues.length > 0)
+	if (bugClosing === null && closedIssues(body).length > 0)
 		console.warn(
 			'::warning::PR body check could not read the closed issue label (gh missing, unauthenticated, or failed), so the "## Detection" requirement check was skipped (#4288).',
 		);
@@ -4511,6 +4698,11 @@ export function lintLocalPrBody(
 	if (classSweep.length) {
 		result.valid = false;
 		result.errors.push(...classSweep);
+	}
+	const foldCheck = lintFoldCheck(body);
+	if (foldCheck.length) {
+		result.valid = false;
+		result.errors.push(...foldCheck);
 	}
 	const coverage = lintTlaCoverage(body, {
 		diff,

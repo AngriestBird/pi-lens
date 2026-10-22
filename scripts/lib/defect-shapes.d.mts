@@ -1,9 +1,13 @@
 export function blankMarkdown(
 	text: string,
-	options?: { indentedCode?: boolean },
+	options?: {
+		indentedCode?: boolean;
+		htmlBlocks?: boolean;
+		codeSpans?: boolean;
+	},
 ): string;
 export function blankHtmlComments(text: string): string;
-export function htmlCommentEnd(text: string, from: number): number;
+export function codeSpanMasked(text: string): string;
 export function parseDefectShapes(agentsMarkdown: string): Map<number, string>;
 export function issueNumbers(text: string): Set<number>;
 export declare const HEADING: RegExp;

@@ -40,12 +40,17 @@ import * as path from "node:path";
 import {
 	resolveGitCheckout,
 	resolveGitIdentity,
+	sameCheckoutOtherRoot,
 } from "./review-graph/git-identity.js";
 import { collectSourceFilesWithBudgetAsync } from "./source-filter.js";
 import { createHash } from "node:crypto";
 
 import { BoundedFifoMap } from "./bounded-cache.js";
-import { incrementDegradationCount } from "./degradation-ledger.js";
+import { scanShellWriteScopes } from "./bash-file-access.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -338,6 +343,137 @@ export function opaquePrescanRoot(
 	projectRoot: string,
 ): string {
 	return sessionCwd ?? projectRoot;
+}
+
+/**
+ * Extra checkouts one bash command may be recovered from, beside the session
+ * root. Bounded because the population comes from the command's own text: a
+ * generated `cd` chain cannot turn one bash call into a repository sweep. A
+ * target past the cap is REFUSED and recorded, never silently dropped.
+ */
+export const OPAQUE_RECOVERY_ROOT_CAP = 4;
+
+/** Why a checkout the command named is not a recovery root (#2050). */
+export type OpaqueRootRefusal =
+	/** A checkout of a DIFFERENT repository: #4242's re-root lane, not this one. */
+	| "different-repository"
+	/** The session root is not a checkout, so no `commonDir` can be compared. */
+	| "session-root-not-a-checkout";
+
+export interface OpaqueRecoveryRoots {
+	/** Roots this call's writes are recovered from: the session root first. */
+	roots: string[];
+	/** Named checkouts that were NOT admitted, with the reason. */
+	refused: Array<{ root: string; reason: OpaqueRootRefusal }>;
+	/** Named checkouts past {@link OPAQUE_RECOVERY_ROOT_CAP}. */
+	capped: string[];
+}
+
+/**
+ * The checkouts one bash command's writes are recovered from (#2050).
+ *
+ * The session root is always first, because the host runs the command there.
+ * Every further root comes from the command's OWN text — a `cd`/`pushd`
+ * target, or a recognised write operand — and is admitted only when its
+ * checkout is a linked worktree of the SESSION's repository, the #3871
+ * `sameCheckoutOtherRoot` rule (equal `commonDir`, different top level). A
+ * sibling checkout, a nested worktree under the session root, and a worktree
+ * reached only by an absolute operand all qualify; another repository does
+ * not, and is reported rather than scanned.
+ *
+ * Deliberately NOT a scan of every registered worktree: the command must name
+ * the tree, so the cost stays one `git status` per named root and the answer
+ * never widens beyond what the command demonstrably touched.
+ *
+ * Pure filesystem reads (`resolveGitCheckout` spawns nothing), so the `tool_call`
+ * and `tool_result` hooks derive the same list from one command text and one
+ * session root — the #4504 rule, now per root.
+ */
+export function resolveOpaqueRecoveryRoots(
+	command: string,
+	sessionRoot: string,
+): OpaqueRecoveryRoots {
+	const roots = [sessionRoot];
+	const refused: OpaqueRecoveryRoots["refused"] = [];
+	const capped: string[] = [];
+	const session = resolveGitCheckout(sessionRoot);
+	const admitted = new Set<string>([
+		normalizeMapKey(path.resolve(sessionRoot)),
+	]);
+	if (session) admitted.add(normalizeMapKey(session.root));
+	const scan = scanShellWriteScopes(command, sessionRoot);
+	// `cd` targets first: they name a tree directly. A recognised write names a
+	// FILE, so its checkout is resolved at the file's directory.
+	const candidates: Array<{ owner: string; lookup: string }> = [
+		...scan.cdTargets.map((dir) => ({ owner: dir, lookup: dir })),
+		...scan.written.map((file) => ({
+			owner: file,
+			lookup: path.dirname(file),
+		})),
+	];
+	const considered = new Set<string>();
+	let extra = 0;
+	for (const candidate of candidates) {
+		const candidateKey = normalizeMapKey(path.resolve(candidate.owner));
+		if (considered.has(candidateKey)) continue;
+		considered.add(candidateKey);
+		if (admitted.has(candidateKey)) continue;
+		const checkout = resolveGitCheckout(candidate.lookup);
+		// Not a checkout: there is no checkout identity to recover against, and
+		// nothing here can claim anything about it.
+		if (!checkout) continue;
+		const rootKey = normalizeMapKey(checkout.root);
+		if (admitted.has(rootKey)) continue;
+		if (!session) {
+			// Nothing to compare a commondir against. Say so once rather than
+			// treating an unrelated tree as if it were this session's.
+			refused.push({
+				root: checkout.root,
+				reason: "session-root-not-a-checkout",
+			});
+			continue;
+		}
+		if (!sameCheckoutOtherRoot(session, checkout)) {
+			refused.push({ root: checkout.root, reason: "different-repository" });
+			continue;
+		}
+		if (extra >= OPAQUE_RECOVERY_ROOT_CAP) {
+			capped.push(checkout.root);
+			continue;
+		}
+		extra += 1;
+		admitted.add(rootKey);
+		roots.push(checkout.root);
+	}
+	return { roots, refused, capped };
+}
+
+const ROOT_REFUSAL_REASONS: Record<OpaqueRootRefusal, string> = {
+	"different-repository":
+		"a bash command named a git checkout in another repository; its writes were not observed (only a linked worktree of the session's own repository is recovered, #2050)",
+	"session-root-not-a-checkout":
+		"a bash command named a git checkout, but the session root is not one, so no commonDir could be compared and its writes were not observed",
+};
+
+/**
+ * Record, once per root and session, every checkout a bash command named that
+ * no baseline was taken for (#2050): a refusal is visible rather than read as
+ * "that command wrote nothing". The cap is one record per session, because it
+ * describes the bound, not a tree.
+ */
+export function recordOpaqueRootRefusals(scopes: OpaqueRecoveryRoots): void {
+	for (const { root, reason } of scopes.refused)
+		recordDegradationOnce({
+			kind: "opaque-recovery-root-refused",
+			subject: normalizeMapKey(root),
+			reason: ROOT_REFUSAL_REASONS[reason],
+		});
+	if (scopes.capped.length > 0)
+		recordDegradationOnce({
+			kind: "opaque-recovery-root-refused",
+			subject: "cap",
+			reason: `a bash command named more than ${OPAQUE_RECOVERY_ROOT_CAP} checkouts of this repository; the ones past the cap had no baseline taken and their writes were not observed`,
+		});
 }
 
 /**

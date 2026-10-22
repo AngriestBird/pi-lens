@@ -2279,6 +2279,7 @@ describe("runtime-agent-end deferred formatting", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				});
 
 				const worktreeRoot = path.join(env.tmpDir, "worktree");
