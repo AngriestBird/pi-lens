@@ -479,6 +479,34 @@ describe.skipIf(!POSIX)("package-manager global lookups (#4530)", () => {
 		expect(await findGlobalBinary(TOOL)).toBeUndefined();
 	});
 
+	it("F8/A4: an answer made under trust never serves an untrusted lookup", async () => {
+		// Trusted, the query runs in the project and reads its `.npmrc`; that
+		// redirected answer must not be reused once the trust answer changes.
+		const redirected = path.join(layout.outside, "redirected");
+		const honest = path.join(layout.root, "honest-prefix");
+		fs.mkdirSync(path.join(honest, "bin"), { recursive: true });
+		const redirectedTool = plant(
+			path.join(redirected, "bin"),
+			path.join(layout.root, "unused"),
+		);
+		fs.writeFileSync(
+			path.join(layout.main, ".npmrc"),
+			`prefix=${redirected}\n`,
+		);
+		stub.plantOnPath(
+			"npm",
+			[
+				`if [ "$*" != 'config get prefix' ]; then exit 1; fi`,
+				`if [ -f .npmrc ]; then printf '%s\\n' '${redirected}'; else printf '%s\\n' '${honest}'; fi`,
+			].join("\n"),
+		);
+
+		setProjectTrustState("trusted");
+		expect(await findGlobalBinary(TOOL)).toBe(redirectedTool);
+		resetProjectTrust();
+		expect(await findGlobalBinary(TOOL)).toBeUndefined();
+	});
+
 	it("F11: two session cwds share one manager probe (no cwd in the key)", async () => {
 		stub.plantManager("npm");
 
