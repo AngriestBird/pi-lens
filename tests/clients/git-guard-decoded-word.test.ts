@@ -666,7 +666,8 @@ const ROWS: readonly Row[] = [
 		command: "echo $g push",
 		bash: null,
 		guard: false,
-	}, // Round 6 (verify r5 class A): an unread word after a readable command
+	},
+	// Round 6 (verify r5 class A): an unread word after a readable command
 	// word is an argument; a second unread word does not make it git.
 	{
 		row: "an unread argument and a readable one (r6)",
