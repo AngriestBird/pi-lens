@@ -2801,6 +2801,60 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 		}
 	});
 
+	it("leaves a shared record holding only a test failure with its stored owner, and logs what the settled turn end dropped", () => {
+		// RECURRENCE GUARDED: #4738, the partition retire's remnant. With every
+		// blocker section gone the record kept its test failure under this
+		// session's id, so this session's gate judged another session's record
+		// as its own; and the drop that left it logged no row.
+		const env = setupTestEnvironment("pi-lens-git-guard-4738-remnant-");
+		try {
+			const [gone, mine] = ["a.ts", "b.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const file of [gone, mine]) fs.writeFileSync(file, "x;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					...foreignRecord([gone]),
+					affectedFiles: [gone, mine],
+					testFailures: true,
+					testFailureContent: "FAIL 0p/1f",
+					carriedBlockers: [
+						{
+							sessionId: "session-A",
+							blockerContent: composerSections([mine]),
+							blockingFiles: [mine],
+						},
+					],
+				}),
+			);
+			fs.rmSync(gone);
+
+			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+				false,
+			);
+
+			const after = storedData(cache, env.tmpDir);
+			expect(after?.sessionId).toBe(EARLIER);
+			expect(after?.blockerContent).toBeUndefined();
+			expect(after?.carriedBlockers).toBeUndefined();
+			expect(after?.content).toBe("FAIL 0p/1f");
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
+				"(session_mismatch)",
+			);
+			expect(phaseRows("sections_dropped").slice(0, 2)).toEqual([
+				{ by: "turn_end", basis: "file_gone" },
+				{ by: "turn_end", basis: "own_session" },
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("hands the turn-end composer every other session's file sections, and not this session's, text no file owns, or a gone file's", () => {
 		// RECURRENCE GUARDED: #4738, the composer. Its write is this session's
 		// whole evidence, so it replaced the record; what it may replace is this

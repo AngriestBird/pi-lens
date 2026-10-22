@@ -1299,17 +1299,17 @@ function retireOwnPartition(
 		if (trimmed.kept) kept.push(trimmed.kept);
 	}
 	if (!ownDropped && goneDropped === 0) return false;
-	if (ownDropped && kept.length > 0)
-		logSectionsDropped(cwd, "turn_end", "own_session");
-	if (goneDropped > 0 && kept.length > 0)
-		logSectionsDropped(cwd, "turn_end", "file_gone");
 	const testFailures = stored.testFailures === true;
+	// Nothing is left only when every other session's section went with its
+	// file: a record shared with another session holds at least one of theirs.
 	if (kept.length === 0 && !testFailures) {
 		cacheManager.clearCache("turn-end-findings", cwd);
 		runtime.clearGitGuardCacheUnknown();
-		logRecordRetired(cwd, "turn_end", ownDropped ? "own_session" : "file_gone");
+		logRecordRetired(cwd, "turn_end", "file_gone");
 		return true;
 	}
+	if (ownDropped) logSectionsDropped(cwd, "turn_end", "own_session");
+	if (goneDropped > 0) logSectionsDropped(cwd, "turn_end", "file_gone");
 	const fields = blockerPartitionFields(kept);
 	const owner = fields.owner ?? stored.sessionId;
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
