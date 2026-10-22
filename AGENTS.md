@@ -1518,9 +1518,14 @@ file-scoped worklist and receives no project-wide scanner output.
   `sessionId`, other owners in `carriedBlockers`; a record without that field
   is one owner's), and a writer replaces only its own session's sections.
   Another session's section leaves only for a file a dispatch checked
-  whole and found clean (`checkedWholeFile`), or whose file is gone. The gate
-  judges a record alone only when this session is its sole owner. A settled
-  turn end drops this session's sections and retires a record that is this
+  whole and found clean (`checkedWholeFile`), or whose file is gone. Its text
+  no file owns (a project lane's report: CVEs, secrets, cascade) leaves only
+  when its owner rewrites it, or at a turn end once `DEFAULT_MAX_AGE_MS` has
+  passed since its owner's own write (`blockerWrittenAt`, per partition; the
+  record's own timestamp moves with every writer). Only a write logs what it
+  drops. The gate judges a record alone only when this session is its sole
+  owner. A settled turn end drops this session's sections and another
+  session's expired text no file owns, and retires a record that is this
   session's own, claims no blocker, or holds no structured claim (the
   `--lens-guard`-off writer's), with one `record_retired` row (#4725). A
   dispatch that never answered (`pipeline_crash`, `pipeline_error`) is latched

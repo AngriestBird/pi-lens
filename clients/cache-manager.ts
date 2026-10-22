@@ -89,7 +89,12 @@ export type TurnStatePartition = Omit<TurnState, "sessions">;
 
 // --- Defaults ---
 
-const DEFAULT_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+/**
+ * The freshness window every scanner cache read applies by default (30
+ * minutes). The commit gate trusts the `turn-end-findings` record only inside
+ * it, and a carried section no file owns expires by it (#4750).
+ */
+export const DEFAULT_MAX_AGE_MS = 30 * 60 * 1000;
 const DEFAULT_TURN_STATE: TurnState = {
 	files: {},
 	turnCycles: 0,

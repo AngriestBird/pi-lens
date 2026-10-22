@@ -1740,6 +1740,8 @@ describe("#4725: the record's writers read it whatever its age", () => {
 			// record, both another session's, with their blocked files live.
 			["4.4.4-lens-guard-blocker-turn-end-findings.json", false, false],
 			["4738-carried-turn-end-findings.json", false, false],
+			// #4750: the stamped record, its project-lane partition long expired.
+			["4750-stamped-turn-end-findings.json", false, false],
 		];
 		const env = setupTestEnvironment("pi-lens-git-guard-4725-corpus-");
 		try {
@@ -2417,6 +2419,31 @@ function phaseRows(phase: string): Array<Record<string, unknown> | undefined> {
 		.map((row) => row.metadata);
 }
 
+/** The newest latency phase row, a mark for `phaseRowsSince`. */
+function latestPhaseRow(): object | undefined {
+	return getRecentLoggedPhases(1)[0];
+}
+
+/**
+ * The metadata of the rows named `phase` logged after `mark`, newest first.
+ * The ring keeps five rows, so a mark that scrolled out reads every row: an
+ * expectation of no rows then fails loudly rather than passing.
+ */
+function phaseRowsSince(
+	phase: string,
+	mark: object | undefined,
+): Array<Record<string, unknown> | undefined> {
+	const rows = getRecentLoggedPhases();
+	const end = mark ? rows.findIndex((row) => row === mark) : -1;
+	return (end === -1 ? rows : rows.slice(0, end))
+		.filter((row) => row.phase === phase)
+		.map((row) => row.metadata);
+}
+
+/** A project lane's report that names no file: trivy's CRITICAL CVE block. */
+const TRIVY_LANE =
+	"🔴 STOP — CRITICAL dependency CVEs (trivy, 1h old). Upgrade before shipping:\n  CVE-2026-0001 (pkg@1.0.0) — upgrade to 1.0.1 or later";
+
 /** A fixture with `<PROJECT>` bound to `root`, its blocked files written live. */
 function boundFixture(name: string, root: string): unknown {
 	for (const file of ["src/target.ts", "src/other.ts"]) {
@@ -2855,11 +2882,13 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 		}
 	});
 
-	it("hands the turn-end composer every other session's file sections, and not this session's, text no file owns, or a gone file's", () => {
+	it("hands the turn-end composer every other session's sections but this session's and a gone file's, keeps text no file owns whole, and logs no drop at the read", () => {
 		// RECURRENCE GUARDED: #4738, the composer. Its write is this session's
 		// whole evidence, so it replaced the record; what it may replace is this
-		// session's partition and another session's text that names no file (a
-		// project lane's report), and nothing else.
+		// session's partition, and nothing else. #4750: another session's text
+		// no file owns (a project lane's report) was replaced too, though this
+		// session's lanes had not re-checked it, and the read logged its drop
+		// though no write had happened.
 		const env = setupTestEnvironment("pi-lens-git-guard-4738-composer-");
 		try {
 			const [theirs, mine, gone] = ["a.ts", "b.ts", "g.ts"].map((name) =>
@@ -2868,15 +2897,14 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 			for (const file of [theirs, mine]) fs.writeFileSync(file, "x;\n");
 			const runtime = sessionA(env.tmpDir);
 			const cache = new CacheManager(false);
-			const lane =
-				"🔴 STOP — CRITICAL dependency CVEs (trivy, 1h old). Upgrade before shipping:\n  CVE-2026-0001 (pkg@1.0.0) — upgrade to 1.0.1 or later";
+			const theirText = `${composerSections([theirs])}\n\n${TRIVY_LANE}`;
 			writeGitGuardRecord(
 				cache,
 				runtime,
 				env.tmpDir,
 				record({
 					...foreignRecord([theirs]),
-					blockerContent: `${composerSections([theirs])}\n\n${lane}`,
+					blockerContent: theirText,
 					affectedFiles: [theirs, mine, gone],
 					carriedBlockers: [
 						{
@@ -2892,25 +2920,27 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 					],
 				}),
 			);
+			const mark = latestPhaseRow();
 
-			const { stored, carried } = readTurnEndGuardRecord(
+			const { stored, carried, dropped } = readTurnEndGuardRecord(
 				cache,
 				runtime,
 				env.tmpDir,
 			);
 
 			expect(owners(stored)).toEqual([EARLIER, "session-A", "a-third-session"]);
+			// Their whole text rides, the report beside its file section included,
+			// and the stamp it carries from now on starts its window.
 			expect(carried).toEqual([
 				{
 					sessionId: EARLIER,
-					blockerContent: composerSections([theirs]),
+					blockerContent: theirText,
 					blockingFiles: [theirs],
+					blockerWrittenAt: expect.any(Number),
 				},
 			]);
-			expect(phaseRows("sections_dropped").slice(0, 2)).toEqual([
-				{ by: "turn_end", basis: "file_gone" },
-				{ by: "turn_end", basis: "no_file" },
-			]);
+			expect(dropped).toEqual({ gone: true, noFile: false });
+			expect(phaseRowsSince("sections_dropped", mark)).toEqual([]);
 		} finally {
 			env.cleanup();
 		}
@@ -3145,14 +3175,16 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 		// Fixture corpus (principles §2), the old-record read rule: a record with
 		// no `carriedBlockers` (every shape released before #4738) is one
 		// partition owned by its `sessionId`, so another session's composer
-		// carries a released record's FILE sections under that id; text no file
-		// owns (4.2.1's) is the composer's to replace, as before. The 4.4.4
-		// lens-guard record and this version's shared record were written by the
-		// production writers in the #4738 tier-2 run, their project path made
-		// `<PROJECT>`.
+		// carries a released record's sections under that id. #4750: text no file
+		// owns (4.2.1's) is carried too, its window starting at that first carry,
+		// for a released record bears no write stamp. The 4.4.4 lens-guard record
+		// and the #4738 shared record were written by the production writers in
+		// the #4738 tier-2 run, the #4750 stamped one by this version's composer
+		// (`turn-end-cap-consumed-state.test.ts`, the dedupe cell), their project
+		// path made `<PROJECT>`.
 		const corpus: Array<[string, string[]]> = [
 			["3.8.74-turn-end-findings.json", []],
-			["4.2.1-turn-end-findings.json", []],
+			["4.2.1-turn-end-findings.json", ["v4-2-1-session"]],
 			["4.4.4-advisory-turn-end-findings.json", []],
 			["4.4.4-guard-off-turn-end-findings.json", []],
 			["4.4.4-lens-guard-blocker-turn-end-findings.json", ["v4-4-4-session"]],
@@ -3160,6 +3192,9 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 				"4738-carried-turn-end-findings.json",
 				["v4738-second-session", "v4738-first-session"],
 			],
+			// Its first session's CVE report names no file, and its stamp is far
+			// past the window: only the second session's file section is carried.
+			["4750-stamped-turn-end-findings.json", ["v4750-second-session"]],
 		];
 		const env = setupTestEnvironment("pi-lens-git-guard-4738-corpus-");
 		try {
@@ -3186,6 +3221,283 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 					// Only the advisory record claims no blocker.
 					!name.includes("advisory"),
 				]),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/** Older than the gate's freshness window, by a minute. */
+const EXPIRED = (): number => Date.now() - 31 * 60_000;
+
+/** Another session's partition: TRIVY_LANE beside `files`' sections. */
+function laneRecord(
+	files: readonly string[],
+	blockerWrittenAt: number | undefined,
+): TurnEndFindingsCache {
+	const text = [composerSections(files), TRIVY_LANE]
+		.filter(Boolean)
+		.join("\n\n");
+	return record({
+		content: text,
+		blockerContent: text,
+		hasBlockers: true,
+		affectedFiles: [...files],
+		blockingFiles: [...files],
+		sessionId: EARLIER,
+		blockerWrittenAt,
+		consumed: true,
+	});
+}
+
+/** A session other than A and EARLIER, reading the record at its turn end. */
+function thirdSession(cwd: string): RuntimeCoordinator {
+	const runtime = new RuntimeCoordinator();
+	runtime.projectRoot = cwd;
+	runtime.setTelemetryIdentity({ sessionId: "a-third-session" });
+	return runtime;
+}
+
+describe("#4750: another session's text no file owns expires by its own write stamp", () => {
+	it("hands the composer an expired partition's file sections only, and logs nothing at the read", () => {
+		// RECURRENCE GUARDED: #4750. The expiry arm: once the owner's stamp is
+		// past the window, its text no file owns is dropped and reported to the
+		// writer, while a section of a live file stays the owner's.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-expired-read-");
+		try {
+			const theirs = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(theirs, "x;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const writtenAt = EXPIRED();
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				laneRecord([theirs], writtenAt),
+			);
+			const mark = latestPhaseRow();
+
+			const { carried, dropped } = readTurnEndGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+			);
+
+			expect(carried).toEqual([
+				{
+					sessionId: EARLIER,
+					blockerContent: composerSections([theirs]),
+					blockingFiles: [theirs],
+					blockerWrittenAt: writtenAt,
+				},
+			]);
+			expect(dropped).toEqual({ gone: false, noFile: true });
+			expect(phaseRowsSince("sections_dropped", mark)).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a settled turn end drops another session's expired text no file owns, keeps its live file section, and logs one row", () => {
+		// RECURRENCE GUARDED: #4750. The settled turn end kept another session's
+		// text no file owns forever: no file to re-check, and no expiry.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-settled-");
+		try {
+			const theirs = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(theirs, "x;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				laneRecord([theirs], EXPIRED()),
+			);
+			const mark = latestPhaseRow();
+
+			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+				false,
+			);
+
+			const stored = storedData(cache, env.tmpDir);
+			expect(owners(stored)).toEqual([EARLIER]);
+			expect(stored?.blockerContent).toBe(composerSections([theirs]));
+			expect(phaseRowsSince("sections_dropped", mark)).toEqual([
+				{ by: "turn_end", basis: "no_file" },
+			]);
+			expect(phaseRowsSince("record_retired", mark)).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps the owner's stamp through every writer that does not rewrite its partition", () => {
+		// RECURRENCE GUARDED: #4750. A writer that rebuilt the record without the
+		// stamp would hand the next turn end an unstamped partition, which then
+		// restarts its window: an expired report would never leave.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-stamp-");
+		try {
+			const [mine, testFile] = ["b.ts", "b.test.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const file of [mine, testFile]) fs.writeFileSync(file, "x;\n");
+			const cache = new CacheManager(false);
+			const expiredLane = (): void => {
+				writeGitGuardRecord(
+					cache,
+					sessionA(env.tmpDir),
+					env.tmpDir,
+					laneRecord([], EXPIRED()),
+				);
+			};
+			const expiredAtNextTurnEnd = (): unknown => {
+				const { carried, dropped } = readTurnEndGuardRecord(
+					cache,
+					thirdSession(env.tmpDir),
+					env.tmpDir,
+				);
+				return [
+					carried.map((partition) => partition.sessionId),
+					dropped.noFile,
+				];
+			};
+			const observed: unknown[] = [];
+
+			// This session's own blocker write carries theirs, then its fix leaves
+			// theirs at the top again. (Theirs at the top, a write latches
+			// `blocking_provenance_untrusted` and writes nothing.)
+			const ownText = composerSections([mine]);
+			writeGitGuardRecord(
+				cache,
+				sessionA(env.tmpDir),
+				env.tmpDir,
+				record({
+					content: ownText,
+					blockerContent: ownText,
+					hasBlockers: true,
+					affectedFiles: [mine],
+					blockingFiles: [mine],
+					blockerWrittenAt: Date.now(),
+					carriedBlockers: [
+						{
+							sessionId: EARLIER,
+							blockerContent: TRIVY_LANE,
+							blockingFiles: [],
+							blockerWrittenAt: EXPIRED(),
+						},
+					],
+				}),
+			);
+			const runtime = sessionA(env.tmpDir);
+			ownBlocker(runtime, mine);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, mine);
+			observed.push(["blocker write", owners(storedData(cache, env.tmpDir))]);
+			observed.push(["blocker write", expiredAtNextTurnEnd()]);
+			ownFix(runtime, mine);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, mine);
+			observed.push(["own fix", owners(storedData(cache, env.tmpDir))]);
+			observed.push(["own fix", expiredAtNextTurnEnd()]);
+			// A failing test run, then the passing one.
+			expiredLane();
+			mergeGitGuardTestFailure(
+				cache,
+				env.tmpDir,
+				sessionA(env.tmpDir),
+				"FAIL 0p/1f",
+				[testFile],
+			);
+			observed.push(["failing test", expiredAtNextTurnEnd()]);
+			clearGitGuardTestFailure(cache, env.tmpDir, sessionA(env.tmpDir), [
+				testFile,
+			]);
+			observed.push(["passing test", expiredAtNextTurnEnd()]);
+			// The context hook's delivery.
+			expiredLane();
+			cache.writeCache(
+				"turn-end-findings",
+				{ ...storedData(cache, env.tmpDir), consumed: false },
+				env.tmpDir,
+			);
+			consumeTurnEndFindings(cache, env.tmpDir, sessionA(env.tmpDir));
+			observed.push(["delivery", expiredAtNextTurnEnd()]);
+
+			const gone = [[], true];
+			expect(observed).toEqual([
+				["blocker write", ["session-A", EARLIER]],
+				["blocker write", [["session-A"], true]],
+				["own fix", [EARLIER]],
+				["own fix", gone],
+				["failing test", gone],
+				["passing test", gone],
+				["delivery", gone],
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("refuses a record whose write stamp is not a number, at the top or carried", () => {
+		// RECURRENCE GUARDED: #4750. A stamp no age can be computed from would
+		// read as never past the window, so a corrupt record would keep text no
+		// file owns forever; it is not a record, and the gate fails closed.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-bad-stamp-");
+		try {
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			const verdicts = [
+				{ ...laneRecord([], undefined), blockerWrittenAt: "soon" },
+				{
+					...laneRecord([], Date.now()),
+					carriedBlockers: [
+						{
+							sessionId: "a-third-session",
+							blockerContent: TRIVY_LANE,
+							blockingFiles: [],
+							blockerWrittenAt: null,
+						},
+					],
+				},
+				laneRecord([], Date.now()),
+			].map((data) => {
+				cache.writeCache("turn-end-findings", data, env.tmpDir);
+				return evaluateGitGuard(runtime, cache, env.tmpDir).reason?.match(
+					/\((\w+)\)/,
+				)?.[1];
+			});
+
+			expect(verdicts).toEqual([
+				"cache_malformed",
+				"cache_malformed",
+				"session_mismatch",
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("tells the asking session what clears text no file owns, apart from a value that is not a record", () => {
+		// RECURRENCE GUARDED: #4750. The remedy said this session's next turn end
+		// replaces another session's text no file owns, which #4750 makes false.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-remedy-");
+		try {
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			const reasons = [
+				laneRecord([], Date.now()),
+				{ content: "🔴 STOP", hasBlockers: "yes" },
+			].map((data) => {
+				cache.writeCache("turn-end-findings", data, env.tmpDir);
+				return evaluateGitGuard(runtime, cache, env.tmpDir).reason ?? "";
+			});
+
+			expect(reasons[0]).toContain(
+				"the session that wrote them replaces them at its next turn end, and once 30 minutes pass without that session rewriting them, a turn end of any session drops them. Then retry.",
+			);
+			expect(reasons[0]).not.toContain("this session's next turn-end findings");
+			expect(reasons[1]).toContain(
+				"cannot attribute to a file, so no re-check of one file clears them; this session's next turn-end findings replace it. Then retry.",
 			);
 		} finally {
 			env.cleanup();
