@@ -55,6 +55,7 @@ const DECLARED_FLAGS = [
 	"no-opengrep",
 	"no-read-guard",
 	"no-lens-context",
+	"lens-retain-injections",
 	"lens-turn-summary",
 	"lens-actionable-warnings",
 	"lens-actionable-warning-actions",

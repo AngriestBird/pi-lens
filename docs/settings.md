@@ -79,6 +79,7 @@ column is the effective behavior when nothing is set.
 | `--no-opengrep` | `opengrep.enabled` | global | Opengrep scanner **on** |
 | `--no-read-guard` | `readGuard.enabled` | global | read-before-edit monitor **on** |
 | `--no-lens-context` | `contextInjection.enabled` | global | context injection **on** |
+| `--lens-retain-injections` | `contextInjection.retain` | global | **off** |
 | `--lens-turn-summary` | `turnSummary.enabled` | global | **off** |
 | `--lens-actionable-warnings` | `actionableWarnings.enabled` | global | **off** |
 | `--lens-actionable-warning-actions` | `actionableWarnings.includeLspCodeActions` | global | **off** |

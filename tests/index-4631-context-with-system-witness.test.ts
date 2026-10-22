@@ -189,6 +189,63 @@ describe("#4631 a mid-list system message never changes the head", () => {
 	});
 
 	/**
+	 * #4743 acceptance 3: the cell above with `--lens-retain-injections` on.
+	 * The third request repeats the finding, so "not present" no longer holds;
+	 * the intent does: the finding is consumed once and delivered as new once.
+	 * It sits in the second prompt, where the second request put it, and the
+	 * third request's record names no new delivery.
+	 */
+	it("with retained injections on, repeats the payload but consumes and delivers it once", async () => {
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: sessionCwd("witness-once-retained"),
+			startupMode: "quick",
+			flags: new Map([["lens-retain-injections", true]]),
+			responses: [
+				fauxAssistantMessage("first answer"),
+				fauxAssistantMessage("injecting answer"),
+				fauxAssistantMessage("third answer"),
+			],
+		});
+
+		const firstRow = (await latencyRows()).length;
+		await handle.prompt("first question");
+		seedTurnEndFindings(handle.cwd);
+		await handle.prompt("second question");
+		await handle.prompt("third question");
+		expect(handle.requests).toHaveLength(3);
+		const [, second, third] = handle.requests;
+		const carrying = (request: typeof third) =>
+			request.flatMap((message, index) =>
+				JSON.stringify(message).includes(FINDING_MARKER) ? [index] : [],
+			);
+		// Once per request, and at the same message: the second prompt.
+		expect(carrying(second)).toEqual([second.length - 1]);
+		expect(carrying(third)).toEqual(carrying(second));
+		expect(JSON.stringify(third).split(FINDING_MARKER)).toHaveLength(2);
+
+		const rows = (await latencyRows()).slice(firstRow);
+		// One consume of the record (`consumeTurnEndFindings` logs its decision).
+		expect(
+			rows.filter(
+				(row) =>
+					row.phase === "advisory_provenance_decision" &&
+					row.metadata?.advisoryKind === "turn-end",
+			),
+		).toHaveLength(1);
+		const contextRows = rows.filter((row) => row.phase === "cache_context");
+		expect(contextRows.map((row) => row.metadata?.injectionOccurred)).toEqual([
+			false,
+			true,
+			false,
+		]);
+		expect(contextRows[2]?.metadata?.retention).toMatchObject({
+			reemitted: 1,
+			retainedNew: false,
+		});
+	});
+
+	/**
 	 * The records #4631's diagnosis had to reconstruct by hand: which request hook
 	 * delivered the observation, and which message the prefix hash was anchored
 	 * to. Read back from the real `latency.log` the LOADED copy wrote, inside

@@ -25,6 +25,7 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-guard` | `guard.enabled` | `false` |
 | `--lens-checkout-guard` | `guard.sharedCheckout` | `false` |
 | `--immediate-format` | `format.mode` (`"immediate"`) | `"deferred"` |
+| `--lens-retain-injections` | `contextInjection.retain` | `false` |
 | `--lens-turn-summary` | `turnSummary.enabled` | `false` |
 | `--lens-actionable-warnings` | `actionableWarnings.enabled` | `false` |
 | `--lens-actionable-warning-actions` | `actionableWarnings.includeLspCodeActions` | `false` |
@@ -137,6 +138,8 @@ Hide the diagnostics widget by default, run formatting immediately after write/e
 `autofix.enabled` (default `true`) is the global-config counterpart to the project `.pi-lens.json` `autofix.enabled` below — set it to `false` to match `--no-autofix` for every project that doesn't set its own `autofix.enabled`. As with `format.enabled` and `actionableWarnings.autoFix.enabled`, a project's own `.pi-lens.json` value overrides this global default in either direction (see "Mutation controls" below).
 
 `contextInjection.enabled` (default `true`) controls whether pi-lens prepends automatic findings — session-start guidance, turn-end findings, and test findings — into the next model turn. Set it to `false` (or use `--no-lens-context` / `PI_LENS_NO_CONTEXT_INJECTION=1` / `/lens-context-toggle`) to keep tools, LSP, read-guard, and formatting running while avoiding the prompt-cache invalidation that injected messages cause in long, cache-sensitive sessions. Findings are still cached, so `lens_diagnostics` and `/lens-health` keep working.
+
+`contextInjection.retain` (default `false`, or `--lens-retain-injections`) keeps injection on and makes it cache-stable instead. An injection normally rides one provider request: pi rebuilds the next request from its own transcript, so that request no longer carries it, and an engine that caches by exact prefix (a local llama.cpp or Qwen server) re-processes everything after the point where it sat. With `retain` on, pi-lens re-sends each injection's bytes unchanged, at the same place, in every later request of the session, so each request is the previous one plus new content. Findings are still delivered once; each retained block ends with a snapshot label naming `lens_diagnostics` for the current state. A compaction, a `/tree` move, or a new, resumed, forked or reloaded session drops what was retained. A session holds at most 64 retained injections and 256 KiB; past either, a new injection reaches its one request only and one `context-injection-retain-declined` degradation row is recorded.
 
 `contextInjection.requirePreExistingFixes` (default `true`) controls whether the session-start orientation tells the agent to fix pre-existing blocking errors; set `false` to scope that demand to errors its own edits introduce.
 
