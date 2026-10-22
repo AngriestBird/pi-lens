@@ -39,7 +39,9 @@ import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import {
 	applyProbeFindingPolicy,
 	describePrimaryUnavailable,
+	mergeWithheld,
 	withheldCompileNote,
+	type PythonCompileWithheld,
 } from "./lsp-diagnostics.js";
 import {
 	dispositionSuppressedLine,
@@ -1381,7 +1383,7 @@ export function createLspNavigationTool(
 									dispositionSuppressed: policy.suppressed,
 								}),
 								...(policy.withheld && {
-									withheldCompile: policy.withheld.count,
+									withheldCompile: policy.withheld,
 								}),
 								...(primaryUnavailable !== undefined && {
 									unconfirmed: true,
@@ -1430,8 +1432,9 @@ export function createLspNavigationTool(
 					),
 				);
 				let snapshotSuppressed = 0;
-				let snapshotWithheld = 0;
-				let snapshotWithheldLine: string | undefined;
+				const snapshotWithheldEntries: Array<
+					PythonCompileWithheld | undefined
+				> = [];
 				const result = Array.from(allDiagnostics.entries()).map(
 					([trackedFile, { diags, ts }]) => {
 						let kept = diags;
@@ -1448,8 +1451,7 @@ export function createLspNavigationTool(
 							snapshotSuppressed += policy.suppressed;
 							// #4638 review (F10): the snapshot is model-facing too, so a
 							// withheld row is named on its text rather than left to the ledger.
-							snapshotWithheld += policy.withheld?.count ?? 0;
-							snapshotWithheldLine ??= withheldCompileNote(policy.withheld);
+							snapshotWithheldEntries.push(policy.withheld);
 							kept = policy.kept;
 						}
 						return {
@@ -1462,6 +1464,8 @@ export function createLspNavigationTool(
 				);
 				const snapshotSuppressedLine =
 					dispositionSuppressedLine(snapshotSuppressed);
+				const snapshotWithheld = mergeWithheld(snapshotWithheldEntries);
+				const snapshotWithheldLine = withheldCompileNote(snapshotWithheld);
 				const noteMap2: Record<string, string> = {
 					"push-only":
 						"Note: push-only tracked diagnostics snapshot (not full workspace pull diagnostics).",
@@ -1486,7 +1490,7 @@ export function createLspNavigationTool(
 							...(snapshotSuppressed > 0 && {
 								dispositionSuppressed: snapshotSuppressed,
 							}),
-							...(snapshotWithheld > 0 && {
+							...(snapshotWithheld && {
 								withheldCompile: snapshotWithheld,
 							}),
 						},

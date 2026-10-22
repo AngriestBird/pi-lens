@@ -179,41 +179,72 @@ type FileDiag = {
 	code?: string | number;
 };
 
-/** #4638 review (F6): the delivery disclosure a filtered result carries. */
+/**
+ * #4638 review (F6): the delivery disclosure a filtered result carries. One
+ * shape on every tool (`details.withheldCompile`): `count` is the total and
+ * `declared` the first declaration. `declarations` is set only when the total
+ * spans more than one declaration (a sweep over several projects), and then
+ * lists each group, so a count is never cited under a level it did not come
+ * from (#4638 r4 F3).
+ */
 export interface PythonCompileWithheld {
 	count: number;
 	declared: PythonTargetVersion;
+	declarations?: ReadonlyArray<{
+		count: number;
+		declared: PythonTargetVersion;
+	}>;
 }
 
 /**
  * #4638 review (F6/F10): the disclosure sentence for any surface with a policy
  * result in hand, so the probe, the renderers, and the navigation routes say it
- * the same way. The sentence itself belongs to the declaration's owner.
+ * the same way. The sentence itself belongs to the declaration's owner; a
+ * disclosure that spans several declarations names each of them.
  */
 export function withheldCompileNote(
 	withheld: PythonCompileWithheld | undefined,
 ): string | undefined {
-	return withheld
-		? describePythonCompileWithheld(withheld.count, withheld.declared)
-		: undefined;
+	if (!withheld) return undefined;
+	if (!withheld.declarations) {
+		return describePythonCompileWithheld(withheld.count, withheld.declared);
+	}
+	const groups = withheld.declarations.map(
+		(group) =>
+			`${group.count} under Python ${group.declared.major}.${group.declared.minor} (${group.declared.source}) in ${group.declared.file}`,
+	);
+	return `${withheld.count} python-jedi compile finding${withheld.count === 1 ? "" : "s"} withheld across ${groups.length} declarations: ${groups.join("; ")}`;
 }
 
 /**
- * The withheld rows of a multi-file result, summed; the first declaration names
- * the aggregate. A result a drop left clean-looking still counts, wherever the
- * other files in the same call landed (#4638 r3 N2).
+ * The one merge of withheld disclosures: the batch and directory routes, the
+ * `mode=full` sweep and the navigation snapshot all fold their per-file entries
+ * here, grouped by the declaration that withheld them (#4638 r3 N2, r4 F3).
  */
-function aggregateWithheld(
-	results: ReadonlyArray<FileDiagnosticResult>,
+export function mergeWithheld(
+	entries: Iterable<PythonCompileWithheld | undefined>,
 ): PythonCompileWithheld | undefined {
-	let count = 0;
-	let declared: PythonTargetVersion | undefined;
-	for (const result of results) {
-		if (!result.withheldCompile) continue;
-		count += result.withheldCompile.count;
-		declared ??= result.withheldCompile.declared;
+	const groups = new Map<
+		string,
+		{ count: number; declared: PythonTargetVersion }
+	>();
+	for (const entry of entries) {
+		if (!entry || entry.count <= 0) continue;
+		for (const part of entry.declarations ?? [entry]) {
+			const { declared } = part;
+			const key = `${declared.file}\0${declared.source}\0${declared.major}.${declared.minor}`;
+			const group = groups.get(key);
+			if (group) group.count += part.count;
+			else groups.set(key, { count: part.count, declared });
+		}
 	}
-	return declared && count > 0 ? { count, declared } : undefined;
+	const merged = [...groups.values()];
+	const first = merged[0];
+	if (!first) return undefined;
+	const count = merged.reduce((sum, group) => sum + group.count, 0);
+	return merged.length === 1
+		? { count, declared: first.declared }
+		: { count, declared: first.declared, declarations: merged };
 }
 
 type FileDiagnosticResult = {
@@ -2744,7 +2775,7 @@ async function runBatchFileDiagnostics(
 	// A withheld row is disclosed whatever else the call found, so the agent never
 	// reads a partial filter as a complete answer (AGENTS.md shape 10): beside
 	// survivors, beside a failed or unconfirmed file, and on a clean result.
-	const withheldBatch = aggregateWithheld(results);
+	const withheldBatch = mergeWithheld(results.map((r) => r.withheldCompile));
 	const withheld = withheldCompileNote(withheldBatch);
 	const allClean =
 		display.length === 0 &&
@@ -2985,7 +3016,9 @@ async function runDirectoryDiagnostics(
 		path.relative(absPath, file),
 	);
 
-	const withheldDirectory = aggregateWithheld(results);
+	const withheldDirectory = mergeWithheld(
+		results.map((r) => r.withheldCompile),
+	);
 	const withheldDisclosure = withheldCompileNote(withheldDirectory);
 	let text: string;
 	if (total === 0) {

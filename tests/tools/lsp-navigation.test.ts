@@ -2374,6 +2374,46 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 		expect(walkedDeclarations.files).toContain(jediFile);
 	});
 
+	it("cites each project's own declaration when the snapshot spans two (#4638 r4 F3)", async () => {
+		// Recurrence: the snapshot printed the FIRST file's count under the first
+		// declaration while the details carried the total, so two projects read as
+		// one level and the text and the details disagreed.
+		const a = path.join(cwd, "a");
+		const b = path.join(cwd, "b");
+		for (const [dir, level] of [
+			[a, "3.14"],
+			[b, "3.15"],
+		] as const) {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, "pyproject.toml"),
+				`[project]\nname = "d"\nrequires-python = ">=${level}"\n`,
+			);
+			fs.writeFileSync(
+				path.join(dir, "app.py"),
+				"def run() -> None:\n\tpass\n",
+			);
+		}
+
+		const envelope = await snapshotWith([
+			[path.join(a, "app.py"), [jediCompileRow()]],
+			[path.join(b, "app.py"), [jediCompileRow()]],
+		]);
+
+		const note = (envelope.notes as string[]).find((entry) =>
+			entry.includes("withheld"),
+		);
+		expect(note).toContain(
+			"2 python-jedi compile findings withheld across 2 declarations",
+		);
+		expect(note).toContain(
+			`1 under Python 3.14 (requires-python) in ${path.join(a, "pyproject.toml")}`,
+		);
+		expect(note).toContain(
+			`1 under Python 3.15 (requires-python) in ${path.join(b, "pyproject.toml")}`,
+		);
+	});
+
 	it("names the withheld row on the single-file path read (#4638 r3 N2)", async () => {
 		// Recurrence: the path route filtered the row and returned a bare empty
 		// answer (`empty_result`), indistinguishable from "no findings published".
@@ -2409,7 +2449,17 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 				"1 python-jedi compile finding withheld: the project declares Python 3.14 (requires-python)",
 			),
 		);
-		expect(result.details?.withheldCompile).toBe(1);
+		// One shape on every tool (#4638 r4 F2): the object the other two tools
+		// carry, never a bare count.
+		expect(result.details?.withheldCompile).toEqual({
+			count: 1,
+			declared: expect.objectContaining({
+				major: 3,
+				minor: 14,
+				source: "requires-python",
+				file: path.join(cwd, "pyproject.toml"),
+			}),
+		});
 	});
 
 	it("still delivers jedi's compile row blocking while the project declares 3.13 (#4638 F10)", async () => {

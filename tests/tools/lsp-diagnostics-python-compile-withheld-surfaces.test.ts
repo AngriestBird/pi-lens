@@ -149,27 +149,35 @@ describe("a withheld-only file beside a file the run could not confirm (#4638 r3
 	});
 });
 
-describe("mode=full names a withheld row (#4638 r3 N2)", () => {
-	async function runFull(): Promise<ToolResult> {
-		const service = makeLspServiceDouble({
-			runWorkspaceDiagnostics: vi.fn(async () => [
-				{ filePath: withheldFile, diagnostics: [jediCompile()], count: 1 },
-			]),
-		});
-		const tool = createLensDiagnosticsTool(
-			{ readCache: vi.fn(() => undefined) } as never,
-			() => tmp,
-			() => service as never,
-		);
-		return (await tool.execute(
-			"r3-n2-full",
-			{ mode: "full" },
-			new AbortController().signal,
-			null as never,
-			{ cwd: tmp } as never,
-		)) as ToolResult;
-	}
+async function runFull(): Promise<ToolResult> {
+	return runFullOver([withheldFile]);
+}
 
+async function runFullOver(files: string[]): Promise<ToolResult> {
+	const service = makeLspServiceDouble({
+		runWorkspaceDiagnostics: vi.fn(async () =>
+			files.map((filePath) => ({
+				filePath,
+				diagnostics: [jediCompile()],
+				count: 1,
+			})),
+		),
+	});
+	const tool = createLensDiagnosticsTool(
+		{ readCache: vi.fn(() => undefined) } as never,
+		() => tmp,
+		() => service as never,
+	);
+	return (await tool.execute(
+		"r3-n2-full",
+		{ mode: "full" },
+		new AbortController().signal,
+		null as never,
+		{ cwd: tmp } as never,
+	)) as ToolResult;
+}
+
+describe("mode=full names a withheld row (#4638 r3 N2)", () => {
 	it("says what the declaration removed when the only row is withheld", async () => {
 		const result = await runFull();
 		const text = result.content.map((entry) => entry.text).join("\n");
@@ -188,5 +196,124 @@ describe("mode=full names a withheld row (#4638 r3 N2)", () => {
 		expect(text).toContain("multiple exception types");
 		expect(text).not.toContain("withheld");
 		expect(result.details?.withheldCompile).toBeUndefined();
+	});
+});
+
+describe("one details shape and each project's own declaration (#4638 r4)", () => {
+	const SHAPE = {
+		count: 1,
+		declared: expect.objectContaining({
+			major: 3,
+			minor: 14,
+			source: "requires-python",
+		}),
+	};
+
+	/** Two projects, each with its own declaration and its own `app.py`. */
+	function twoProjects(): { a: string; b: string } {
+		fs.rmSync(path.join(tmp, "pyproject.toml"), { force: true });
+		fs.rmSync(withheldFile, { force: true });
+		const dirs = { a: path.join(tmp, "a"), b: path.join(tmp, "b") };
+		for (const [dir, level] of [
+			[dirs.a, ">=3.14"],
+			[dirs.b, ">=3.15"],
+		] as const) {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, "pyproject.toml"),
+				`[project]\nname = "demo"\nrequires-python = "${level}"\n`,
+			);
+			fs.writeFileSync(
+				path.join(dir, "app.py"),
+				"def run() -> None:\n\tpass\n",
+			);
+		}
+		return dirs;
+	}
+
+	function expectTwoDeclarations(
+		text: string,
+		details: Record<string, unknown> | undefined,
+		dirs: { a: string; b: string },
+	): void {
+		expect(text).toContain(
+			"2 python-jedi compile findings withheld across 2 declarations",
+		);
+		expect(text).toContain(
+			`1 under Python 3.14 (requires-python) in ${path.join(dirs.a, "pyproject.toml")}`,
+		);
+		expect(text).toContain(
+			`1 under Python 3.15 (requires-python) in ${path.join(dirs.b, "pyproject.toml")}`,
+		);
+		// The total stays one number and the groups sum to it.
+		expect(details?.withheldCompile).toMatchObject({
+			count: 2,
+			declarations: [
+				{ count: 1, declared: { minor: 14 } },
+				{ count: 1, declared: { minor: 15 } },
+			],
+		});
+	}
+
+	it("lsp_diagnostics carries the shared shape on a single file", async () => {
+		const result = await callLsp({ path: withheldFile });
+
+		expect(result.details?.withheldCompile).toEqual({
+			...SHAPE,
+			declared: expect.objectContaining({
+				file: path.join(tmp, "pyproject.toml"),
+			}),
+		});
+	});
+
+	it("mode=full carries the same shape as lsp_diagnostics", async () => {
+		const result = await runFull();
+
+		expect(result.details?.withheldCompile).toEqual({
+			...SHAPE,
+			declared: expect.objectContaining({
+				file: path.join(tmp, "pyproject.toml"),
+			}),
+		});
+	});
+
+	it("mode=full cites each project's declaration, not the first one's", async () => {
+		const dirs = twoProjects();
+		const result = await runFullOver([
+			path.join(dirs.a, "app.py"),
+			path.join(dirs.b, "app.py"),
+		]);
+
+		expectTwoDeclarations(
+			result.content.map((entry) => entry.text).join("\n"),
+			result.details,
+			dirs,
+		);
+	});
+
+	it("a directory scan cites each project's declaration", async () => {
+		const dirs = twoProjects();
+
+		const result = await callLsp({ path: tmp });
+
+		expectTwoDeclarations(
+			result.content.map((entry) => entry.text).join("\n"),
+			result.details,
+			dirs,
+		);
+	});
+
+	it("a batch cites each project's declaration", async () => {
+		const dirs = twoProjects();
+
+		const result = await callLsp({
+			paths: [path.join(dirs.a, "app.py"), path.join(dirs.b, "app.py")],
+		});
+
+		expectTwoDeclarations(
+			result.content.map((entry) => entry.text).join("\n"),
+			result.details,
+			dirs,
+		);
 	});
 });

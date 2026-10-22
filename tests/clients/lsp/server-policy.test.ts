@@ -753,7 +753,11 @@ describe("lsp server policy", () => {
 			}
 		}
 		expect(stale).toEqual([]);
-	});
+		// Budget (#4638 r4 F1): this cell makes 40+ temp trees, so on the Windows
+		// runner its cost is filesystem-bound. CI "Unit tests Windows"
+		// measured 396-794 ms on five earlier heads of this PR and 5333 ms on the
+		// next (job 119786141033), against the lane's 5000 ms default. Locally it is ~60 ms.
+	}, 30_000);
 
 	// #3412: a marker that carries a path segment (`prisma/schema.prisma`) is
 	// probed inside a SUBDIRECTORY of the walked directory, so creating it bumps
@@ -2586,7 +2590,13 @@ describe("monorepo root hoisting (#1671)", () => {
 				}),
 			]),
 		);
-	});
+		// Budget (#4638 r4 F1): the fixture nests 708 directories, and creating
+		// and walking a path that deep is filesystem-bound on the Windows runner.
+		// CI "Unit tests Windows" measured 1058, 1552, 2160, 2591 and 11405 ms on
+		// five earlier heads of this PR (the 11405 ms head predates every r3
+		// change) and 7475 ms on the next, against the lane's 5000 ms default. Locally
+		// it is ~100 ms.
+	}, 30_000);
 
 	it("RustServer.root hoists to the workspace root even when Cargo.toml opens with a UTF-8 BOM (#2498/#2520 round 2, F4)", async () => {
 		const { RustServer } = await import("../../../clients/lsp/server.js");

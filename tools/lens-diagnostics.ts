@@ -149,10 +149,10 @@ import {
 	LSP_SEVERITY_FILTERS,
 	MAX_BATCH_FILES,
 	renderBatchOutcomeLines,
+	mergeWithheld,
 	withheldCompileNote,
 	type BatchOutcomeDetail,
 	type LspDiagnosticsFlagReader,
-	type PythonCompileWithheld,
 } from "./lsp-diagnostics.js";
 import {
 	demotePastEofDiagnostics,
@@ -2574,16 +2574,13 @@ async function formatFullMode(
 		},
 	);
 	lspResults = pythonSweep.map((entry) => entry.result);
-	let withheldCompile: PythonCompileWithheld | undefined;
-	for (const entry of pythonSweep) {
-		if (!("withheld" in entry) || !entry.withheld) continue;
-		withheldCompile = withheldCompile
-			? {
-					count: withheldCompile.count + entry.withheld.count,
-					declared: withheldCompile.declared,
-				}
-			: entry.withheld;
-	}
+	// Each project's rows are cited under that project's own declaration
+	// (#4638 r4 F3).
+	const withheldCompile = mergeWithheld(
+		pythonSweep.map((entry) =>
+			"withheld" in entry ? entry.withheld : undefined,
+		),
+	);
 	// A result bound to a different document must not replace the current
 	// widget state, even when it contains real diagnostics. Pull results may carry
 	// a content hash without the push binding verdict, so verify that hash against
