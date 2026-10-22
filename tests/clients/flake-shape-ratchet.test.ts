@@ -343,6 +343,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"spawning the managed language server is the process boundary; the wrapper delegates every other command, the refused project-local candidate included, to the real launchLSP",
 		},
+	// 2026-10-23 (#4763): the per-touch published counts and the held-publish
+	// counter are written through logLatency rows the five-phase ring excludes.
+	"in-process-mock:clients/lsp/opengrep-pre-rules-publish-4763.test.ts::clients/latency-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the lsp_aux_wait_outcome and lsp_rules_refreshed rows are outside the getRecentLoggedPhases ring (LAST_PHASE_EXCLUDED) and test mode skips the file sink, so a passed-through logLatency spy is the only reader of the per-touch published counts and held-publish counter (#4763)",
+		},
 	// 2026-10-20 (#4638): tool availability is resolved so the spawn seam records the
 	// real argv (cwd + config args) without probing or installing ruff; only that
 	// resolver is doubled, and resolveToolCwd, ruffConfigArgs, safe-spawn stay real.
@@ -390,6 +398,12 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			detector: "in-process-mock",
 			reason:
 				"the wrapper spreads the actual module and only counts calls to the declaration resolver, which is the behaviour under test (zero I/O for a file without jedi's row)",
+		},
+	"in-process-mock:tools/lsp-diagnostics-opengrep-pre-rules-4763.test.ts::clients/latency-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the lsp_aux_wait_outcome and lsp_rules_refreshed rows are outside the getRecentLoggedPhases ring (LAST_PHASE_EXCLUDED) and test mode skips the file sink, so a passed-through logLatency spy is the only reader of the per-touch published counts and held-publish counter (#4763)",
 		},
 	// 2026-10-21 (#4638 review F10): the wrapper spreads the actual owner module
 	// and counts only the declaration resolver, so the snapshot filter's effect on

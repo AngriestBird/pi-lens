@@ -4460,6 +4460,17 @@ export class LSPService {
 					)
 				);
 			};
+			// #4763: how many diagnostics an auxiliary's publication for this touch
+			// holds, recorded on `lsp_aux_wait_outcome` so a field query can tell an
+			// auxiliary that answered "clean" (0) from one that answered with findings
+			// (n) and from one that published nothing (also 0, but outcome `silent`).
+			// `published` is the caller's own evidence verdict (the stamp, the binding
+			// or both), so a cache entry left by an earlier revision never counts.
+			const auxPublishedCount = (
+				client: (typeof spawned)[number]["client"],
+				published: boolean,
+			): number =>
+				published ? (client.getDiagnostics?.(filePath)?.length ?? 0) : 0;
 			// #743: PER-SERVER notify-write deadlines. Each server's didOpen/didChange
 			// write gets its OWN notifyWriteBudgetMs budget rather than one shared
 			// deadline over a single Promise.all — otherwise one backpressured server
@@ -5379,18 +5390,23 @@ export class LSPService {
 									auxWaits.map(async (aux) => {
 										const { budgetMs } = aux;
 										if (aux.demoted) {
+											const demotedPublished = auxiliaryPublicationEvidence({
+												bindingMatchesContent: auxCoversThisContent(
+													aux.serverId,
+												),
+												baseline: aux.baseline,
+												currentPathVersion: readPathVersion(aux.client),
+											});
 											return {
 												serverId: aux.serverId,
 												outcome: deferredResyncServerIds.has(aux.serverId)
 													? ("deferred" as const)
 													: ("demoted" as const),
-												publishedThisContent: auxiliaryPublicationEvidence({
-													bindingMatchesContent: auxCoversThisContent(
-														aux.serverId,
-													),
-													baseline: aux.baseline,
-													currentPathVersion: readPathVersion(aux.client),
-												}),
+												publishedThisContent: demotedPublished,
+												publishedCount: auxPublishedCount(
+													aux.client,
+													demotedPublished,
+												),
 												budgetMs,
 												elapsedMs: 0,
 												elapsedSinceNotifyMs: 0,
@@ -5473,6 +5489,10 @@ export class LSPService {
 											// below is master's line; the stamp axis already decided
 											// the outcome above and must not re-admit the row here.
 											publishedThisContent: auxCoversThisContent(aux.serverId),
+											publishedCount: auxPublishedCount(
+												aux.client,
+												publishedEvidence || auxCoversThisContent(aux.serverId),
+											),
 											budgetMs,
 											elapsedMs,
 											// #1458 S3: elapsed measured from BEFORE the primary wait
@@ -5782,6 +5802,10 @@ export class LSPService {
 								// below is master's line; the stamp axis already decided
 								// the outcome above and must not re-admit the row here.
 								publishedThisContent: auxCoversThisContent(entry.info.id),
+								publishedCount: auxPublishedCount(
+									entry.client,
+									publishedEvidence || auxCoversThisContent(entry.info.id),
+								),
 								budgetMs: timeoutFor(entry.client.serverId),
 								elapsedMs: waitedMs,
 								elapsedSinceNotifyMs: waitedMs,
