@@ -344,7 +344,7 @@ const EXPANDING_CHARS: Partial<Record<WordPartKind, RegExp>> = {
 
 export function decodeShellWords(command: string): DecodedShellSegment[] {
 	return tokenizeShellCommandWithRanges(command).map(({ words }) => ({
-		words: words.flatMap((word): DecodedShellWord[] => {
+		words: words.map((word): DecodedShellWord => {
 			const hidden = word.parts.some((part) => part.text === undefined)
 				? "escape"
 				: word.parts.some((part) =>
@@ -352,11 +352,10 @@ export function decodeShellWords(command: string): DecodedShellSegment[] {
 					  )
 					? "expansion"
 					: undefined;
-			const text = wordValue(word, true, "") ?? "";
-			// An empty word names no token, as in the public stream.
-			return text === "" && !hidden
-				? []
-				: [{ text, ...(hidden && { hidden }) }];
+			return {
+				text: wordValue(word, true, "") ?? "",
+				...(hidden && { hidden }),
+			};
 		}),
 	}));
 }

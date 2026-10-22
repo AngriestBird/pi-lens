@@ -215,7 +215,32 @@ const ROWS: readonly Row[] = [
 		bash: null,
 		guard: true,
 	},
-	// Unguarded: a word the model cannot read that cannot be git or its verb.
+	{
+		row: "double-quoted expansion as the executable",
+		command: '"$g" push',
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "empty word before git",
+		command: "'' git push",
+		bash: null,
+		guard: true,
+	},
+	// Unguarded: a word that is not git, or a word the model cannot read that
+	// cannot be git or its verb.
+	{
+		row: "escaped expansion is a literal word",
+		command: "\\$g push",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "single-quoted expansion is a literal word",
+		command: "'$g' push",
+		bash: null,
+		guard: false,
+	},
 	{
 		row: "expansion after the verb word",
 		command: "ls push $g",
