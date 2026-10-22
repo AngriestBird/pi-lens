@@ -579,6 +579,10 @@ export const wallClockBudgetInclude = [
 	// window. Keep child-process CPU sampling and this wall-clock lower bound in
 	// the fully serialized, dead-last phase.
 	"tests/clients/lsp/service-notify-cpu-liveness.test.ts",
+	// #4709 slice 3b: the resolver verdict `runRebuild` acts on comes from the
+	// real package-manager lookup spawning executable stand-in managers on PATH
+	// (flake-shape admission).
+	"tests/clients/mcp/review-rebuild.test.ts",
 	"tests/clients/metrics-history-stderr.test.ts",
 	// #4268 MED-8: a real `npx` child is the observation (the spawned process's
 	// own environment), so it runs in the quiet serialized phase (flake-shape
@@ -635,6 +639,10 @@ export const wallClockBudgetInclude = [
 	// #3871: runner-location regex budget (depth-30 paths, 100K blank runs
 	// and tokens); a real event-loop occupancy witness, so it runs serialized.
 	"tests/clients/test-runner-location-regex-budget.test.ts",
+	// #4709 slice 3b: the global-bin and fallback arms of resolveExec run the real
+	// package-manager lookup against executable stand-in managers (flake-shape
+	// admission).
+	"tests/clients/test-runner-resolve-exec.test.ts",
 	// #3511 review round 3: the quick-mode warmup witness joins session_start's
 	// background save with vi.waitFor (flake-shape admission).
 	"tests/clients/word-index-lifecycle.test.ts",
@@ -840,6 +848,9 @@ export const wallClockBudgetInclude = [
 	"tests/support/fault-injection.test.ts",
 	"tests/support/git-config-guard.test.ts",
 	"tests/support/git-fixture-env.test.ts",
+	// #4709 slice 3b: the PATH-probe stub's fidelity is observable only through a
+	// real child (flake-shape admission).
+	"tests/support/path-probe-stub.test.ts",
 	// #3179: the guard's #3179 fix's one real, cross-process reproduction. A
 	// separately spawned process races node's own recursive-watch readdirSync
 	// against a directory removal — the same race PR #3178 hit in CI — which
