@@ -193,6 +193,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		env: "PI_LENS_NO_CONTEXT_INJECTION",
 	},
 	{
+		name: "lens-retain-injections",
+		description:
+			"Opt-in (#4743): re-send each request's injected findings unchanged, at the same place, in every later request of the session, so an exact-prefix prompt cache (a local llama.cpp or Qwen server) keeps the whole conversation. Each retained block is labelled a snapshot; findings are still delivered once. Default off. Also via contextInjection.retain=true in ~/.pi-lens/config.json.",
+		configKey: "contextInjection.retain",
+		negated: false,
+		default: false,
+		scope: "global",
+	},
+	{
 		name: "lens-turn-summary",
 		description:
 			"Opt-in: persist a per-turn transcript entry summarizing diagnostics found, autofixes applied, and autoformats applied this turn (#484). Collapsed one-line, expandable in place. Default off. Also via turnSummary.enabled=true in ~/.pi-lens/config.json.",

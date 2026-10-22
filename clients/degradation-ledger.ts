@@ -242,6 +242,15 @@ export type DegradationKind =
 	 */
 	| "config-notice-suppressed"
 	/**
+	 * #4743: with `--lens-retain-injections` on, a context injection was not
+	 * kept for later requests (`entry-cap`, `byte-cap`, `no-session-id`), or the
+	 * transcript could not be hashed so nothing retained was re-sent
+	 * (`transcript-not-hashable`). The injection still reached its one request.
+	 * Subject is `<reason>:<session id>`; once per session and reason
+	 * (`clients/context-injection-ledger.ts`).
+	 */
+	| "context-injection-retain-declined"
+	/**
 	 * A warm-only client lookup (`getWarmClientForFile`) found no live client
 	 * for a file that HAS a language server with a resolvable root (#1934).
 	 * Subject is the candidate `serverId:root` set, so the ledger still answers

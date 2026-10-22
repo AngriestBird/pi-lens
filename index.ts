@@ -332,6 +332,7 @@ import {
 	type CacheContextInjectionHook,
 	type CacheContextInjectionSlice,
 	type CacheContextPlacement,
+	type CacheContextRetention,
 	clearCachePrefixSession,
 	emitCacheUsageSummaryAtSessionEnd,
 	logCacheUsage,
@@ -341,6 +342,10 @@ import {
 	resetCacheFindingIdentitiesSession,
 	recordTurnEndAdvisoryBytes,
 } from "./clients/cache-observability.js";
+import {
+	createInjectionLedger,
+	retainedSnapshotLabel,
+} from "./clients/context-injection-ledger.js";
 import {
 	buildStartupTimingRecords,
 	getPiLensEvalMs,
@@ -1338,6 +1343,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// env override → CLI flag → global config, all resolved inside getLensFlag
 	// from the registry's PI_LENS_NO_CONTEXT_INJECTION env binding (#166).
 	let contextInjectionEnabled = !getLensFlag("no-lens-context");
+	// #4743: opt-in retained injections. The ledger belongs to this activation,
+	// and pi re-runs this factory for every new, resumed, forked or switched
+	// session and for /reload, so each of those starts with an empty ledger.
+	// The flag is read per request because pi applies extension flag values
+	// after the factory runs; its CLI value and the global config are fixed per
+	// load.
+	const injectionLedger = createInjectionLedger();
 	let lensWidgetVisible = globalConfig?.widget?.visible !== false;
 	let mountedLensWidgetUi: LensWidgetUi | undefined;
 	let widgetMountFailureLogged = false;
@@ -4596,6 +4608,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// inside observeCacheContext, so this call site cannot report a
 			// source that contributed nothing.
 			injectionSlices: ReadonlyArray<CacheContextInjectionSlice>,
+			// #4743: where pi-lens spans begin in `resultMessages`, new or
+			// retained, so the next request's divergence can name a dropped one.
+			injectedPositions: readonly number[] = [],
+			retention?: CacheContextRetention,
 		) => {
 			if (telemetryLogged) return;
 			telemetryLogged = true;
@@ -4612,16 +4628,55 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// reader can tell a 0.87+ full-transcript observation from a
 				// pre-0.87 one without guessing from the host version.
 				injectionHook,
+				injectedPositions,
+				...(retention ? { retention } : {}),
 				dbg,
 			});
 		};
 		try {
 			const cwd = ctx.cwd ?? process.cwd();
 
+			// #4743: off, the ledger is neither read nor written, and the request is
+			// exactly what it was without the flag.
+			const ledger = getLensFlag("lens-retain-injections")
+				? injectionLedger
+				: undefined;
 			if (!effectiveInjectionEnabled) {
+				// #4743: injection switched off mid-session also stops re-sending
+				// what was retained, so no request carries pi-lens bytes while off.
+				ledger?.clearSession(prefixSessionId);
 				logContextObservation(existingMessages, "none", []);
 				return;
 			}
+
+			// #4743 (`--lens-retain-injections`): put back what earlier requests of
+			// this session injected, byte for byte and where it sat, BEFORE this
+			// request adds anything. Rendered text only: no record is read or
+			// consumed for it. Off, `base` is pi's own list.
+			const rebuilt = ledger?.rebuild(
+				prefixSessionId,
+				existingMessages,
+				appendToUserPromptContent,
+			);
+			const base = rebuilt?.messages ?? existingMessages;
+			const retention = (
+				retainedNew: boolean,
+				declined?: string,
+			): CacheContextRetention | undefined =>
+				rebuilt
+					? {
+							reemitted: rebuilt.reemitted,
+							reemittedBytes: rebuilt.reemittedBytes,
+							pruned: rebuilt.pruned,
+							retainedNew,
+							...((declined ?? rebuilt.declined)
+								? { declined: declined ?? rebuilt.declined }
+								: {}),
+						}
+					: undefined;
+			const retainedPositions = rebuilt?.retainedPositions ?? [];
+			const contributeBase = () =>
+				base === existingMessages ? undefined : { messages: base };
 
 			const turnEndFindings = consumeTurnEndFindings(
 				cacheManager,
@@ -4674,8 +4729,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 				(source) => source.messages,
 			);
 			if (injectedMessages.length === 0) {
-				logContextObservation(existingMessages, "none", []);
-				return;
+				logContextObservation(
+					base,
+					"none",
+					[],
+					retainedPositions,
+					retention(false),
+				);
+				return contributeBase();
 			}
 
 			// Empty transcript (no turns yet): fall back to prepend semantics —
@@ -4683,11 +4744,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// emit empty input (fe0ed5da: OpenAI Responses fails on empty input).
 			if (existingMessages.length === 0) {
 				const resultMessages = [...injectedMessages];
-				logContextObservation(resultMessages, "prepend", sourceMessages);
+				logContextObservation(resultMessages, "prepend", sourceMessages, [0]);
 				return { messages: resultMessages };
 			}
 
+			// The placement rule reads pi's own last message. With retention on,
+			// `base` ends with that same message too: a retained span after it is
+			// an "after" entry, which only a non-prompt last message gets, so the
+			// prompt path below never meets one.
 			const lastMessage = existingMessages[existingMessages.length - 1];
+			const lastPosition = base.length - 1;
+			// #4743: a retained injection says in its own bytes that it is a
+			// snapshot, so the label is part of what every later request repeats.
+			const snapshotLabel = ledger ? retainedSnapshotLabel() : undefined;
 
 			// Mid-loop the tail can be a tool_result (or assistant/tool) message;
 			// inserting before it would break tool_use↔tool_result adjacency. Only
@@ -4696,33 +4765,70 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// Append after the whole transcript — pure append preserves the
 				// adjacency AND leaves the entire prior transcript as an untouched
 				// cache prefix.
-				const resultMessages = [...existingMessages, ...injectedMessages];
-				logContextObservation(resultMessages, "append", sourceMessages);
+				const labelled = snapshotLabel
+					? injectedMessages.map((message, index) =>
+							index === injectedMessages.length - 1
+								? {
+										...message,
+										content: `${message.content}\n\n${snapshotLabel}`,
+									}
+								: message,
+						)
+					: injectedMessages;
+				const declined = rebuilt?.retain({
+					kind: "after",
+					messages: labelled,
+				});
+				// A declined injection is not repeated, so it must not say it is.
+				const delivered = declined ? injectedMessages : labelled;
+				const resultMessages = [...base, ...delivered];
+				logContextObservation(
+					resultMessages,
+					"append",
+					sourceMessages,
+					[...retainedPositions, base.length],
+					retention(rebuilt !== undefined && declined === undefined, declined),
+				);
 				return { messages: resultMessages };
 			}
 
-			const injectedText = injectedMessages.map((m) => m.content).join("\n\n");
-			if (!injectedText) {
-				logContextObservation(existingMessages, "none", []);
-				return;
+			const joinedText = injectedMessages.map((m) => m.content).join("\n\n");
+			if (!joinedText) {
+				logContextObservation(
+					base,
+					"none",
+					[],
+					retainedPositions,
+					retention(false),
+				);
+				return contributeBase();
 			}
+			const labelledText = snapshotLabel
+				? `${joinedText}\n\n${snapshotLabel}`
+				: joinedText;
+			const declined = rebuilt?.retain({
+				kind: "user-text",
+				text: labelledText,
+			});
+			// A declined injection is not repeated, so it must not say it is.
+			const injectedText = declined ? joinedText : labelledText;
 
+			const lastBaseMessage = base[lastPosition] ?? lastMessage;
 			const updatedLastMessage = {
-				...lastMessage,
+				...lastBaseMessage,
 				content: appendToUserPromptContent(
-					lastMessage.content as string | unknown[],
+					lastBaseMessage.content as string | unknown[],
 					injectedText,
 				),
 			};
 
-			const resultMessages = [
-				...existingMessages.slice(0, -1),
-				updatedLastMessage,
-			];
+			const resultMessages = [...base.slice(0, -1), updatedLastMessage];
 			logContextObservation(
 				resultMessages,
 				"append-to-last-user",
 				sourceMessages,
+				[...retainedPositions, lastPosition],
+				retention(rebuilt !== undefined && declined === undefined, declined),
 			);
 			return { messages: resultMessages };
 		} catch (err) {

@@ -118,6 +118,7 @@ type CacheMissCause =
 	| "system-prompt-changed"
 	| "partial-eviction"
 	| "model-provider-changed"
+	| "injection-dropped"
 	| "prefix-shrunk"
 	| "unknown";
 
@@ -291,6 +292,21 @@ interface SessionAttributionState {
 	systemPromptChangedSinceLastUsage: boolean;
 	/** The tool loadout those system messages declare changed. */
 	toolSetChangedSinceLastUsage: boolean;
+	/**
+	 * #4743: a request since the previous usage record stopped re-sending a
+	 * span pi-lens had added to the request before it, so the provider's
+	 * cached prefix ended where that span sat.
+	 */
+	injectionDroppedSinceLastUsage: boolean;
+	/**
+	 * #4743: the rolling digest of every message the previous request sent
+	 * (8 bytes each, see {@link rollingMessageDigests}), the reference the next
+	 * request's first differing index is measured against. `null`: that
+	 * request had no digest (a bound or an unserializable message).
+	 */
+	lastRequestDigests?: Buffer | null;
+	/** Positions in that request where a pi-lens span began (sorted). */
+	lastInjectedPositions?: readonly number[] | undefined;
 	/** Unknown-cause misses recorded for this session (#4687 item 5). */
 	unexplainedMisses: number;
 	/** Characters pi-lens injected since the previous usage record. */
@@ -325,6 +341,7 @@ function emptyCacheMissCauses(): Record<CacheMissCause, number> {
 		"system-prompt-changed": 0,
 		"partial-eviction": 0,
 		"model-provider-changed": 0,
+		"injection-dropped": 0,
 		"prefix-shrunk": 0,
 		unknown: 0,
 	};
@@ -370,6 +387,7 @@ function newAttributionState(): SessionAttributionState {
 		prefixStableSinceLastUsage: false,
 		systemPromptChangedSinceLastUsage: false,
 		toolSetChangedSinceLastUsage: false,
+		injectionDroppedSinceLastUsage: false,
 		unexplainedMisses: 0,
 		sequenceHashTruncatedSinceLastUsage: false,
 		requestEvidenceIncompleteSinceLastUsage: false,
@@ -613,6 +631,11 @@ interface CacheMissVerdict {
  *      not, #1016's fix has regressed.
  *   3. `model-provider-changed` — both adjacent identities were present and
  *      differ. This is direct local evidence and outranks timing heuristics.
+ *   3b. `injection-dropped` — a request since the previous usage record first
+ *      differed from the request before it at a position where pi-lens had
+ *      added a span (#4743): the span was request-local, so the next request
+ *      no longer carried it and the cached prefix ended there. Direct local
+ *      evidence from the per-message rolling digest.
  *   4. `prefix-shrunk` — a low or zero read of a request whose whole prompt
  *      is itself below half the baseline (`promptShrank`): the prompt got
  *      smaller (compaction, a trimmed transcript), so the read is low because
@@ -664,6 +687,7 @@ function classifyCacheMiss(args: {
 	estimatedNewTokens: number;
 	attributionCharsCapped: boolean;
 	promptShrank: boolean;
+	injectionDropped: boolean;
 }): CacheMissVerdict | null {
 	const cacheRead = readableTokenCount(args.cacheRead);
 	if (cacheRead === undefined) return null;
@@ -703,6 +727,7 @@ function classifyCacheMiss(args: {
 	if (args.modelProviderChanged) {
 		return { kind, cause: "model-provider-changed" };
 	}
+	if (args.injectionDropped) return { kind, cause: "injection-dropped" };
 	if (args.promptShrank) return { kind, cause: "prefix-shrunk" };
 	// TTL and transcript-growth claims need the request-side context observation.
 	// A response-time fallback includes generation and can only explain why the
@@ -1135,6 +1160,112 @@ function hashMessageSequence(messages: ReadonlyArray<ContextMessageLike>): {
 	};
 }
 
+/** Bytes kept per message by {@link rollingMessageDigests}. */
+const ROLLING_DIGEST_BYTES = 8;
+
+/**
+ * #4743: bounds on the rolling digest. A transcript past either bound gets no
+ * digest, so the divergence reads `unavailable` and a retained injection is
+ * not re-sent. 10,000 messages is `MAX_REPORTED_MESSAGES`; 16 Mi characters
+ * is four times a one-million-token context at four characters per token.
+ */
+export const MAX_ROLLING_DIGEST_MESSAGES = MAX_REPORTED_MESSAGES;
+export const MAX_ROLLING_DIGEST_CHARS = 16 * 1024 * 1024;
+
+/** Why {@link rollingMessageDigests} returned no digest. */
+export type RollingDigestGap =
+	| "too-many-messages"
+	| "too-many-chars"
+	| "unserializable";
+
+export type RollingDigests =
+	| { complete: true; count: number; digests: Buffer }
+	| { complete: false; gap: RollingDigestGap };
+
+/**
+ * A rolling digest of a message list (#4743): entry `i` hashes messages
+ * `0..i`, each serialized the way a provider receives it (`JSON.stringify`,
+ * insertion order, every field), so two lists share digest `i` exactly when
+ * they share their first `i + 1` messages. Unbounded per message, unlike the
+ * sampled `hashMessageSequence`: one long tool result must not hide where a
+ * request stopped repeating the one before it. Never throws.
+ */
+export function rollingMessageDigests(
+	messages: ReadonlyArray<unknown>,
+): RollingDigests {
+	try {
+		const count = messages.length;
+		if (count > MAX_ROLLING_DIGEST_MESSAGES)
+			return { complete: false, gap: "too-many-messages" };
+		const digests = Buffer.alloc(count * ROLLING_DIGEST_BYTES);
+		const hash = createHash("sha256");
+		let chars = 0;
+		for (let index = 0; index < count; index++) {
+			const serialized = JSON.stringify(messages[index]) ?? "undefined";
+			chars += serialized.length;
+			if (chars > MAX_ROLLING_DIGEST_CHARS)
+				return { complete: false, gap: "too-many-chars" };
+			hash.update(serialized).update("\u0000");
+			hash
+				.copy()
+				.digest()
+				.copy(digests, index * ROLLING_DIGEST_BYTES, 0, ROLLING_DIGEST_BYTES);
+		}
+		return { complete: true, count, digests };
+	} catch {
+		// none: a cycle, a BigInt or a throwing getter leaves the list without a
+		// digest; the gap is the return value, and both callers record it
+		// (cache_context's `rollingDigestGap`, the ledger's
+		// `context-injection-retain-declined` row).
+		return { complete: false, gap: "unserializable" };
+	}
+}
+
+/** Digest of messages `0..index` as hex, or undefined past the list. */
+export function rollingDigestAt(
+	digests: RollingDigests,
+	index: number,
+): string | undefined {
+	if (!digests.complete || index < 0 || index >= digests.count) return;
+	const start = index * ROLLING_DIGEST_BYTES;
+	return digests.digests.toString("hex", start, start + ROLLING_DIGEST_BYTES);
+}
+
+/**
+ * The first message index where `current` stops repeating `previous`, or
+ * undefined when `previous` is a whole prefix of `current` (append-only).
+ */
+function firstDifferingMessageIndex(
+	previous: Buffer,
+	current: Buffer,
+): number | undefined {
+	const previousCount = previous.length / ROLLING_DIGEST_BYTES;
+	const currentCount = current.length / ROLLING_DIGEST_BYTES;
+	const shared = Math.min(previousCount, currentCount);
+	for (let index = 0; index < shared; index++) {
+		const start = index * ROLLING_DIGEST_BYTES;
+		if (
+			previous.compare(
+				current,
+				start,
+				start + ROLLING_DIGEST_BYTES,
+				start,
+				start + ROLLING_DIGEST_BYTES,
+			) !== 0
+		)
+			return index;
+	}
+	return currentCount < previousCount ? currentCount : undefined;
+}
+
+/**
+ * Where this request stops repeating the session's previous one (#4743).
+ * `baseline`: no earlier request; `append-only`: the earlier request is a
+ * whole prefix of this one; `diverged`: they differ from
+ * `firstDifferingMessageIndex` on; `unavailable`: either list has no digest.
+ */
+type PrefixDivergence = "baseline" | "append-only" | "diverged" | "unavailable";
+
 /** Per-measurement bounds, so the caller picks the population's own cap. */
 interface MeasureLimits {
 	maxChars: number;
@@ -1247,6 +1378,83 @@ function attributionKey(
 	return `${sessionRole ?? "unknown"}:${key}`;
 }
 
+/** #4743: the retained-injection ledger's work on one request. */
+export interface CacheContextRetention {
+	/** Retained entries re-sent on this request. */
+	reemitted: number;
+	/** Their rendered bytes. */
+	reemittedBytes: number;
+	/** Entries deleted because the transcript before their anchor changed. */
+	pruned: number;
+	/** This request's new injection was added to the ledger. */
+	retainedNew: boolean;
+	/** Why a new injection was not retained, or the ledger was cleared. */
+	declined?: string;
+}
+
+/**
+ * Compare this request's rolling digest with the session's previous request
+ * and arm `injection-dropped` when the first difference lands where pi-lens
+ * had added a span (#4743). Returns the bounded record fields.
+ */
+function observePrefixDivergence(
+	state: SessionAttributionState,
+	resultMessages: ReadonlyArray<ContextMessageLike>,
+	injectedPositions: readonly number[],
+): {
+	prefixDivergence: PrefixDivergence;
+	firstDifferingMessageIndex: number | null;
+	previousRequestMessageCount: number | null;
+	divergedAtInjection: boolean;
+	rollingDigestGap: RollingDigestGap | null;
+	injectedSpanCount: number;
+} {
+	const current = rollingMessageDigests(resultMessages);
+	const previous = state.lastRequestDigests;
+	const previousPositions = state.lastInjectedPositions ?? [];
+	state.lastRequestDigests = current.complete ? current.digests : null;
+	state.lastInjectedPositions = current.complete
+		? injectedPositions
+		: undefined;
+	const base = {
+		previousRequestMessageCount: previous
+			? previous.length / ROLLING_DIGEST_BYTES
+			: null,
+		rollingDigestGap: current.complete ? null : current.gap,
+		injectedSpanCount: injectedPositions.length,
+	};
+	if (!current.complete || previous === null)
+		return {
+			...base,
+			prefixDivergence: "unavailable",
+			firstDifferingMessageIndex: null,
+			divergedAtInjection: false,
+		};
+	if (previous === undefined)
+		return {
+			...base,
+			prefixDivergence: "baseline",
+			firstDifferingMessageIndex: null,
+			divergedAtInjection: false,
+		};
+	const index = firstDifferingMessageIndex(previous, current.digests);
+	if (index === undefined)
+		return {
+			...base,
+			prefixDivergence: "append-only",
+			firstDifferingMessageIndex: null,
+			divergedAtInjection: false,
+		};
+	const atInjection = previousPositions.includes(index);
+	if (atInjection) state.injectionDroppedSinceLastUsage = true;
+	return {
+		...base,
+		prefixDivergence: "diverged",
+		firstDifferingMessageIndex: index,
+		divergedAtInjection: atInjection,
+	};
+}
+
 /**
  * Log one bounded request-side observation for every `context` call. This is
  * deliberately a separate phase from `cache_prefix_break`: it describes the
@@ -1274,6 +1482,15 @@ export function observeCacheContext(args: {
 	placement?: CacheContextPlacement;
 	/** The request hook that carried this observation (#4631). */
 	injectionHook?: CacheContextInjectionHook;
+	/**
+	 * #4743: positions in `resultMessages` where a pi-lens span begins (a
+	 * modified message or the first of an inserted run), new or retained. The
+	 * NEXT request's first differing index is attributed to a dropped injection
+	 * when it lands on one of these.
+	 */
+	injectedPositions?: readonly number[];
+	/** #4743: what the retained-injection ledger did, when its flag is on. */
+	retention?: CacheContextRetention;
 	dbg?: (msg: string) => void;
 }): void {
 	try {
@@ -1351,6 +1568,11 @@ export function observeCacheContext(args: {
 			afterSequence.contentTruncated;
 		state.requestEvidenceIncompleteSinceLastUsage ||=
 			beforeSequence.incomplete || afterSequence.incomplete;
+		const divergence = observePrefixDivergence(
+			state,
+			resultMessages,
+			args.injectedPositions ?? [],
+		);
 
 		logLatency({
 			type: "phase",
@@ -1414,6 +1636,9 @@ export function observeCacheContext(args: {
 					beforeSequence.contentTruncated || afterSequence.contentTruncated,
 				sequenceHashIncomplete:
 					beforeSequence.incomplete || afterSequence.incomplete,
+				// #4743: where this request stopped repeating the previous one.
+				...divergence,
+				...(args.retention ? { retention: args.retention } : {}),
 			},
 		});
 	} catch (err) {
@@ -1565,6 +1790,7 @@ export function logCacheUsage(
 			estimatedNewTokens,
 			attributionCharsCapped: state.attributionCharsCapped,
 			promptShrank: shrank,
+			injectionDropped: state.injectionDroppedSinceLastUsage,
 		});
 		const unknownReason: CacheMissUnknownReason | undefined =
 			providerUsageMalformed
@@ -1633,6 +1859,7 @@ export function logCacheUsage(
 		state.prefixStableSinceLastUsage = false;
 		state.toolSetChangedSinceLastUsage = false;
 		state.systemPromptChangedSinceLastUsage = false;
+		state.injectionDroppedSinceLastUsage = false;
 		state.sequenceHashTruncatedSinceLastUsage = false;
 		state.requestEvidenceIncompleteSinceLastUsage = false;
 		state.injectedCharsSinceLastUsage = 0;

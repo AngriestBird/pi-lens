@@ -13,9 +13,13 @@ import {
 	DEFAULT_PROVIDER_CACHE_TTL_MS,
 	emitCacheUsageSummaryAtSessionEnd,
 	logCacheUsage,
+	MAX_ROLLING_DIGEST_CHARS,
+	MAX_ROLLING_DIGEST_MESSAGES,
 	observeCacheContext,
 	observeCachePrefix,
 	recordToolResultDelivery,
+	rollingDigestAt,
+	rollingMessageDigests,
 	resetCacheFindingIdentitiesSession,
 	resetCachePrefixObservation,
 } from "../../clients/cache-observability.js";
@@ -2145,6 +2149,7 @@ describe("cache-observability — miss attribution (#1071)", () => {
 				"system-prompt-changed": 0,
 				"partial-eviction": 0,
 				"model-provider-changed": 0,
+				"injection-dropped": 0,
 				"prefix-shrunk": 0,
 				unknown: 1,
 			},
@@ -2433,5 +2438,168 @@ describe("cache-observability — tool-result delivery bytes (#2800 item 7)", ()
 		const metadata = usageRows()[0]?.metadata;
 		expect(metadata?.toolResultBytes).toBeLessThanOrEqual(1_048_576);
 		expect(metadata?.toolResultsTruncated).toBe(1);
+	});
+});
+
+describe("cache-observability — where a request stops repeating the last one (#4743)", () => {
+	const SID = "divergence";
+	const head = { role: "system", content: "head" };
+	const first = { role: "user", content: "first question" };
+	const answer = { role: "assistant", content: "first answer" };
+	const second = { role: "user", content: "second question" };
+	/** `second` as request N carried it: pi-lens extended the prompt. */
+	const secondInjected = {
+		role: "user",
+		content:
+			"second question\n\n[pi-lens automated context — not a user request]",
+	};
+	const later = { role: "assistant", content: "second answer" };
+
+	function observe(
+		resultMessages: ReadonlyArray<{ role: string; content: unknown }>,
+		injectedPositions: number[] = [],
+	) {
+		observeCacheContext({
+			sessionId: SID,
+			turnIndex: 0,
+			injectionEnabled: true,
+			existingMessages: resultMessages,
+			resultMessages,
+			injectedPositions,
+		});
+		return latencyEntries
+			.filter((entry) => entry.phase === "cache_context")
+			.at(-1)?.metadata;
+	}
+
+	function usage(cacheRead: number, input: number) {
+		logCacheUsage(
+			assistantMessage({
+				usage: { input, output: 10, cacheRead, cacheWrite: 0 },
+			}),
+			undefined,
+			{ sessionId: SID, turnIndex: 0 },
+		);
+		return latencyEntries
+			.filter((entry) => entry.phase === "cache_usage")
+			.at(-1)?.metadata;
+	}
+
+	beforeEach(() => {
+		latencyEntries.length = 0;
+		resetCachePrefixObservation();
+		resetDegradationLedger();
+	});
+
+	it("names a miss after a request that dropped pi-lens's span `injection-dropped`", () => {
+		expect(observe([head, first])).toMatchObject({
+			prefixDivergence: "baseline",
+		});
+		usage(10_000, 100);
+		// Request N: pi-lens extended the new prompt at position 3.
+		expect(observe([head, first, answer, secondInjected], [3])).toMatchObject({
+			prefixDivergence: "append-only",
+			injectedSpanCount: 1,
+		});
+		usage(10_000, 100);
+		// Request N+1 is pi's own transcript: it stops repeating N at position 3.
+		expect(observe([head, first, answer, second, later])).toMatchObject({
+			prefixDivergence: "diverged",
+			firstDifferingMessageIndex: 3,
+			previousRequestMessageCount: 4,
+			divergedAtInjection: true,
+		});
+		expect(usage(0, 10_100)).toMatchObject({
+			cacheMissCause: "injection-dropped",
+			cacheMissKind: "zero-read",
+		});
+	});
+
+	it("does not blame an injection for a break where pi-lens added nothing", () => {
+		observe([head, first]);
+		usage(10_000, 100);
+		observe([head, first, answer, secondInjected], [3]);
+		usage(10_000, 100);
+		// The transcript changed at position 1, before the pi-lens span.
+		expect(
+			observe([head, { role: "user", content: "summary" }, second, later]),
+		).toMatchObject({
+			prefixDivergence: "diverged",
+			firstDifferingMessageIndex: 1,
+			divergedAtInjection: false,
+		});
+		expect(usage(0, 10_100)?.cacheMissCause).not.toBe("injection-dropped");
+	});
+
+	it("reads a request that repeats the previous one whole as append-only, with no cause", () => {
+		observe([head, first, answer, secondInjected], [3]);
+		usage(10_000, 100);
+		expect(
+			observe([head, first, answer, secondInjected, later], [3]),
+		).toMatchObject({
+			prefixDivergence: "append-only",
+			firstDifferingMessageIndex: null,
+			divergedAtInjection: false,
+		});
+		expect(usage(10_050, 100)?.cacheMissCause).toBeNull();
+	});
+
+	it("reports an unhashable request as unavailable, and the request after it too", () => {
+		observe([head, first]);
+		const cyclic: Record<string, unknown> = { role: "user" };
+		cyclic.content = cyclic;
+		expect(observe([head, cyclic as never])).toMatchObject({
+			prefixDivergence: "unavailable",
+			rollingDigestGap: "unserializable",
+		});
+		// Nothing to compare against is not a fresh baseline.
+		expect(observe([head, first])).toMatchObject({
+			prefixDivergence: "unavailable",
+			rollingDigestGap: null,
+		});
+	});
+});
+
+describe("rollingMessageDigests bounds (#4743)", () => {
+	it("hashes up to MAX_ROLLING_DIGEST_MESSAGES messages and refuses one more", () => {
+		const messages = Array.from(
+			{ length: MAX_ROLLING_DIGEST_MESSAGES },
+			(_, index) => ({ role: "user", content: `m${index}` }),
+		);
+		expect(rollingMessageDigests(messages).complete).toBe(true);
+		expect(
+			rollingMessageDigests([
+				...messages,
+				{ role: "user", content: "one more" },
+			]),
+		).toEqual({ complete: false, gap: "too-many-messages" });
+	});
+
+	it("hashes a transcript of exactly MAX_ROLLING_DIGEST_CHARS and refuses one char more", () => {
+		// `{"role":"user","content":"` + text + `"}` serializes to text + 28.
+		const wrap = (text: string) => [{ role: "user", content: text }];
+		const exact = "x".repeat(MAX_ROLLING_DIGEST_CHARS - 28);
+		expect(JSON.stringify(wrap(exact)[0])).toHaveLength(
+			MAX_ROLLING_DIGEST_CHARS,
+		);
+		expect(rollingMessageDigests(wrap(exact)).complete).toBe(true);
+		expect(rollingMessageDigests(wrap(`${exact}x`))).toEqual({
+			complete: false,
+			gap: "too-many-chars",
+		});
+	});
+
+	it("gives two lists the same digest at i exactly when their first i + 1 messages match", () => {
+		const a = rollingMessageDigests([
+			{ role: "user", content: "same" },
+			{ role: "user", content: "a" },
+		]);
+		const b = rollingMessageDigests([
+			{ role: "user", content: "same" },
+			{ role: "user", content: "b" },
+		]);
+		expect(rollingDigestAt(a, 0)).toBe(rollingDigestAt(b, 0));
+		expect(rollingDigestAt(a, 1)).not.toBe(rollingDigestAt(b, 1));
+		expect(rollingDigestAt(a, 2)).toBeUndefined();
 	});
 });

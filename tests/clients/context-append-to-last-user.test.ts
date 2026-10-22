@@ -277,6 +277,72 @@ describe("context injection appends to last user message (#3693)", () => {
 		TIMEOUT_MS,
 	);
 
+	/**
+	 * #4743 acceptance 3: the image cell with `--lens-retain-injections` on. The
+	 * replay request now repeats the injected block (three blocks, by design),
+	 * so the immutability half moves to what it was always about: pi's STORED
+	 * message keeps its two blocks and its image bytes, because the ledger
+	 * works on the per-request copy.
+	 */
+	it(
+		"with retained injections on, repeats the block on the replay and leaves pi's stored image message unchanged",
+		async () => {
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd: sessionCwd("image-blocks-retained"),
+				startupMode: "quick",
+				flags: new Map([["lens-retain-injections", true]]),
+				responses: [
+					fauxAssistantMessage(fauxText("ready")),
+					fauxAssistantMessage(fauxText("seen")),
+					fauxAssistantMessage(fauxText("still seen")),
+				],
+			});
+
+			await handle.prompt("Warm up");
+			new CacheManager(false).writeCache(
+				"session-start-guidance",
+				{ content: "Follow safety guidelines." },
+				handle.cwd,
+			);
+			await handle.session.prompt("Analyze this image", {
+				images: [{ type: "image", data: PNG_1X1, mimeType: "image/png" }],
+			});
+			const injected = handle.requests[1].at(-1);
+			await handle.prompt("anything else");
+
+			const isImageMessage = (message: { content?: unknown }) =>
+				Array.isArray(message.content) &&
+				(message.content as ContentBlock[]).some(
+					(block) => block.type === "image",
+				);
+			const replayed = handle.requests[2].find(isImageMessage);
+			if (!replayed || !injected)
+				throw new Error("the replay turn dropped the image message");
+			// The provider sees the injected message again, byte for byte.
+			expect(replayed).toEqual(injected);
+			expect(
+				(replayed.content as ContentBlock[]).map((block) => block.type),
+			).toEqual(["text", "image", "text"]);
+
+			// pi's own transcript never held the block.
+			const stored = (
+				handle.session.messages as Array<{ content?: unknown }>
+			).find(isImageMessage);
+			if (!stored) throw new Error("pi stored no image message");
+			const storedBlocks = stored.content as ContentBlock[];
+			expect(storedBlocks.map((block) => block.type)).toEqual([
+				"text",
+				"image",
+			]);
+			expect(storedBlocks[1].data).toBe(
+				(replayed.content as ContentBlock[])[1].data,
+			);
+			expect(handle.errors).toEqual([]);
+		},
+		TIMEOUT_MS,
+	);
+
 	it(
 		"handles empty array content without creating leading blank blocks",
 		async () => {
