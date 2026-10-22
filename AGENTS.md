@@ -1217,10 +1217,10 @@ file-scoped worklist and receives no project-wide scanner output.
   the bytes it reports on, so its empty publications are refused as evidence
   (`lsp_publish_dropped_server_config_failed`) and empty answers already stored
   are retracted; a non-empty answer still flows, and a language-role server is
-  recorded but never gated. A refused publication still answers its send
-  (#3482), the server's own `semgrep/rulesRefreshed` clears the failure, and the
+  recorded but never gated. A refused publication still answers its send,
+  the server's own `semgrep/rulesRefreshed` clears the failure, and the
   touch's `lsp-scanner-coverage-gap` reason carries the failure text. It
-  composes with #4763's hold of the empty publish before the rules load (table:
+  composes with the hold of the empty publish before the rules load (table:
   `tests/clients/lsp/opengrep-pre-rules-publish-4763.test.ts`). Proven by
   `tests/clients/lsp/opengrep-offline-config-failure.test.ts`.
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before

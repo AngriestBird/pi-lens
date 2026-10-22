@@ -3353,7 +3353,7 @@ export function setupIncomingHandlers(
 		// The notification is sent only after the rules loaded (opengrep
 		// `refresh_rules` sends it after `cache_session`), so an earlier config
 		// failure is resolved and its empty publishes are answers again.
-		state.configLoadFailure = undefined;
+		delete state.configLoadFailure;
 		rebaselineForRulesRefresh(state);
 	});
 	// #1669: a server can send `workspace/diagnostic/refresh` (typically after a
