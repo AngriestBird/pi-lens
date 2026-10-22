@@ -24,9 +24,11 @@ import {
 	isRapidHeapGrowth,
 	MEMORY_SAMPLE_TURN_INTERVAL,
 	recordMemorySampleOutcome,
+	recordMemoryTurnEnd,
 	resetMemorySamplerCadence,
 	shouldEmitMemorySample,
 	shouldEmitMemorySampleAdaptive,
+	takeMemoryIdleGapMs,
 	toMemoryProcessUsage,
 } from "../../clients/memory-sampler.js";
 import {
@@ -484,5 +486,57 @@ describe("formatMemoryHealthLine (pure)", () => {
 		sample.subsystems.treeSitter = null;
 		const line = formatMemoryHealthLine(sample);
 		expect(line).toContain("tree-sitter cache n/a");
+	});
+});
+
+describe("post-idle sample decision (#1332)", () => {
+	// An explicit window: the decision takes the window as an argument, so the
+	// default (the LSP idle-evict value) is not pinned here.
+	const WINDOW_MS = 300_000;
+
+	beforeEach(() => {
+		resetMemorySamplerCadence();
+	});
+
+	it("#1332: no post-idle heap reading existed, so a turn after a gap over the window reports the measured idleMs", () => {
+		recordMemoryTurnEnd(1_000);
+		expect(takeMemoryIdleGapMs(1_000 + WINDOW_MS + 1, WINDOW_MS)).toBe(
+			WINDOW_MS + 1,
+		);
+	});
+
+	it("#1332: a gap at or under the window yields no idle sample (the window is a strict bound)", () => {
+		recordMemoryTurnEnd(1_000);
+		expect(takeMemoryIdleGapMs(1_000 + WINDOW_MS - 1, WINDOW_MS)).toBeNull();
+		recordMemoryTurnEnd(1_000);
+		expect(takeMemoryIdleGapMs(1_000 + WINDOW_MS, WINDOW_MS)).toBeNull();
+	});
+
+	it("#1332: two turn starts after one long gap yield only one idle sample", () => {
+		recordMemoryTurnEnd(0);
+		const longGap = WINDOW_MS * 2;
+		expect(takeMemoryIdleGapMs(longGap, WINDOW_MS)).toBe(longGap);
+		// The second turn start has no turn end in between: nothing is pending.
+		expect(takeMemoryIdleGapMs(longGap + 5, WINDOW_MS)).toBeNull();
+	});
+
+	it("#1332: no turn end was ever recorded (first turn of a process) yields no idle sample", () => {
+		expect(takeMemoryIdleGapMs(WINDOW_MS * 10, WINDOW_MS)).toBeNull();
+	});
+
+	it("#1332: the next turn end re-arms the decision for the next idle period", () => {
+		recordMemoryTurnEnd(0);
+		expect(takeMemoryIdleGapMs(WINDOW_MS * 2, WINDOW_MS)).toBe(WINDOW_MS * 2);
+		const secondEnd = WINDOW_MS * 2 + 10;
+		recordMemoryTurnEnd(secondEnd);
+		expect(takeMemoryIdleGapMs(secondEnd + WINDOW_MS * 3, WINDOW_MS)).toBe(
+			WINDOW_MS * 3,
+		);
+	});
+
+	it("#1332: session reset clears a pending turn end, so a new session's first turn is never measured against the old one", () => {
+		recordMemoryTurnEnd(0);
+		resetMemorySamplerCadence();
+		expect(takeMemoryIdleGapMs(WINDOW_MS * 2, WINDOW_MS)).toBeNull();
 	});
 });

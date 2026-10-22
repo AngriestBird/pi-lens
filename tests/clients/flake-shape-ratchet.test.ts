@@ -429,6 +429,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"bounded() races the touch against a live wall budget; fake timers settle the bound instantly and the budget semantics are unmeasurable",
 	},
+	// 2026-10-22 (#1332): the post-idle case needs a real elapsed gap between two
+	// turns, because the idle decision reads Date.now() inside the built extension;
+	// the 50 ms timer only clears a 1 ms window and the assertion is a lower bound.
+	"raw-timer-wait:index-memory-sample-wiring.test.ts": {
+		detector: "raw-timer-wait",
+		reason:
+			"a real elapsed gap is the subject; the idle decision reads Date.now() in the built extension, so no injected clock reaches it",
+	},
 	// 2026-09-15 (#2042 cheapest probe): the sample-tail file is written by the
 	// wrapper's own real setInterval loop in a separate process; a poll waits
 	// for that file's first write rather than a fixed sleep, and one case kills

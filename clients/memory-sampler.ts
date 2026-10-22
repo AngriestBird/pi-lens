@@ -49,6 +49,7 @@ import {
 import { getDispatchCascadeCacheStats } from "./dispatch/integration.js";
 import { getLspDocumentTextRetentionSnapshot } from "./lsp/client.js";
 import type { PersistWorkerHeapStatistics } from "./persist-worker-stats.js";
+import { getLspIdleEvictMs } from "./lsp/client-registry.js";
 
 /** Every N turns, emit one `memory_sample` latency.log line (#1123 item 2). */
 export const MEMORY_SAMPLE_TURN_INTERVAL = 10;
@@ -98,11 +99,37 @@ export const HEAP_GROWTH_TIGHTEN_RATIO = 1.2;
 
 let _lastSampledHeapUsedBytes = 0;
 let _tightenThroughTurn = 0;
+/** #1332: epoch ms of the turn end not yet matched by a turn start, or null. */
+let _pendingTurnEndedAt: number | null = null;
 
 /** Clear the rising-edge cadence state. Called on primary session_start. */
 export function resetMemorySamplerCadence(): void {
 	_lastSampledHeapUsedBytes = 0;
 	_tightenThroughTurn = 0;
+	_pendingTurnEndedAt = null;
+}
+
+/** #1332: record that a turn ended at `now` (epoch ms). Called at turn_end. */
+export function recordMemoryTurnEnd(now: number): void {
+	_pendingTurnEndedAt = now;
+}
+
+/**
+ * #1332 (post-idle heap reading): called once per turn start. Returns the idle
+ * gap in ms when the turn start is the first after a turn end and that gap is
+ * strictly greater than `windowMs` (the TS idle-evict window), otherwise null.
+ * Consumes the pending turn end, so at most one idle sample is taken per idle
+ * period, however many turns start after it.
+ */
+export function takeMemoryIdleGapMs(
+	now: number,
+	windowMs: number = getLspIdleEvictMs(),
+): number | null {
+	const endedAt = _pendingTurnEndedAt;
+	_pendingTurnEndedAt = null;
+	if (endedAt === null) return null;
+	const gap = now - endedAt;
+	return gap > windowMs ? gap : null;
 }
 
 /** PURE: >20% heap growth between two sampled readings warrants tightening. */

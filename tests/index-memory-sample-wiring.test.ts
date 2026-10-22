@@ -1,3 +1,7 @@
+// flake-shape: raw-timer-wait — the #1332 idle case needs a real elapsed gap
+// between two turns: the idle decision reads Date.now() inside the built extension,
+// so no injected clock reaches it. The 50 ms timer only has to clear a 1 ms window,
+// and the assertion is a lower bound (> 1), never an exact duration.
 /**
  * Wiring guard for the #1123 item 2 periodic memory sample: the extension emits
  * exactly one `memory_sample` latency record every `MEMORY_SAMPLE_TURN_INTERVAL`
@@ -106,6 +110,9 @@ describe(
 			const session = metadata.session as Record<string, number>;
 			expect(session.sessionAgeMs).toBeGreaterThanOrEqual(0);
 			expect(session.turnCount).toBe(10);
+			// #1332: no post-idle heap reading existed, so a regular sample is
+			// tagged `idle: false` and a reader can filter the idle ones out.
+			expect(metadata.idle).toBe(false);
 			expect(handle.errors).toEqual([]);
 		});
 
@@ -120,6 +127,36 @@ describe(
 			expect((samples[1].metadata as Record<string, unknown>).turnIndex).toBe(
 				20,
 			);
+		});
+
+		// #1332: no post-idle heap reading existed. A turn that starts after a real
+		// idle gap longer than the window writes one idle-tagged sample. The window
+		// is pinned to 1 ms and a 50 ms timer sits between the two turns, so the
+		// gap clears the window without any injected clock.
+		it("#1332: a turn after a real idle gap writes one idle-tagged memory_sample", async () => {
+			const previous = process.env.PI_LENS_LSP_IDLE_EVICT_MS;
+			process.env.PI_LENS_LSP_IDLE_EVICT_MS = "1";
+			try {
+				const handle = await startSession(2);
+				const before = (await handle.latencyRows()).rows.length;
+				await handle.prompt("turn 1");
+				await new Promise((resolve) => setTimeout(resolve, 50));
+				await handle.prompt("turn 2");
+				const read = await handle.latencyRows();
+				expect(read.skipped).toBe(0);
+				const idle = samplesIn(read.rows.slice(before)).filter(
+					(row) => (row.metadata as Record<string, unknown>).idle === true,
+				);
+				expect(idle).toHaveLength(1);
+				const idleMs = (idle[0].metadata as Record<string, unknown>).idleMs;
+				expect(typeof idleMs).toBe("number");
+				expect(idleMs as number).toBeGreaterThan(1);
+				expect(handle.errors).toEqual([]);
+			} finally {
+				if (previous === undefined)
+					delete process.env.PI_LENS_LSP_IDLE_EVICT_MS;
+				else process.env.PI_LENS_LSP_IDLE_EVICT_MS = previous;
+			}
 		});
 	},
 );
