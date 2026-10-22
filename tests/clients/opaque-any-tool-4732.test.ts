@@ -85,6 +85,7 @@ import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
+import { syncGitGuardRecord } from "../../clients/git-guard.js";
 import { execSync } from "../support/git-fixture-env.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 import { readNdjsonRows } from "../support/ndjson-rows.js";
@@ -491,41 +492,157 @@ describe("which calls pay for git status (#4732)", () => {
 		expect(await analysedSince(offset)).toEqual(["relative_ext_tool seed.ts"]);
 	});
 
-	it("drops an export a refused relative path's edit removed, so a pi write of that name lands", async () => {
-		// RECURRENCE GUARDED: #4737 r3 verify R3-F1. The cachedExports refresh
-		// stayed keyed on filePath, so a refused relative path skipped it. The
-		// cache kept the export the edit removed, and the next pi write of that
-		// name in another file took a false "Redefining existing export(s)" STOP.
-		const runtime = runtimeFor("4737-r3-f1-exports");
+	/**
+	 * An unknown tool naming `seed.ts` (relative, so the result refuses it)
+	 * renames the export `seed`; then a pi `write` of `seed` lands in a sibling.
+	 * Returns that write's verdict and what the export cache maps afterwards.
+	 */
+	async function writeAfterRemovedExport(
+		label: string,
+		result: (
+			deps: Parameters<typeof handleToolResult>[0],
+		) => Parameters<typeof handleToolResult>[0],
+	): Promise<{ reason: string | undefined; renamed: string | undefined }> {
+		const runtime = runtimeFor(`4737-${label}`);
 		// As session_start's export scan leaves it.
 		runtime.cachedExports.set("seed", seed());
 		const event = {
-			toolName: "exports_ext_tool",
-			toolCallId: "4737-r3-f1-exports-1",
+			toolName: `${label.replaceAll("-", "_")}_ext_tool`,
+			toolCallId: `4737-${label}-1`,
 			input: { path: "seed.ts" },
 		};
 		await runHandlerExpectingNoThrow(() =>
 			handleToolCall(callDeps(runtime, event)),
 		);
 		fs.writeFileSync(seed(), "export const renamed = 2;\n");
-		await handleToolResult(resultDeps(runtime, event));
+		await handleToolResult(result(resultDeps(runtime, event)));
 		// An existing sibling: a write to a missing target returns before the
 		// export check.
 		const other = path.join(repoDir, "other.ts");
 		fs.writeFileSync(other, "// placeholder\n");
 		const write = {
 			toolName: "write",
-			toolCallId: "4737-r3-f1-exports-write",
-			input: {
-				path: other,
-				content: "export const seed = 3;\n",
-			},
+			toolCallId: `4737-${label}-write`,
+			input: { path: other, content: "export const seed = 3;\n" },
 		};
 		const verdict = (await runHandlerExpectingNoThrow(() =>
 			handleToolCall(callDeps(runtime, write)),
 		)) as { block?: boolean; reason?: string } | undefined;
-		expect(verdict?.reason).toBeUndefined();
-		expect(runtime.cachedExports.get("renamed")).toBe(seed());
+		return {
+			reason: verdict?.reason,
+			renamed: runtime.cachedExports.get("renamed"),
+		};
+	}
+
+	it("drops an export a refused relative path's edit removed, so a pi write of that name lands", async () => {
+		// RECURRENCE GUARDED: #4737 r3 verify R3-F1. The cachedExports refresh
+		// stayed keyed on filePath, so a refused relative path skipped it. The
+		// cache kept the export the edit removed, and the next pi write of that
+		// name in another file took a false "Redefining existing export(s)" STOP.
+		expect(await writeAfterRemovedExport("r3-f1", (deps) => deps)).toEqual({
+			reason: undefined,
+			renamed: seed(),
+		});
+	});
+
+	it("drops a removed export even when the analysis clients never arrive", async () => {
+		// RECURRENCE GUARDED: #4737 r4 (Greptile PRRT_kwDORt8rec6vFINK). The
+		// R3-F1 refresh sat inside the dispatch loop, after the client wait, so
+		// a client load failure or a wait cut returned first and the false
+		// duplicate-export STOP came back. Here the wait is cut: the clients are
+		// not loaded yet and the call is cancelled.
+		const cancelled = new AbortController();
+		cancelled.abort();
+		expect(
+			await writeAfterRemovedExport("r4-clients", (deps) => ({
+				...deps,
+				metricsClient: undefined,
+				signal: cancelled.signal,
+			})),
+		).toEqual({ reason: undefined, renamed: seed() });
+	});
+
+	it("clears the saved commit record when a clean observed edit of a refused relative path retires its blocker", async () => {
+		// RECURRENCE GUARDED: #4737 r4 (Greptile PRRT_kwDORt8rec6vFING). The
+		// observed dispatch took its analysis-root mode from the handler's
+		// `filePath`, which a refused relative path leaves unset, so the mode
+		// was that of the process cwd, not of the file. syncGitGuardRecord then
+		// skipped the saved record: the in-memory blocker cleared, and the saved
+		// one kept refusing every commit.
+		const runtime = runtimeFor("4737-r4-mode");
+		const guarded = (flag: string) =>
+			flag === "no-lsp" || flag === "lens-guard";
+		let commits = 0;
+		const commitBlocked = async () => {
+			const commit = {
+				toolName: "bash",
+				toolCallId: `4737-r4-mode-commit-${++commits}`,
+				input: { command: 'git commit -m "wip"' },
+			};
+			const verdict = (await runHandlerExpectingNoThrow(() =>
+				handleToolCall({ ...callDeps(runtime, commit), getFlag: guarded }),
+			)) as { block?: boolean } | undefined;
+			return verdict?.block === true;
+		};
+		// As a blocked earlier dispatch of seed.ts leaves the gate: the
+		// in-memory entry, and the saved record written from it.
+		runtime.recordInlineBlockers(
+			seed(),
+			"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+			runtime.nextWriteIndex(),
+			["ast-grep-napi"],
+			[1],
+		);
+		syncGitGuardRecord(runtime, new CacheManager(false), repoDir);
+		expect(await commitBlocked()).toBe(true);
+
+		const event = {
+			toolName: "mode_ext_tool",
+			toolCallId: "4737-r4-mode-1",
+			input: { path: "seed.ts" },
+		};
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall({ ...callDeps(runtime, event), getFlag: guarded }),
+		);
+		const offset = await latencyOffset();
+		fs.writeFileSync(seed(), "export const seed = 2;\n");
+		await handleToolResult({ ...resultDeps(runtime, event), getFlag: guarded });
+		// The run used the file's own class: a session file is not an adopted
+		// root, whose dispatch admits only a short runner list.
+		expect(
+			await phaseRowsSince(offset, "dispatch_adopted_root_allowlist"),
+		).toEqual([]);
+		expect(runtime.hasInlineBlocker(seed())).toBe(false);
+		expect(await commitBlocked()).toBe(false);
+	});
+
+	it("leaves a file an observed directory-target edit rewrote to the deferred autofix pass", async () => {
+		// RECURRENCE GUARDED: #4737 r4 sweep. The observed path took its mutation
+		// receipt for the path the tool named, which for a directory target is
+		// the directory (and for a refused relative path, nothing). A file in it
+		// that an earlier pi write's autofix had marked fixed this turn stayed
+		// marked, so the deferred pass skipped the bytes the tool wrote.
+		const runtime = runtimeFor("4737-r4-receipt");
+		const dir = path.join(repoDir, "src");
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, "a.ts");
+		fs.writeFileSync(file, "export const a = 1;\n");
+		// As a pi write whose immediate autofix fixed the file leaves the turn.
+		runtime.recordMutationToolReceipt(file, "write");
+		runtime.fixedThisTurn.add(file);
+		const event = {
+			toolName: "dir_ext_tool",
+			toolCallId: "4737-r4-receipt-1",
+			input: { path: dir },
+		};
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, event)),
+		);
+		const offset = await latencyOffset();
+		fs.writeFileSync(file, "export const a = 2;\n");
+		await handleToolResult(resultDeps(runtime, event));
+		expect(await analysedSince(offset)).toEqual(["dir_ext_tool src/a.ts"]);
+		expect(runtime.fixedThisTurn.has(file)).toBe(false);
 	});
 
 	it("sends an observed file to the servers before a sibling the same call rewrote is checked", async () => {

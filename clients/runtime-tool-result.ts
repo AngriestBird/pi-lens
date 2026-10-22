@@ -3425,26 +3425,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						stateHash: preSettleStateHash ?? getFileStateHash(filePath),
 					})
 				: [];
-			// #3763: the settle awaited; a replaced session's receipt stays out
-			// of the live session's turn.
-			const receiptOutcome = filePath
-				? writeSession.guardedWrite(filePath, () =>
-						(
-							runtime as Partial<RuntimeCoordinator>
-						).recordMutationToolReceipt?.call(runtime, filePath, observedKind),
-					)
-				: undefined;
-			// Same fallback formula the classified chain uses below, minus its
-			// `_bypassDebounce` branch (#2464 review round 2, S3): that branch was
-			// unreachable here. Both callers that set `_bypassDebounce` arrive with
-			// no pending baseline — `scheduleDebounced`'s re-entry because THIS
-			// call already consumed it at the settle above, and the bash-derived
-			// synthetic write because `runtime-tool-call.ts` excludes `bash` from
-			// arming outright (`toolName !== "bash"`). `observedKind` is always
-			// "edit", so the un-receipted default is "deferred" either way.
-			const observedAutofixMode: "immediate" | "deferred" =
-				receiptOutcome?.autofixMode ??
-				(observedKind === "edit" ? "deferred" : "immediate");
 			// Analyse the files the observation actually RECORDED, not merely the
 			// path the tool named. A directory is never a pipeline target.
 			const observedDispatchPaths = observedChangedPaths
@@ -3465,6 +3445,29 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					reason: `observed mutation dispatch capped at ${OBSERVED_DISPATCH_MAX_PATHS}; ${observedDispatchDropped} path(s) not dispatched`,
 				});
 			}
+			// #4737 r3 F1, r4: each recorded file's own receipt and exports, before
+			// the client wait below can return. The receipt is the write->edit
+			// turn transition (it releases a file an earlier write's autofix
+			// marked fixed, so the deferred pass fixes these bytes too), and a
+			// removed export left cached blocks the next write of that name.
+			// #3763: the settle awaited; a replaced session's receipt stays out of
+			// the live session's turn. The fallback is the classified chain's,
+			// minus its `_bypassDebounce` branch (#2464 review round 2, S3), which
+			// no caller reaching this block sets.
+			const observedAutofixModes = new Map<string, "immediate" | "deferred">();
+			for (const observedPath of observedChangedPaths)
+				writeSession.guardedWrite(observedPath, () => {
+					refreshCachedExports(runtime, observedPath);
+					const receipt = (
+						runtime as Partial<RuntimeCoordinator>
+					).recordMutationToolReceipt?.call(
+						runtime,
+						observedPath,
+						observedKind,
+					);
+					if (receipt)
+						observedAutofixModes.set(observedPath, receipt.autofixMode);
+				});
 			if (observedDispatchPaths.length > 0) {
 				const observedClients = ensureToolResultClients(deps);
 				if (
@@ -3491,9 +3494,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					// one's writes would be dropped, so its run is wasted work.
 					if (writeSession.guardedWrite(observedPath, () => true) !== true)
 						continue;
-					// #4737 r3 F1: each recorded file, not only the named path, so a
-					// refused relative path cannot leave a removed export cached.
-					refreshCachedExports(runtime, observedPath);
+					// #4737 r4: the file's own class, never the named path's: a refused
+					// relative path leaves `filePath` unset, and a sibling is not the
+					// file the tool named.
+					const observedRootMode = classifyAnalysisRoot(
+						observedPath,
+						workspaceRoot,
+					).mode;
 					const observedDispatchSignal = deps.signal;
 					const observedJoinSignal = deps.signal;
 					const observedStateHashForPath = getFileStateHash(observedPath);
@@ -3532,8 +3539,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 								workspaceRoot,
 							),
 							turnStateCwd: observedTurnStateCwd,
-							analysisRootMode,
-							autofixMode: observedAutofixMode,
+							analysisRootMode: observedRootMode,
+							autofixMode:
+								observedAutofixModes.get(observedPath) ??
+								(observedKind === "edit" ? "deferred" : "immediate"),
 							modifiedRanges: undefined,
 							writeIndex: observedWriteIndex,
 							writeOrderTurn: observedWriteOrderTurn,
@@ -3598,7 +3607,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							authored: true,
 							getFlag,
 							turnStateCwd: observedTurnStateCwd,
-							analysisRootMode,
+							analysisRootMode: observedRootMode,
 						});
 					}
 				}
