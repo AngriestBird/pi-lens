@@ -23,7 +23,7 @@
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { logLatency } = vi.hoisted(() => ({ logLatency: vi.fn() }));
@@ -69,7 +69,7 @@ interface TraceRun {
 const trace = JSON.parse(
 	fs.readFileSync(
 		path.join(
-			path.dirname(new URL(import.meta.url).pathname),
+			path.dirname(fileURLToPath(import.meta.url)),
 			"../../fixtures/opengrep-lsp-trace/auxiliary-first-publish.json",
 		),
 		"utf8",
@@ -324,5 +324,25 @@ describe("#4763 opengrep's empty publish before semgrep/rulesRefreshed", () => {
 			serverId: "opengrep",
 			heldEmptyPublishes: 2,
 		});
+	});
+
+	it("a second refresh reports only the publishes held since the first row", () => {
+		// Recurrence (#4770 review F2): the counter was never reset, so every
+		// later `lsp_rules_refreshed` row re-reported the session total as if the
+		// hold had dropped that many publishes again.
+		const { publish, rulesRefreshed } = armHandler("opengrep");
+		publish({ uri: uri(FILE), diagnostics: [] });
+		vi.advanceTimersByTime(OPENGREP_DEBOUNCE_MS * 2);
+		rulesRefreshed();
+		rulesRefreshed();
+
+		const held = logLatency.mock.calls
+			.map(
+				([row]) =>
+					row as { phase?: string; metadata?: { heldEmptyPublishes?: number } },
+			)
+			.filter((row) => row.phase === "lsp_rules_refreshed")
+			.map((row) => row.metadata?.heldEmptyPublishes);
+		expect(held).toEqual([1, 0]);
 	});
 });

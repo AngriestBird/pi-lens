@@ -1265,8 +1265,8 @@ export interface LSPClientState {
 	 * `emptyUntilRulesRefreshed`; a respawn is a new client and starts unset.
 	 */
 	rulesRefreshed?: boolean;
-	/** #4763: empty publishes held before `rulesRefreshed`; reported once, on the
-	 *  `lsp_rules_refreshed` row. */
+	/** #4763: empty publishes held since the last `lsp_rules_refreshed` row,
+	 *  which reports it and resets it. */
 	heldEmptyPublishes?: number;
 	/**
 	 * #3484: paths with a diagnostics fence outstanding. Each entry is its own
@@ -2065,6 +2065,8 @@ export function rebaselineForRulesRefresh(state: LSPClientState): void {
 			heldEmptyPublishes: state.heldEmptyPublishes ?? 0,
 		},
 	});
+	// Per refresh, not per session: a later refresh reports its own holds.
+	state.heldEmptyPublishes = 0;
 }
 
 /** #3482: expected and counted publications for a path. `sent` is the open
