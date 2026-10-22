@@ -225,6 +225,31 @@ describe("source=lsp drops jedi's compile verdict under a declared 3.14 (#4638)"
 	});
 });
 
+describe("source=lsp keys the drop on the publishing server (#4638 r3 N3)", () => {
+	it("delivers another server's source=compile row at a declared 3.14", async () => {
+		// Recurrence: the discriminator read `source === "compile"` alone in every
+		// delivery suite, so collapsing the `serverId` arm to a constant dropped a
+		// second server's genuine verdict and no delivery cell noticed (the
+		// survivor the second review quoted).
+		declareRequiresPython(">=3.14");
+		const service = makeService([
+			jediCompile(),
+			jediCompile({
+				serverId: "python-pyright-aux",
+				message: "SyntaxError: another server's own compile verdict",
+			}),
+		]);
+
+		const result = await probe(service);
+
+		expect(result.content[0].text).not.toContain("multiple exception types");
+		expect(result.content[0].text).toContain(
+			"another server's own compile verdict",
+		);
+		expect(result.details?.totalDiagnostics).toBe(1);
+	});
+});
+
 describe("source=lsp keeps every verdict below a declared 3.14 (#4638)", () => {
 	it("delivers jedi's compile verdict at a declared 3.13", async () => {
 		declareRequiresPython(">=3.13");
@@ -296,8 +321,36 @@ describe("the declaration that governs the drop (#4638 review)", () => {
 		);
 	});
 
-	it("stops a nested project from inheriting the enclosing level", async () => {
-		declareRequiresPython(">=3.14");
+	it("stops a nested ruff config from inheriting the enclosing level (#4638 r3 N1)", async () => {
+		// Ruff reads the nested `.ruff.toml` and applies its own default, so the
+		// enclosing project's 3.14 is not the level for this file.
+		fs.writeFileSync(
+			path.join(cwd, "pyproject.toml"),
+			'[tool.ruff]\ntarget-version = "py314"\n',
+		);
+		const nestedDir = path.join(cwd, "services", "api");
+		fs.mkdirSync(nestedDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(nestedDir, ".ruff.toml"),
+			"[lint]\nselect = ['E']\n",
+		);
+		const nestedFile = path.join(nestedDir, "app.py");
+		fs.writeFileSync(nestedFile, fs.readFileSync(filePath));
+		const service = makeService([jediCompile(), pyrightFinding()]);
+
+		const result = await probe(service, nestedFile);
+
+		expect(result.content[0].text).toContain("multiple exception types");
+		expect(compileDrops()).toHaveLength(0);
+	});
+
+	it("lets the enclosing level through a nested pyproject ruff ignores (#4638 r3 N1)", async () => {
+		// A nested `pyproject.toml` without `[tool.ruff]` is not a ruff config, so
+		// ruff keeps walking and the enclosing 3.14 governs this file too.
+		fs.writeFileSync(
+			path.join(cwd, "pyproject.toml"),
+			'[tool.ruff]\ntarget-version = "py314"\n',
+		);
 		const nestedDir = path.join(cwd, "services", "api");
 		fs.mkdirSync(nestedDir, { recursive: true });
 		fs.writeFileSync(
@@ -310,8 +363,10 @@ describe("the declaration that governs the drop (#4638 review)", () => {
 
 		const result = await probe(service, nestedFile);
 
-		expect(result.content[0].text).toContain("multiple exception types");
-		expect(compileDrops()).toHaveLength(0);
+		expect(result.content[0].text).not.toContain("multiple exception types");
+		expect(compileDrops()[0]?.latestReasons[0]?.reason).toContain(
+			"declared Python 3.14 (ruff-target-version)",
+		);
 	});
 
 	it("reads ruff's own same-directory config the way ruff does", async () => {

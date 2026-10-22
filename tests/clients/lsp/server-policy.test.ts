@@ -2146,6 +2146,12 @@ describe("lsp server policy", () => {
 		// the same venv ladder is intended; the fallback begins after the LAST one.
 		setPlatform("win32");
 		try {
+			// The ambient channels outrank the project `.venv`, so they are stubbed
+			// BEFORE the first detection: a developer shell with an active
+			// `VIRTUAL_ENV` must not decide this case (#4638 r3 N8).
+			vi.stubEnv("VIRTUAL_ENV", undefined);
+			vi.stubEnv("CONDA_PREFIX", undefined);
+			vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
 			const binDir = venvBinDir(tmp);
 			fs.mkdirSync(binDir, { recursive: true });
 			for (const name of ["jedi-language-server", "python"]) {
@@ -2168,9 +2174,6 @@ describe("lsp server policy", () => {
 			}
 
 			setProjectTrustState("trusted");
-			vi.stubEnv("VIRTUAL_ENV", undefined);
-			vi.stubEnv("CONDA_PREFIX", undefined);
-			vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
 			resetDegradationLedger();
 			launchLSP.mockClear();
 			// Every project candidate fails with something that is not "tool not
@@ -2204,6 +2207,82 @@ describe("lsp server policy", () => {
 			);
 		} finally {
 			setPlatform(realPlatform);
+			vi.unstubAllEnvs();
+			setProjectTrustState("trusted");
+		}
+	});
+
+	it("the fallback cannot resolve the failed project binary through PATH (#4638 r3 N5)", async () => {
+		// Recurrence: the fallback reused the venv-augmented environment, so its
+		// bare `jedi-language-server` resolved the SAME executable-but-failing shim
+		// the project tier had just thrown on, `spawn` rejected, and a working host
+		// copy later on PATH was never tried.
+		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
+		const { setProjectTrustState } =
+			await import("../../../clients/project-trust.js");
+		const { detectPythonEnvironment, pythonEnvironmentToolCandidates } =
+			await import("../../../clients/python-environment.js");
+
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-jedi-broken-shim-"),
+		);
+		dirs.push(tmp);
+		const binDir = venvBinDir(tmp);
+		fs.mkdirSync(binDir, { recursive: true });
+		for (const name of ["jedi-language-server", "python"]) {
+			fs.writeFileSync(venvTool(binDir, name), "#!/usr/bin/env bash\nexit 0\n");
+			fs.chmodSync(venvTool(binDir, name), 0o755);
+		}
+		const hostBin = path.join(tmp, "host-bin");
+		fs.mkdirSync(hostBin, { recursive: true });
+		const hostShim = venvTool(hostBin, "jedi-language-server");
+		fs.writeFileSync(hostShim, "#!/usr/bin/env bash\nexit 0\n");
+		fs.chmodSync(hostShim, 0o755);
+
+		setProjectTrustState("trusted");
+		vi.stubEnv("VIRTUAL_ENV", undefined);
+		vi.stubEnv("CONDA_PREFIX", undefined);
+		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
+		const environment = await detectPythonEnvironment(tmp);
+		const projectCandidates = pythonEnvironmentToolCandidates(
+			environment,
+			"jedi-language-server",
+		);
+		getToolEnvironment.mockResolvedValueOnce({ PATH: hostBin });
+		launchLSP.mockClear();
+		for (const _candidate of projectCandidates) {
+			launchLSP.mockRejectedValueOnce(
+				new Error("jedi-language-server exited immediately with code 127"),
+			);
+		}
+		launchLSP.mockResolvedValueOnce({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 5555,
+		});
+
+		try {
+			const spawned = await PythonJediServer.spawn(tmp);
+
+			expect(spawned).toBeDefined();
+			const [command, , options] = launchLSP.mock.calls.at(-1) as [
+				string,
+				string[],
+				{ env?: NodeJS.ProcessEnv },
+			];
+			expect(command).toBe("jedi-language-server");
+			const entries = String(options.env?.PATH).split(path.delimiter);
+			expect(entries).not.toContain(binDir);
+			expect(options.env?.VIRTUAL_ENV).toBeUndefined();
+			// `launchLSP` resolves a bare command by the first executable of that
+			// name along `env.PATH`; walk the fallback's PATH the same way.
+			const firstOnPath = entries
+				.map((entry) => venvTool(entry, command))
+				.find((candidate) => fs.existsSync(candidate));
+			expect(firstOnPath).toBe(hostShim);
+		} finally {
 			vi.unstubAllEnvs();
 			setProjectTrustState("trusted");
 		}

@@ -1338,6 +1338,9 @@ export function createLspNavigationTool(
 					);
 					const diagnostics = policy.kept;
 					const suppressedLine = dispositionSuppressedLine(policy.suppressed);
+					// #4638 r3 (N2): a row the declaration withheld is named on this route
+					// too, so an empty answer cannot read as "no findings published".
+					const withheldLine = withheldCompileNote(policy.withheld);
 					// #4403: #4322's rule on this route. When no language server
 					// answered, the read's health record names it, and an empty
 					// answer is not 0 diagnostics.
@@ -1366,7 +1369,7 @@ export function createLspNavigationTool(
 							content: [
 								{
 									type: "text" as const,
-									text: `${note}\n${JSON.stringify(result)}${primaryUnavailable ? `\nNote: ${primaryUnavailable}` : ""}${suppressedLine ? `\nNote: ${suppressedLine}` : ""}`,
+									text: `${note}\n${JSON.stringify(result)}${primaryUnavailable ? `\nNote: ${primaryUnavailable}` : ""}${suppressedLine ? `\nNote: ${suppressedLine}` : ""}${withheldLine ? `\nNote: ${withheldLine}` : ""}`,
 								},
 							],
 							details: {
@@ -1376,6 +1379,9 @@ export function createLspNavigationTool(
 								coverage: "requested-file",
 								...(policy.suppressed > 0 && {
 									dispositionSuppressed: policy.suppressed,
+								}),
+								...(policy.withheld && {
+									withheldCompile: policy.withheld.count,
 								}),
 								...(primaryUnavailable !== undefined && {
 									unconfirmed: true,

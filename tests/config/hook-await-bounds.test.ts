@@ -2670,7 +2670,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// S3776, cognitive complexity 35 -> under the limit), so the same five reads
 	// now cost three extra `await` expressions at the tier calls. No new I/O, no
 	// new unbounded operation; the probes themselves are unchanged.
-	"clients/python-environment.ts": 13,
+	// 13 -> 11 (#4638 r3 N1): each tier now returns its declaration together
+	// with whether it closed the walk, and one per-directory function drives the
+	// four tiers, so the tier awaits sit in one loop instead of in the walker.
+	// Fewer awaits, the same declaration-file reads, no new unbounded operation.
+	"clients/python-environment.ts": 11,
 	"clients/quiet-window.ts": 6,
 	"clients/read-expansion.ts": 2,
 	// 5 -> 3 (#3612): `resolveReadGuardStartState`'s two sidecar awaits moved

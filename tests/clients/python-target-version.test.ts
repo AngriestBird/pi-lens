@@ -226,6 +226,111 @@ describe("detectPythonTargetVersion precedence", () => {
 	});
 });
 
+/**
+ * #4638 r3 (N1): each declaration source stops the upward walk where ITS OWN tool
+ * stops, not at any `pyproject.toml`. Every expectation below was measured on
+ * ruff 0.17.1 (`ruff check --show-settings`) and pyright 1.1.414 (`--verbose`);
+ * `ruff-target-version-real.test.ts` re-asks the real ruff for the ruff rows.
+ * Recurrence: one directory-wide boundary under-triggered at a nested
+ * `pyproject.toml` ruff ignores and over-triggered past a nested config that
+ * owns the level, so the drop applied an ancestor's level where the tool never
+ * would, or withheld nothing where it should.
+ */
+describe("detectPythonTargetVersion walk boundary per source (#4638 r3 N1)", () => {
+	it("ruff walks past a nested pyproject without [tool.ruff]", async () => {
+		const file = write(
+			"pyproject.toml",
+			'[tool.ruff]\ntarget-version = "py314"\n',
+		);
+		write("services/api/pyproject.toml", '[project]\nname = "api"\n');
+		await expect(resolveFor("services/api/app.py")).resolves.toEqual({
+			major: 3,
+			minor: 14,
+			source: "ruff-target-version",
+			file,
+		});
+	});
+
+	it("ruff stops at a nested .ruff.toml that sets no target-version", async () => {
+		write("pyproject.toml", '[tool.ruff]\ntarget-version = "py314"\n');
+		write("services/api/.ruff.toml", "[lint]\nselect = ['E']\n");
+		await expect(resolveFor("services/api/app.py")).resolves.toBeUndefined();
+	});
+
+	it("ruff stops at a nested [tool.ruff] that sets no target-version", async () => {
+		write("pyproject.toml", '[tool.ruff]\ntarget-version = "py314"\n');
+		write("services/api/pyproject.toml", "[tool.ruff]\nline-length = 100\n");
+		await expect(resolveFor("services/api/app.py")).resolves.toBeUndefined();
+	});
+
+	it("pyright walks past a nested pyproject without [tool.pyright]", async () => {
+		const file = write(
+			"pyproject.toml",
+			'[tool.pyright]\npythonVersion = "3.14"\n',
+		);
+		write("services/api/pyproject.toml", '[project]\nname = "api"\n');
+		await expect(resolveFor("services/api/app.py")).resolves.toEqual({
+			major: 3,
+			minor: 14,
+			source: "pyright-python-version",
+			file,
+		});
+	});
+
+	it("pyright stops at a nested pyrightconfig.json that sets no pythonVersion", async () => {
+		write("pyrightconfig.json", '{"pythonVersion": "3.14"}\n');
+		write("services/api/pyrightconfig.json", "{}\n");
+		await expect(resolveFor("services/api/app.py")).resolves.toBeUndefined();
+	});
+
+	it("requires-python walks past a nested pyproject that has none (ruff infers the same way)", async () => {
+		const file = write(
+			"pyproject.toml",
+			'[project]\nrequires-python = ">=3.14"\n',
+		);
+		write("services/api/pyproject.toml", '[project]\nname = "api"\n');
+		await expect(resolveFor("services/api/app.py")).resolves.toEqual({
+			major: 3,
+			minor: 14,
+			source: "requires-python",
+			file,
+		});
+	});
+
+	it("requires-python stops at a nested pyproject that carries its own, usable or not", async () => {
+		write("pyproject.toml", '[project]\nrequires-python = ">=3.14"\n');
+		write("services/api/pyproject.toml", '[project]\nrequires-python = "<4"\n');
+		await expect(resolveFor("services/api/app.py")).resolves.toBeUndefined();
+	});
+
+	it("a nested ruff config without a target still lets an ancestor's requires-python through", async () => {
+		const file = write(
+			"pyproject.toml",
+			'[project]\nrequires-python = ">=3.14"\n',
+		);
+		write("services/api/.ruff.toml", "[lint]\nselect = ['E']\n");
+		await expect(resolveFor("services/api/app.py")).resolves.toEqual({
+			major: 3,
+			minor: 14,
+			source: "requires-python",
+			file,
+		});
+	});
+
+	it(".python-version walks past a nested pyproject and stops at a nested .python-version", async () => {
+		const file = write(".python-version", "3.14\n");
+		write("services/api/pyproject.toml", '[project]\nname = "api"\n');
+		await expect(resolveFor("services/api/app.py")).resolves.toMatchObject({
+			major: 3,
+			minor: 14,
+			source: "python-version-file",
+			file,
+		});
+		write("services/api/.python-version", "main\n");
+		await expect(resolveFor("services/api/app.py")).resolves.toBeUndefined();
+	});
+});
+
 describe("detectPythonTargetVersion reductions", () => {
 	const forms: Array<[string, number]> = [
 		[">=3.12", 12],
@@ -254,6 +359,37 @@ describe("detectPythonTargetVersion reductions", () => {
 		});
 	}
 
+	it("reads a triple-quoted declaration in every source (#4638 r3 N7)", async () => {
+		// Recurrence: `parseTomlScalarString` read `"""..."""` as an empty string, so
+		// a legal TOML spelling declared nothing and the false positive survived.
+		write("pyproject.toml", '[project]\nrequires-python = """>=3.14"""\n');
+		await expect(resolveFor()).resolves.toMatchObject({
+			minor: 14,
+			source: "requires-python",
+		});
+		write(
+			"pyproject.toml",
+			"[project]\nrequires-python = \'\'\'>=3.14\'\'\'\n",
+		);
+		await expect(resolveFor()).resolves.toMatchObject({
+			minor: 14,
+			source: "requires-python",
+		});
+		write("pyproject.toml", '[tool.ruff]\ntarget-version = """py314"""\n');
+		await expect(resolveFor()).resolves.toMatchObject({
+			minor: 14,
+			source: "ruff-target-version",
+		});
+		write(
+			"pyproject.toml",
+			"[tool.pyright]\npythonVersion = \'\'\'3.14\'\'\'\n",
+		);
+		await expect(resolveFor()).resolves.toMatchObject({
+			minor: 14,
+			source: "pyright-python-version",
+		});
+	});
+
 	it("takes the strongest lower bound in either order (#4638 review)", async () => {
 		for (const specifier of [">=3.12,>=3.14", ">=3.14,>=3.12"]) {
 			write("pyproject.toml", `[project]\nrequires-python = "${specifier}"\n`);
@@ -276,12 +412,6 @@ describe("detectPythonTargetVersion reductions", () => {
 			source: "pyright-python-version",
 			file,
 		});
-	});
-
-	it("stops at a nested pyproject.toml that declares nothing (#4638 review)", async () => {
-		write("pyproject.toml", '[project]\nrequires-python = ">=3.14"\n');
-		write("services/api/pyproject.toml", '[project]\nname = "api"\n');
-		await expect(resolveFor("services/api/app.py")).resolves.toBeUndefined();
 	});
 
 	it("still reads a declaration inside the nested project", async () => {

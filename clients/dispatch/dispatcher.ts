@@ -672,6 +672,8 @@ export interface RunnerLatency {
 	primaryUnavailableCause?: PrimaryUnavailableCause;
 	/** #4403: the runner's own `disabledPrimaryServerIds`. */
 	disabledPrimaryServerIds?: readonly string[];
+	/** #4638 r3 (N2): the runner's own `withheldNotice`, rendered inline. */
+	withheldNotice?: string;
 }
 
 export interface DispatchLatencyReport {
@@ -1361,6 +1363,9 @@ async function runGroup(
 			...(result.disabledPrimaryServerIds !== undefined && {
 				disabledPrimaryServerIds: result.disabledPrimaryServerIds,
 			}),
+			...(result.withheldNotice !== undefined && {
+				withheldNotice: result.withheldNotice,
+			}),
 		});
 		logLatency({
 			type: "runner",
@@ -1897,9 +1902,29 @@ export async function dispatchForFile(
 	const blockerOutput = formatDiagnostics(inlineBlockers, "blocking");
 	let output = blockerOutput;
 	output += formatDiagnostics(inlineFixed, "fixed");
-	if (coverageNotice) {
-		output += formatDiagnostics([coverageNotice], "warning", 1);
-		warnings.push(coverageNotice);
+	// #4638 r3 (N2): findings a runner withheld on purpose are named on the same
+	// inline channel as the coverage notice, never left to the ledger alone.
+	const withheldMessages = [
+		...new Set(runnerLatencies.flatMap((r) => r.withheldNotice ?? [])),
+	];
+	const withheldNotice: Diagnostic | undefined =
+		withheldMessages.length > 0
+			? {
+					id: `withheld-compile:${ctx.kind}:${path.basename(ctx.filePath)}`,
+					message: withheldMessages.join("\n"),
+					filePath: ctx.filePath,
+					severity: "warning",
+					semantic: "warning",
+					tool: "pi-lens",
+				}
+			: undefined;
+	const inlineNotices = [
+		...(coverageNotice ? [coverageNotice] : []),
+		...(withheldNotice ? [withheldNotice] : []),
+	];
+	if (inlineNotices.length > 0) {
+		output += formatDiagnostics(inlineNotices, "warning", inlineNotices.length);
+		warnings.push(...inlineNotices);
 	}
 	const pendingRunners = runnerLatencies
 		.filter((runner) => runner.status === "pending")

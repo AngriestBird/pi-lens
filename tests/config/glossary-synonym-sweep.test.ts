@@ -950,7 +950,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/diagnostic-dispositions.ts": 10,
 		"clients/diagnostic-logger.ts": 3,
 		"clients/diagnostics-publish.ts": 6,
-		"clients/dispatch/dispatcher.ts": 6,
+		// 6 -> 7 (#4638 r3 N2): the inline withheld-compile notice names its file
+		// with one more `path.basename`, the same sense as the two coverage notices.
+		"clients/dispatch/dispatcher.ts": 7,
 		"clients/dispatch/integration.ts": 1,
 		"clients/dispatch/rule-id-normalize.ts": 2,
 		"clients/dispatch/rule-ignores.ts": 3,

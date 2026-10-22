@@ -2374,6 +2374,44 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 		expect(walkedDeclarations.files).toContain(jediFile);
 	});
 
+	it("names the withheld row on the single-file path read (#4638 r3 N2)", async () => {
+		// Recurrence: the path route filtered the row and returned a bare empty
+		// answer (`empty_result`), indistinguishable from "no findings published".
+		const jediFile = path.join(cwd, "jedi_only.py");
+		fs.writeFileSync(jediFile, "def run() -> None:\n\tpass\n");
+		fs.writeFileSync(
+			path.join(cwd, "pyproject.toml"),
+			'[project]\nname = "d"\nrequires-python = ">=3.14"\n',
+		);
+		const service = mocked.service as {
+			getWorkspaceDiagnosticsSupport: unknown;
+			getDiagnostics: unknown;
+		};
+		service.getWorkspaceDiagnosticsSupport = vi
+			.fn()
+			.mockResolvedValue({ mode: "pull" });
+		service.getDiagnostics = vi.fn().mockResolvedValue([jediCompileRow()]);
+
+		const result = await createLspNavigationTool(
+			(flag) => flag === "lens-lsp",
+		).execute(
+			"nav-4638-path",
+			{ operation: "workspaceDiagnostics", path: jediFile },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		);
+
+		const envelope = parseToolJson(result);
+		expect(resultMessages(envelope)).not.toContain(COMPILE);
+		expect(envelope.notes).toContainEqual(
+			expect.stringContaining(
+				"1 python-jedi compile finding withheld: the project declares Python 3.14 (requires-python)",
+			),
+		);
+		expect(result.details?.withheldCompile).toBe(1);
+	});
+
 	it("still delivers jedi's compile row blocking while the project declares 3.13 (#4638 F10)", async () => {
 		const jediFile = path.join(cwd, "jedi_only.py");
 		fs.writeFileSync(jediFile, "def run() -> None:\n\tpass\n");

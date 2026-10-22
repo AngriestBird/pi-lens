@@ -32,6 +32,18 @@ const hasRuff = (() => {
 	}
 })();
 
+/** The level ruff itself resolves for `filePath` from `cwd` (`none` when unset). */
+function ruffTargetLevel(filePath: string, cwd: string): string {
+	const shown = spawnSync("ruff", ["check", "--show-settings", filePath], {
+		cwd,
+		encoding: "utf-8",
+	}).stdout;
+	const target = /linter\.unresolved_target_version = (\d+)\.(\d+)/.exec(
+		shown ?? "",
+	);
+	return target ? `${target[1]}.${target[2]}` : "none";
+}
+
 const SOURCE = "from typing import List\n\nx: List[int] = []\n";
 
 let cwd: string;
@@ -104,19 +116,76 @@ describe.skipIf(!hasRuff)(
 				filePath,
 				path.dirname(cwd),
 			);
-			const shown = spawnSync("ruff", ["check", "--show-settings", filePath], {
-				cwd,
-				encoding: "utf-8",
-			}).stdout;
-			const target = /linter\.unresolved_target_version = (\d+)\.(\d+)/.exec(
-				shown ?? "",
-			);
+			const ruffLevel = ruffTargetLevel(filePath, cwd);
 
 			expect(declared).toMatchObject({
-				major: Number(target?.[1]),
-				minor: Number(target?.[2]),
+				major: Number(ruffLevel.split(".")[0]),
+				minor: Number(ruffLevel.split(".")[1]),
 				source: "ruff-target-version",
 			});
+		});
+
+		it("agrees with ruff's nested config discovery (#4638 r3 N1)", async () => {
+			// Recurrence: one walk boundary for every source under-triggered at a
+			// nested pyproject ruff ignores and over-triggered past a nested config
+			// ruff reads. The binary is the oracle for each nested shape.
+			const NESTED = path.join(cwd, "services", "api");
+			fs.mkdirSync(NESTED, { recursive: true });
+			const filePath = path.join(NESTED, "app.py");
+			fs.writeFileSync(filePath, "x = 1\n");
+			const rootRuff = '[tool.ruff]\ntarget-version = "py314"\n';
+			const rootRequires =
+				'[project]\nname = "r"\nrequires-python = ">=3.14"\n';
+			const cases: Array<{
+				label: string;
+				root: string;
+				nested: Record<string, string>;
+			}> = [
+				{
+					label: "nested pyproject without [tool.ruff]",
+					root: rootRuff,
+					nested: { "pyproject.toml": '[project]\nname = "n"\n' },
+				},
+				{
+					label: "nested .ruff.toml without target-version",
+					root: rootRuff,
+					nested: { ".ruff.toml": "[lint]\nselect = ['E']\n" },
+				},
+				{
+					label: "nested [tool.ruff] without target-version",
+					root: rootRuff,
+					nested: { "pyproject.toml": "[tool.ruff]\nline-length = 100\n" },
+				},
+				{
+					label: "nested .ruff.toml, ancestor requires-python",
+					root: rootRequires,
+					nested: { ".ruff.toml": "[lint]\nselect = ['E']\n" },
+				},
+				{
+					label: "nested pyproject without requires-python",
+					root: rootRequires,
+					nested: { "pyproject.toml": '[project]\nname = "n"\n' },
+				},
+			];
+			for (const entry of cases) {
+				for (const name of fs.readdirSync(NESTED)) {
+					if (name !== "app.py") fs.rmSync(path.join(NESTED, name));
+				}
+				fs.writeFileSync(path.join(cwd, "pyproject.toml"), entry.root);
+				for (const [name, content] of Object.entries(entry.nested)) {
+					fs.writeFileSync(path.join(NESTED, name), content);
+				}
+
+				const declared = await detectPythonTargetVersion(
+					filePath,
+					path.dirname(cwd),
+				);
+				const ruffLevel = ruffTargetLevel(filePath, NESTED);
+				expect(
+					declared ? `${declared.major}.${declared.minor}` : "none",
+					entry.label,
+				).toBe(ruffLevel);
+			}
 		});
 
 		it("fixes at the level the same-directory config selects", async () => {

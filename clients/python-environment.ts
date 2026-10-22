@@ -517,6 +517,18 @@ export function recordPythonCompileVerdictDrop(
 	});
 }
 
+/**
+ * The one model-facing sentence for rows the declaration withheld: the post-write
+ * runner, every probe render, `mode=full` and `lsp_navigation` say it the same
+ * way, so a dropped row is never visible only in the ledger (AGENTS.md shape 10).
+ */
+export function describePythonCompileWithheld(
+	count: number,
+	declared: PythonTargetVersion,
+): string {
+	return `${count} python-jedi compile finding${count === 1 ? "" : "s"} withheld: the project declares Python ${declared.major}.${declared.minor} (${declared.source}) in ${declared.file}`;
+}
+
 interface DeclaredPythonVersion {
 	major: number;
 	minor: number;
@@ -656,17 +668,29 @@ function parsePyrightJsonVersion(
 }
 
 /**
+ * One tier's answer for one directory: the declaration it read, and whether the
+ * directory holds the tier's OWN config, which ends that tier's upward walk
+ * whether or not it declared a level (#4638 r3 N1).
+ */
+interface TierRead {
+	declaration: PythonTargetVersion | undefined;
+	owned: boolean;
+}
+
+/**
  * Tier 1, ruff `target-version`. Ruff reads ONE config file per project, and in
  * one directory it prefers `.ruff.toml`, then `ruff.toml`, then
  * `pyproject.toml`; measured against ruff 0.16.8 (#4638 review). A file with no
  * usable `target-version` ends the tier rather than falling through to a
- * spelling ruff would ignore.
+ * spelling ruff would ignore. Ruff ignores a `pyproject.toml` without
+ * `[tool.ruff]`, so only a config that holds ruff's own settings owns the
+ * directory (#4638 r3 N1).
  */
 async function readRuffTier(
 	dir: string,
 	pyproject: string | undefined,
 	pyprojectPath: string,
-): Promise<PythonTargetVersion | undefined> {
+): Promise<TierRead> {
 	let configPath: string | undefined;
 	let config: string | undefined;
 	for (const name of [".ruff.toml", "ruff.toml"]) {
@@ -682,118 +706,164 @@ async function readRuffTier(
 			pyproject === undefined ||
 			!hasTomlTable(pyproject, String.raw`tool\.ruff`)
 		) {
-			return undefined;
+			return { declaration: undefined, owned: false };
 		}
 		configPath = pyprojectPath;
 		config = extractTomlTableSection(pyproject, String.raw`tool\.ruff`);
 	}
-	if (configPath === undefined || config === undefined) return undefined;
+	if (configPath === undefined || config === undefined) {
+		return { declaration: undefined, owned: false };
+	}
 	const target = parseTomlScalarString(config, "target-version");
-	return withSource(
-		target ? reduceRuffTargetVersion(target) : undefined,
-		"ruff-target-version",
-		configPath,
-	);
+	return {
+		declaration: withSource(
+			target ? reduceRuffTargetVersion(target) : undefined,
+			"ruff-target-version",
+			configPath,
+		),
+		owned: true,
+	};
 }
 
 /**
  * Tier 2, pyright `pythonVersion`. pyright's own config file outranks
- * `[tool.pyright]`, and only one of the two is read.
+ * `[tool.pyright]`, and only one of the two is read. pyright skips a
+ * `pyproject.toml` without `[tool.pyright]` (measured on 1.1.414), so only
+ * `pyrightconfig.json` or that table owns the directory.
  */
 async function readPyrightTier(
 	dir: string,
 	pyproject: string | undefined,
 	pyprojectPath: string,
-): Promise<PythonTargetVersion | undefined> {
+): Promise<TierRead> {
 	const configPath = join(dir, "pyrightconfig.json");
 	const config = await readDeclarationFile(configPath);
 	if (config !== undefined) {
-		return withSource(
-			parsePyrightJsonVersion(config),
-			"pyright-python-version",
-			configPath,
-		);
+		return {
+			declaration: withSource(
+				parsePyrightJsonVersion(config),
+				"pyright-python-version",
+				configPath,
+			),
+			owned: true,
+		};
 	}
-	if (pyproject === undefined) return undefined;
+	if (pyproject === undefined) return { declaration: undefined, owned: false };
 	const section = extractTomlTableSection(pyproject, String.raw`tool\.pyright`);
-	const raw = section
-		? parseTomlScalarString(section, "pythonVersion")
-		: undefined;
-	return withSource(
-		raw ? reduceBarePythonVersion(raw) : undefined,
-		"pyright-python-version",
-		pyprojectPath,
-	);
+	if (section === undefined) return { declaration: undefined, owned: false };
+	const raw = parseTomlScalarString(section, "pythonVersion");
+	return {
+		declaration: withSource(
+			raw ? reduceBarePythonVersion(raw) : undefined,
+			"pyright-python-version",
+			pyprojectPath,
+		),
+		owned: true,
+	};
 }
 
-/** Tier 3, `requires-python` reduced to its lower bound. */
+/**
+ * Tier 3, `requires-python` reduced to its lower bound. Ruff infers its target
+ * from the nearest ancestor `pyproject.toml` that CARRIES the key and walks past
+ * one that does not (measured on ruff 0.17.1), so only the key owns the directory.
+ */
 function readRequiresPythonTier(
 	pyproject: string | undefined,
 	pyprojectPath: string,
-): PythonTargetVersion | undefined {
-	if (pyproject === undefined) return undefined;
+): TierRead {
+	if (pyproject === undefined) return { declaration: undefined, owned: false };
 	const projectSection = extractTomlTableSection(pyproject, "project");
 	const raw =
 		projectSection !== undefined
 			? parseTomlScalarString(projectSection, "requires-python")
 			: undefined;
-	return withSource(
-		raw ? reducePythonSpecifier(raw) : undefined,
-		"requires-python",
-		pyprojectPath,
-	);
+	return {
+		declaration: withSource(
+			raw ? reducePythonSpecifier(raw) : undefined,
+			"requires-python",
+			pyprojectPath,
+		),
+		owned: raw !== undefined,
+	};
 }
 
-/** Tier 4, the first line of `.python-version`. */
-async function readVersionFileTier(
-	dir: string,
-): Promise<PythonTargetVersion | undefined> {
+/** Tier 4, the first line of `.python-version`; the file itself owns the directory. */
+async function readVersionFileTier(dir: string): Promise<TierRead> {
 	const levelFilePath = join(dir, ".python-version");
 	const content = await readDeclarationFile(levelFilePath);
-	if (content === undefined) return undefined;
+	if (content === undefined) return { declaration: undefined, owned: false };
 	const firstLine = (content.split(/\r?\n/, 1)[0] ?? "").trim();
-	return withSource(
-		reduceBarePythonVersion(firstLine),
-		"python-version-file",
-		levelFilePath,
-	);
+	return {
+		declaration: withSource(
+			reduceBarePythonVersion(firstLine),
+			"python-version-file",
+			levelFilePath,
+		),
+		owned: true,
+	};
 }
+
+/** The four declaration sources, highest precedence first. */
+const PYTHON_DECLARATION_SOURCES: readonly PythonTargetVersionSource[] = [
+	"ruff-target-version",
+	"pyright-python-version",
+	"requires-python",
+	"python-version-file",
+];
 
 interface DirectoryDeclarations {
 	declaration: PythonTargetVersion | undefined;
-	/** A `pyproject.toml` here opens a project; nothing above it declares for it. */
-	projectBoundary: boolean;
+	/** Sources whose own config sits here, so their walk ends in this directory. */
+	closed: PythonTargetVersionSource[];
 }
 
 /**
  * The declarations one directory can hold, probed in the documented order:
  * ruff `target-version`, pyright `pythonVersion`, `requires-python`, then
  * `.python-version`. Within a tier the nearest declaration wins, so the first
- * directory that declares anything answers for the file. `??` keeps the tiers
- * sequential: each is only read when the one before it declared nothing.
+ * directory that declares anything answers for the file. Each tier is only read
+ * when it is still `open` and when the one before it declared nothing.
  *
- * The same probe reports whether the directory holds a `pyproject.toml`, which
- * the walk uses as a project boundary (#4638 review).
+ * The probe also reports which sources this directory CLOSES: each tool stops
+ * at its own config, not at any `pyproject.toml` (#4638 r3 N1).
  */
 async function readPythonDeclarationInDirectory(
 	dir: string,
+	open: ReadonlySet<PythonTargetVersionSource>,
 ): Promise<DirectoryDeclarations> {
 	const pyprojectPath = join(dir, "pyproject.toml");
 	const pyproject = await readDeclarationFile(pyprojectPath);
-	const declaration =
-		(await readRuffTier(dir, pyproject, pyprojectPath)) ??
-		(await readPyrightTier(dir, pyproject, pyprojectPath)) ??
-		readRequiresPythonTier(pyproject, pyprojectPath) ??
-		(await readVersionFileTier(dir));
-	return { declaration, projectBoundary: pyproject !== undefined };
+	const tiers: Array<[PythonTargetVersionSource, () => Promise<TierRead>]> = [
+		["ruff-target-version", () => readRuffTier(dir, pyproject, pyprojectPath)],
+		[
+			"pyright-python-version",
+			() => readPyrightTier(dir, pyproject, pyprojectPath),
+		],
+		[
+			"requires-python",
+			async () => readRequiresPythonTier(pyproject, pyprojectPath),
+		],
+		["python-version-file", () => readVersionFileTier(dir)],
+	];
+	const closed: PythonTargetVersionSource[] = [];
+	for (const [source, read] of tiers) {
+		if (!open.has(source)) continue;
+		const { declaration, owned } = await read();
+		if (declaration) return { declaration, closed: [] };
+		if (owned) closed.push(source);
+	}
+	return { declaration: undefined, closed };
 }
 
 /**
  * #4638: the Python syntax level the project declares for `filePath`, or
  * undefined when it declares none. Walks up from the file's directory (so every
  * project root is on the way) and stops at `homeDir`, the shared ceiling for
- * walk-up discovery. Only a Python source file has an answer, so a mixed sweep
- * pays nothing for its other files.
+ * walk-up discovery. Each source ends its own walk at its own config (ruff at a
+ * ruff config, pyright at pyrightconfig.json or `[tool.pyright]`,
+ * `requires-python` at a `pyproject.toml` that carries the key, `.python-version`
+ * at itself), the rule each tool applies. Only a Python source file has an
+ * answer, so a mixed sweep pays nothing for its other files.
  *
  * A declaration that names no CPython major/minor is absent, never a default:
  * guessing a level is what produced the spurious `compile` verdict in the first
@@ -804,14 +874,19 @@ export async function detectPythonTargetVersion(
 	homeDir: string = os.homedir(),
 ): Promise<PythonTargetVersion | undefined> {
 	if (resolveLanguage(filePath)?.id !== "python") return undefined;
+	const open = new Set(PYTHON_DECLARATION_SOURCES);
 	for (const dir of walkUpDirs(dirname(resolve(filePath)))) {
 		if (isAtOrAboveHomeDir(dir, homeDir)) return undefined;
-		const { declaration, projectBoundary } =
-			await readPythonDeclarationInDirectory(dir);
+		const { declaration, closed } = await readPythonDeclarationInDirectory(
+			dir,
+			open,
+		);
 		if (declaration) return declaration;
-		// A nested project declares only for itself: a `pyproject.toml` that names
-		// no level must not inherit the enclosing project's declaration.
-		if (projectBoundary) return undefined;
+		// A source's own config here ends THAT source's walk: a nested project
+		// declares only for itself under that tool's discovery rule, and no
+		// ancestor's level reaches it. Other sources keep walking.
+		for (const source of closed) open.delete(source);
+		if (open.size === 0) return undefined;
 	}
 	return undefined;
 }

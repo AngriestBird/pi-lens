@@ -52,6 +52,9 @@ function pyrightFinding() {
 	};
 }
 
+const WITHHELD_NOTICE =
+	"1 python-jedi compile finding withheld: the project declares Python 3.14 (requires-python) in ";
+
 const mocked = vi.hoisted(() => ({
 	service: undefined as unknown,
 }));
@@ -63,6 +66,13 @@ vi.mock("../../../../clients/lsp/capabilities.js", async () => {
 	return { ...actual, getLSPService: () => mocked.service };
 });
 
+import {
+	clearCoverageNoticeState,
+	createDispatchContext,
+	dispatchForFile,
+	RunnerRegistry,
+} from "../../../../clients/dispatch/dispatcher.js";
+import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import lspRunner from "../../../../clients/dispatch/runners/lsp.js";
 
 let cwd: string;
@@ -75,17 +85,18 @@ function declareRequiresPython(specifier: string): void {
 	);
 }
 
-async function run(
-	diags: Array<Record<string, unknown>>,
-): Promise<Array<{ message: string }>> {
+async function runResult(diags: Array<Record<string, unknown>>) {
 	mocked.service = makeLspServiceDouble({
 		supportsLSP: vi.fn(() => true),
 		touchFile: vi.fn(async () => ({ diags })),
 	});
-	const result = await lspRunner.run(
-		makeRunnerCtx(filePath, cwd, { kind: "python" }),
-	);
-	return result.diagnostics;
+	return lspRunner.run(makeRunnerCtx(filePath, cwd, { kind: "python" }));
+}
+
+async function run(
+	diags: Array<Record<string, unknown>>,
+): Promise<Array<{ message: string }>> {
+	return (await runResult(diags)).diagnostics;
 }
 
 function compileDrops() {
@@ -130,6 +141,78 @@ describe("post-write jedi answer under a declared syntax level (#4638)", () => {
 		expect(drops[0]?.latestReasons[0]?.reason).toContain(
 			"1 jedi compile finding dropped",
 		);
+	});
+
+	it("names the withheld row when it was the only one, and never reads as clean (#4638 r3 N2)", async () => {
+		// Recurrence: with the only row withheld the runner returned
+		// `succeeded` / `no-diagnostics` / `[]` and nothing else, so the edit read
+		// as clean on the lane an edit actually goes through.
+		declareRequiresPython(">=3.14");
+
+		const result = await runResult([jediCompile()]);
+
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toEqual([]);
+		expect(result.withheldNotice).toBe(
+			`${WITHHELD_NOTICE}${path.join(cwd, "pyproject.toml")}`,
+		);
+	});
+
+	it("names the withheld row beside a surviving finding too (#4638 r3 N2)", async () => {
+		declareRequiresPython(">=3.14");
+
+		const result = await runResult([jediCompile(), pyrightFinding()]);
+
+		expect(result.withheldNotice).toBe(
+			`${WITHHELD_NOTICE}${path.join(cwd, "pyproject.toml")}`,
+		);
+	});
+
+	it("reaches the edit's inline output through the real dispatcher (#4638 r3 N2)", async () => {
+		// The dispatcher renders only blockers inline, so a field the runner sets
+		// but the dispatcher drops would still read as a clean edit.
+		declareRequiresPython(">=3.14");
+		mocked.service = makeLspServiceDouble({
+			supportsLSP: vi.fn(() => true),
+			touchFile: vi.fn(async () => ({ diags: [jediCompile()] })),
+		});
+		const registry = new RunnerRegistry();
+		registry.register(lspRunner);
+		clearCoverageNoticeState();
+
+		const result = await dispatchForFile(
+			createDispatchContext(
+				filePath,
+				cwd,
+				{ getFlag: () => false },
+				new FactStore(),
+			),
+			[{ mode: "all", runnerIds: ["lsp"] }],
+			registry,
+			undefined,
+			{ dedupeCoverageNotice: false },
+		);
+
+		expect(result.hasBlockers).toBe(false);
+		expect(result.output).toContain(
+			`${WITHHELD_NOTICE}${path.join(cwd, "pyproject.toml")}`,
+		);
+		expect(result.warnings.map((entry) => entry.message)).toContainEqual(
+			expect.stringContaining("1 python-jedi compile finding withheld"),
+		);
+	});
+
+	it("keeps another server's source=compile row at 3.14 (#4638 r3 N3)", async () => {
+		// Recurrence: the drop must key on the publishing `serverId`; a constant
+		// there survived every delivery cell (second review's mutation).
+		declareRequiresPython(">=3.14");
+
+		const diagnostics = await run([
+			jediCompile(),
+			{ ...jediCompile(), serverId: "python-pyright-aux", message: "other" },
+		]);
+
+		expect(diagnostics.map((entry) => entry.message)).toEqual(["other"]);
 	});
 
 	it("delivers the compile row at 3.13", async () => {

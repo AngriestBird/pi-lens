@@ -2837,10 +2837,8 @@ export const PythonServer: LSPServerInfo = {
 	),
 	async spawn(root, options) {
 		const pythonEnvironment = await detectPythonEnvironment(root);
-		const env = augmentPythonEnvironment(
-			await getToolEnvironment(),
-			pythonEnvironment,
-		);
+		const toolEnvironment = await getToolEnvironment();
+		const env = augmentPythonEnvironment(toolEnvironment, pythonEnvironment);
 		let source: "direct" | "managed" | "package-manager" = "direct";
 
 		// openFilesOnly: true — analyse only open files rather than the full workspace.
@@ -2994,10 +2992,8 @@ export const PythonJediServer: LSPServerInfo = {
 		// prepended to `candidates` ahead of everything, which would put it back
 		// in front of the project's environment.
 		const pythonEnvironment = await detectPythonEnvironment(root);
-		const env = augmentPythonEnvironment(
-			await getToolEnvironment(),
-			pythonEnvironment,
-		);
+		const toolEnvironment = await getToolEnvironment();
+		const env = augmentPythonEnvironment(toolEnvironment, pythonEnvironment);
 		const initialization = pythonEnvironment
 			? { workspace: { environmentPath: pythonEnvironment.pythonPath } }
 			: {};
@@ -3033,13 +3029,15 @@ export const PythonJediServer: LSPServerInfo = {
 
 		// No project-owned interpreter (absent, or refused untrusted inside
 		// `detectPythonEnvironment`, which records the one-shot refusal): fall back
-		// to the managed install and then the host PATH, as before.
+		// to the managed install and then the host PATH, as before. The fallback
+		// gets the UN-augmented environment: with the venv's `bin` first on PATH its
+		// bare name resolves back to the project shim that just failed (#4638 r3 N5).
 		const launched = await resolveAndLaunch(
 			{
 				candidates: ["jedi-language-server"],
 				args: [],
 				cwd: root,
-				env,
+				env: toolEnvironment,
 				managedToolId: "jedi-language-server",
 			},
 			options?.allowInstall,

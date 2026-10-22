@@ -45,6 +45,7 @@ import {
 	partitionOutrankedPythonCompileVerdicts,
 	PYTHON_DECLARATION_CONCURRENCY,
 	type PythonCompileVerdictPartition,
+	type PythonTargetVersion,
 	type PythonVerdictRow,
 	recordPythonCompileVerdictDrop,
 } from "../clients/python-environment.js";
@@ -148,8 +149,10 @@ import {
 	LSP_SEVERITY_FILTERS,
 	MAX_BATCH_FILES,
 	renderBatchOutcomeLines,
+	withheldCompileNote,
 	type BatchOutcomeDetail,
 	type LspDiagnosticsFlagReader,
+	type PythonCompileWithheld,
 } from "./lsp-diagnostics.js";
 import {
 	demotePastEofDiagnostics,
@@ -286,7 +289,9 @@ async function findFullScanBindingMismatches(
 async function applyDeclarationRule<T extends PythonVerdictRow>(
 	filePath: string,
 	diagnostics: readonly T[],
-): Promise<PythonCompileVerdictPartition<T>> {
+): Promise<
+	PythonCompileVerdictPartition<T> & { declared?: PythonTargetVersion }
+> {
 	if (!diagnostics.some(isJediCompileVerdict)) {
 		return { kept: [...diagnostics], dropped: 0 };
 	}
@@ -298,7 +303,7 @@ async function applyDeclarationRule<T extends PythonVerdictRow>(
 	if (partition.dropped > 0 && declared) {
 		recordPythonCompileVerdictDrop(filePath, declared, partition.dropped);
 	}
-	return partition;
+	return declared ? { ...partition, declared } : partition;
 }
 
 export function createLensDiagnosticsTool(
@@ -2546,7 +2551,11 @@ async function formatFullMode(
 	// the declaration's owner rule runs before the widget/store conversion that
 	// drops it. `mode=full` and the `source=session` store it writes then see the
 	// same filtered set the probe and post-write lanes already deliver.
-	lspResults = await mapWithConcurrency(
+	// The same pass counts what it withheld (#4638 r3 N2): the filtered report
+	// names the rows instead of reading as "No issues" with only the ledger to
+	// say otherwise. Collected per file in sweep order, so the aggregate's named
+	// declaration does not depend on which walk finished first.
+	const pythonSweep = await mapWithConcurrency(
 		lspResults,
 		PYTHON_DECLARATION_CONCURRENCY,
 		async (result) => {
@@ -2554,10 +2563,27 @@ async function formatFullMode(
 				result.filePath,
 				result.diagnostics,
 			);
-			if (pythonKept.dropped === 0) return result;
-			return { ...result, diagnostics: pythonKept.kept };
+			if (pythonKept.dropped === 0) return { result };
+			return {
+				result: { ...result, diagnostics: pythonKept.kept },
+				withheld: pythonKept.declared && {
+					count: pythonKept.dropped,
+					declared: pythonKept.declared,
+				},
+			};
 		},
 	);
+	lspResults = pythonSweep.map((entry) => entry.result);
+	let withheldCompile: PythonCompileWithheld | undefined;
+	for (const entry of pythonSweep) {
+		if (!("withheld" in entry) || !entry.withheld) continue;
+		withheldCompile = withheldCompile
+			? {
+					count: withheldCompile.count + entry.withheld.count,
+					declared: withheldCompile.declared,
+				}
+			: entry.withheld;
+	}
 	// A result bound to a different document must not replace the current
 	// widget state, even when it contains real diagnostics. Pull results may carry
 	// a content hash without the push binding verdict, so verify that hash against
@@ -2880,7 +2906,7 @@ async function formatFullMode(
 			projectScanObservedAt,
 		);
 	}
-	const result = await formatAllMode(
+	const formatted = await formatAllMode(
 		cwd,
 		severity,
 		summaries,
@@ -2921,6 +2947,21 @@ async function formatFullMode(
 			analyzersByLane: extracted.dispositionSuppressedByLane ?? {},
 		},
 	);
+	// #4638 r3 (N2): every return below builds on `result`, so the disclosure of
+	// rows the declaration withheld is added once, here, to text and details.
+	const withheldText = withheldCompileNote(withheldCompile);
+	const result = withheldText
+		? {
+				...formatted,
+				content: [
+					{
+						type: "text" as const,
+						text: `${formatted.content[0].text}\n\n${withheldText}`,
+					},
+				] as [{ type: "text"; text: string }],
+				details: { ...formatted.details, withheldCompile },
+			}
+		: formatted;
 	const missingNote = pathsScopeMissingNote(pathsScope);
 	// #630: mirrors `tools/lsp-diagnostics.ts`'s `unconfirmedReasonClause`/
 	// `tallyConfirmation` semantic guarantee (never silently render
