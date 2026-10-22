@@ -1526,13 +1526,13 @@ file-scoped worklist and receives no project-wide scanner output.
   this version has no stamp: the first turn end of another session that
   carries it (a composer write or a settled turn end) writes one, and its
   window starts there. Only a write logs what it drops. The gate judges a
-  record alone only when this session is its sole owner. A settled turn end drops this session's sections and another
-  session's expired text no file owns, and retires a record that is this
-  session's own, claims no blocker, or holds no structured claim (the
-  `--lens-guard`-off writer's), with one `record_retired` row (#4725). A
-  dispatch that never answered (`pipeline_crash`, `pipeline_error`) is latched
-  per file, apart from the record's latch, and only that file's own returning
-  dispatch clears it.
+  record alone only when this session is its sole owner. A settled turn end
+  drops this session's sections and another session's expired text no file
+  owns, and retires a record that is this session's own, claims no blocker, or
+  holds no structured claim (the `--lens-guard`-off writer's), with one
+  `record_retired` row (#4725). A dispatch that never answered
+  (`pipeline_crash`, `pipeline_error`) is latched per file, apart from the
+  record's latch, and only that file's own returning dispatch clears it.
 - The shared-checkout guard refuses unsafe worktree mutation when another live
   session and uncommitted work are both proven. It never auto-stashes.
 - `mcp/server.ts` talks to pi-lens through `clients/lens-engine.ts`. A mirrored

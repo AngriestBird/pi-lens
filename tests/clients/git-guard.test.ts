@@ -30,6 +30,7 @@ import { normalizeFilePath } from "../../clients/path-utils.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import { readNdjsonRows } from "../support/ndjson-rows.js";
 import { tokenizeShellCommand } from "../../clients/bash-file-access.js";
 
 /**
@@ -3284,12 +3285,11 @@ function readStampedFixtureAt<T>(
  */
 async function savedRows(cwd: string, phase: string): Promise<unknown[]> {
 	await flushLatencyLog();
-	const file = getLatencyLogPath();
+	const read = readNdjsonRows(getLatencyLogPath());
+	// A corrupt line would hide a row the claim counts, so it reds here with the count.
+	expect(read.skipped, "unparseable latency.log lines").toBe(0);
 	const key = normalizeFilePath(cwd);
-	return (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "")
-		.split("\n")
-		.filter((line) => line.trim().length > 0)
-		.map((line) => JSON.parse(line) as Record<string, unknown>)
+	return read.rows
 		.filter((row) => row.phase === phase && row.filePath === key)
 		.map((row) => row.metadata);
 }
