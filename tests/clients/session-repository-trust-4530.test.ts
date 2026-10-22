@@ -109,9 +109,15 @@ function makeLayout(): Layout {
 	return { root, home, main, wt, outside, data };
 }
 
-/** An executable `TOOL` in `dir` that records, in `marker`, that it ran. */
+/**
+ * An executable `TOOL` in `dir` that records, in `marker`, that it ran. The
+ * body is the host shell's: a `.cmd` under cmd.exe has no `printf`, so a POSIX
+ * body would fail without writing the marker and the Windows cells could not
+ * red.
+ */
 function plant(dir: string, marker: string, name = TOOL): string {
-	return writeStandIn(dir, name, `printf ran > '${marker}'`);
+	const body = POSIX ? `printf ran > '${marker}'` : `echo ran> "${marker}"`;
+	return writeStandIn(dir, name, body);
 }
 
 function ran(marker: string): boolean {
@@ -139,7 +145,14 @@ beforeEach(() => {
 	resetPathWalkMemo();
 	clearFormatterCache();
 	layout = makeLayout();
-	cleanups.push(withEnv({ HOME: layout.home, PI_LENS_HOME: layout.data }));
+	// os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
+	cleanups.push(
+		withEnv({
+			HOME: layout.home,
+			USERPROFILE: layout.home,
+			PI_LENS_HOME: layout.data,
+		}),
+	);
 	// Hermetic: PATH holds only the stub's stand-ins and the host's `which`,
 	// so no lookup reaches a package manager the test did not plant.
 	if (POSIX) {
@@ -652,7 +665,10 @@ describe.skipIf(!POSIX)("package-manager global lookups (#4530)", () => {
 	});
 });
 
-describe.runIf(!POSIX)(
+// The literal platform gate is what enrols this file in the Windows lane
+// (scripts/lib/win32-gate-population.mjs); `!POSIX` would not.
+// lane: windows-vitest
+describe.runIf(process.platform === "win32")(
 	"Windows lookups under untrusted pi trust (#4530 F13)",
 	() => {
 		// lane: windows-vitest
