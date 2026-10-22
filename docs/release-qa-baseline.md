@@ -184,6 +184,7 @@ and `tests/packaging.test.ts` list are updated together.
 | 1.1.0 | 2026-10-08 | 2fda17a53d62267cd9035fa04380bbf0e2de4318 | 15 pass / 1 skipped (git-install-loads) |
 | 1.2.0 | 2026-10-16 | 9400454891d5a1beb0a4d2d9452dece276e22e71 | 15 pass / 1 skipped (git-install-loads) |
 | 1.3.0 | 2026-10-16 | 9400454891d5a1beb0a4d2d9452dece276e22e71 | 15 pass / 1 skipped (git-install-loads) |
+| 1.4.0 | 2026-10-22 | 75a1a3c893ed0ac44a3081dd3d475c1e72349099 | 15 pass / 1 skipped (git-install-loads) |
 
 Re-run any row with `node scripts/release-qa.mjs --pi <host>` at the listed commit.
 
