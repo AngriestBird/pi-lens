@@ -1831,10 +1831,13 @@ async function laneBlockerOfSessionA(rig: Rig): Promise<string> {
 		rig.cwd,
 	);
 	touch(rig, "a.ts");
+	const before = Date.now();
 	expect(await endTurn(rig)).toContain("CVE-2026-0001");
 	rig.cacheManager.clearCache("trivy", rig.cwd);
 	const [[owner, text]] = ownerSections(rig);
 	expect(owner).toBe(SESSION);
+	// Its window runs from its own write (#4750).
+	expect(guardRecord(rig)?.blockerWrittenAt).toBeGreaterThanOrEqual(before);
 	expect(text).toContain("CRITICAL dependency CVEs (trivy");
 	return text as string;
 }
@@ -1852,14 +1855,25 @@ function retirement(rig: Rig): void {
 	rig.runtime.clearInlineBlockers(file, rig.runtime.nextWriteIndex());
 }
 
-/** Move session A's own stamp back past the gate's freshness window. */
+/**
+ * Move session A's own stamp back past the gate's freshness window, wherever
+ * its partition sits: at the top, or carried under another session's.
+ */
 function expireSessionA(rig: Rig): void {
+	const data = guardRecord(rig);
+	const expired = Date.now() - DEFAULT_MAX_AGE_MS - 60_000;
 	rig.cacheManager.writeCache(
 		"turn-end-findings",
-		{
-			...guardRecord(rig),
-			blockerWrittenAt: Date.now() - DEFAULT_MAX_AGE_MS - 60_000,
-		},
+		data?.sessionId === SESSION
+			? { ...data, blockerWrittenAt: expired }
+			: {
+					...data,
+					carriedBlockers: data?.carriedBlockers?.map((partition) =>
+						partition.sessionId === SESSION
+							? { ...partition, blockerWrittenAt: expired }
+							: partition,
+					),
+				},
 		rig.cwd,
 	);
 }
@@ -1916,6 +1930,7 @@ describe("#4750: another session's text no file owns stays until its owner re-ru
 			b.runtime.beginTurn();
 			blocker();
 			logLatency.mockClear();
+			const before = Date.now();
 
 			// The same findings again: the dedupe branch rewrites the record.
 			await endTurn(b);
@@ -1924,9 +1939,44 @@ describe("#4750: another session's text no file owns stays until its owner re-ru
 			expect(sections.map(([owner]) => owner)).toEqual(["session-B", SESSION]);
 			expect(sections[1]).toEqual([SESSION, laneText]);
 			expect(phaseCalls("sections_dropped")).toEqual([]);
+			// B's own partition is rewritten, so its window restarts.
+			expect(guardRecord(rig)?.blockerWrittenAt).toBeGreaterThanOrEqual(before);
 			expect(evaluateGitGuard(b.runtime, b.cacheManager, b.cwd)).toMatchObject({
 				block: true,
 			});
+		} finally {
+			rig.cleanup();
+		}
+	});
+
+	it("the dedupe rewrite drops session A's expired report, with one drop row", async () => {
+		const rig = makeRig("pi-lens-4750-dedupe-expired-");
+		try {
+			await laneBlockerOfSessionA(rig);
+			const b = secondSession(rig, true);
+			const blocker = () => {
+				const file = touch(b, "b.ts", "eval(x);\n");
+				b.runtime.recordInlineBlockers(
+					file,
+					"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+					b.runtime.nextWriteIndex(),
+					["ast-grep"],
+					[1],
+				);
+			};
+			blocker();
+			await endTurn(b);
+			expireSessionA(rig);
+			b.runtime.beginTurn();
+			blocker();
+			logLatency.mockClear();
+
+			await endTurn(b);
+
+			expect(ownerSections(rig).map(([owner]) => owner)).toEqual(["session-B"]);
+			expect(phaseCalls("sections_dropped")).toEqual([
+				{ by: "turn_end", basis: "no_file" },
+			]);
 		} finally {
 			rig.cleanup();
 		}
