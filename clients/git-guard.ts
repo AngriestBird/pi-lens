@@ -1136,13 +1136,12 @@ const RECHECK_REMEDY =
 
 const MAX_REMEDY_FILES = 5;
 
-/** What answers a dispatch latch: that file's own next dispatch (#4733 r2 F12). */
-function unansweredDispatchRemedy(filePath: string, cwd: string): string {
+/** How a dispatch latch's file is shown: an outside path is never printed. */
+function shownLatchFile(filePath: string, cwd: string): string {
 	const resolved = resolveGuardPath(filePath, cwd);
-	const shown = isOutsideProjectRoot(resolved, cwd)
+	return isOutsideProjectRoot(resolved, cwd)
 		? "a file outside the project"
 		: toProjectRelativePath(resolved, cwd);
-	return `pi-lens could not check ${shown}. Write it again so pi-lens re-checks it, then retry.`;
 }
 
 /**
@@ -1726,14 +1725,23 @@ export function evaluateGitGuard(
 	const latched = runtime.gitGuardCacheUnknownReason;
 	if (latched) return unknown(cwd, latched, {}, recordRemedy());
 	// #4733 r2 F12: a dispatch that never answered refuses until that file's own
-	// dispatch returns, whatever happened to the record since.
-	const unanswered = runtime.gitGuardUnansweredDispatch;
+	// dispatch returns, whatever happened to the record since. #4733 r3 F16: a
+	// latch whose file is gone has no dispatch left to answer it, so it is
+	// skipped, as a record's deleted affected file is (`liveFiles`); it is kept,
+	// so bytes back at that path are gated again.
+	const unanswered = runtime.gitGuardUnansweredDispatches.find(
+		(entry) =>
+			currentFileFingerprint(resolveGuardPath(entry.filePath, cwd)) !==
+			"missing",
+	);
 	if (unanswered) {
+		const shown = shownLatchFile(unanswered.filePath, cwd);
 		return unknown(
 			cwd,
 			unanswered.reason,
-			{},
-			unansweredDispatchRemedy(unanswered.filePath, cwd),
+			// #4733 r3 F18: one row per file, told apart.
+			{ file: shown },
+			`pi-lens could not check ${shown}. Write it again so pi-lens re-checks it, then retry.`,
 		);
 	}
 

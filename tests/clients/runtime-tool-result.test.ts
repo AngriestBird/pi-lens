@@ -3636,6 +3636,111 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 	});
 
 	it.each([
+		["this session's own record", "session-A", false, false],
+		["another session's record", "an-earlier-session", false, true],
+		// An errored run cleared the entry but observed nothing: the next
+		// no-verdict write would otherwise find no entry and the section gone.
+		["this session's own record, errored run", "session-A", true, true],
+	] as const)(
+		"%s: a file's section leaves only when the write retired that file's own blocker, without a whole-file verdict (#4733 r3 F15)",
+		async (_label, owner, errored, kept) => {
+			// RECURRENCE GUARDED: #4733 r3 F15 (#4509 row 31b). The write that
+			// fixed a file's blocker while a language server was cut off reached no
+			// whole-file verdict, so the caller passed no file and the record kept a
+			// section its own observation had retired: every commit stayed refused.
+			// The own section leaves with the inline-blocker entry this write retired
+			// (the rule the sibling callers use); another session's section still
+			// waits for a whole-file clean verdict.
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			await acrossReplacement(
+				`4733-f15-${owner}`,
+				async ({ tmpDir, filePath, runtime, cacheManager }) => {
+					runtime.setTelemetryIdentity({ sessionId: "session-A" });
+					const other = createTempFile(
+						tmpDir,
+						"other.ts",
+						"export const y = 1;\n",
+					);
+					fs.utimesSync(other, LONG_AGO, LONG_AGO);
+					const summary =
+						"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned";
+					const otherSection = `${other}: 🔴 STOP — 1 issue(s) must be fixed:\n  L1: Debugger statement`;
+					const stored = () =>
+						cacheManager.readCache<{
+							blockerContent?: string;
+							sessionId?: string;
+						}>("turn-end-findings", tmpDir, Number.POSITIVE_INFINITY)?.data;
+					const write = async (
+						file: string,
+						result: Record<string, unknown>,
+					) => {
+						vi.mocked(runPipeline).mockReset();
+						vi.mocked(runPipeline).mockResolvedValue(result as never);
+						runtime.beginTurn();
+						clearLastAnalyzedStateCache();
+						await handleToolResult(
+							toolResultDeps({
+								filePath: file,
+								runtime,
+								cacheManager,
+								flags: ["lens-guard"],
+							}),
+						);
+					};
+
+					await write(filePath, {
+						output: summary,
+						hasBlockers: true,
+						isError: false,
+						fileModified: false,
+						currentBlockerCount: 1,
+						inlineBlockerSummary: summary,
+						inlineBlockerSources: ["ast-grep-napi"],
+						inlineBlockerLines: [1],
+					});
+					expect(stored()?.blockerContent).toContain(`${filePath}:`);
+					// The record as its owner left it: this session's, or another
+					// session's that wrote over it since (its section for the file is
+					// that session's evidence, not the entry this session retires).
+					const fileSection = `${filePath}: ${summary}`;
+					const blockerContent = `${fileSection}\n\n${otherSection}`;
+					cacheManager.writeCache(
+						"turn-end-findings",
+						{
+							content: blockerContent,
+							blockerContent,
+							blockingFiles: [filePath, other],
+							hasBlockers: true,
+							affectedFiles: [filePath, other],
+							sessionId: owner,
+							projectSeqStart: 0,
+							projectSeqEnd: 0,
+							fileSeqByPath: {},
+							fileContentHashes: {},
+							consumed: true,
+						},
+						tmpDir,
+					);
+
+					// The fix: no blocker left, but no whole-file verdict either (a
+					// server went unconfirmed), so `fileVerdictComplete` is absent.
+					await write(filePath, {
+						output: "",
+						hasBlockers: false,
+						isError: errored,
+						fileModified: false,
+						currentBlockerCount: 0,
+					});
+					expect(
+						stored()?.blockerContent?.includes(`${filePath}:`) ?? false,
+					).toBe(kept);
+					expect(stored()?.blockerContent).toContain(otherSection);
+				},
+			);
+		},
+	);
+
+	it.each([
 		["crashed", "pipeline_crash"],
 		["errored", "pipeline_error"],
 	] as const)(

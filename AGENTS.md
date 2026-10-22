@@ -108,7 +108,7 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   observability, and class-sweep coverage. The issue reference goes in the PR
   title; the closing keyword goes in the body, because GitHub ignores it in a
   title.
-- Mutation acceptance has one PR layer (#4005, superseding #3973's two): every
+- Mutation acceptance has one PR layer (#4005): every
   new guard, branch, filter, cap, or fallback, and the behaviour behind every
   relaxed or rewritten assertion, has bounded compile-valid hand-mutation
   proof under the engineering principles, and a missing proof or a
@@ -1518,7 +1518,7 @@ file-scoped worklist and receives no project-wide scanner output.
   drops a section, of either session, only for a file its dispatch checked whole
   and found clean (`checkedWholeFile`), and a settled turn end retires a record
   that is this session's own, claims no blocker, or holds no structured claim
-  (the `--lens-guard`-off writer's), with one `record_retired` row. A
+  (the `--lens-guard`-off writer's), with one `record_retired` row (#4725). A
   dispatch that never answered (`pipeline_crash`, `pipeline_error`) is latched
   per file, apart from the record's latch, and only that file's own returning
   dispatch clears it.

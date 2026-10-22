@@ -15,4 +15,6 @@ audience: user
   passing test run no longer takes over another session's record, so its
   blockers stay until their files are checked. A file whose check crashed
   keeps the gate closed, and names the file, until pi-lens checks that file
-  again; other files' clean writes no longer clear it.
+  again or the file is gone; other files' clean writes no longer clear it. A
+  blocker fixed while a language server was unavailable no longer keeps every
+  commit refused.

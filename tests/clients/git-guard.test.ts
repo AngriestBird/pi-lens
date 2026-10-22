@@ -16,6 +16,7 @@ import {
 import type { Diagnostic } from "../../clients/dispatch/types.js";
 import { formatDiagnostics } from "../../clients/dispatch/utils/format-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { getRecentLoggedPhases } from "../../clients/latency-logger.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { tokenizeShellCommand } from "../../clients/bash-file-access.js";
@@ -2135,6 +2136,7 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			const cache = new CacheManager(false);
 			const first = path.join(env.tmpDir, "first.ts");
 			const second = path.join(env.tmpDir, "second.ts");
+			for (const file of [first, second]) fs.writeFileSync(file, "x;\n");
 			runtime.markGitGuardDispatchUnanswered(first, "pipeline_crash");
 			runtime.markGitGuardDispatchUnanswered(second, "pipeline_error");
 
@@ -2143,6 +2145,13 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			expect(refusal.block).toBe(true);
 			expect(refusal.reason).toContain("(pipeline_error)");
 			expect(refusal.reason).toContain("pi-lens could not check second.ts");
+			// #4733 r3 F18: the decision row names the file, so two latched files
+			// in one session are two distinguishable rows.
+			expect(getRecentLoggedPhases(1)[0]?.metadata).toMatchObject({
+				decision: "unknown",
+				reasonCategory: "pipeline_error",
+				file: "second.ts",
+			});
 
 			runtime.answerGitGuardDispatch(second);
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
@@ -2154,24 +2163,68 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			// session" must help).
 			runtime.markGitGuardDispatchUnanswered(first, "pipeline_crash");
 			runtime.resetForSession();
-			expect(runtime.gitGuardUnansweredDispatch).toBeUndefined();
+			expect(runtime.gitGuardUnansweredDispatches).toEqual([]);
 		} finally {
 			env.cleanup();
 		}
 	});
+
+	it.each([
+		["deleted", (file: string) => fs.rmSync(file)],
+		[
+			"renamed",
+			(file: string) => fs.renameSync(file, file.replace(/c\.ts$/, "d.ts")),
+		],
+	] as const)(
+		"skips a dispatch latch whose file was %s, and gates it again if the file comes back (#4733 r3 F16)",
+		(_label, remove) => {
+			// RECURRENCE GUARDED: #4733 r3 F16. The latch is keyed by the path its
+			// dispatch ran on; once that path is gone no dispatch can answer it, and
+			// the gate refused every commit for the session, telling the model to
+			// write a file that no longer exists. A record's deleted affected file is
+			// resolved the same way (`liveFiles`).
+			const env = setupTestEnvironment("pi-lens-git-guard-4733-gone-latch-");
+			try {
+				const runtime = sessionA(env.tmpDir);
+				const cache = new CacheManager(false);
+				const crashed = path.join(env.tmpDir, "c.ts");
+				fs.writeFileSync(crashed, "x;\n");
+				runtime.markGitGuardDispatchUnanswered(crashed, "pipeline_crash");
+				expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+
+				remove(crashed);
+				expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+					block: false,
+				});
+
+				// The bytes back at that path were never checked: the latch applies.
+				fs.writeFileSync(crashed, "y;\n");
+				expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
+					"pi-lens could not check c.ts",
+				);
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
 
 	it("names a crashed file outside the project without printing its path (#4733 r2 F12)", () => {
 		// RECURRENCE GUARDED: #4733 r1 F6's rule, for the new remedy: a path
 		// outside the project is not the model's to see.
 		const env = setupTestEnvironment("pi-lens-git-guard-4733-outside-latch-");
 		try {
-			const runtime = sessionA(env.tmpDir);
-			const outside = path.join(path.dirname(env.tmpDir), "elsewhere", "x.ts");
+			// The latch's file exists: a latch whose file is gone is skipped (F16).
+			const proj = path.join(env.tmpDir, "proj");
+			fs.mkdirSync(proj);
+			const runtime = sessionA(proj);
+			const outside = path.join(env.tmpDir, "elsewhere", "x.ts");
+			fs.mkdirSync(path.dirname(outside));
+			fs.writeFileSync(outside, "x;\n");
 			runtime.markGitGuardDispatchUnanswered(outside, "pipeline_crash");
 			const reason = evaluateGitGuard(
 				runtime,
 				new CacheManager(false),
-				env.tmpDir,
+				proj,
 			).reason;
 			expect(reason).toContain(
 				"pi-lens could not check a file outside the project",

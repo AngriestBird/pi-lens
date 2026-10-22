@@ -926,14 +926,19 @@ export class RuntimeCoordinator {
 		this._gitGuardUnansweredDispatches.delete(filePath);
 	}
 
-	/** The first file whose dispatch has not answered, with its reason. */
-	get gitGuardUnansweredDispatch():
-		| { readonly filePath: string; readonly reason: string }
-		| undefined {
-		for (const [filePath, reason] of this._gitGuardUnansweredDispatches) {
-			return { filePath, reason };
-		}
-		return undefined;
+	/** Every file whose dispatch has not answered, with its reason, in order. */
+	get gitGuardUnansweredDispatches(): ReadonlyArray<{
+		readonly filePath: string;
+		readonly reason: string;
+	}> {
+		return [...this._gitGuardUnansweredDispatches].map(
+			([filePath, reason]) => ({ filePath, reason }),
+		);
+	}
+
+	/** Whether this session holds an inline-blocker entry for the file. */
+	hasInlineBlocker(filePath: string): boolean {
+		return this._pendingInlineBlockers.has(filePath);
 	}
 
 	/**
