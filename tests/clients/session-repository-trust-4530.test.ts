@@ -30,6 +30,7 @@ import {
 import { createAvailabilityLatch } from "../../clients/dispatch/runners/utils/availability-policy.js";
 import {
 	isCommandAvailable,
+	isSpawnableCommand,
 	resetPathWalkMemo,
 } from "../../clients/installer/index.js";
 import { launchLSP } from "../../clients/lsp/launch.js";
@@ -338,6 +339,15 @@ describe.skipIf(!POSIX)("bare lookups under untrusted pi trust (#4530)", () => {
 		expect(await isCommandAvailable(TOOL)).toBe(false);
 		setProjectTrustState("trusted");
 		expect(await isCommandAvailable(TOOL)).toBe(true);
+	});
+
+	it("A9: the memoized spawnability answer is kept per trust answer", async () => {
+		plant(path.join(layout.main, "bin"), path.join(layout.root, "unused"));
+		cleanups.push(withEnv({ PATH: path.join(layout.main, "bin") }));
+
+		expect(await isSpawnableCommand(TOOL)).toBe(false);
+		setProjectTrustState("trusted");
+		expect(await isSpawnableCommand(TOOL)).toBe(true);
 	});
 
 	it("A6: the LSP launcher drops project entries that are not bin layouts", async () => {
