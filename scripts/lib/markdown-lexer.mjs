@@ -317,6 +317,27 @@ export function markdownHeadings(text) {
 	return headings;
 }
 
+/**
+ * The first line (0-based over `text.split(/\r?\n/)`) of every top-level
+ * raw-HTML block that opens with a comment, as the reader sees it: a `<!--`
+ * inside a fence, a code span, a list item or an earlier open comment is not
+ * one (#4774). A bot that edits a PR body marks its block with such a line.
+ */
+export function markdownBlockComments(text) {
+	const source = normalized(text);
+	const { blocks, leaves } = layout(source);
+	const hidden = carriedComments(leaves, source.length);
+	const lines = [];
+	for (const { token, start } of blocks) {
+		if (token.type !== "html" || !token.raw.trimStart().startsWith("<!--"))
+			continue;
+		const at = start + token.raw.length - token.raw.trimStart().length;
+		if (hidden.some(([from, to]) => at > from && at < to)) continue;
+		lines.push(lineOf(source, at));
+	}
+	return lines;
+}
+
 function lineOf(source, offset) {
 	let line = 0;
 	for (

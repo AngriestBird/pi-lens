@@ -13,6 +13,7 @@ import {
 } from "./lib/defect-shapes.mjs";
 import {
 	blankMarkdownRegions,
+	markdownBlockComments,
 	markdownHeadings,
 } from "./lib/markdown-lexer.mjs";
 import { githubGet } from "./lib/github-rest.mjs";
@@ -235,6 +236,40 @@ function bodyHeadings(body) {
 				? SECTION_SYNONYMS.get(heading.text.toLowerCase())
 				: undefined,
 	}));
+}
+
+// Headings the author writes after the template sections: the review-round
+// records the fixer contract appends, and the accepted-residuals list.
+const AUTHOR_TAIL_HEADING =
+	/^(?:(?:fix|review) round \d+\b|accepted residuals$)/i;
+
+/**
+ * The author's text (#4774). A bot that edits a PR body appends its block
+ * after the author's last section, so the last section would otherwise run
+ * into it: Greptile's "Last reviewed commit" link quotes a commit title that
+ * ends `(refs #N)`, and `## Fold check`, the template's last section, read
+ * that `#N` as a candidate with no decision. The body ends at the first
+ * top-level HTML comment after the last heading the template names; every
+ * bot marks its block with one, so no bot is named here and an unknown bot
+ * is cut too (fail closed). A comment the author wrote before a later
+ * template heading stays in the body, where the section readers blank it. An
+ * author's own comment in the last section also ends the text, which can
+ * only refuse. Every section reader gets the cut body from the two entries,
+ * `lintPullRequestEvent` and `lintLocalPrBody`; the close-keyword gate keeps
+ * the full body, because GitHub closes an issue a bot's block names.
+ */
+export function authorText(body = "") {
+	const source = String(body ?? "");
+	const lastAuthored = bodyHeadings(source).findLast(
+		(heading) =>
+			heading.section !== undefined || AUTHOR_TAIL_HEADING.test(heading.name),
+	);
+	const cut = markdownBlockComments(source).find(
+		(line) => line > (lastAuthored?.index ?? -1),
+	);
+	return cut === undefined
+		? source
+		: source.split("\n").slice(0, cut).join("\n");
 }
 
 /**
@@ -4399,7 +4434,9 @@ export async function lintPullRequestEvent(
 	const pullRequest = event.pull_request;
 	if (!pullRequest || !process.env.GITHUB_REPOSITORY)
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
-	const { body, normalized } = await resolveLivePrBody(pullRequest, fetchImpl);
+	const live = await resolveLivePrBody(pullRequest, fetchImpl);
+	const { normalized } = live;
+	const body = authorText(live.body);
 	const requireTestAssessment =
 		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
 	// #4288: a bug-closing PR owes a detection retrospective. The label read is
@@ -4642,6 +4679,7 @@ export function lintLocalPrBody(
 	git = gitExecFileSync,
 	options = {},
 ) {
+	body = authorText(body);
 	let diff = "";
 	// #4585: a local preflight must judge the same range as CI. An unavailable
 	// diff cannot classify the diff-keyed rows, so it fails closed; the rest of

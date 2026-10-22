@@ -15,6 +15,7 @@ export declare function repairEscapedNewlineBody(body?: string): string;
 export declare function splitMarkdownUnits(
 	body?: string,
 ): Array<{ kind: string; text: string }>;
+export declare function authorText(body?: string): string;
 export declare function normalizePrBodyForChecking(
 	body?: string,
 	pullRequestNumber?: number,
