@@ -925,8 +925,8 @@ const LSP_FIXTURES = [
 	{
 		lang: "fsharp",
 		setup: "dotnet restore",
-		lspGateExempt:
-			"observed: 0 diagnostics collected within 8000ms after `dotnet restore` (app.fsproj restored in 212ms, runs 36058292424/36059988117), and the SAME zero at the 1500ms default (run 36054901266) — so the wait budget is not the binding constraint. This gate records COLLECTED diagnostics, not publishes, so it is not an authoritative empty publish; the publish-level evidence is separate and consistent: #3311's clean-signal probe recorded dirtyPubs=0 for fsautocomplete on run 35990178129, and mode=push-only has no pull fallback, i.e. the workspace load never completes. Not a proven server property. Next step: load the project the way an editor does (a `dotnet build`, or a workspace/peek after initialize) and re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; see #3311",
+		lspGate: true,
+		lspGateReadiness: { deadlineMs: 150_000, intervalMs: 1000 },
 		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
