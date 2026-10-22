@@ -29,14 +29,16 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	decodeShellWords,
+	scanShellWriteScopes,
 	tokenizeShellCommand,
 } from "../../clients/bash-file-access.js";
 import {
 	isGitCommitOrPushAttempt,
 	collectGitInvocations,
 } from "../../clients/git-guard.js";
+import { isFailedGitIntegrationCommand } from "../../clients/runtime-tool-result.js";
 import { isWorktreeMutatingGitAttempt } from "../../clients/shared-checkout-guard.js";
-import { spellings } from "../support/shell-spellings.js";
+import { COMMAND_WRAPPERS, spellings } from "../support/shell-spellings.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
 
@@ -154,6 +156,84 @@ const ROWS: readonly Row[] = [
 		command: "git push\\\n",
 		bash: "push",
 		guard: true,
+	},
+	{
+		row: "subshell",
+		command: "(git push)",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "subshell after a list",
+		command: "(true; git push)",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "subshell, commit",
+		command: "(git commit -m x)",
+		bash: "commit",
+		guard: true,
+	},
+	{
+		row: "nested subshells",
+		command: "( (git push) )",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "subshell after a cd",
+		command: "(cd . && git push)",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "group",
+		command: "{ git push; }",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "group around a subshell",
+		command: "{ (git push); }",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "subshell around a group",
+		command: "( { git push; } )",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "subshell, mixed executable",
+		command: "(g$'i't push)",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "subshell, escape in the executable",
+		command: "($'\\x67it' push)",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "unbalanced open paren, which bash rejects",
+		command: "(git push",
+		bash: null,
+		guard: true,
+	},
+	{
+		row: "unbalanced close paren, which bash rejects",
+		command: "git push)",
+		bash: null,
+		guard: true,
+	},
+	{
+		row: "subshell around a verb the gate does not govern",
+		command: "(git status)",
+		bash: null,
+		guard: false,
 	},
 	// Fail closed: a word the model cannot read.
 	{
@@ -286,11 +366,18 @@ const ROWS: readonly Row[] = [
 	},
 ];
 
-/** The generated rows: every quoting of the executable and of the verbs. */
-const GENERATED: readonly string[] = [
+/**
+ * The generated rows: every quoting of the executable and of the verbs, bare
+ * and inside each subshell and group wrapper.
+ */
+const PLAIN: readonly string[] = [
 	...spellings("git").map((spelled) => `${spelled} push`),
 	...spellings("push").map((spelled) => `git ${spelled}`),
 	...spellings("commit").map((spelled) => `git ${spelled} -m x`),
+];
+const GENERATED: readonly string[] = [
+	...PLAIN,
+	...COMMAND_WRAPPERS.flatMap((wrap) => PLAIN.map(wrap)),
 ];
 
 /**
@@ -308,13 +395,13 @@ const ACCEPTED: ReadonlyArray<{
 	{
 		reason:
 			"bash reads a word holding whitespace (`git\\ push`, `'\\<newline>git'`) as one command name, and the head split reads it as `git` then `push`: a command bash cannot find",
-		rows: 35,
+		rows: 175,
 		covers: (command) => command.includes("\\ ") || command.includes("'\\\n"),
 	},
 	{
 		reason:
 			"a backslash inside quotes (`'\\git'`, `\"\\p\"ush`) is literal to bash, and the verb normalization strips a backslash before a letter, so the gate reads the word as `git` or `push`",
-		rows: 48,
+		rows: 240,
 		covers: (command) => /['"]\\[a-z]/.test(command),
 	},
 ];
@@ -414,12 +501,15 @@ describe.skipIf(process.platform === "win32")(
 			}
 			// Floors: the generator still composes, and bash still ran git (a
 			// missing bash would run nothing and pass every miss as accepted).
-			assertNonEmptyScan("composed spellings", GENERATED.length, 400);
+			assertNonEmptyScan("composed spellings", GENERATED.length, 2000);
 			assertNonEmptyScan("spellings bash ran as commit or push", ran, 100);
 			expect(failures).toEqual([]);
 			expect(covered).toEqual(ACCEPTED.map((entry) => entry.rows));
 			// The cost bound: one spawn per row, so the exact count bounds the run.
-			expect(GENERATED.length).toBe(693);
+			expect(GENERATED.length).toBe(
+				PLAIN.length * (COMMAND_WRAPPERS.length + 1),
+			);
+			expect(PLAIN.length).toBe(693);
 		}, 120_000);
 	},
 );
@@ -449,6 +539,23 @@ describe("the word model the gate reads (#4739)", () => {
 			expect(words(spelled)[0]?.hidden, spelled).toBeUndefined();
 	});
 
+	it("ends a word at a paren, so the command word inside a subshell is its own", () => {
+		// Recurrence: #4739 r2. `(git` was one word, so `(git push)` ran unguarded.
+		const texts = (command: string) => words(command).map((w) => w.text);
+		expect(texts("(git push)")).toEqual(["git", "push"]);
+		expect(texts("( (git push) )")).toEqual(["git", "push"]);
+		expect(texts("(g$'i't push)")).toEqual(["git", "push"]);
+		expect(texts("{ git push; }")).toEqual(["git", "push"]);
+		expect(texts("(cd x && git push)")).toEqual(["cd", "x", "git", "push"]);
+		// A paren that is a character of its word stays in it: escaped, quoted,
+		// or the opener of a substitution (which the gate reads as hidden).
+		expect(texts("\\(git push")).toEqual(["\\(git", "push"]);
+		expect(texts('"(git" push')).toEqual(["(git", "push"]);
+		expect(texts("{git push")).toEqual(["{git", "push"]);
+		expect(texts("$(echo git)")).toEqual(["$(echo", "git"]);
+		expect(words("$(echo git)")[0]?.hidden).toBe("expansion");
+	});
+
 	it("keeps a native Windows executable path whole", () => {
 		// The legacy token kept the backslashes; so does the decoded word.
 		expect(words("C:\\tools\\git.exe push")[0]).toEqual({
@@ -474,6 +581,42 @@ describe("what else reads the decoded word (#4739)", () => {
 		expect(
 			isWorktreeMutatingGitAttempt("bash", { command: "$'git' checkout ." }),
 		).toBe(true);
+	});
+
+	it("reads the command inside a subshell or a group (r2)", () => {
+		// Gains: `(git checkout .)` rewrote the tree unguarded. Loss, on purpose:
+		// `{ git status; }` was an "indirect" git behind a `{` word and was
+		// guarded; it is a direct git status now, which the gate does not govern.
+		const checkout = (command: string) =>
+			isWorktreeMutatingGitAttempt("bash", { command });
+		expect(checkout("(git checkout .)")).toBe(true);
+		expect(checkout("{ git checkout .; }")).toBe(true);
+		expect(checkout("(git status)")).toBe(false);
+		expect(guarded("{ git status; }")).toBe(false);
+		expect(guarded("(git status)")).toBe(false);
+		expect(
+			collectGitInvocations("bash", { command: "(git -C sub checkout .)" }),
+		).toEqual([["git", "-C", "sub", "checkout", "."]]);
+		// The other reader of the public token stream sees `(` and `git` apart
+		// now and still names no git integration command: no gain, no loss.
+		expect(isFailedGitIntegrationCommand("(git merge x)", true)).toBe(false);
+	});
+
+	it("the write scan reads a redirect inside a subshell (r2 side effect)", () => {
+		// The redirect target `f.ts)` kept its paren, so the scan named no file
+		// bash wrote (real bash wrote f.ts in each row but the second). Now it
+		// names `f.ts`. The second row is the documented fallback: the scan keeps
+		// the command's own cwd where bash wrote sub/f.ts, and recordWritten
+		// confirms existence later.
+		const written = (command: string) =>
+			scanShellWriteScopes(command, "/w").written;
+		expect(written("(printf x > f.ts)")).toEqual([path.resolve("/w", "f.ts")]);
+		expect(written("echo $(printf x > f.ts)")).toEqual([
+			path.resolve("/w", "f.ts"),
+		]);
+		expect(written("(cd sub && printf x > f.ts)")).toEqual([
+			path.resolve("/w", "f.ts"),
+		]);
 	});
 
 	it("targets the directory of an ANSI-C git", () => {

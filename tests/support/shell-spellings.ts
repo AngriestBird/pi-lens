@@ -47,3 +47,15 @@ export function spellings(token: string): string[] {
 				);
 	return [...out];
 }
+
+/**
+ * Subshell and group forms around one command (#4739 r2), nested and mixed:
+ * bash runs the command inside each, and a gate that reads `(git` as a word
+ * misses it. Each takes the command text and returns the wrapped command.
+ */
+export const COMMAND_WRAPPERS: ReadonlyArray<(command: string) => string> = [
+	(command) => `(${command})`,
+	(command) => `{ ${command}; }`,
+	(command) => `(cd . && ${command})`,
+	(command) => `( (${command}) )`,
+];

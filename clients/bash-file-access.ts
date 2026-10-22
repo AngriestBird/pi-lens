@@ -88,6 +88,14 @@ interface ShellWord {
 	 * `~/x""` expands; `""~`, `~""/x` and `~\ x` do not.
 	 */
 	tildeExpands: boolean;
+	/**
+	 * An unquoted `(`, `)`, `{` or `}` standing alone: shell syntax, not a
+	 * character of a command word (#4739 r2). Bash ends a word at a paren, so
+	 * `(git push)` runs `git`, and a lone `{` opens a group whose first command
+	 * follows it. The one paren a word keeps is the `(` of `$(`, which opens a
+	 * substitution, and an escaped or quoted paren is a character of its word.
+	 */
+	syntax?: true;
 }
 
 /**
@@ -344,19 +352,21 @@ const EXPANDING_CHARS: Partial<Record<WordPartKind, RegExp>> = {
 
 export function decodeShellWords(command: string): DecodedShellSegment[] {
 	return tokenizeShellCommandWithRanges(command).map(({ words }) => ({
-		words: words.map((word): DecodedShellWord => {
-			const hidden = word.parts.some((part) => part.text === undefined)
-				? "escape"
-				: word.parts.some((part) =>
-							EXPANDING_CHARS[part.kind]?.test(part.text ?? ""),
-					  )
-					? "expansion"
-					: undefined;
-			return {
-				text: wordValue(word, true, "") ?? "",
-				...(hidden && { hidden }),
-			};
-		}),
+		words: words
+			.filter((word) => word.syntax !== true)
+			.map((word): DecodedShellWord => {
+				const hidden = word.parts.some((part) => part.text === undefined)
+					? "escape"
+					: word.parts.some((part) =>
+								EXPANDING_CHARS[part.kind]?.test(part.text ?? ""),
+						  )
+						? "expansion"
+						: undefined;
+				return {
+					text: wordValue(word, true, "") ?? "",
+					...(hidden && { hidden }),
+				};
+			}),
 	}));
 }
 
@@ -421,6 +431,9 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 					first?.kind === "unquoted" &&
 					first.text?.startsWith("~") === true &&
 					(rest.length === 0 || first.text.includes("/")),
+				...(rest.length === 0 &&
+					first?.kind === "unquoted" &&
+					["(", ")", "{", "}"].includes(first.text ?? "") && { syntax: true }),
 			});
 			redirectWords.push(redirectPending);
 			redirectPending = false;
@@ -624,6 +637,19 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			continue;
 		}
 		if ("(){}`".includes(ch)) grouping = true;
+		// An escaped paren (`\(`) is a character of its word, not syntax.
+		if ((ch === "(" || ch === ")") && !escapeKept) {
+			const opensSubstitution =
+				ch === "(" && part?.kind === "unquoted" && part.text.endsWith("$");
+			if (!opensSubstitution) {
+				flushWord();
+				word = ch;
+				addToPart("unquoted", ch);
+				flushWord();
+				escapeKept = false;
+				continue;
+			}
+		}
 		word += ch;
 		if (escapeKept) addToPart("keptEscape", ch);
 		else if (ch === "$" && (next === "'" || next === '"')) dollarQuote = true;
