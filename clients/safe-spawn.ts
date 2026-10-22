@@ -1449,14 +1449,12 @@ export function trustScopedEnvironment(
 	env: NodeJS.ProcessEnv,
 	cwd: string = process.cwd(),
 ): NodeJS.ProcessEnv {
-	if (getProjectTrustState() === "trusted") return env;
 	// POSIX names the key exactly; only Windows needs the scan for spellings.
+	// An absent value scopes to itself, so it returns `env` below.
 	const keys =
 		process.platform === "win32"
 			? windowsEnvironmentKeys(env, "PATH")
-			: Object.hasOwn(env, "PATH")
-				? ["PATH"]
-				: [];
+			: ["PATH"];
 	const lastKey = keys.at(-1);
 	if (lastKey === undefined) return env;
 	const value = env[lastKey];
