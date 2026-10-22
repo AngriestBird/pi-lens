@@ -29,7 +29,10 @@ import {
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 import {
+	AstGrepServer,
 	OpengrepServer,
+	TyposServer,
+	ZizmorServer,
 	type LSPServerInfo,
 } from "../../../clients/lsp/server.js";
 import {
@@ -184,6 +187,26 @@ describe("auxiliary loose-file root (#4760)", () => {
 		expect(server.spawn.mock.calls[0]?.[0]).toBe(
 			path.join(home, ".pi", "agent"),
 		);
+	});
+
+	it("declares the loose-file root on all four auxiliary rows", async () => {
+		const home = looseHomeTree("aux-all-rows");
+		const file = path.join(home, "bin", "loose.sh");
+		fs.writeFileSync(file, "#!/bin/sh\n");
+		const registry = new ClientRegistry(makeHooks(), undefined, home);
+
+		for (const server of [
+			OpengrepServer,
+			AstGrepServer,
+			ZizmorServer,
+			TyposServer,
+		]) {
+			expect(server.role).toBe("auxiliary");
+			expect(server.looseFileRoot).toBe("decline");
+			expect(await registry.resolveServerRoot(server, file)).toBe(
+				path.join(home, "bin"),
+			);
+		}
 	});
 
 	it("declines a file whose own directory is $HOME, with one bounded record", async () => {
