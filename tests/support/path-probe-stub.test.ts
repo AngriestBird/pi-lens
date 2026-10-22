@@ -164,6 +164,12 @@ describe("isPackageManagerProbe", () => {
 			isPackageManagerProbe("npm", ["config", "get", "prefix", "-g"]),
 		).toBe(false);
 		expect(isPackageManagerProbe("pnpm", ["bin"])).toBe(false);
+		// Same length as a real query, different words: a router that checked
+		// only the argument COUNT would let these run for real.
+		expect(isPackageManagerProbe("npm", ["config", "get", "registry"])).toBe(
+			false,
+		);
+		expect(isPackageManagerProbe("yarn", ["global", "dir"])).toBe(false);
 		expect(isPackageManagerProbe("bun", ["bin", "-g"])).toBe(false);
 		expect(isPackageManagerProbe("git", ["status"])).toBe(false);
 		expect(isPackageManagerProbe("toString", ["bin", "-g"])).toBe(false);
