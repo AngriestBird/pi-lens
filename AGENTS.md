@@ -1723,8 +1723,8 @@ The stale-build guard rejects a missing or older compiled twin. Pre-push and
 governance suites when a bundled file is missing or older than its source.
 Pre-push diffs each pushed ref against `origin/master`, or `upstream/master`
 when that has commits `origin/master` lacks, never against the remote tip, and
-skips a head whose tree-bound record already passed the same selection
-(#4724). When that base range cannot be resolved it falls back to the remote-tip
+skips a head whose tree-bound record already passed the same selection. When
+that base range cannot be resolved it falls back to the remote-tip
 range, and to the loud build-only pass only when that cannot resolve either.
 Pre-push fails
 when its bounded test-lock wait times out (#3717); `PI_LENS_PREPUSH_LOCK_SKIP=1`
