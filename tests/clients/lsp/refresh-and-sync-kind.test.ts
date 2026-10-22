@@ -909,6 +909,65 @@ describe("#2066 one JS document pass per send", () => {
 	// an equal value proves equal bytes: the count of one spelling is the count
 	// of every other spelling of those bytes. The second case is the fail-closed
 	// direction — different bytes are always walked.
+	it("sends the whole-document range whose last line the reused count describes", async () => {
+		const state = createMockState({ syncKind: 2 });
+		// The reuse path answers `lastLine` from `lastIndexOf` plus the reused
+		// count, so it has to agree with the walk character for character: the
+		// second change's range is built from the position the first send stored.
+		const first = "alpha\nbeta\ngamma\n";
+		const second = `${first}delta\n`;
+		exceedsLspSyncLimits(first);
+		await handleNotifyChange(state, TEST_FILE, first);
+		await handleNotifyChange(state, TEST_FILE, second);
+		const calls = vi.mocked(state.connection.sendNotification).mock.calls;
+		const change = calls.filter(
+			(call) => call[0] === "textDocument/didChange",
+		)[0];
+		const params = change[1] as {
+			contentChanges: Array<{
+				range?: {
+					start: { line: number; character: number };
+					end: { line: number; character: number };
+				};
+				text: string;
+			}>;
+		};
+		// `alpha\nbeta\ngamma\n` is four addressable lines (line 3 is empty after
+		// the trailing newline), and line 3 is 0 characters long.
+		expect(params.contentChanges[0]?.range?.end).toEqual({
+			line: 3,
+			character: 0,
+		});
+	});
+
+	it("counts a lone \\r as a terminator when the reused count came from the LF walk", async () => {
+		const state = createMockState({ syncKind: 2 });
+		// Mixed endings: three LSP terminators (\\r\\n, \\r, \\n) but only two `\\n`.
+		// The reused count answers `lfNewlineCount`; where the last line STARTS is
+		// still the terminator loop's answer, or the range ends inside the document.
+		const mixed = "alpha\r\nbeta\rgamma\n";
+		exceedsLspSyncLimits(mixed);
+		await handleNotifyChange(state, TEST_FILE, mixed);
+		await handleNotifyChange(state, TEST_FILE, `${mixed}delta\n`);
+		const calls = vi.mocked(state.connection.sendNotification).mock.calls;
+		const change = calls.filter(
+			(call) => call[0] === "textDocument/didChange",
+		)[0];
+		const params = change[1] as {
+			contentChanges: Array<{
+				range?: {
+					start: { line: number; character: number };
+					end: { line: number; character: number };
+				};
+				text: string;
+			}>;
+		};
+		expect(params.contentChanges[0]?.range?.end).toEqual({
+			line: 3,
+			character: 0,
+		});
+	});
+
 	it("reuses the sync bound's LF walk for a send of the same bytes", async () => {
 		const state = createMockState({ syncKind: 2 });
 		await handleNotifyChange(state, TEST_FILE, DOCUMENT);
