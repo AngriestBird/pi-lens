@@ -224,6 +224,307 @@ it("keeps intended vendor skips silent (#4218)", async () => {
 	}
 });
 
+/**
+ * A checkout with one linked worktree, written as git writes it: `<repo>/.git`
+ * is a directory (the shared commondir), `<worktree>/.git` is a file holding
+ * `gitdir: <repo>/.git/worktrees/<name>`, that gitdir's `commondir` points
+ * back at the shared `.git`, and each gitdir holds a `HEAD`. `resolveGitCheckout`/`resolveLinkedWorktreeOwner`
+ * read exactly these files, so no `git` child is needed to classify the file.
+ */
+function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
+	const repo = path.join(root, "repo");
+	const worktree = path.join(root, "repo-wt");
+	const gitDir = path.join(repo, ".git");
+	const linkedGitDir = path.join(gitDir, "worktrees", "repo-wt");
+	fs.mkdirSync(linkedGitDir, { recursive: true });
+	fs.mkdirSync(worktree, { recursive: true });
+	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
+	fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${linkedGitDir}\n`);
+	fs.writeFileSync(path.join(linkedGitDir, "commondir"), "../..\n");
+	// git writes a HEAD in both gitdirs, and a `.git` directory without one is
+	// not a repository to `resolveGitCheckout` (#4508).
+	fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+	fs.writeFileSync(path.join(linkedGitDir, "HEAD"), "ref: refs/heads/wt\n");
+	return { repo, worktree };
+}
+
+/**
+ * What `runPipeline` returns for a linked-worktree edit, by verdict: the
+ * shapes `tests/clients/pipeline.test.ts` pins on the real pipeline (its
+ * "All-clear output" cells). A clean run's output is the all-clear line,
+ * never empty (#4734 review F1), and that line is not the verdict (r3).
+ */
+const linkedWorktreeResult = {
+	clean: () => ({
+		output: "✓ JavaScript/TypeScript clean · 5ms",
+		hasBlockers: false,
+		isError: false,
+		fileModified: false,
+		checkedClean: true,
+	}),
+	/**
+	 * The same clean line with no clean verdict: a run that recorded only a
+	 * warning (the dispatcher renders no text for one), or one no language
+	 * server answered (#4734 r3 state table, rows 5, 6, 8, 10-13).
+	 */
+	uncheckedCleanLine: () => ({
+		output: "✓ JavaScript/TypeScript clean · 5ms",
+		hasBlockers: false,
+		isError: false,
+		fileModified: false,
+		checkedClean: false,
+	}),
+	/** A format-only change whose primary did not answer: no output at all. */
+	formatOnlyUnconfirmed: (targetPath: string) => ({
+		output: "",
+		hasBlockers: false,
+		isError: false,
+		fileModified: true,
+		checkedClean: false,
+		postAutofixNotice: { targetPath, changedFiles: [targetPath] },
+	}),
+};
+
+/**
+ * One linked worktree of a session checkout at `checkoutRoot`, its session
+ * coordinator, and an edit `tool_result` for one file in the worktree.
+ */
+function linkedWorktreeEdit(checkoutRoot: string) {
+	const { repo, worktree } = writeLinkedWorktree(checkoutRoot);
+	const worktreeFile = path.join(worktree, "src", "sibling.ts");
+	fs.mkdirSync(path.dirname(worktreeFile), { recursive: true });
+	fs.writeFileSync(worktreeFile, "export const value = 1;\n");
+	const runtime = new RuntimeCoordinator();
+	runtime.projectRoot = repo;
+	const editResult = () =>
+		({
+			event: {
+				toolName: "edit",
+				input: { path: worktreeFile },
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			resetLSPService: () => {},
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+			// The pipeline is doubled, so these three only satisfy
+			// `ensureToolResultClients` (`deps.biomeClient && deps.ruffClient &&
+			// deps.metricsClient`): the dispatch itself must be REACHED for the
+			// delivery rung to be the thing under test, and a failed bootstrap
+			// demand would skip it.
+			biomeClient: {},
+			ruffClient: {},
+			metricsClient: {},
+		}) as never;
+	return { repo, worktree, worktreeFile, runtime, editResult };
+}
+
+it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2050-worktree-delivery-");
+	// A linked worktree of the session's checkout, written as the metadata git
+	// itself writes (`<worktree>/.git` names a worktree-private gitdir whose
+	// `commondir` points at the shared `.git`), so no child process is needed.
+	// The class assertion below reds if the fixture stops resolving as a
+	// worktree. The checkout is a DIRECT child of the temp root with no
+	// `pi-lens-` prefix: a pi-owned temp path is the intended-skip class, not
+	// the linked-worktree class this rung is about (#4560). Removed here, so the
+	// widened tmp-root census never sees a leftover.
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`capture-2050-worktree-${process.pid}`,
+	);
+	const { repo, worktree, worktreeFile, runtime, editResult } =
+		linkedWorktreeEdit(checkoutRoot);
+	try {
+		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
+		vi.mocked(runPipeline).mockResolvedValue(linkedWorktreeResult.clean());
+		const runsBefore = vi.mocked(runPipeline).mock.calls.length;
+
+		await handleToolResult(editResult());
+
+		// One bounded row names the root the session analysed, so "the analysis
+		// ran on a worktree foreign to the session" is not only in latency.log.
+		const worktreeRows = getDegradationSummary().filter(
+			(entry) => entry.kind === "tool-result-linked-worktree",
+		);
+		expect(worktreeRows).toHaveLength(1);
+		expect(worktreeRows[0]?.latestReasons[0]?.subject).toContain(
+			path.basename(worktree),
+		);
+		// The advisory is gated by its own once-per-root row, and that record is
+		// what a reader can count: one clean run, one row.
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind === "tool-result-linked-worktree-clean")
+				.map((entry) => entry.count),
+		).toEqual([1]);
+		// The run produced nothing, so silence would be ambiguous: the agent is
+		// told the analysis RAN and found nothing.
+		expect(
+			consumeAgentNudge(undefined, runtime.sessionScope)?.messages,
+		).toEqual([
+			expect.objectContaining({
+				content: expect.stringContaining(path.basename(worktree)),
+			}),
+		]);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+
+		// Bounded: a second silent run in the same worktree is covered by the
+		// first row and advisory, not by a second pair. Each later edit writes
+		// new bytes: an unchanged file never reaches the pipeline, so the run
+		// below would observe nothing (the pipeline-call count proves it ran).
+		fs.writeFileSync(worktreeFile, "export const value = 2;\n");
+		await handleToolResult(editResult());
+		expect(vi.mocked(runPipeline).mock.calls).toHaveLength(runsBefore + 2);
+		expect(
+			getDegradationSummary().filter(
+				(entry) => entry.kind === "tool-result-linked-worktree",
+			),
+		).toHaveLength(1);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+
+		// The same clean line from a run that recorded a warning, or that no
+		// language server answered, states nothing: the line is not the verdict.
+		resetDegradationLedger();
+		vi.mocked(runPipeline).mockResolvedValue(
+			linkedWorktreeResult.uncheckedCleanLine(),
+		);
+		fs.writeFileSync(worktreeFile, "export const value = 3;\n");
+		await handleToolResult(editResult());
+		expect(vi.mocked(runPipeline).mock.calls).toHaveLength(runsBefore + 3);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		vi.mocked(runPipeline).mockReset();
+		env.cleanup();
+		fs.rmSync(checkoutRoot, { recursive: true, force: true });
+	}
+});
+
+// Recurrence: #4734 Greptile "Unchecked edits look checked". An empty output
+// is a format-only change, and here the primary never answered: telling the
+// agent the analysis ran and found nothing would read an unavailable check as
+// a clean one (AGENTS.md shape 10).
+it("states nothing for a linked-worktree format-only change whose primary did not answer", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2657-worktree-unconfirmed-");
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`capture-2657-unconfirmed-${process.pid}`,
+	);
+	const { repo, worktreeFile, runtime, editResult } =
+		linkedWorktreeEdit(checkoutRoot);
+	try {
+		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
+		vi.mocked(runPipeline).mockResolvedValue(
+			linkedWorktreeResult.formatOnlyUnconfirmed("src/sibling.ts"),
+		);
+		const runsBefore = vi.mocked(runPipeline).mock.calls.length;
+
+		await handleToolResult(editResult());
+
+		expect(vi.mocked(runPipeline).mock.calls).toHaveLength(runsBefore + 1);
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind.startsWith("tool-result-linked-worktree"))
+				.map((entry) => entry.kind),
+		).toEqual(["tool-result-linked-worktree"]);
+		expect(
+			(
+				consumeAgentNudge(undefined, runtime.sessionScope)?.messages ?? []
+			).filter((message) => String(message.content).includes("found nothing")),
+		).toEqual([]);
+	} finally {
+		vi.mocked(runPipeline).mockReset();
+		env.cleanup();
+		fs.rmSync(checkoutRoot, { recursive: true, force: true });
+	}
+});
+
+// Recurrence: #4734 Sourcery thread 3. The row's root came from the
+// out-of-session eligibility rule, which refuses a pi-owned temp path, so a
+// worktree the class served in full was analysed in silence.
+it("records the linked-worktree row for a worktree under a pi-owned temp dir", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2657-pi-owned-worktree-");
+	// A `pi-` prefix directly under the temp root is pi-owned
+	// (`isPiOwnedTempPath`); removed here, as in the AC3 cell.
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`pi-2657-worktree-${process.pid}`,
+	);
+	const { repo, worktree, worktreeFile, editResult } =
+		linkedWorktreeEdit(checkoutRoot);
+	try {
+		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
+		vi.mocked(runPipeline).mockResolvedValue(linkedWorktreeResult.clean());
+
+		await handleToolResult(editResult());
+
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind === "tool-result-linked-worktree")
+				.map((entry) => path.basename(entry.latestReasons[0]?.subject ?? "")),
+		).toEqual([path.basename(worktree)]);
+	} finally {
+		vi.mocked(runPipeline).mockReset();
+		env.cleanup();
+		fs.rmSync(checkoutRoot, { recursive: true, force: true });
+	}
+});
+
+// Recurrence: #4734 Sourcery thread 4. The row was written after the pipeline
+// await without the #3596 liveness check, so a replaced session's handler
+// latched its once-key in the new session's ledger.
+it("a linked-worktree result settling after a replacement records nothing in the new session", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2657-worktree-replaced-");
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`capture-2657-replaced-${process.pid}`,
+	);
+	const { repo, worktreeFile, runtime, editResult } =
+		linkedWorktreeEdit(checkoutRoot);
+	const entered = gatedPromise<void>();
+	const release = gatedPromise<void>();
+	try {
+		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
+		vi.mocked(runPipeline).mockImplementation(async () => {
+			entered.resolve();
+			await release.promise;
+			return linkedWorktreeResult.clean();
+		});
+
+		const handler = handleToolResult(editResult());
+		await entered.promise;
+		// session_start: the coordinator and the ledger reset for session 2.
+		runtime.resetForSession();
+		resetDegradationLedger();
+		release.resolve();
+		await handler;
+
+		expect(vi.mocked(runPipeline).mock.calls.length).toBeGreaterThan(0);
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind.startsWith("tool-result-linked-worktree"))
+				.map((entry) => entry.kind),
+		).toEqual([]);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		vi.mocked(runPipeline).mockReset();
+		env.cleanup();
+		fs.rmSync(checkoutRoot, { recursive: true, force: true });
+	}
+});
+
 it("classifies outside-root path families through the real tool-result seam (#4230)", async () => {
 	resetDegradationLedger();
 	const env = setupTestEnvironment("pi-lens-4230-path-families-");
@@ -249,6 +550,7 @@ it("classifies outside-root path families through the real tool-result seam (#42
 		hasBlockers: false,
 		isError: false,
 		fileModified: false,
+		checkedClean: false,
 	});
 	process.env.PILENS_DATA_DIR = dataDir;
 	try {
@@ -380,7 +682,16 @@ it("adopts a home sibling but refuses home, ancestors, and a home symlink (#4230
 	// os.homedir() reads USERPROFILE rather than HOME. Keep this fake home
 	// outside the OS temp tree and pin both environment spellings so the D1
 	// boundary is testing home ownership, not the temp-root refusal (#4230).
-	const home = fs.mkdtempSync(path.join(process.cwd(), ".analysis-root-home-"));
+	// Shape 73: it must also sit outside the session's own checkout. In a
+	// git-worktree lane `process.cwd()` IS that checkout's root, so the parent
+	// of a fixture there resolves a linked worktree of the same repository and
+	// the ancestor case below would read `linked-worktree` instead of `none`.
+	// A direct child of the OS temp root has a parent that is no checkout.
+	const home = path.join(
+		path.dirname(env.tmpDir),
+		`capture-4230-home-${process.pid}`,
+	);
+	fs.mkdirSync(home, { recursive: true });
 	const sessionRoot = path.join(home, "code", "a");
 	const siblingRoot = path.join(home, "code", "b");
 	const homeLink = path.join(env.tmpDir, "home-link");
@@ -487,6 +798,7 @@ describe("bash grep searchReads registration", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				});
 				const filePath = path.join(env.tmpDir, "changed.ts");
 				fs.writeFileSync(filePath, "export const before = true;\n");
@@ -660,6 +972,7 @@ describe("bash grep searchReads registration", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			});
 			expect(await handleToolResult(base)).toEqual(
 				expect.objectContaining({
@@ -673,6 +986,7 @@ describe("bash grep searchReads registration", () => {
 				hasBlockers: false,
 				isError: true,
 				fileModified: false,
+				checkedClean: false,
 			});
 			expect(await handleToolResult(base)).toEqual(
 				expect.objectContaining({
@@ -1563,6 +1877,7 @@ describe("bash grep searchReads registration", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			});
 			const filePath = path.join(env.tmpDir, "unknown.ts");
 			fs.writeFileSync(filePath, "const a = 1;\n", "utf8");
@@ -1676,6 +1991,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-1603-tool-result-");
 		try {
@@ -1721,6 +2037,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-1603-rewrite-");
 		try {
@@ -1782,6 +2099,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-1603-removal-");
 		try {
@@ -1848,6 +2166,7 @@ describe("bash grep searchReads registration", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 				changedFiles: [configPath],
 			});
 			await handleToolResult({
@@ -1872,6 +2191,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-2071-tool-result-");
 		try {
@@ -2046,6 +2366,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-native-edit-hash-");
 		try {
@@ -2420,6 +2741,7 @@ describe("monorepo turn-state cwd alignment", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-monorepo-cwd-");
@@ -2505,6 +2827,7 @@ describe("monorepo turn-state cwd alignment", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-monorepo-dispatch-");
@@ -2577,6 +2900,7 @@ describe("monorepo turn-state cwd alignment", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-3512-dispatch-generation-");
 		try {
@@ -2665,6 +2989,7 @@ describe("monorepo turn-state cwd alignment", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 					cascadePromise: Promise.resolve(sessionOneRun),
 				};
 			});
@@ -2766,6 +3091,7 @@ describe("monorepo turn-state cwd alignment", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 			cascadePromise: Promise.resolve(sessionOneRun),
 		}));
 		const entered = gatedPromise<void>();
@@ -2846,6 +3172,7 @@ describe("monorepo turn-state cwd alignment", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				};
 			});
 			const existingPath = createTempFile(
@@ -3012,6 +3339,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const entered = gatedPromise<void>();
 		const release = gatedPromise<void>();
@@ -3124,6 +3452,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 				hasBlockers: false,
 				isError: true,
 				fileModified: false,
+				checkedClean: false,
 			};
 		});
 		await acrossReplacement(
@@ -3431,6 +3760,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 						hasBlockers: false,
 						isError: false,
 						fileModified: false,
+						checkedClean: false,
 					};
 				});
 				const handler = handleToolResult(
@@ -3476,6 +3806,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 						hasBlockers: false,
 						isError: false,
 						fileModified: false,
+						checkedClean: false,
 					};
 				});
 				const handler = handleToolResult({
@@ -3521,6 +3852,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-change-log-");
@@ -3585,6 +3917,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-deferred-format-");
@@ -3683,6 +4016,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [filePath],
 				postMutation: {
 					filePath,
@@ -3737,6 +4071,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				// A side-effect file changed, but the target write has no owned hash.
 				changedFiles: [path.join(env.tmpDir, "helper.rs")],
 			});
@@ -3783,6 +4118,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				}));
 				const paths = Array.from({ length: fileCount }, (_, index) =>
 					createTempFile(env.tmpDir, `bash-${index}.ts`, "export {};\n"),
@@ -3857,6 +4193,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				});
 				const runtime = new RuntimeCoordinator();
 				runtime.projectRoot = env.tmpDir;
@@ -3911,6 +4248,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				});
 				const runtime = new RuntimeCoordinator();
 				runtime.projectRoot = env.tmpDir;
@@ -3965,6 +4303,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [filePath],
 				postMutation:
 					ctx.autofixMode === "immediate"
@@ -4014,6 +4353,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			}));
 			const existingPath = createTempFile(
 				env.tmpDir,
@@ -4154,6 +4494,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			}));
 			const existingPath = createTempFile(
 				env.tmpDir,
@@ -4244,6 +4585,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [ctx.filePath],
 				postMutation: {
 					filePath: ctx.filePath,
@@ -4299,6 +4641,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			});
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
@@ -4380,6 +4723,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				};
 			});
 			await handleToolResult({
@@ -4411,6 +4755,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			});
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
@@ -4450,6 +4795,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: true,
+					checkedClean: false,
 					changedFiles: [boundaryPath],
 					postMutation: {
 						filePath: boundaryPath,
@@ -4462,6 +4808,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: true,
+					checkedClean: false,
 					changedFiles: [filePath],
 					postMutation: { filePath, content, source: "autofix" },
 				});
@@ -4536,6 +4883,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const formatEventsPublish =
 			await import("../../clients/format-events-publish.js");
@@ -4636,6 +4984,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: true,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-");
@@ -4710,6 +5059,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-");
@@ -4784,6 +5134,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-");
@@ -4877,6 +5228,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-dedupe-");
@@ -4960,6 +5312,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [filePath, sideEffectPath],
 			});
 
@@ -5039,6 +5392,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				// runPipeline reports the target's post-write hash whenever its own
 				// write touched the target (pipeline.ts, #2499).
 				postWriteStateHash: createHash("sha256")
@@ -5099,6 +5453,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				// A cwd-relative workspace-edit spelling must be resolved against
 				// the workspace passed to applyWorkspaceEdit, not process.cwd().
 				changedFiles: ["src/main.rs"],
@@ -5184,6 +5539,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [caseVariantPath],
 			});
 
@@ -5386,6 +5742,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-path-");
@@ -5464,6 +5821,7 @@ describe("#484 turn-summary collection gate", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: true,
+			checkedClean: false,
 			diagnostics: [
 				{
 					id: "d1",
@@ -5524,6 +5882,7 @@ describe("#484 turn-summary collection gate", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: true,
+			checkedClean: false,
 			diagnostics: [
 				{
 					id: "d1",
@@ -5618,6 +5977,7 @@ describe("#3246 inline blocker provenance", () => {
 				hasBlockers: true,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 				inlineBlockerSummary:
 					"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
 				inlineBlockerSources: ["ast-grep"],
@@ -5667,6 +6027,7 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		logLatency.mockClear();
 	});

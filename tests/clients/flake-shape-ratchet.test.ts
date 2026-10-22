@@ -432,6 +432,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git worktree metadata is written and registered by Git; an in-process double cannot prove linked-worktree ownership",
 	},
+	// 2026-10-21 (#4713 R11): real `bash -c` is the oracle for which
+	// directory each generated spelling enters and where its redirect lands;
+	// the generator exists because hand-written expectations missed spellings.
+	"real-process-spawn:clients/bash-word-composition.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"real bash decides which directory each generated spelling enters and where its write lands; a stubbed shell answers neither",
+	},
 	"real-process-spawn:clients/biome-config-decorator-metadata.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -626,6 +634,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// store, a worktree-local toplevel — and `git worktree add` is the only way
 	// to make one. The prescan's own recovery is git's `status --porcelain`, so
 	// a stubbed git would answer neither question.
+	// 2026-10-19 (#2050): a real linked worktree (`git worktree add`), pi's own
+	// `bash` tool running the script, and the real tree-sitter dispatch are the
+	// subject; a stubbed shell or git could not answer whether the worktree's
+	// own `git status` saw the write.
+	"real-process-spawn:index-2050-worktree-bash-dispatch-witness.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the subject is what a real bash command does to a real linked worktree, detected by git's own status; a stubbed shell or git answers neither",
+	},
 	"real-process-spawn:index-4504-opaque-prescan-root-witness.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -860,6 +877,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the real pinned npm child is required to reproduce lockfile optional-binding rewrites; a process double cannot validate npm behavior",
+	},
+	// 2026-10-21 (#4717): two CI jobs import the PR-body script with no
+	// install; only a fresh node over a scripts copy with no node_modules
+	// proves the lexer's lazy marked load keeps them resolvable.
+	"real-process-spawn:scripts/markdown-lexer-entry-points.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"what a fresh node resolves from a scripts tree with no node_modules is the boundary under test; an in-process import shares vitest's resolved modules",
 	},
 	// 2026-10-16 (#4510): the killed-runner witness ends its own vitest
 	// launcher from outside the worker (the kill guard refuses process.kill).

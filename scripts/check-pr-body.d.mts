@@ -45,6 +45,7 @@ export declare function lintClassSweep(
 	body?: string,
 	options?: { diff?: string },
 ): string[];
+export declare function lintFoldCheck(body?: string): string[];
 export declare const DETECTION_LAYERS: readonly string[];
 export declare const DETECTION_MESSAGE: string;
 export declare const DETECTION_UNKNOWN_MESSAGE: string;

@@ -249,7 +249,10 @@ rigor (#2599).
   `## Observability` (a record literal from the runtime diff, `none: <reason>`,
   or exactly `No new failure path; no record added.`, which a new decision
   branch on a session, lifecycle or delivery seam refuses, #3875),
-  `## Class sweep`, and `## Test assessment`. A brief that names only some
+  `## Class sweep`, `## Fold check` (one line per candidate, `#N folded`,
+  `#N not folded` or `#N sequenced`, then its reason, or `none: <reason>`;
+  the body lint owns the form and the local script owns the candidate list,
+  #4711), and `## Test assessment`. A brief that names only some
   headings does not shorten this list. The closing keyword lives in the body;
   GitHub ignores it in a title.
 - Run `node scripts/check-pr-body.mjs --lint-local PR_BODY.md` and

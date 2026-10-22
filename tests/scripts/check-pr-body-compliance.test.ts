@@ -1152,3 +1152,72 @@ describe("diff-keyed compliance (#4585)", () => {
 		).toContain("row 1");
 	});
 });
+
+// #4717 F1: a row belongs to the section the reader sees, so both row scanners
+// take their heading lines from the lexer. Recurrence: each scanner ran
+// `HEADING.exec(row)`, a column-0 `## ` regex, so a setext or an indented ATX
+// heading never ended a table's section and a later section's row proved the
+// mutation (or Controls) evidence the section above it did not. `marked`'s own
+// gfm render hides nothing there: the heading is a heading.
+describe("row scanners read the lexer's headings (#4717 F1)", () => {
+	const ended = [
+		["a setext heading", "Blast radius\n------------"],
+		["an indented ATX heading", "   ## Blast radius"],
+	];
+	const evidenceTable = (file: string, evidence: string) =>
+		[
+			"| file | evidence |",
+			"| --- | --- |",
+			`| \`${file}\` | ${evidence} |`,
+		].join("\n");
+
+	it.each(ended)("does not credit a mutation row past %s", (_name, heading) => {
+		const { diff, headFiles } = image(
+			"scripts/sample.mjs",
+			"if (ready) return value;",
+		);
+		const body = [
+			"## Mutations",
+			evidenceTable("scripts/other.mjs", "`Tests 1 failed`"),
+			"",
+			heading,
+			"",
+			evidenceTable("scripts/sample.mjs", "`Tests 1 failed`"),
+		].join("\n");
+		expect(errors(body, diff, headFiles).join()).toContain("row 2");
+		// The same row inside its own section still proves the mutation.
+		expect(
+			errors(
+				[
+					"## Mutations",
+					evidenceTable("scripts/sample.mjs", "`Tests 1 failed`"),
+				].join("\n"),
+				diff,
+				headFiles,
+			),
+		).toEqual([]);
+	});
+
+	it.each(ended)("does not credit a Controls row past %s", (_name, heading) => {
+		const { diff, headFiles } = image(
+			"tests/a.test.ts",
+			`it("fails for stale bytes", () => {});`,
+		);
+		const control = evidenceTable(
+			"tests/a.test.ts",
+			"the case predates this diff",
+		);
+		const body = [
+			"## Controls",
+			"No control is named here.",
+			"",
+			heading,
+			"",
+			control,
+		].join("\n");
+		expect(errors(body, diff, headFiles).join()).toContain("row 1");
+		expect(
+			errors(["## Controls", control].join("\n"), diff, headFiles),
+		).toEqual([]);
+	});
+});

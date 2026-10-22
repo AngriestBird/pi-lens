@@ -1,5 +1,16 @@
 # HISTORY
 
+## 2026-10-22 — a synchronous native-tree walk holds every tree (shape 81)
+
+`silent-catch-sweep` parsed about 530 files in one synchronous loop. The
+`@ast-grep/napi` finalizer that frees a tree runs only when the event loop
+turns, so the file peaked at 1,902 MB of a 2,048 MB budget with 44 MB of V8
+heap, and #4713's +0.34% of source redded Unit shard 2/5 (#4736). One
+`setImmediate` per file brings it to about 250 MB with an identical finding
+list. `env-path-key-composition-sweep` and `lsp-service-double-sweep` had the
+same loop at 1,703 and 1,715 MB and got the same turn. Earlier members:
+#3565 and #4292.
+
 ## 2026-10-20 — a fold rule that ran only after the lane was written
 
 Three documents decided folding before this date, and none of them read the

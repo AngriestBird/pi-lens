@@ -1269,6 +1269,7 @@ describe("parallel bash calls (#4137)", () => {
 		hasBlockers: false,
 		isError: false,
 		fileModified: false,
+		checkedClean: false,
 	};
 
 	async function pipelineMock() {
@@ -1287,6 +1288,7 @@ describe("parallel bash calls (#4137)", () => {
 		hasBlockers: true,
 		isError: false,
 		fileModified: false,
+		checkedClean: false,
 		inlineBlockerSummary: STOP,
 		inlineBlockerSources: ["biome"],
 		inlineBlockerLines: [2],

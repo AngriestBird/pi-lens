@@ -253,6 +253,15 @@ export interface DispatchResult {
 	 * `unconfirmedStatus` hides that no runner of a defined primary group ran.
 	 */
 	coverage?: "primary" | "in_flight" | "fallback" | "unconfigured";
+	/**
+	 * #4734 r3: the primary group's language server (its `lsp` runner) reached
+	 * a usable result for these bytes, with no server left unconfirmed. Absent
+	 * otherwise: no kind or primary group, `--no-lsp`, a CLI primary or a
+	 * fallback linter standing in, a primary deferred or still in flight, and a
+	 * partial notice the session latch withheld. The clean advisory's evidence
+	 * that a language server answered (`PipelineResult.checkedClean`).
+	 */
+	primaryLspChecked?: true;
 }
 
 // --- Runner Definition ---

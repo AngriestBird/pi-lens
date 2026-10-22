@@ -2,6 +2,7 @@ import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { loadBootstrapClients, requestBootstrapClients } from "./bootstrap.js";
 import type { CacheManager } from "./cache-manager.js";
+import { resolveSessionConfigRoot } from "./analysis-root.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { detectFileKind } from "./file-kinds.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
@@ -17,6 +18,8 @@ import {
 	isGitWorktree,
 	opaqueBaselineSlot,
 	opaquePrescanRoot,
+	recordOpaqueRootRefusals,
+	resolveOpaqueRecoveryRoots,
 	shouldRunOpaqueRecovery,
 	type PendingOpaqueBaseline,
 } from "./opaque-mutation-scan.js";
@@ -425,6 +428,58 @@ export type ToolCallResult = { block: true; reason?: string } | void;
  * recorded (a gitignored SKIP is not a block, so it is unaffected). This
  * cleanup runs INSIDE the try, so a throw out of it is absorbed too.
  */
+/**
+ * The pre-call baseline for ONE recovery root (#2050).
+ *
+ * The session root keeps the strategy it has always chosen: git when it is a
+ * worktree, the bounded stat snapshot otherwise. Every further root was
+ * admitted by {@link resolveOpaqueRecoveryRoots} because its checkout belongs
+ * to this repository, so it IS a worktree and its baseline is the timestamp.
+ *
+ * `startedAt` is passed in rather than taken here so every root of one call
+ * shares one window floor: a timestamp taken after the first root's baseline
+ * work would miss a write that landed in the meantime.
+ */
+async function captureOpaqueBaseline(
+	root: string,
+	sessionRoot: boolean,
+	startedAt: number,
+): Promise<{ state: PendingOpaqueBaseline; note: string }> {
+	if (!sessionRoot)
+		return { state: { startedAt, strategy: "git" }, note: "git" };
+	if (await isGitWorktree(root)) {
+		// Git-first: the timestamp IS the baseline; git answers what changed, at
+		// any repo size, with no file-universe cap.
+		//
+		// #4502: the dirty set is the second half. A same-HEAD discard
+		// (`git stash`, `git checkout .`, `git restore`) moves no HEAD and
+		// leaves the tree clean, so neither signal names the reverted files; the
+		// pre-command dirty set is the only evidence that they were ours to
+		// resync. `undefined` when git could not answer, which says "unknown",
+		// never "the tree was clean".
+		const dirtyPaths = await captureGitDirtyPaths(root);
+		return {
+			state: {
+				startedAt,
+				strategy: "git",
+				...(dirtyPaths === undefined ? {} : { dirtyPaths }),
+			},
+			note: "git",
+		};
+	}
+	const outcome = await captureFileStats(root, { withHashes: true });
+	return {
+		state: outcome.snapshot
+			? { startedAt, strategy: "stat-diff", stats: outcome.snapshot }
+			: {
+					startedAt,
+					strategy: "stat-diff",
+					statsUnknownReason: outcome.unknownReason ?? "walk-failed",
+				},
+		note: outcome.unknownReason ?? `scanned:${outcome.scannedCount}`,
+	};
+}
+
 export async function handleToolCall(
 	deps: ToolCallDeps,
 ): Promise<ToolCallResult> {
@@ -630,68 +685,57 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			const scanRoot = opaquePrescanRoot(ctx.cwd, runtime.projectRoot);
 			if (scanRoot && shouldRunOpaqueRecovery(toolName, scanRoot)) {
 				const started = Date.now();
-				const baselineSlot = opaqueBaselineSlot(
+				// #2050: the trees this command's writes must be recovered from. The
+				// session root is where the host ran it; any further root is a
+				// checkout the command itself named and that belongs to THIS
+				// repository (a linked worktree), so its baseline is taken here and
+				// its recovery happens there. Bounded by `OPAQUE_RECOVERY_ROOT_CAP`,
+				// and every refused or over-cap root leaves one record per session.
+				const scopes = resolveOpaqueRecoveryRoots(
+					commandInput.command,
 					scanRoot,
-					runtime.sessionGeneration,
 				);
-				let baseline: PendingOpaqueBaseline;
-				let resultNote: string;
-				if (await isGitWorktree(scanRoot)) {
-					// Git-first: the timestamp IS the baseline; git answers what
-					// changed, at any repo size, with no file-universe cap.
-					//
-					// #4502: the dirty set is the second half. A same-HEAD discard
-					// (`git stash`, `git checkout .`, `git restore`) moves no HEAD and
-					// leaves the tree clean, so neither signal names the reverted
-					// files; the pre-command dirty set is the only evidence that they
-					// were ours to resync. `undefined` when git could not answer, which
-					// says "unknown", never "the tree was clean".
-					const dirtyPaths = await captureGitDirtyPaths(scanRoot);
-					baseline = {
-						startedAt: started,
-						strategy: "git",
-						...(dirtyPaths === undefined ? {} : { dirtyPaths }),
-					};
-					resultNote = "git";
-				} else {
-					const outcome = await captureFileStats(scanRoot, {
-						withHashes: true,
-					});
-					baseline = outcome.snapshot
-						? {
-								startedAt: started,
-								strategy: "stat-diff",
-								stats: outcome.snapshot,
-							}
-						: {
-								startedAt: started,
-								strategy: "stat-diff",
-								statsUnknownReason: outcome.unknownReason ?? "walk-failed",
-							};
-					resultNote =
-						outcome.unknownReason ?? `scanned:${outcome.scannedCount}`;
+				recordOpaqueRootRefusals(scopes);
+				const turn = {
+					key: runtime.turnKey(deps.sessionId),
+					isLive: (key: number) => runtime.isLiveTurnKey(key),
+				};
+				const callId = resolveToolCallCorrelationId(event);
+				let resultNote = "";
+				for (const [index, root] of scopes.roots.entries()) {
+					// The session root keeps the strategy it chose before: git when it
+					// is a worktree, the bounded stat snapshot otherwise. An admitted
+					// worktree IS a checkout by admission, so its baseline is the
+					// timestamp and its recovery is `git status` in that root.
+					const baseline = await captureOpaqueBaseline(
+						root,
+						index === 0,
+						started,
+					);
+					if (index === 0) resultNote = baseline.note;
+					// Session-stamped slot: a concurrent-secondary session (#473)
+					// replacing it must yield a no-pending-snapshot UNKNOWN for us -
+					// never a diff against another session's baseline. One entry per
+					// call (#4137): parallel bash calls all record before the first
+					// result. The turn lets the store retire the entry of a call that
+					// never gets a result (#3613 F2: this session's own turn).
+					getOpaqueBaselineStore().record(
+						opaqueBaselineSlot(root, runtime.sessionGeneration),
+						callId,
+						baseline.state,
+						turn,
+					);
 				}
-				// Session-stamped slot: a concurrent-secondary session (#473)
-				// replacing it must yield a no-pending-snapshot UNKNOWN for us -
-				// never a diff against another session's baseline. One entry per
-				// call (#4137): parallel bash calls all record before the first
-				// result. The turn lets the store retire the entry of a call that
-				// never gets a result (#3613 F2: this session's own turn).
-				getOpaqueBaselineStore().record(
-					baselineSlot,
-					resolveToolCallCorrelationId(event),
-					baseline,
-					{
-						key: runtime.turnKey(deps.sessionId),
-						isLive: (key) => runtime.isLiveTurnKey(key),
-					},
-				);
 				logLatency({
 					type: "phase",
 					phase: "opaque_mutation_prescan",
 					filePath: commandInput.command.slice(0, 80),
 					durationMs: Date.now() - started,
 					result: resultNote,
+					metadata: {
+						root: scanRoot,
+						roots: scopes.roots.join(",").slice(0, 300),
+					},
 				});
 			}
 		}
@@ -812,10 +856,17 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 
 	if (!getFlag("no-lsp")) {
 		try {
-			const configCwd = filePath
-				? path.dirname(filePath)
-				: (ctx.cwd ?? runtime.projectRoot ?? process.cwd());
-			await ensureLSPConfigInitialized(configCwd);
+			// #2657: the session registers a WORKSPACE, and the owning class
+			// decides whether it registers at all. This seam answered with a raw
+			// `path.dirname(filePath)`, so every touched directory became a root
+			// (cycling the FIFO(128) registry out from under the operator's
+			// `lsp.disabledServers` denial) and an adopted project was laundered
+			// into a session root.
+			const sessionRoot = ctx.cwd ?? runtime.projectRoot ?? process.cwd();
+			const configRoot = filePath
+				? resolveSessionConfigRoot(filePath, sessionRoot).register
+				: sessionRoot;
+			if (configRoot) await ensureLSPConfigInitialized(configRoot);
 		} catch (cfgErr) {
 			dbg(`lsp config init failed during tool_call: ${cfgErr}`);
 		}

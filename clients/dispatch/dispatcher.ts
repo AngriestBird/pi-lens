@@ -705,7 +705,10 @@ function buildCoverageNotice(
 	ctx: DispatchContext,
 	runnerLatencies: RunnerLatency[],
 	dedupe: boolean,
-): Pick<DispatchResult, "unconfirmedStatus" | "coverage"> & {
+): Pick<
+	DispatchResult,
+	"unconfirmedStatus" | "coverage" | "primaryLspChecked"
+> & {
 	notice?: Diagnostic;
 } {
 	if (!ctx.kind) return {};
@@ -796,7 +799,18 @@ function buildCoverageNotice(
 	// primary produced no usable result and must not suppress the notice
 	// (#3867). `hasUsableResult` owns that rule in dispatch/types.ts.
 	const primaryHasCoverage = relevant.some(hasUsableResult);
-	if (primaryHasCoverage) return { coverage: "primary" };
+	// #4734 r3: the one return where a language server checked these bytes, so
+	// the only one that may say so (`DispatchResult.primaryLspChecked`). A CLI
+	// primary (pyright under --no-lsp) or a fallback linter is coverage, not an
+	// answer from a language server.
+	if (primaryHasCoverage) {
+		return {
+			coverage: "primary",
+			...(relevant.some((r) => r.runnerId === "lsp" && hasUsableResult(r)) && {
+				primaryLspChecked: true,
+			}),
+		};
+	}
 
 	// A primary still in flight (collect-later) may deliver findings at turn
 	// end, so it withholds the notice. A skipped or broken primary produced
@@ -1871,6 +1885,7 @@ export async function dispatchForFile(
 		notice: coverageNotice,
 		unconfirmedStatus,
 		coverage,
+		primaryLspChecked,
 	} = buildCoverageNotice(
 		ctx,
 		runnerLatencies,
@@ -1990,6 +2005,7 @@ export async function dispatchForFile(
 		}),
 		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),
 		...(coverage !== undefined && { coverage }),
+		...(primaryLspChecked && { primaryLspChecked }),
 	};
 }
 
