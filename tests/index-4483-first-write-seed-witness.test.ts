@@ -1,4 +1,3 @@
-// flake-shape: in-process-mock — clients/lsp/capabilities stands in for the language-server process (the LSP double computes diagnostics from the bytes it is handed); every other pi-lens module on the chain is real
 /**
  * #4483 witness (ADR 0007): on a file's first write in a session, a linter
  * error the file already had is not a STOP blocker.
@@ -163,25 +162,6 @@ vi.mock("../clients/safe-spawn.js", async (importOriginal) => ({
 		boundary.isDoubled(command) ? command : null,
 }));
 
-vi.mock("../clients/lsp/capabilities.js", async (importOriginal) => {
-	const original =
-		await importOriginal<typeof import("../clients/lsp/capabilities.js")>();
-	const { makeLspServiceDouble } =
-		await import("./support/lsp-service-double.js");
-	const double = makeLspServiceDouble({
-		supportsLSP: () => boundary.lsp.enabled,
-		hasLSP: async () => boundary.lsp.enabled,
-		touchFile: boundary.lsp.touch,
-	});
-	return {
-		...original,
-		// Always the double: with `enabled` off it supports no file, so no
-		// real language server is ever spawned for the shell cells.
-		getLSPService: () =>
-			double as unknown as ReturnType<typeof original.getLSPService>,
-	};
-});
-
 import extension from "../index.js";
 import { resetDegradationLedger } from "../clients/degradation-ledger.js";
 import {
@@ -202,6 +182,7 @@ import {
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { installLspServiceDouble } from "./support/lsp-service-seam.js";
 import { readNdjsonRows } from "./support/ndjson-rows.js";
 
 let tmpDir = "";
@@ -213,7 +194,14 @@ beforeAll(() => {
 	);
 });
 afterAll(() => removeTempDirSync(tmpDir));
-beforeEach(() => {
+beforeEach(async () => {
+	// Always the double: with `enabled` off it supports no file, so no real
+	// language server is ever spawned for the shell cells.
+	await installLspServiceDouble({
+		supportsLSP: () => boundary.lsp.enabled,
+		hasLSP: async () => boundary.lsp.enabled,
+		touchFile: boundary.lsp.touch,
+	});
 	process.env.PI_LENS_TEST_MODE = "0";
 	// Each cell is a separate session but shares this temporary project. A
 	// blocker intentionally left by one cell must not become the next cell's
@@ -282,12 +270,12 @@ async function openSession(
 	fs.writeFileSync(target, before);
 	const pi = createPiMock({ "lens-guard": true, ...flags });
 	extension(pi.asExtensionAPI());
-	const ctx = () => makeCtx({ cwd: tmpDir });
-	await pi.emit(
-		"session_start",
-		makeSessionStartEvent(),
-		makeCtx({ cwd: tmpDir, sessionId: `pi-lens-4483-${name}` }),
-	);
+	// #4733 r5: every event carries this session's id. A shutdown with no id
+	// left the first cell holding the primary registration, so every later cell
+	// ran as its secondary and inherited the first cell's inline blockers.
+	const sessionId = `pi-lens-4483-${name}`;
+	const ctx = () => makeCtx({ cwd: tmpDir, sessionId });
+	await pi.emit("session_start", makeSessionStartEvent(), ctx());
 	await pi.emit("turn_start", {}, ctx());
 	let call = 0;
 	const read = async () => {
@@ -900,6 +888,43 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		const out = await s.edit("echo c", "echo d");
 		expect(out).not.toContain("🔴 STOP");
 		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L2\)/);
+		await s.end();
+	});
+
+	it("keeps another session's saved section for a linter blocker the seed calls pre-existing (#4733 r5 G3)", async () => {
+		// RECURRENCE GUARDED: #4733 r5 G3. The seed re-classified a blocker the
+		// linter still reports as pre-existing, the write then read as a whole-file
+		// clean verdict, and another session's saved section for that blocker left
+		// the record: the commit ran on a blocker shellcheck still reported.
+		const s = await openSession("g3", "scripts/g3.sh", OLD_ERROR);
+		const section = `${s.target}: 🔴 STOP — 1 issue(s) must be fixed:\n  L2: [shellcheck] SC1072`;
+		new CacheManager(false).writeCache(
+			"turn-end-findings",
+			{
+				content: section,
+				blockerContent: section,
+				blockingFiles: [s.target],
+				hasBlockers: true,
+				affectedFiles: [s.target],
+				sessionId: "an-earlier-session",
+				projectSeqStart: 0,
+				projectSeqEnd: 0,
+				fileSeqByPath: {},
+				fileContentHashes: {},
+				consumed: true,
+			},
+			tmpDir,
+		);
+		const out = await s.edit("echo a", "echo b");
+		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L2\)/);
+		expect(
+			new CacheManager(false).readCache<{ blockerContent?: string }>(
+				"turn-end-findings",
+				tmpDir,
+				Number.POSITIVE_INFINITY,
+			)?.data?.blockerContent ?? "",
+		).toContain(section);
+		expect(await s.commitBlocked()).toBe(true);
 		await s.end();
 	});
 

@@ -31,6 +31,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envFor, gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { copyFixtureGitHelper } from "../support/fixture-git-copy.js";
+import { readNdjsonRows } from "../support/ndjson-rows.js";
 import {
 	loadHistorySelection,
 	resolveHeadPaths,
@@ -48,12 +49,17 @@ import {
 	changesProductionFile,
 	changesTestTreeFile,
 	selectTargetedTests,
+	resolveBaseRef,
 	resolveDiffRange,
 	readPrePushRecord,
 	writePrePushRecord,
 } from "../../scripts/pre-push-targeted-tests.mjs";
 
 const repoRoot = path.resolve(__dirname, "..", "..");
+
+// What the local hook runs of a registry: its CI-only members run in CI (#4724).
+const local = (tests: string[]) =>
+	tests.filter((test) => !Object.hasOwn(CI_ONLY_PRE_PUSH_TESTS, test));
 
 let fixtureDir: string | undefined;
 const originalCwd = process.cwd();
@@ -123,19 +129,41 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		(_name, stdin) => {
 			// #3661 recurrence: reading only the first line made mixed pushes
 			// depend on ref ordering and could select a deletion range.
-			expect(resolveDiffRange(stdin)).toEqual(["remotesha...localsha"]);
+			expect(resolveDiffRange(stdin)).toEqual(["origin/master...localsha"]);
 		},
 	);
 
-	it("keeps the origin/master fallback for a new branch", () => {
-		// #3661 recurrence: a non-deletion line with an all-zero remote sha is
-		// the new-branch case and must retain the existing fallback.
+	it("diffs an update and a new branch against the base, never the remote tip (#4724)", () => {
+		// #4724: `remotesha...localsha` counted a merged-in master's files as the
+		// branch's own; every pushed ref now diffs against the base branch.
+		expect(
+			resolveDiffRange(
+				"refs/heads/topic localsha refs/heads/topic remotesha\n",
+				"upstream/master",
+			),
+		).toEqual(["upstream/master...localsha"]);
 		expect(
 			resolveDiffRange(`refs/heads/topic localsha refs/heads/topic ${zero}\n`),
-		).toEqual(["origin/master...HEAD"]);
+		).toEqual(["origin/master...localsha"]);
+		expect(resolveDiffRange("", "upstream/master")).toEqual([
+			"upstream/master...HEAD",
+		]);
 	});
 
-	it("deduplicates repeated update and new-branch ranges", () => {
+	it("remoteTip returns the pre-#4724 ranges: remote tip for an update, origin/master for a new branch (#4724)", () => {
+		// Recurrence (#4726 F2): the fallback for an unresolvable base must be the
+		// range set master ran, not another base range that fails the same way.
+		expect(
+			resolveDiffRange(
+				"refs/heads/a localsha refs/heads/a remotesha\n" +
+					`refs/heads/b newlocal refs/heads/b ${zero}\n`,
+				"upstream/master",
+				{ remoteTip: true },
+			),
+		).toEqual(["remotesha...localsha", "origin/master...HEAD"]);
+	});
+
+	it("deduplicates repeated ranges", () => {
 		// F3664-1 recurrence: multiple ref lines can describe the same range;
 		// main must not run the same diff and target twice.
 		expect(
@@ -143,9 +171,9 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 				`refs/heads/topic localsha refs/heads/topic remotesha\n` +
 					`refs/heads/topic localsha refs/heads/topic remotesha\n` +
 					`refs/heads/new newlocal refs/heads/new ${zero}\n` +
-					`refs/heads/new newerlocal refs/heads/new ${zero}\n`,
+					`refs/heads/new newlocal refs/heads/new ${zero}\n`,
 			),
-		).toEqual(["remotesha...localsha", "origin/master...HEAD"]);
+		).toEqual(["origin/master...localsha", "origin/master...newlocal"]);
 	});
 
 	it.each([
@@ -153,101 +181,31 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			"update first",
 			"refs/heads/updated localsha refs/heads/updated remotesha\n" +
 				`refs/heads/new-branch newlocal refs/heads/new-branch ${zero}\n`,
-			["remotesha...localsha", "origin/master...HEAD"],
+			["origin/master...localsha", "origin/master...newlocal"],
 		],
 		[
 			"new branch first",
 			`refs/heads/new-branch newlocal refs/heads/new-branch ${zero}\n` +
 				"refs/heads/updated localsha refs/heads/updated remotesha\n",
-			["origin/master...HEAD", "remotesha...localsha"],
+			["origin/master...newlocal", "origin/master...localsha"],
 		],
-	])(
-		"unions an update with a new-branch fallback (%s)",
-		(_name, stdin, expected) => {
-			// F3664-1 recurrence: a mixed push must not lose the normal update when
-			// the new-branch fallback appears before or after it.
-			expect(resolveDiffRange(stdin)).toEqual(expected);
-		},
-	);
+	])("unions an update with a new branch (%s)", (_name, stdin, expected) => {
+		// F3664-1 recurrence: a mixed push must not lose the normal update when
+		// the new branch appears before or after it.
+		expect(resolveDiffRange(stdin)).toEqual(expected);
+	});
 
-	it("passes changed files from both mixed-push ranges to selection", () => {
-		// F3664-1 witness: main must call changedFiles for both ranges; a
-		// ranges.slice(0, 1) mutation must leave one target out of this output.
+	// One real git fixture for the hook's range tests: symlinked scripts/ and
+	// node_modules/, two source files with their tests, one base commit that
+	// origin/master points at, and the hook run through the symlinked scripts/.
+	function gitFixture() {
 		fixtureDir = fs.mkdtempSync(path.join(repoRoot, ".tmp-pre-push-test-"));
 		process.chdir(fixtureDir);
-		const scriptDir = path.join(fixtureDir as string, "scripts");
+		const scriptDir = path.join(fixtureDir, "scripts");
 		fs.symlinkSync(path.join(repoRoot, "scripts"), scriptDir, "dir");
 		fs.symlinkSync(
 			path.join(repoRoot, "node_modules"),
-			path.join(fixtureDir as string, "node_modules"),
-			"dir",
-		);
-		write(
-			"vitest.config.ts",
-			'export default { test: { include: ["tests/**/*.test.ts"] } };\n',
-		);
-		write("package.json", '{"type":"module"}\n');
-		write("clients/first.ts", "export const first = true;\n");
-		write(
-			"tests/clients/first.test.ts",
-			"import { it } from 'vitest'; it('first', () => {});\n",
-		);
-		write("clients/second.ts", "export const second = true;\n");
-		write(
-			"tests/clients/second.test.ts",
-			"import { it } from 'vitest'; it('second', () => {});\n",
-		);
-		const git = (args: string[]) =>
-			String(gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" }));
-		git(["init", "--quiet", "--initial-branch=main"]);
-		git(["config", "user.name", "pi-lens test"]);
-		git(["config", "user.email", "test@example.com"]);
-		git(["add", "."]);
-		git(["commit", "--quiet", "-m", "base"]);
-		const base = git(["rev-parse", "HEAD"]).trim();
-		git(["update-ref", "refs/remotes/origin/master", base]);
-		write("clients/first.ts", "export const first = false;\n");
-		git(["add", "clients/first.ts"]);
-		git(["commit", "--quiet", "-m", "first"]);
-		const first = git(["rev-parse", "HEAD"]).trim();
-		write("clients/second.ts", "export const second = false;\n");
-		git(["add", "clients/second.ts"]);
-		git(["commit", "--quiet", "-m", "second"]);
-		const second = git(["rev-parse", "HEAD"]).trim();
-
-		const result = spawnSync(
-			process.execPath,
-			[path.join(scriptDir, "pre-push-targeted-tests.mjs"), "--skip-build"],
-			{
-				cwd: fixtureDir,
-				encoding: "utf8",
-				input: `refs/heads/first ${first} refs/heads/first ${base}\nrefs/heads/new ${second} refs/heads/new ${zero}\n`,
-			},
-		);
-		expect(result.status).toBe(0);
-		expect(result.stdout).toContain("tests/clients/first.test.ts");
-		expect(result.stdout).toContain("tests/clients/second.test.ts");
-		// #4086 recurrence: a fixture suite reports green without running vitest
-		// when the pre-push script reaches with-test-lock through a symlinked
-		// scripts/ directory. The known fixture test must appear in real output.
-		expect(result.stdout).toContain("2 passed");
-	});
-
-	// Recurrence (#4047 review H3): `lane:check` was blind to a grant-none lane,
-	// whose whole deliverable is uncommitted tracked edits plus new files; the
-	// selector only diffed committed ranges, so an edit that reds 8 tests
-	// selected nothing and the gate read green.
-	it("--include-worktree adds uncommitted tracked edits and untracked files to the changed set", () => {
-		fixtureDir = fs.mkdtempSync(path.join(repoRoot, ".tmp-pre-push-test-"));
-		process.chdir(fixtureDir);
-		fs.symlinkSync(
-			path.join(repoRoot, "scripts"),
-			path.join(fixtureDir as string, "scripts"),
-			"dir",
-		);
-		fs.symlinkSync(
-			path.join(repoRoot, "node_modules"),
-			path.join(fixtureDir as string, "node_modules"),
+			path.join(fixtureDir, "node_modules"),
 			"dir",
 		);
 		// Not the repo's vitest.config.ts: its globalSetup file does not exist in
@@ -259,23 +217,416 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			'export default { test: { include: ["tests/**/*.test.ts"] } };\n',
 		);
 		write("package.json", '{"type":"module"}\n');
-		write("clients/first.ts", "export const first = true;\n");
-		write(
-			"tests/clients/first.test.ts",
-			"import { it } from 'vitest'; it('first', () => {});\n",
-		);
+		for (const name of ["first", "second"]) {
+			write(`clients/${name}.ts`, `export const ${name} = true;\n`);
+			write(
+				`tests/clients/${name}.test.ts`,
+				`import { it } from 'vitest'; it('${name}', () => {});\n`,
+			);
+		}
 		const git = (args: string[]) =>
-			String(gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" }));
+			String(
+				gitExecFileSync(args, { cwd: fixtureDir, encoding: "utf8" }),
+			).trim();
 		git(["init", "--quiet", "--initial-branch=main"]);
 		git(["config", "user.name", "pi-lens test"]);
 		git(["config", "user.email", "test@example.com"]);
 		git(["add", "."]);
 		git(["commit", "--quiet", "-m", "base"]);
+		const base = git(["rev-parse", "HEAD"]);
+		git(["update-ref", "refs/remotes/origin/master", base]);
+		const commit = (file: string, content: string) => {
+			write(file, content);
+			git(["add", file]);
+			git(["commit", "--quiet", "-m", file]);
+			return git(["rev-parse", "HEAD"]);
+		};
+		const hook = (
+			input: string,
+			extra: string[] = [],
+			env: NodeJS.ProcessEnv = {},
+		) =>
+			spawnSync(
+				process.execPath,
+				[
+					path.join(scriptDir, "pre-push-targeted-tests.mjs"),
+					"--skip-build",
+					...extra,
+				],
+				{
+					cwd: fixtureDir,
+					encoding: "utf8",
+					input,
+					env: { ...process.env, ...env },
+				},
+			);
+		return { git, base, commit, hook };
+	}
+
+	it("passes changed files from both mixed-push ranges to selection", () => {
+		// F3664-1 witness: main must call changedFiles for both ranges; a
+		// ranges.slice(0, 1) mutation must leave one target out of this output.
+		const { base, commit, hook } = gitFixture();
+		const first = commit("clients/first.ts", "export const first = false;\n");
+		const second = commit(
+			"clients/second.ts",
+			"export const second = false;\n",
+		);
+		const result = hook(
+			`refs/heads/first ${first} refs/heads/first ${base}\nrefs/heads/new ${second} refs/heads/new ${zero}\n`,
+		);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("tests/clients/first.test.ts");
+		expect(result.stdout).toContain("tests/clients/second.test.ts");
+		// #4086 recurrence: a fixture suite reports green without running vitest
+		// when the pre-push script reaches with-test-lock through a symlinked
+		// scripts/ directory. The known fixture test must appear in real output.
+		expect(result.stdout).toContain("2 passed");
+	});
+
+	// #4724: #4557's master merge, replayed. The remote tip is an ancestor of
+	// the merge, so `remote...local` was master's change alone; the base range
+	// is the branch's own change alone.
+	it("selects only the branch's own files after a master merge (#4724)", () => {
+		const { git, base, commit, hook } = gitFixture();
+		const remote = commit("clients/first.ts", "export const first = false;\n");
+		git(["switch", "--quiet", "--detach", base]);
+		const master = commit(
+			"clients/second.ts",
+			"export const second = false;\n",
+		);
+		git(["update-ref", "refs/remotes/origin/master", master]);
+		git(["switch", "--quiet", "main"]);
+		git(["merge", "--quiet", "--no-edit", master]);
+		const merge = git(["rev-parse", "HEAD"]);
+
+		const result = hook(`refs/heads/main ${merge} refs/heads/main ${remote}\n`);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("  - tests/clients/first.test.ts");
+		expect(result.stdout).not.toContain("tests/clients/second.test.ts");
+	});
+
+	it("prefers upstream/master only when it has commits origin/master lacks (#4724)", () => {
+		const { git, base, commit } = gitFixture();
+		// No upstream remote, as in CI and the maintainer's checkout.
+		expect(resolveBaseRef()).toBe("origin/master");
+		const ahead = commit("clients/first.ts", "export const first = false;\n");
+		git(["update-ref", "refs/remotes/upstream/master", ahead]);
+		// A fork whose origin/master lags the upstream a branch merges.
+		expect(resolveBaseRef()).toBe("upstream/master");
+		git(["update-ref", "refs/remotes/upstream/master", base]);
+		git(["update-ref", "refs/remotes/origin/master", ahead]);
+		expect(resolveBaseRef()).toBe("origin/master");
+	});
+
+	// #4724: an SSH drop after a green hook re-ran the same head five times.
+	it("skips a head that already passed the same selection, and reruns otherwise (#4724)", () => {
+		const { commit, hook } = gitFixture();
+		const head = commit("clients/first.ts", "export const first = false;\n");
+		const push = `refs/heads/main ${head} refs/heads/main ${zero}\n`;
+		const first = hook(push);
+		expect(first.status).toBe(0);
+		expect(first.stdout).toContain("1 passed");
+
+		const again = hook(push);
+		expect(again.status).toBe(0);
+		expect(again.stdout).toContain("already passed these 1 test file(s)");
+		expect(again.stdout).not.toContain("passed (1)");
+
+		const commonDir = path.join(fixtureDir as string, ".git");
+		const record = readPrePushRecord(commonDir, head);
+		writePrePushRecord({
+			commonDir,
+			head,
+			base: zero,
+			selected: record?.selected ?? [],
+			passed: 0,
+			failed: 1,
+			skipped: 0,
+			vitestExitCode: 1,
+			wallTimeMs: 0,
+			outcome: "tests-failed",
+		});
+		const afterRed = hook(push);
+		expect(afterRed.status).toBe(0);
+		expect(afterRed.stdout).not.toContain("already passed");
+		expect(afterRed.stdout).toContain("1 passed");
+	});
+
+	// A fixture whose first test reads the source it covers, so the committed
+	// bytes can fail while the working tree passes (#4726 review F1, P2).
+	function sourceBoundFixture() {
+		const fx = gitFixture();
+		write(
+			"tests/clients/first.test.ts",
+			"import { expect, it } from 'vitest';\nimport { first } from '../../clients/first.ts';\nit('first', () => { expect(first).toBe(true); });\n",
+		);
+		fx.git(["add", "tests/clients/first.test.ts"]);
+		fx.git(["commit", "--quiet", "-m", "bound test"]);
+		fx.git([
+			"update-ref",
+			"refs/remotes/origin/master",
+			fx.git(["rev-parse", "HEAD"]),
+		]);
+		return fx;
+	}
+
+	// Recurrence (#4726 review F1, bot threads on the skip): the hook tests the
+	// working tree but stamped `tests-complete` on the pushed sha, so a dirty
+	// tree that passed made the later re-push of the failing bytes skip.
+	it("never trusts a pass from a dirty tree for the committed bytes (#4724)", () => {
+		const { git, commit, hook } = sourceBoundFixture();
+		const bad = commit("clients/first.ts", "export const first = false;\n");
+		const push = `refs/heads/main ${bad} refs/heads/main ${zero}\n`;
+		write("clients/first.ts", "export const first = true;\n");
+		const dirty = hook(push);
+		expect(dirty.status).toBe(0);
+		expect(dirty.stdout).toContain("1 passed");
+
+		git(["checkout", "--", "clients/first.ts"]);
+		const rePush = hook(push);
+		expect(rePush.stdout).not.toContain("already passed");
+		expect(rePush.status).toBe(1);
+		expect(rePush.stdout).toContain("1 failed");
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			bad,
+		);
+		expect(record?.outcome).not.toBe("tests-complete");
+	});
+
+	// Recurrence (#4726 verify F6): the tree was sampled only after the run, so a
+	// fix that was dirty when the push started and reverted during the run
+	// recorded a pass for the committed (failing) bytes.
+	it("never trusts a pass from a tree that was dirty when the run started (#4724)", () => {
+		const { git, commit, hook } = gitFixture();
+		write(
+			"tests/clients/first.test.ts",
+			[
+				"import { afterAll, expect, it } from 'vitest';",
+				"import { gitExecFileSync } from '../../scripts/lib/git-fixture-env.mjs';",
+				"import { first } from '../../clients/first.ts';",
+				"it('first', () => { expect(first).toBe(true); });",
+				// The run itself cleans the tree: the pass read the dirty bytes.
+				"afterAll(() => { gitExecFileSync(['checkout', '--', 'clients/first.ts'], { encoding: 'utf8' }); });",
+				"",
+			].join("\n"),
+		);
+		git(["add", "tests/clients/first.test.ts"]);
+		git(["commit", "--quiet", "-m", "self-cleaning test"]);
 		git([
 			"update-ref",
 			"refs/remotes/origin/master",
-			git(["rev-parse", "HEAD"]).trim(),
+			git(["rev-parse", "HEAD"]),
 		]);
+		const bad = commit("clients/first.ts", "export const first = false;\n");
+		const push = `refs/heads/main ${bad} refs/heads/main ${zero}\n`;
+		write("clients/first.ts", "export const first = true;\n");
+		const dirty = hook(push);
+		expect(dirty.status).toBe(0);
+		expect(dirty.stdout).toContain("1 passed");
+		expect(git(["status", "--porcelain", "--untracked-files=no"])).toBe("");
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			bad,
+		);
+		expect(record?.outcome).not.toBe("tests-complete");
+		expect(record?.treeBound).toBeUndefined();
+		const rePush = hook(push);
+		expect(rePush.stdout).not.toContain("already passed");
+		expect(rePush.status).toBe(1);
+	});
+
+	// Recurrence (#4726 verify F8): `after.dirty` had no witness once the
+	// pre-run check joined it; a tree that is clean when the run starts and
+	// dirty when it ends must not bind the committed bytes either.
+	it("never trusts a pass from a run that left the tree dirty (#4724)", () => {
+		const { git, commit, hook } = gitFixture();
+		write(
+			"tests/clients/first.test.ts",
+			[
+				"import { writeFileSync } from 'node:fs';",
+				"import { expect, it } from 'vitest';",
+				// The run lands a fix and leaves it uncommitted, then reads it.
+				"it('first', async () => {",
+				"  writeFileSync('clients/first.ts', 'export const first = true;\\n');",
+				"  const mod = await import('../../clients/first.ts?run');",
+				"  expect(mod.first).toBe(true);",
+				"});",
+				"",
+			].join("\n"),
+		);
+		git(["add", "tests/clients/first.test.ts"]);
+		git(["commit", "--quiet", "-m", "dirtying test"]);
+		git([
+			"update-ref",
+			"refs/remotes/origin/master",
+			git(["rev-parse", "HEAD"]),
+		]);
+		const bad = commit("clients/first.ts", "export const first = false;\n");
+		const push = `refs/heads/main ${bad} refs/heads/main ${zero}\n`;
+		const run = hook(push);
+		expect(run.status).toBe(0);
+		expect(run.stdout).toContain("1 passed");
+		expect(git(["status", "--porcelain", "--untracked-files=no"])).not.toBe("");
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			bad,
+		);
+		expect(record?.outcome).not.toBe("tests-complete");
+		expect(record?.treeBound).toBeUndefined();
+		const rePush = hook(push);
+		expect(rePush.stdout).not.toContain("already passed");
+		expect(rePush.stdout).toContain("1 passed");
+	});
+
+	// Recurrence (#4726 verify F6, HEAD axis): clean at both ends is not enough
+	// when the run moved HEAD from another commit onto the pushed one.
+	it("never trusts a pass from a run that started on a different HEAD (#4724)", () => {
+		const { git, commit, hook } = gitFixture();
+		write(
+			"tests/clients/first.test.ts",
+			[
+				"import { afterAll, expect, it } from 'vitest';",
+				"import { gitExecFileSync } from '../../scripts/lib/git-fixture-env.mjs';",
+				"import { first } from '../../clients/first.ts';",
+				"it('first', () => { expect(first).toBe(true); });",
+				"afterAll(() => { gitExecFileSync(['checkout', '--quiet', process.env.PUSHED_SHA ?? ''], { encoding: 'utf8' }); });",
+				"",
+			].join("\n"),
+		);
+		git(["add", "tests/clients/first.test.ts"]);
+		git(["commit", "--quiet", "-m", "head-moving test"]);
+		git([
+			"update-ref",
+			"refs/remotes/origin/master",
+			git(["rev-parse", "HEAD"]),
+		]);
+		const bad = commit("clients/first.ts", "export const first = false;\n");
+		commit("clients/first.ts", "export const first = true;\n");
+		const push = `refs/heads/old ${bad} refs/heads/old ${zero}\n`;
+		const run = hook(push, [], { PUSHED_SHA: bad });
+		expect(run.status).toBe(0);
+		expect(git(["rev-parse", "HEAD"])).toBe(bad);
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			bad,
+		);
+		expect(record?.outcome).not.toBe("tests-complete");
+	});
+
+	it("never trusts a pass for a pushed sha that is not the checked-out HEAD (#4724)", () => {
+		const { commit, hook } = sourceBoundFixture();
+		const bad = commit("clients/first.ts", "export const first = false;\n");
+		commit("clients/first.ts", "export const first = true;\n");
+		const push = `refs/heads/old ${bad} refs/heads/old ${zero}\n`;
+		const first = hook(push);
+		expect(first.status).toBe(0);
+		expect(first.stdout).toContain("1 passed");
+		const again = hook(push);
+		expect(again.stdout).not.toContain("already passed");
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			bad,
+		);
+		expect(record?.outcome).not.toBe("tests-complete");
+	});
+
+	// Recurrence: a record the master hook wrote for an untested sha carries no
+	// `treeBound`; the skip must treat it as unproven, not as a pass.
+	it("does not skip on a tests-complete record that was never bound to the tested tree (#4724)", () => {
+		const { commit, hook } = gitFixture();
+		const head = commit("clients/first.ts", "export const first = false;\n");
+		const push = `refs/heads/main ${head} refs/heads/main ${zero}\n`;
+		expect(hook(push).status).toBe(0);
+		const commonDir = path.join(fixtureDir as string, ".git");
+		const record = readPrePushRecord(commonDir, head);
+		expect(record?.treeBound).toBe(true);
+		const { treeBound: _bound, ...unbound } = record as NonNullable<
+			typeof record
+		>;
+		fs.writeFileSync(
+			path.join(commonDir, "pi-lens-prepush", `${head}.json`),
+			`${JSON.stringify(unbound)}\n`,
+		);
+		const again = hook(push);
+		expect(again.stdout).not.toContain("already passed");
+		expect(again.stdout).toContain("1 passed");
+	});
+
+	// Recurrence (#4726 review F5): the skip removes the gate for one push, so
+	// it leaves the same durable trace the lock opt-out does.
+	it("logs one pre-push-skip row beside the lock log when it skips (#4724)", () => {
+		const { commit, hook } = gitFixture();
+		const home = path.join(fixtureDir as string, ".probe-home");
+		const head = commit("clients/first.ts", "export const first = false;\n");
+		const push = `refs/heads/main ${head} refs/heads/main ${zero}\n`;
+		expect(hook(push, [], { PI_LENS_HOME: home }).status).toBe(0);
+		const again = hook(push, [], { PI_LENS_HOME: home });
+		expect(again.stdout).toContain("already passed");
+		const read = readNdjsonRows(path.join(home, "pre-push.log"));
+		expect(read.skipped).toBe(0);
+		const rows = read.rows.filter((row) => row.event === "pre-push-skip");
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
+			event: "pre-push-skip",
+			heads: [head],
+			selected: 1,
+		});
+	});
+
+	// Recurrence (#4726 review F2): every push now diffs `<base>...<sha>`, so a
+	// checkout without that ref selected nothing and exited 0.
+	it("falls back to the remote-tip range when the base ref is missing (#4724)", () => {
+		const { git, commit, hook } = gitFixture();
+		const remote = git(["rev-parse", "HEAD"]);
+		const head = commit("clients/first.ts", "export const first = false;\n");
+		git(["update-ref", "-d", "refs/remotes/origin/master"]);
+		const result = hook(`refs/heads/main ${head} refs/heads/main ${remote}\n`);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("  - tests/clients/first.test.ts");
+		expect(result.stdout).toContain("falling back to the remote-tip range");
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			head,
+		);
+		expect(record?.base).toBe(remote);
+	});
+
+	it("falls back to the remote-tip range when upstream/master shares no history (#4724)", () => {
+		const { git, commit, hook } = gitFixture();
+		const remote = git(["rev-parse", "HEAD"]);
+		const head = commit("clients/first.ts", "export const first = false;\n");
+		const emptyTree = git(["hash-object", "-t", "tree", "--stdin"]);
+		const unrelated = git(["commit-tree", emptyTree, "-m", "unrelated"]);
+		git(["update-ref", "refs/remotes/upstream/master", unrelated]);
+		expect(resolveBaseRef()).toBe("upstream/master");
+		const result = hook(`refs/heads/main ${head} refs/heads/main ${remote}\n`);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("  - tests/clients/first.test.ts");
+		expect(result.stdout).toContain("falling back to the remote-tip range");
+	});
+
+	// F3: the record names the base the selection actually diffed.
+	it("records the comparison base the selection used (#4724)", () => {
+		const { commit, hook } = gitFixture();
+		const head = commit("clients/first.ts", "export const first = false;\n");
+		expect(
+			hook(`refs/heads/main ${head} refs/heads/main ${zero}\n`).status,
+		).toBe(0);
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			head,
+		);
+		expect(record?.base).toBe("origin/master");
+	});
+
+	// Recurrence (#4047 review H3): `lane:check` was blind to a grant-none lane,
+	// whose whole deliverable is uncommitted tracked edits plus new files; the
+	// selector only diffed committed ranges, so an edit that reds 8 tests
+	// selected nothing and the gate read green.
+	it("--include-worktree adds uncommitted tracked edits and untracked files to the changed set", () => {
+		const { hook } = gitFixture();
 		// Nothing committed past origin/master: only the working tree differs.
 		write("clients/first.ts", "export const first = false;\n");
 		write(
@@ -283,21 +634,11 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			"import { it } from 'vitest'; it('third', () => {});\n",
 		);
 
-		const run = (extra: string[]) =>
-			spawnSync(
-				process.execPath,
-				[
-					path.join(repoRoot, "scripts/pre-push-targeted-tests.mjs"),
-					"--skip-build",
-					...extra,
-				],
-				{ cwd: fixtureDir, encoding: "utf8", input: "" },
-			);
-		const without = run([]);
+		const without = hook("");
 		expect(without.status).toBe(0);
 		expect(without.stdout).not.toContain("tests/clients/first.test.ts");
 		expect(without.stdout).not.toContain("tests/clients/third.test.ts");
-		const withTree = run(["--include-worktree"]);
+		const withTree = hook("", ["--include-worktree"]);
 		expect(withTree.status).toBe(0);
 		expect(withTree.stdout).toContain("  - tests/clients/first.test.ts");
 		expect(withTree.stdout).toContain("  - tests/clients/third.test.ts");
@@ -432,8 +773,10 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/project-trust-seam-ratchet.test.ts",
 			"tests/config/pr-smoke-paths.test.ts",
 			"tests/tools/diagnostics-route-switch-matrix.test.ts",
+			"tests/config/path-identity-sweep.test.ts",
 			// #4590: walks both trees, so both change kinds must arm it.
 			"tests/config/env-path-key-composition-sweep.test.ts",
+			"tests/config/git-fixture-governance.test.ts",
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
@@ -454,6 +797,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/pi-mock-importer-sweep.test.ts",
 			"tests/config/sink-read-drain-sweep.test.ts",
 			"tests/config/env-path-key-composition-sweep.test.ts",
+			"tests/config/git-fixture-governance.test.ts",
 			"tests/config/test-env-restore-sweep.test.ts",
 			"tests/config/test-server-teardown-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
@@ -464,6 +808,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/scripts/ci-shuffle-census.test.ts",
 			"tests/support/ast-census.test.ts",
 			"tests/support/host-event-shape-scan.test.ts",
+			"tests/support/source-walkers-vanished-dir.test.ts",
 			// #4522: walks both captured-fixture trees, so a fixture change arms it.
 			"tests/clients/dispatch/smoke-fixture-coverage.test.ts",
 		];
@@ -489,8 +834,8 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			["tests/support/__test_probe__.ts"],
 			allTests,
 		);
-		expect(production.selected).toEqual(productionScanners);
-		expect(testsOnly.selected).toEqual(testScanners);
+		expect(production.selected).toEqual(local(productionScanners));
+		expect(testsOnly.selected).toEqual(local(testScanners));
 	});
 
 	it("selects the registered tree scanners for production changes", () => {
@@ -509,7 +854,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		expect(changesProductionFile("clients/review-graph/git-identity.ts")).toBe(
 			true,
 		);
-		expect(result.selected).toEqual(TREE_SCANNING_GOVERNANCE_TESTS);
+		expect(result.selected).toEqual(local(TREE_SCANNING_GOVERNANCE_TESTS));
 	});
 
 	it("arms the registry for tools, mcp, scripts, and the root index", () => {
@@ -579,7 +924,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		expect([...result.selected].sort()).toEqual(
 			[
 				"tests/clients/lsp/diagnostics-fence.test.ts",
-				...TEST_TREE_GOVERNANCE_TESTS,
+				...local(TEST_TREE_GOVERNANCE_TESTS),
 			].sort(),
 		);
 		// A support-module change reaches the ratchet too: it counts helpers
@@ -590,7 +935,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 				["tests/support/fake-child.ts"],
 				collectTestFiles("tests"),
 			).selected,
-		).toEqual(TEST_TREE_GOVERNANCE_TESTS);
+		).toEqual(local(TEST_TREE_GOVERNANCE_TESTS));
 	});
 
 	it("leaves the tests-tree ratchet out of a push that touches no test file", () => {
@@ -614,6 +959,33 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		expect(selectTargetedTests(["docs/tests/x.md"], allTests).selected).toEqual(
 			[],
 		);
+	});
+
+	// #4104 (Greptile P2 on PR #4557): walk-files.mjs has no direct importer, so
+	// the import index selected none of the walker's own tests. Recurrence: an
+	// edit to the shared walker that runs no vanished-directory or sort pin
+	// before the push.
+	it("selects the walker's own tests for a change to scripts/lib/walk-files.mjs", () => {
+		enterFixture();
+		write("scripts/lib/walk-files.mjs", "export function walkFiles() {}\n");
+		write(
+			"tests/support/source-walkers-vanished-dir.test.ts",
+			"it('vanished', () => {});\n",
+		);
+		write("tests/support/sweep-kit.test.ts", "it('sweep', () => {});\n");
+
+		const allTests = collectTestFiles("tests");
+		const result = selectTargetedTests(
+			["scripts/lib/walk-files.mjs"],
+			allTests,
+		);
+
+		expect(result.selected).toEqual([
+			"tests/support/source-walkers-vanished-dir.test.ts",
+			"tests/support/sweep-kit.test.ts",
+		]);
+		expect(result.unmatched).toEqual([]);
+		expect(result.capped).toBe(false);
 	});
 
 	it("always includes a changed test file itself", () => {
@@ -836,12 +1208,12 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		expect(result.capped).toBe(true);
 		// Deduped: the #4590 sweep walks both trees and sits in both registries, so
 		// the union counts it once (a Set is what the selection itself uses).
-		const registries = [
+		const registries = local([
 			...new Set([
 				...TREE_SCANNING_GOVERNANCE_TESTS,
 				...TEST_TREE_GOVERNANCE_TESTS,
 			]),
-		];
+		]);
 		for (const registry of registries)
 			expect(result.selected).toContain(registry);
 		// The changed test file survives the cap (#4489), and the rest of the
@@ -1240,6 +1612,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 		git(root, "add", ".husky", "scripts", "package.json", "scan.mjs");
 		git(root, "commit", "-q", "-m", "base");
 		const base = git(root, "rev-parse", "HEAD");
+		git(root, "update-ref", "refs/remotes/origin/master", base);
 		put(root, "docs/readme.md", "# docs\n");
 		git(root, "add", "docs");
 		git(root, "commit", "-q", "-m", "docs");
@@ -1379,6 +1752,7 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 		git(root, "add", ".husky", "scripts", "package.json", "clients", "tests");
 		git(root, "commit", "-q", "-m", "base");
 		const base = git(root, "rev-parse", "HEAD");
+		git(root, "update-ref", "refs/remotes/origin/master", base);
 		put(root, "clients/planted.ts", VIOLATION);
 		if (plantTracked) git(root, "add", "clients/planted.ts");
 		put(root, "clients/clean.ts", "export const clean = 2;\n");
@@ -1530,6 +1904,7 @@ if (isEntryPoint(import.meta.url)) process.kill(process.pid, "SIGKILL");
 		git("add", ".husky", "scripts", "package.json");
 		git("commit", "-q", "-m", "base");
 		const base = git("rev-parse", "HEAD");
+		git("update-ref", "refs/remotes/origin/master", base);
 		put("clients/x.ts", "export const x = 1;\n");
 		put("tests/clients/x.test.ts", testSource);
 		git("add", "clients", "tests");
@@ -1933,7 +2308,7 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 		failingChange: Record<string, string>;
 		pushedChange: Record<string, string>;
 	}) {
-		const { cwd, commit } = repo();
+		const { cwd, git, commit } = repo();
 		for (const link of ["scripts", "node_modules"])
 			fs.symlinkSync(path.join(repoRoot, link), path.join(cwd, link), "dir");
 		// Not the repo's vitest.config.ts: its globalSetup file does not exist in
@@ -1955,6 +2330,8 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 		);
 		const failingHead = commit(failingChange, "round 1");
 		const pushed = commit(pushedChange, "round 2");
+		// Round 1 is on the base, so the pushed range is round 2 alone (#4724).
+		git(["update-ref", "refs/remotes/origin/master", failingHead]);
 		const artifact = path.join(cwd, ".history-artifact");
 		fs.mkdirSync(artifact);
 		fs.writeFileSync(

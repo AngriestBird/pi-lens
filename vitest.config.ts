@@ -745,6 +745,9 @@ export const wallClockBudgetInclude = [
 	"tests/scripts/lint-js.test.ts",
 	"tests/scripts/lockfile-completeness.test.ts",
 	"tests/scripts/lsp-idle-eviction-promote.test.ts",
+	// #4717: the lexer-seam entry points run in a fresh node over a scripts
+	// copy with no node_modules (real child process, flake-shape admission).
+	"tests/scripts/markdown-lexer-entry-points.test.ts",
 	// #4048: the mutation helper's real child and SIGINT restoration witness
 	// require a quiet serialized phase; its bounded timer and never-settling
 	// fixture are the process boundary under test (flake-shape admission).

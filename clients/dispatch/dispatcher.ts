@@ -705,11 +705,17 @@ function buildCoverageNotice(
 	ctx: DispatchContext,
 	runnerLatencies: RunnerLatency[],
 	dedupe: boolean,
-): { notice?: Diagnostic; unconfirmedStatus?: string } {
+): Pick<
+	DispatchResult,
+	"unconfirmedStatus" | "coverage" | "primaryLspChecked"
+> & {
+	notice?: Diagnostic;
+} {
 	if (!ctx.kind) return {};
 	const lspEnabled = !ctx.pi.getFlag("no-lsp");
 	const primary = getPrimaryDispatchGroup(ctx.kind, lspEnabled);
-	if (!primary || primary.runnerIds.length === 0) return {};
+	if (!primary || primary.runnerIds.length === 0)
+		return { coverage: "unconfigured" };
 
 	const relevant = runnerLatencies.filter((r) =>
 		primary.runnerIds.includes(r.runnerId),
@@ -793,7 +799,18 @@ function buildCoverageNotice(
 	// primary produced no usable result and must not suppress the notice
 	// (#3867). `hasUsableResult` owns that rule in dispatch/types.ts.
 	const primaryHasCoverage = relevant.some(hasUsableResult);
-	if (primaryHasCoverage) return {};
+	// #4734 r3: the one return where a language server checked these bytes, so
+	// the only one that may say so (`DispatchResult.primaryLspChecked`). A CLI
+	// primary (pyright under --no-lsp) or a fallback linter is coverage, not an
+	// answer from a language server.
+	if (primaryHasCoverage) {
+		return {
+			coverage: "primary",
+			...(relevant.some((r) => r.runnerId === "lsp" && hasUsableResult(r)) && {
+				primaryLspChecked: true,
+			}),
+		};
+	}
 
 	// A primary still in flight (collect-later) may deliver findings at turn
 	// end, so it withholds the notice. A skipped or broken primary produced
@@ -801,7 +818,7 @@ function buildCoverageNotice(
 	const primaryStillInFlight = relevant.some(
 		(r) => r.status === "pending" || r.status === "deferred",
 	);
-	if (primaryStillInFlight) return {};
+	if (primaryStillInFlight) return { coverage: "in_flight" };
 
 	const plan = getToolPlan(ctx.kind);
 	const fallbackRunnerIds = new Set(
@@ -837,7 +854,7 @@ function buildCoverageNotice(
 			(!plan?.capabilities.includes("types") ||
 				TYPE_CAPABLE_FALLBACK_RUNNERS.has(r.runnerId)),
 	);
-	if (anyFallbackHasCoverage) return {};
+	if (anyFallbackHasCoverage) return { coverage: "fallback" };
 
 	// #4403: no primary checked this file. When the runner knows why, the
 	// status line says it; otherwise it says what the notice says.
@@ -1864,7 +1881,12 @@ export async function dispatchForFile(
 
 	const inlineBlockers = blockers;
 	const inlineFixed = fixedItems;
-	const { notice: coverageNotice, unconfirmedStatus } = buildCoverageNotice(
+	const {
+		notice: coverageNotice,
+		unconfirmedStatus,
+		coverage,
+		primaryLspChecked,
+	} = buildCoverageNotice(
 		ctx,
 		runnerLatencies,
 		options?.dedupeCoverageNotice ?? true,
@@ -1982,6 +2004,8 @@ export async function dispatchForFile(
 			},
 		}),
 		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),
+		...(coverage !== undefined && { coverage }),
+		...(primaryLspChecked && { primaryLspChecked }),
 	};
 }
 

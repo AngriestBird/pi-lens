@@ -26,6 +26,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
+import {
+	resetUserNotifier,
+	wireUserNotifier,
+} from "../../clients/user-notify.js";
 
 /**
  * Flipped per test. `true` reproduces the compiled host: a bare specifier
@@ -87,8 +91,12 @@ vi.mock("../../clients/tree-sitter-logger.js", async (importOriginal) => {
 	};
 });
 
-const notifyUserDegradation = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/user-notify.js", () => ({ notifyUserDegradation }));
+const notifyUserDegradation = vi.fn();
+beforeEach(() => {
+	resetUserNotifier();
+	wireUserNotifier(() => notifyUserDegradation);
+});
+afterEach(() => resetUserNotifier());
 
 /** The private surface these tests observe, all of it pre-existing. */
 type GrammarDirClient = {

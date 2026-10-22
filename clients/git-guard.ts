@@ -1,8 +1,9 @@
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
-import type { CacheManager } from "./cache-manager.js";
+import type { CacheInspection, CacheManager } from "./cache-manager.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
+import { isOutsideProjectRoot, toProjectRelativePath } from "./path-utils.js";
 import { tokenizeShellCommand } from "./bash-file-access.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { absorbSettledRunnerBlockers } from "./deferred-runner-blockers.js";
@@ -165,11 +166,20 @@ function blockerSectionFile(line: string): string | undefined {
  * is NOT in that company — round 1 claimed it was, and the section-count guard
  * below is why (HIGH-3287-1).
  */
+interface BlockerSection {
+	/** The path key the section is attributed to. */
+	key: string;
+	/** The attribution line's own path spelling, for display. */
+	file: string;
+	/** The section's lines: its attribution line, then its body. */
+	lines: string[];
+}
+
 function blockingProvenance(
 	blockerContent: unknown,
 	blockingFiles: unknown,
 	cwd: string,
-): string[] | undefined {
+): BlockerSection[] | undefined {
 	if (typeof blockerContent !== "string" || blockerContent.length === 0)
 		return undefined;
 	// `Array.isArray` only: a non-empty `blockingFiles` is not a separate
@@ -187,25 +197,26 @@ function blockingProvenance(
 		return undefined;
 	}
 	const provenanceKeys = blockingFiles.map((file) => guardPathKey(file, cwd));
-	const sectionKeys: string[] = [];
-	let inSection = false;
+	const sections: BlockerSection[] = [];
+	let open: BlockerSection | undefined;
 	for (const line of blockerContent.split("\n")) {
 		// A ZERO-LENGTH line only: the composer's part separator. A
 		// whitespace-only line is how `formatDiagnostics` renders a blank line
 		// inside a multi-line diagnostic message, and it is body (#3282 F13).
 		if (line.length === 0) {
-			inSection = false;
+			open = undefined;
 			continue;
 		}
 		const file = blockerSectionFile(line);
 		if (file === undefined) {
 			// Body of the open section, or — with no section open — text that no
 			// entry of `blockingFiles` can be held responsible for.
-			if (!inSection) return undefined;
+			if (!open) return undefined;
+			open.lines.push(line);
 			continue;
 		}
-		sectionKeys.push(guardPathKey(file, cwd));
-		inSection = true;
+		open = { key: guardPathKey(file, cwd), file, lines: [line] };
+		sections.push(open);
 	}
 	// No line opened a section, so there is nothing for `blockingFiles` to be
 	// checked against and nothing a per-file dispatch may claim authority over.
@@ -214,9 +225,9 @@ function blockingProvenance(
 	// to attribute" let a clean dispatch of an unrelated file DELETE a record
 	// whose `blockingFiles` named a different file, and the gate then answered
 	// `no_record`. Unattributed is not clean.
-	if (sectionKeys.length === 0) return undefined;
-	return sectionKeys.every((key) => provenanceKeys.includes(key))
-		? sectionKeys
+	if (sections.length === 0) return undefined;
+	return sections.every((section) => provenanceKeys.includes(section.key))
+		? sections
 		: undefined;
 }
 
@@ -844,16 +855,203 @@ function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
 	);
 }
 
+/** A stored record's fields as read, before any of them is trusted. */
+type StoredRecord = Partial<TurnEndFindingsCache>;
+
+/**
+ * A stored value: its fields, or `undefined` fields for a value that is not an
+ * object (#4733 r2). It is present, so the gate still refuses it, and it is
+ * never read as a record that makes no claim.
+ */
+interface StoredValue {
+	readonly fields: StoredRecord | undefined;
+}
+
+/**
+ * The stored value WHATEVER ITS AGE (#4725), or `undefined` when there is none
+ * or it cannot be read.
+ *
+ * The cache's freshness window is the gate's bound on TRUSTING a recorded
+ * blocker, not a reason for the record's own writers to stop seeing it. Read
+ * through the window, a stale record was invisible to every writer that could
+ * carry or retire it: a clean write latched `cache_stale`, the turn end's
+ * clean-up skipped it, and it refused every commit in every later session.
+ */
+function storedRecord(
+	cacheManager: CacheManager,
+	cwd: string,
+): StoredValue | undefined {
+	const read = cacheManager.readCache<unknown>(
+		"turn-end-findings",
+		cwd,
+		Number.POSITIVE_INFINITY,
+	);
+	if (!read) return undefined;
+	const { data } = read;
+	// The parse that makes the type true, not a verdict: every claim predicate
+	// already fails closed on a value with none of the record's fields.
+	return {
+		fields:
+			data && typeof data === "object" ? (data as StoredRecord) : undefined,
+	};
+}
+
 function cacheRecord(
 	cacheManager: CacheManager,
 	cwd: string,
 ): TurnEndFindingsCache | undefined {
-	const entry = cacheManager.readCache<unknown>("turn-end-findings", cwd);
-	return entry && isTurnEndFindingsCache(entry.data) ? entry.data : undefined;
+	const fields = storedRecord(cacheManager, cwd)?.fields;
+	return isTurnEndFindingsCache(fields) ? fields : undefined;
 }
 
-function markCacheUnknown(runtime: RuntimeCoordinator, reason: string): void {
+/**
+ * True only for a record that states it carries no blocker (#4725): an explicit
+ * `hasBlockers: false`, no test failures, and no blocker text. These are the
+ * only fields a commit verdict reads to ALLOW, so a record that claims them
+ * answers for nothing whichever session wrote it and however old it is. Every
+ * other form (a blocker, a contradiction, a record with no claim at all) is
+ * not admitted here and keeps failing closed.
+ */
+function claimsNoBlocker(fields: StoredRecord | undefined): boolean {
+	if (!fields) return false;
+	return (
+		fields.hasBlockers === false &&
+		(fields.testFailures === undefined || fields.testFailures === false) &&
+		(fields.blockerContent === undefined || fields.blockerContent === "") &&
+		// #4733 r1 F7: a test failure's text or files contradict the claim too.
+		(fields.testFailureContent === undefined ||
+			fields.testFailureContent === "") &&
+		(fields.testFailureFiles === undefined ||
+			(Array.isArray(fields.testFailureFiles) &&
+				fields.testFailureFiles.length === 0))
+	);
+}
+
+/**
+ * The only fields a record that makes NO claim carries (#4733 r1 F3): what the
+ * `--lens-guard`-off turn-end writer stores for delivery
+ * (`clients/runtime-turn.ts`, the `else` branch), and 3.8.74's `{ content }`.
+ */
+const NO_CLAIM_FIELDS = [
+	"content",
+	"affectedFiles",
+	"affectedFilesTruncated",
+	"provenance",
+] as const;
+
+/**
+ * True only for a record that holds no structured claim: an object with string
+ * `content` and no field outside {@link NO_CLAIM_FIELDS}. Its `content` may
+ * still be a blocker report the writer delivered (#4733 r2 F14), but no field
+ * says so a check could answer, so it answers to no
+ * file, so no re-check of one file clears it; the gate still refuses it, and a
+ * settled turn end with no blocker retires it. Any other key (a claim, an
+ * owner, a field no writer of these shapes stores) is not this form and keeps
+ * failing closed.
+ */
+function makesNoClaim(fields: StoredRecord | undefined): boolean {
+	return (
+		!!fields &&
+		typeof fields.content === "string" &&
+		Object.keys(fields).every((key) =>
+			NO_CLAIM_FIELDS.some((field) => field === key),
+		)
+	);
+}
+
+/** One row per retired record: a retire removes the record it describes. */
+function logRecordRetired(
+	cwd: string,
+	by: "turn_end" | "write",
+	basis: "own_session" | "no_blocker" | "no_claim" | "rechecked",
+): void {
+	logLatency({
+		type: "phase",
+		toolName: "git-guard",
+		filePath: cwd,
+		phase: "record_retired",
+		durationMs: 0,
+		result: basis,
+		metadata: { by, basis },
+	});
+}
+
+/**
+ * The turn end's clean-up of the persisted record, once the turn settled with
+ * no blocker in the runtime (the caller's guard). It retires the record when
+ * it is this session's own and holds no test failure (the rule both turn-end
+ * branches applied before #4725), when it claims no blocker at all, or when it
+ * makes no claim (#4733 r1 F3: the `--lens-guard`-off writer's record, which
+ * answers to no file) — read whatever its age, so a record the freshness
+ * window hides is no longer kept for good. A record another session wrote
+ * that still carries a blocker stays: this session's turn end did not
+ * re-check it (`syncGitGuardRecord` clears it file by file as this session
+ * re-checks the files it names). The latch that described the record goes
+ * with it; a dispatch latch stays (`RecordLatchReason`).
+ *
+ * @returns true when the record was retired.
+ */
+export function retireSettledGitGuardRecord(
+	runtime: RuntimeCoordinator,
+	cacheManager: CacheManager,
+	cwd: string,
+): boolean {
+	const stored = storedRecord(cacheManager, cwd)?.fields;
+	if (!stored) return false;
+	const own =
+		stored.sessionId === runtime.telemetrySessionId &&
+		stored.testFailures !== true;
+	const basis = own
+		? "own_session"
+		: claimsNoBlocker(stored)
+			? "no_blocker"
+			: makesNoClaim(stored)
+				? "no_claim"
+				: undefined;
+	if (!basis) return false;
+	cacheManager.clearCache("turn-end-findings", cwd);
+	runtime.clearGitGuardCacheUnknown();
+	logRecordRetired(cwd, "turn_end", basis);
+	return true;
+}
+
+/**
+ * Every reason this module latches about the stored record itself (#4733 r1
+ * F4), the only reasons the coordinator's latch slot holds. A dispatch that
+ * never answered is latched per file instead
+ * (`markGitGuardDispatchUnanswered`, #4733 r2 F12), so a writer that deletes
+ * or rewrites the record clears this slot and leaves that latch alone.
+ */
+type RecordLatchReason =
+	| "session_mismatch"
+	| "blocking_provenance_untrusted"
+	| "cache_write_failed"
+	| "cache_fresh"
+	| "cache_stale"
+	| "cache_malformed"
+	| "cache_unreadable";
+
+function markCacheUnknown(
+	runtime: RuntimeCoordinator,
+	reason: RecordLatchReason,
+): void {
 	runtime.markGitGuardCacheUnknown(reason);
+}
+
+/**
+ * The session a rewritten record belongs to (#4733 r1 F1). The owner speaks
+ * for the record's blocker sections, so a writer keeps the stored owner while
+ * any stored section survives its write, and stamps this session only when it
+ * writes none. Test failures carry no owner: only a passing run clears them.
+ */
+function recordOwner(
+	existing: TurnEndFindingsCache | undefined,
+	runtime: RuntimeCoordinator,
+	storedSectionSurvives: boolean,
+): string {
+	return existing && storedSectionSurvives
+		? existing.sessionId
+		: runtime.telemetrySessionId;
 }
 
 /** Persist a complete, bounded, content-bound guard record. */
@@ -928,16 +1126,115 @@ function logDecision(
 	});
 }
 
+/**
+ * What clears an unknown state this session's own evidence describes: a write
+ * re-dispatches the file and rewrites (or clears) the record and the latch.
+ * Never "start a fresh session": a fresh session reads the same record (#4725).
+ */
+const RECHECK_REMEDY =
+	"Write the affected files again so pi-lens re-checks them, then retry.";
+
+const MAX_REMEDY_FILES = 5;
+
+/** How a dispatch latch's file is shown: an outside path is never printed. */
+function shownLatchFile(filePath: string, cwd: string): string {
+	const resolved = resolveGuardPath(filePath, cwd);
+	return isOutsideProjectRoot(resolved, cwd)
+		? "a file outside the project"
+		: toProjectRelativePath(resolved, cwd);
+}
+
+/**
+ * The action that clears a stored record this session cannot confirm: one
+ * another session wrote, one older than the freshness window, or one no
+ * writer of this version produces (#4725). `undefined` for a record that is
+ * this session's own, fresh evidence, whose unknown states `RECHECK_REMEDY`
+ * answers.
+ *
+ * Each sentence names an action `syncGitGuardRecord`,
+ * `clearGitGuardTestFailure` or `retireSettledGitGuardRecord` honours for such
+ * a record: a clean dispatch of a named file drops that file's sections, a
+ * passing run retires its test failures, and a settled turn end retires a
+ * record that makes no claim. A record whose blockers name no file has no
+ * such action, and the text says what replaces it instead of inventing one.
+ */
+function unconfirmedRecordRemedy(
+	stored: StoredValue | undefined,
+	inspection: CacheInspection,
+	runtime: RuntimeCoordinator,
+	cwd: string,
+): string | undefined {
+	if (stored === undefined) return undefined;
+	const { fields } = stored;
+	const record = isTurnEndFindingsCache(fields) ? fields : undefined;
+	const testRemedy =
+		record?.testFailures === true
+			? "Run the failing tests again: a passing run clears them."
+			: undefined;
+	if (
+		record &&
+		inspection === "fresh" &&
+		record.sessionId === runtime.telemetrySessionId
+	) {
+		// #4733 r1 F5: a write re-checks this session's own files, and clears no
+		// test failure, so a record that holds one names the passing run too.
+		return testRemedy
+			? `Write the affected files again so pi-lens re-checks them. ${testRemedy} Then retry.`
+			: undefined;
+	}
+	const sections = record?.blockerContent
+		? blockingProvenance(record.blockerContent, record.blockingFiles, cwd)
+		: undefined;
+	const parts: string[] = [];
+	if (sections) {
+		// #4733 r1 F6: a file outside the project is counted, never printed:
+		// its spelling is not the model's to see.
+		const named = new Set<string>();
+		const outsideKeys = new Set<string>();
+		for (const section of sections) {
+			const resolved = resolveGuardPath(section.file, cwd);
+			if (isOutsideProjectRoot(resolved, cwd)) outsideKeys.add(section.key);
+			else named.add(toProjectRelativePath(resolved, cwd));
+		}
+		const outside = outsideKeys.size;
+		const listed = [...named].slice(0, MAX_REMEDY_FILES);
+		const shownParts = listed.length > 0 ? [listed.join(", ")] : [];
+		if (named.size > listed.length) {
+			shownParts.push(`${named.size - listed.length} more`);
+		}
+		if (outside > 0) {
+			shownParts.push(
+				`${outside} file${outside === 1 ? "" : "s"} outside the project`,
+			);
+		}
+		const shown = shownParts.join(" and ");
+		parts.push(
+			`The record names blockers in ${shown} that pi-lens cannot confirm. Fix them and write each file again: a clean pi-lens check of a file clears its part of the record.`,
+		);
+	} else if (makesNoClaim(fields)) {
+		parts.push(
+			"The record makes no blocker claim pi-lens can check, so no re-check of one file clears it; a turn that ends with no blocker clears it.",
+		);
+	} else if (!record || record.blockerContent) {
+		parts.push(
+			"The record holds blockers pi-lens cannot attribute to a file, so no re-check of one file clears them; this session's next turn-end findings replace it.",
+		);
+	}
+	if (testRemedy) parts.push(testRemedy);
+	return parts.length > 0 ? `${parts.join(" ")} Then retry.` : undefined;
+}
+
 function unknown(
 	cwd: string,
 	reasonCategory: string,
 	metadata = {},
+	remedy = RECHECK_REMEDY,
 ): GuardDecision {
 	logDecision(cwd, "unknown", reasonCategory, metadata);
 	return {
 		block: true,
 		unknown: true,
-		reason: `🔴 COMMIT BLOCKED (--lens-guard): blocker state is unknown (${reasonCategory}). Re-run pi-lens checks or start a fresh session, then retry.`,
+		reason: `🔴 COMMIT BLOCKED (--lens-guard): blocker state is unknown (${reasonCategory}). ${remedy}`,
 	};
 }
 
@@ -1041,12 +1338,22 @@ export function resyncGitGuardAfterInlinePolicy(args: {
 	args.runtime.updateGitGuardStatus(false, "");
 }
 
+/**
+ * `editedCleanVerdict` is true only when the dispatch of `editedFilePath`
+ * reached a clean verdict over the whole file (#4733 r1 F2): every runner and
+ * server answered, over all of it, and the observation holds no blocker. Only
+ * such a write speaks for another session's section of that file. A run with
+ * no verdict (failed, unanswered, in flight, edit-scoped) observes nothing
+ * (AGENTS.md shape 10), and this session's map, which carries its own blockers
+ * through such runs, holds nothing of another session's.
+ */
 export function syncGitGuardRecord(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
 	cwd: string,
 	editedFilePath?: string,
 	analysisRootMode: AnalysisRootMode = "session",
+	editedCleanVerdict = false,
 ): void {
 	if (!canWriteAnalysisRoot(analysisRootMode)) return;
 	// #3248: a record the turn-end policy fully suppressed is not a blocker the
@@ -1056,19 +1363,48 @@ export function syncGitGuardRecord(
 	const entries = (runtime.getInlineBlockersSnapshot?.() ?? []).filter(
 		(entry) => !entry.policySuppressed,
 	);
-	const inspection = cacheManager.inspectCache("turn-end-findings", cwd);
-	const existing = cacheRecord(cacheManager, cwd);
-	if (
-		existing &&
-		existing.sessionId !== runtime.telemetrySessionId &&
-		entries.length === 0
-	) {
+	// #4725: the record is read whatever its age (`storedRecord`). Read through
+	// the freshness window, a stale record latched `cache_stale` here on every
+	// write, and no later session could clear it.
+	const stored = storedRecord(cacheManager, cwd)?.fields;
+	// A record that claims no blocker answers for nothing, whichever session
+	// wrote it, so a write with no blocker of its own replaces it exactly as it
+	// replaces a missing record (the clear branch below).
+	if (entries.length === 0 && claimsNoBlocker(stored)) {
+		cacheManager.clearCache("turn-end-findings", cwd);
+		runtime.clearGitGuardCacheUnknown();
+		logRecordRetired(cwd, "write", "no_blocker");
+		return;
+	}
+	const existing = isTurnEndFindingsCache(stored) ? stored : undefined;
+	const editedKey = editedFilePath
+		? guardPathKey(editedFilePath, cwd)
+		: undefined;
+	const existingBlockingFiles = existing?.blockingFiles ?? [];
+	const blockerSections = existing?.blockerContent
+		? blockingProvenance(existing.blockerContent, existingBlockingFiles, cwd)
+		: undefined;
+	// A record another session wrote speaks for that session's checks, and
+	// this session may take back only what its own clean dispatch re-checked:
+	// the edited file's blocker sections (#4725). It stays that session's
+	// record, so the gate keeps refusing it until the last section goes.
+	const foreign =
+		!!existing && existing.sessionId !== runtime.telemetrySessionId;
+	const recheckedForeign =
+		foreign &&
+		editedCleanVerdict &&
+		entries.length === 0 &&
+		!!blockerSections?.some((section) => section.key === editedKey);
+	if (foreign && entries.length === 0 && !recheckedForeign) {
 		markCacheUnknown(runtime, "session_mismatch");
 		return;
 	}
-	if (!existing && inspection !== "missing" && entries.length === 0) {
-		markCacheUnknown(runtime, `cache_${inspection}`);
-		return;
+	if (!existing && entries.length === 0) {
+		const inspection = cacheManager.inspectCache("turn-end-findings", cwd);
+		if (inspection !== "missing") {
+			markCacheUnknown(runtime, `cache_${inspection}`);
+			return;
+		}
 	}
 	const fileSeqByPath: Record<string, number> = {};
 	for (const [filePath, seq] of runtime.getFileSeqEntries?.() ?? []) {
@@ -1077,17 +1413,10 @@ export function syncGitGuardRecord(
 	const inlineFiles = entries.map((entry) =>
 		resolveGuardPath(entry.filePath, cwd),
 	);
-	const existingBlockingFiles = existing?.blockingFiles ?? [];
-	const blockerSections = existing?.blockerContent
-		? blockingProvenance(existing.blockerContent, existingBlockingFiles, cwd)
-		: undefined;
 	if (existing?.blockerContent && !blockerSections) {
 		markCacheUnknown(runtime, "blocking_provenance_untrusted");
 		return;
 	}
-	const editedKey = editedFilePath
-		? guardPathKey(editedFilePath, cwd)
-		: undefined;
 	const testFiles = existing?.testFailureFiles ?? [];
 	const remainingBlockingFiles =
 		editedKey && existingBlockingFiles.length > 0
@@ -1108,28 +1437,33 @@ export function syncGitGuardRecord(
 			);
 		}
 	}
-	// A clean per-file dispatch is authoritative for that file. When every
-	// blocker section the persisted record still carries is THIS file's,
-	// retaining `blockerContent` would resurrect a blocker the dispatch just
-	// cleared on every later git-guard lookup. Records whose text cannot be
-	// attributed remain fail-closed: they returned above.
+	// A clean per-file dispatch is authoritative for that file, so it drops
+	// THIS file's blocker sections from the persisted record; retaining them
+	// would resurrect a blocker the dispatch just cleared on every later
+	// git-guard lookup. Every other file's section stays. Records whose text
+	// cannot be attributed remain fail-closed: they returned above.
 	//
 	// The question is asked of the SECTIONS, not of `blockingFiles` (#3282): the
 	// turn-end composer persists `blockingFiles: affectedFiles`
-	// (`clients/runtime-turn.ts:4292`) — every file the turn touched, blocking or
-	// not — so "the list has shrunk to nothing" never became true for a turn that
-	// edited a clean file alongside a blocking one, and the fixed blocker was
-	// quoted back at every commit for the rest of the session.
-	const clearedLastKnownBlocker =
-		!entries.length &&
-		!!editedKey &&
-		!!blockerSections &&
-		blockerSections.every((key) => key === editedKey);
+	// (`clients/runtime-turn.ts`, the lens-guard record write) — every file the
+	// turn touched, blocking or not — so "the list has shrunk to nothing" never
+	// became true for a turn that edited a clean file alongside a blocking one,
+	// and the fixed blocker was quoted back at every commit for the rest of the
+	// session. Dropping only the edited file's sections (#4725, which needs it
+	// for a record from another session that names several files) keeps the
+	// text in step with `remainingBlockingFiles` below, so the next lookup still
+	// attributes every section it keeps.
+	const keptSections =
+		!entries.length && editedKey && blockerSections
+			? blockerSections.filter((section) => section.key !== editedKey)
+			: undefined;
 	const blockerContent =
 		entries.length > 0
 			? entries.map((entry) => `${entry.filePath}: ${entry.summary}`).join("\n")
-			: clearedLastKnownBlocker
-				? undefined
+			: keptSections && keptSections.length < (blockerSections?.length ?? 0)
+				? keptSections.length > 0
+					? keptSections.map((section) => section.lines.join("\n")).join("\n\n")
+					: undefined
 				: existing?.blockerContent;
 	const hasTestFailures = existing?.testFailures === true;
 	const hasBlockers = !!blockerContent || hasTestFailures;
@@ -1148,6 +1482,7 @@ export function syncGitGuardRecord(
 		// described and refused every commit after it, with no re-run able to
 		// clear it.
 		runtime.clearGitGuardCacheUnknown();
+		if (recheckedForeign) logRecordRetired(cwd, "write", "rechecked");
 		return;
 	}
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
@@ -1156,12 +1491,18 @@ export function syncGitGuardRecord(
 		blockingFiles: entries.length > 0 ? inlineFiles : remainingBlockingFiles,
 		hasBlockers,
 		affectedFiles,
-		sessionId: runtime.telemetrySessionId,
+		// #4725: what is left of another session's record is still that
+		// session's, and so is its delivery state: this session re-checked one
+		// file, not the rest.
+		sessionId:
+			recheckedForeign && existing
+				? existing.sessionId
+				: runtime.telemetrySessionId,
 		projectSeqStart: runtime.turnStartProjectSeq,
 		projectSeqEnd: runtime.projectSeq,
 		fileSeqByPath,
 		fileContentHashes: {},
-		consumed: false,
+		consumed: recheckedForeign && existing?.consumed === true,
 		testFailures: existing?.testFailures,
 		testFailureContent: existing?.testFailureContent,
 		testFailureFiles: existing?.testFailureFiles,
@@ -1183,6 +1524,8 @@ export function mergeGitGuardTestFailure(
 	}
 	const failedFiles = files.map((file) => resolveGuardPath(file, cwd));
 	const blockerContent = existing?.blockerContent;
+	// #4733 r1 F1: the stored sections stay, so their owner does.
+	const sessionId = recordOwner(existing, runtime, !!blockerContent);
 	const testFailureFiles = [
 		...(existing?.testFailureFiles ?? []),
 		...failedFiles,
@@ -1200,7 +1543,7 @@ export function mergeGitGuardTestFailure(
 		testFailureFiles: testFailureFiles,
 		hasBlockers: true,
 		affectedFiles: [...(existing?.affectedFiles ?? []), ...failedFiles],
-		sessionId: runtime.telemetrySessionId,
+		sessionId,
 		projectSeqStart: runtime.turnStartProjectSeq,
 		projectSeqEnd: runtime.projectSeq,
 		fileSeqByPath,
@@ -1231,6 +1574,7 @@ export function clearGitGuardTestFailure(
 	const blockerContent = existing.blockerContent ?? "";
 	if (!blockerContent && remainingFiles.length === 0) {
 		cacheManager.clearCache("turn-end-findings", cwd);
+		runtime.clearGitGuardCacheUnknown();
 		return;
 	}
 	const blockingKeys = new Set(
@@ -1253,7 +1597,9 @@ export function clearGitGuardTestFailure(
 			remainingFiles.length > 0 ? existing.testFailureContent : undefined,
 		testFailureFiles: remainingFiles.length > 0 ? remainingFiles : undefined,
 		hasBlockers: !!blockerContent || remainingFiles.length > 0,
-		sessionId: runtime.telemetrySessionId,
+		// #4733 r1 F1: a passing run re-checks its tests, not the stored
+		// sections, so they keep their owner.
+		sessionId: recordOwner(existing, runtime, !!blockerContent),
 		projectSeqStart: runtime.turnStartProjectSeq,
 		projectSeqEnd: runtime.projectSeq,
 		fileSeqByPath: Object.fromEntries(
@@ -1369,30 +1715,63 @@ export function evaluateGitGuard(
 			tier: expired.tier,
 		});
 	}
-	if (runtime.gitGuardCacheUnknownReason) {
-		return unknown(cwd, runtime.gitGuardCacheUnknownReason);
+	const inspection = cacheManager.inspectCache("turn-end-findings", cwd);
+	// #4725: the record is read whatever its age, so the refusal can name what
+	// clears it and a no-blocker claim never refuses for being old.
+	const stored =
+		inspection === "missing" ? undefined : storedRecord(cacheManager, cwd);
+	const recordRemedy = () =>
+		unconfirmedRecordRemedy(stored, inspection, runtime, cwd) ?? RECHECK_REMEDY;
+	const latched = runtime.gitGuardCacheUnknownReason;
+	if (latched) return unknown(cwd, latched, {}, recordRemedy());
+	// #4733 r2 F12: a dispatch that never answered refuses until that file's own
+	// dispatch returns, whatever happened to the record since. #4733 r3 F16: a
+	// latch whose file is gone has no dispatch left to answer it, so it is
+	// skipped, as a record's deleted affected file is (`liveFiles`); it is kept,
+	// so bytes back at that path are gated again.
+	const unanswered = runtime.gitGuardUnansweredDispatches.find(
+		(entry) =>
+			currentFileFingerprint(resolveGuardPath(entry.filePath, cwd)) !==
+			"missing",
+	);
+	if (unanswered) {
+		const shown = shownLatchFile(unanswered.filePath, cwd);
+		return unknown(
+			cwd,
+			unanswered.reason,
+			// #4733 r3 F18: one row per file, told apart.
+			{ file: shown },
+			`pi-lens could not check ${shown}. Write it again so pi-lens re-checks it, then retry.`,
+		);
 	}
 
-	const inspection = cacheManager.inspectCache("turn-end-findings", cwd);
 	if (inspection === "missing") {
 		logDecision(cwd, "allowed", "no_record");
 		return { block: false };
 	}
-	if (inspection !== "fresh") return unknown(cwd, `cache_${inspection}`);
-	const pending = cacheManager.readCache<unknown>("turn-end-findings", cwd);
-	if (!pending || !isTurnEndFindingsCache(pending.data)) {
-		return unknown(cwd, "cache_malformed");
-	}
-	const record = pending.data;
-	if (!record.hasBlockers) {
-		logDecision(cwd, "allowed", "advisory_only");
+	// A record that claims no blocker answers for nothing, whatever its age and
+	// whichever session wrote it (the fresh path allowed it before any session
+	// check, and age adds no evidence to a claim of none).
+	if (claimsNoBlocker(stored?.fields)) {
+		logDecision(cwd, "allowed", "advisory_only", { inspection });
 		return { block: false };
 	}
+	if (inspection !== "fresh") {
+		return unknown(cwd, `cache_${inspection}`, {}, recordRemedy());
+	}
+	const fields = stored?.fields;
+	if (!isTurnEndFindingsCache(fields)) {
+		return unknown(cwd, "cache_malformed", {}, recordRemedy());
+	}
+	const record = fields;
+	// Only a contradiction is left here (`hasBlockers: false` beside test
+	// failures or blocker text); no writer produces one, so it is not admitted.
+	if (!record.hasBlockers) return unknown(cwd, "cache_malformed");
 	if (record.affectedFilesTruncated) {
 		return unknown(cwd, "affected_files_truncated");
 	}
 	if (record.sessionId !== runtime.telemetrySessionId) {
-		return unknown(cwd, "session_mismatch");
+		return unknown(cwd, "session_mismatch", {}, recordRemedy());
 	}
 	if (record.projectSeqEnd !== runtime.projectSeq) {
 		return unknown(cwd, "project_sequence_mismatch", {

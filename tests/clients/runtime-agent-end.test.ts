@@ -1092,6 +1092,43 @@ describe("runtime-agent-end deferred formatting", () => {
 		}
 	});
 
+	// #4675 (CodeRabbit PRRT_kwDORt8rec6uV2rp): the drain no longer skips links.
+	// A dangling link has no file to format, so it is skipped as `missing` and
+	// never handed to the service. Recurrence: a drain that probes the link's
+	// target with `lstat`-style semantics hands the service a path with nothing
+	// behind it, and the service records a failed format every turn.
+	it("skips a queued dangling symlink as missing and never formats it", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-dangling-");
+		try {
+			const link = path.join(env.tmpDir, "link.ts");
+			fs.symlinkSync("gone.ts", link);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferFormat(link, env.tmpDir, "edit", env.tmpDir);
+			const formatFile = vi.fn();
+
+			const summary = await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: () => {},
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile,
+					}) as any,
+			});
+
+			expect(formatFile).not.toHaveBeenCalled();
+			expect(summary?.skipped).toEqual([{ filePath: link, reason: "missing" }]);
+			expect(summary?.failed).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("skips queued files when autoformat is disabled", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-format-");
 		try {
@@ -2242,6 +2279,7 @@ describe("runtime-agent-end deferred formatting", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				});
 
 				const worktreeRoot = path.join(env.tmpDir, "worktree");

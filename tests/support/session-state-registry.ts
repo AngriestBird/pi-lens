@@ -51,6 +51,11 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import {
+	getPathIdentityFallbacks,
+	realpathOrResolve,
+	resetPathIdentityFallbacks,
+} from "../../clients/path-utils.js";
+import {
 	_analyzerBootstrapFailureStrikes as analyzerBootstrapStrikes,
 	_armAnalyzerBootstrapLatchForTests as armAnalyzerBootstrapLatch,
 	isAnalyzerBootstrapShutdown,
@@ -1082,6 +1087,24 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		},
 	},
 	{
+		id: "path-utils:pathIdentityFallbacks",
+		module: "path-utils.ts",
+		state: "pathIdentityFallbacks",
+		policy: "session_start",
+		resetName: "resetPathIdentityFallbacks",
+		reason:
+			"#4689: the identity-fallback tally is the ledger's `path-identity-fallback` row, folded at read time; a tally that outlived the session would report the previous session's fallbacks to the next one. `resetDegradationLedger` (reached from `handleSessionStart`) calls it.",
+		probe: {
+			// A NUL byte is refused by realpath with ERR_INVALID_ARG_VALUE on every
+			// platform, so the probe needs no symlink.
+			arm: () => {
+				realpathOrResolve(path.join(os.tmpdir(), "pi-lens-probe\0x"));
+			},
+			isArmed: () => getPathIdentityFallbacks().length === 0,
+			reset: () => resetPathIdentityFallbacks(),
+		},
+	},
+	{
 		id: "pending-runner-findings:pending",
 		module: "dispatch/pending-runner-findings.ts",
 		state: "pending runner handoff array",
@@ -1823,6 +1846,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #4320 r2: `replacedPathBirths`, registered above (process_lifetime).
 	// #4368 r1 row 13: `appearedPaths` (1 -> 2), registered above.
 	"path-birth.ts": 2,
+	// #4689: `pathIdentityFallbacks` and its exported reset, registered above.
+	"path-utils.ts": 2,
 	// #2506: the container key is a Symbol.for constant, so the scan sees no
 	// mutable module-scope container here — the same shape as
 	// process-singletons.ts just below.

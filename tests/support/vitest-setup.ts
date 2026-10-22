@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { afterAll, afterEach, beforeEach, expect, vi } from "vitest";
 import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
-import { reportPeakRss } from "./worker-peak-rss.js";
+import { currentPeakRssMb, reportPeakRss } from "./worker-peak-rss.js";
 import {
 	fixtureHomeRoot,
 	fixtureHomeRootIn,
@@ -963,8 +963,9 @@ export function unadmittedRepoRootEntries(
 // `[mem-watch]` low-water mark is the record that says how close the run
 // actually came.
 //
-// `maxRSS` is kilobytes on every platform: libuv normalizes the Win32 peak
-// working set for `uv_getrusage`, so no per-platform scaling is needed.
+// `maxRSS` is kilobytes on linux and win32 (libuv normalizes the Win32 peak
+// working set); `currentPeakRssMb` owns the conversion, and enforcement stays
+// linux-only because darwin reports bytes.
 //
 // #3139 (#3137 review): this used to be its own top-level `afterAll`,
 // registered FIRST so Vitest's LIFO afterAll order ran it LAST — the reading
@@ -994,7 +995,7 @@ const memReportThresholdMb = Number(
 function emitMemReport(): void {
 	if (memReportThresholdMb <= 0) return;
 	const usage = process.memoryUsage();
-	const peakMb = Math.round(process.resourceUsage().maxRSS / 1024);
+	const peakMb = currentPeakRssMb();
 	if (peakMb < memReportThresholdMb) return;
 	const file = String(expect.getState().testPath ?? "unknown")
 		.replace(/\\/g, "/")

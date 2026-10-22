@@ -2214,9 +2214,13 @@ function situationalGuidance(
 		if (isEnabled(name)) active.push(name);
 	}
 	if (active.length === 0) return undefined;
-	let text = `• Situational (activate via pi_lens_activate_tools): ${active.join(", ")}.`;
+	// #4682: one clause, true under every tools.lazy posture. With lazy=false
+	// (and auto on an eager model) the tools are already declared, so nothing
+	// is activated; only an unlisted tool needs the loader. Rendered once at
+	// session_start, never changed mid-session (prompt-cache prefix).
+	let text = `• Situational (activate via pi_lens_activate_tools if unlisted): ${active.join(", ")}.`;
 	if (isEnabled("ast_grep_search")) {
-		text += " Use ast_grep_search with dump=true to inspect AST nodes.";
+		text += " Use ast_grep_search dump=true to inspect AST.";
 	}
 	return text;
 }
@@ -2765,7 +2769,11 @@ export async function handleSessionStart(
 						? "using hashed directory because legacy and hashed directories both exist"
 						: migration.outcome === "rename-failed"
 							? "using legacy directory after hashed-directory rename failure"
-							: "using resolved directory after realpath fallback",
+							: migration.outcome === "adopted"
+								? "copied the data an earlier version stored under the root's link spelling into the real path's directory; the old directory is kept"
+								: migration.outcome === "adopt-failed"
+									? "some data an earlier version stored under the root's link spelling could not be copied and stays in the old directory"
+									: "using resolved directory after realpath fallback",
 		});
 	}
 	// #1609 review F1: sweepOwnStagingFiles does not recurse, so the installer's

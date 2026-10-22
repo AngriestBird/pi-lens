@@ -72,6 +72,9 @@ const BASE_BODY = [
 	"## Class sweep",
 	"Defect shape: a mapped runtime file changed without its model. Search: `rg -n read-guard formal`. Verdict: none outside this fixture.",
 	"",
+	"## Fold check",
+	"#4711 folded: the same body-lint seam, so the section lands here. Closes #4711.",
+	"",
 	"## Observability",
 	"No new failure path; no record added.",
 ].join("\n");
@@ -595,6 +598,8 @@ describe("index.ts hook anchors (#3878)", () => {
 			context: ["on"],
 			// #4631: the pi 0.87+ request hook, an inline registration like `context`.
 			context_with_system: ["on"],
+			// #4687: the model-switch re-plan of the lazy-tools posture.
+			model_select: ["on"],
 		});
 	});
 

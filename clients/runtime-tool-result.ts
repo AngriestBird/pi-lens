@@ -160,8 +160,8 @@ import {
 } from "./degradation-ledger.js";
 import {
 	canWriteAnalysisRoot,
+	classifyAnalysisRoot,
 	resolveAnalysisRoot,
-	resolveAnalysisRootPath,
 	type AnalysisRootMode,
 } from "./analysis-root.js";
 
@@ -1497,7 +1497,12 @@ async function dispatchPipelineAnalysis(args: {
 		result = await pipelinePromise;
 	} catch (pipelineErr) {
 		if (getFlag("lens-guard")) {
-			runtime.markGitGuardCacheUnknown("pipeline_crash");
+			// #4733 r2 F12: about this file, so only its own next dispatch answers it.
+			// #4733 r5 G2: in the session that dispatched it, so a replaced
+			// session's late rejection cannot latch the live one.
+			sessionGeneration.guardedWrite(filePath, () =>
+				runtime.markGitGuardDispatchUnanswered(filePath, "pipeline_crash"),
+			);
 		}
 		dbg(`runPipeline crashed: ${pipelineErr}`);
 		logReadGuardEvent({
@@ -1566,6 +1571,16 @@ async function dispatchPipelineAnalysis(args: {
 		};
 	} finally {
 		releaseInFlightPipeline(filePath, registryKey, registeredPipelines);
+	}
+	// #4733 r2 F12, r5 G1: the dispatch latch is this file's, and both callers
+	// return here, so an errored run sets it and any other returned run answers
+	// it. Fenced like the crash mark above (r5 G2).
+	if (getFlag("lens-guard")) {
+		sessionGeneration.guardedWrite(filePath, () =>
+			result.isError && !result.hasBlockers
+				? runtime.markGitGuardDispatchUnanswered(filePath, "pipeline_error")
+				: runtime.answerGitGuardDispatch(filePath),
+		);
 	}
 
 	if (!isPartialApplyResult) {
@@ -2022,7 +2037,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			? rawFilePath
 			: resolveToolCallFilePath(rawFilePath, resolutionBasis, workspaceRoot)
 					?.path;
-	const analysisRootMode = resolveAnalysisRoot(filePath ?? "", workspaceRoot);
+	// The class and its root, answered once: the rows below name the root the
+	// class served, never a second rule's answer (#4734 Sourcery thread 3).
+	const analysisRoot = classifyAnalysisRoot(filePath ?? "", workspaceRoot);
+	const analysisRootMode = analysisRoot.mode;
 	if (filePath) {
 		invalidateProjectIgnoreMatcherForPath(filePath);
 		invalidateFormatterCacheForPath(filePath);
@@ -3464,7 +3482,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return;
 	}
 	if (analysisRootMode === "adopted") {
-		const adoptedRoot = resolveAnalysisRootPath(filePath, workspaceRoot);
+		const adoptedRoot = analysisRoot.root;
 		if (adoptedRoot) {
 			const firstAdoptedRoot = recordDegradationOnce({
 				kind: "tool-result-adopted-project",
@@ -4132,6 +4150,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// #3507: both verbs are ordered by this dispatch's token, so an older
 	// pipeline that settles after a newer one of the same file changes nothing.
 	let inlineVerdictApplied: boolean;
+	// #4733 r3 F15: this write's clear removed the file's own blocker entry.
+	let ownBlockerRetired = false;
 	const { inlineBlockerSummary } = result;
 	if (inlineBlockerSummary) {
 		// #1561: stamp the verdict with THIS dispatch's write token — the same
@@ -4158,6 +4178,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				),
 			) !== undefined;
 	} else {
+		// `clearInlineBlockers` applies with no entry too, so the entry is read
+		// before it.
+		// Optional: a runtime double without the accessor never retires.
+		const hadOwnBlocker = runtime.hasInlineBlocker?.(filePath) ?? false;
 		inlineVerdictApplied =
 			writeSession.guardedWrite(filePath, () =>
 				runtime.clearInlineBlockers(
@@ -4176,6 +4200,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					},
 				),
 			) ?? false;
+		// An errored run reached no observation, whatever it cleared.
+		ownBlockerRetired =
+			hadOwnBlocker && inlineVerdictApplied && !result.isError;
 	}
 	// #4484 round 3: the anchor follows the record, so it moves only with a
 	// verdict that applied.
@@ -4189,15 +4216,65 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			result.output,
 		);
 		if (getFlag("lens-guard")) {
+			// #4733 r1 F2: a clean verdict over the whole file, applied, with no
+			// blocker left in the observation; anything less observes nothing.
+			// #4733 r5 G3: a blocking finding the seed called pre-existing is still
+			// reported, so it is not a clean verdict for another session's section.
+			const wholeFileClean =
+				inlineVerdictApplied &&
+				!result.isError &&
+				!result.hasBlockers &&
+				result.currentBlockerCount === 0 &&
+				(result.preExistingBlockerCount ?? 0) === 0 &&
+				result.fileVerdictComplete === true;
 			syncGitGuardRecord(
 				runtime,
 				cacheManager,
 				turnStateCwd,
-				filePath,
+				// #4733 r2 F11: a write speaks for its file's recorded sections only
+				// with that verdict, whichever session wrote them. #4733 r3 F15: or,
+				// for this session's own record, when it retired the file's own
+				// blocker entry (the rule the sibling callers use); without
+				// `wholeFileClean` another session's section stays.
+				wholeFileClean || ownBlockerRetired ? filePath : undefined,
 				analysisRootMode,
+				wholeFileClean,
 			);
-			if (result.isError && !result.hasBlockers) {
-				runtime.markGitGuardCacheUnknown("pipeline_error");
+		}
+	}
+
+	// #2050 AC3 / #2657: `linked-worktree` is a WRITABLE class
+	// (`canWriteAnalysisRoot`), so the pipeline above ran the full set — format,
+	// autofix, LSP touch/sync and dispatch. That makes it the one class whose
+	// silence is ambiguous: the agent saw a real analysis and heard nothing,
+	// which it cannot tell apart from "analysis never ran". Record one bounded
+	// row per (mode, root) per session, and state it when the primary checked
+	// the file and found nothing. Any delivery is its own statement. The
+	// pipeline answers that (`checkedClean`, required); `output` cannot, because
+	// the all-clear line also ends a run with only warnings or one no language
+	// server answered, and an empty one is a format-only change (#4734 F1).
+	// #3596: after the pipeline await, so a replaced session's handler records
+	// nothing; its once-key would otherwise latch in the live session's ledger.
+	if (resultLive && analysisRootMode === "linked-worktree") {
+		const worktreeRoot = analysisRoot.root;
+		if (worktreeRoot) {
+			recordDegradationOnce({
+				kind: "tool-result-linked-worktree",
+				subject: worktreeRoot,
+				reason: `analysed a linked worktree of this repository: ${worktreeRoot}`,
+			});
+			if (result.checkedClean) {
+				const firstSilentRun = recordDegradationOnce({
+					kind: "tool-result-linked-worktree-clean",
+					subject: worktreeRoot,
+					reason: `a linked-worktree edit produced no finding: ${filePath}`,
+				});
+				if (firstSilentRun) {
+					queueAgentAdvisory(
+						`pi-lens analysed the edit at ${filePath} in the linked worktree ${worktreeRoot} (full LSP, formatting, autofix and dispatch) and found nothing to report.`,
+						writeSession,
+					);
+				}
 			}
 		}
 	}

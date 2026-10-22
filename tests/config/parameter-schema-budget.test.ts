@@ -15,7 +15,7 @@ const astClient = {
 
 const expected = {
 	ast_grep_search: {
-		total: 1629,
+		total: 1473,
 		maximum: 2995,
 		keys: [
 			"dump",
@@ -59,7 +59,7 @@ const expected = {
 		],
 	},
 	lsp_navigation: {
-		total: 2432,
+		total: 1729,
 		maximum: 2593,
 		keys: [
 			"operation",

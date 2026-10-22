@@ -63,7 +63,6 @@ import {
 } from "../../clients/mutation-bridge.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { TestRunnerClient } from "../../clients/test-runner-client.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { waitFor } from "./interleaving-kit.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -127,13 +126,7 @@ vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => ({
 }));
 import { dispatchLintWithResult } from "../../clients/dispatch/integration.js";
 
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: vi.fn(),
-}));
-import { getLSPService } from "../../clients/lsp/capabilities.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 function gate() {
@@ -171,6 +164,13 @@ const ORIGINAL = "pub fn f() { let x = 1; }\n";
 const TOOL_FIXED = "pub fn f() { let _x = 1; }\n";
 const KIND = "fix-run-agent-edit-overwritten";
 
+// File level, so the three describes that never install a service keep the
+// "no service" answer the former `getLSPService: vi.fn()` gave them; the first
+// describe's own hook installs the double over it.
+beforeEach(async () => {
+	await installLspServiceDouble(null);
+});
+
 describe("whole-package fixer restores agent edits (#3598)", () => {
 	let tmpDir: string;
 	let cleanup: () => void;
@@ -178,7 +178,7 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 	let mainRs: string;
 	let previousDebounce: string | undefined;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		notices = [];
 		resetDegradationLedger();
 		_resetAgentNudgeForTests();
@@ -213,12 +213,10 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		fs.writeFileSync(mainRs, "mod a;\nmod b;\nfn main() {}\n");
 		fs.writeFileSync(path.join(srcDir, "a.rs"), ORIGINAL);
 		fs.writeFileSync(path.join(srcDir, "b.rs"), ORIGINAL);
-		vi.mocked(getLSPService).mockReturnValue(
-			makeLspServiceDouble({
-				supportsLSP: vi.fn().mockReturnValue(true),
-				hasLSP: vi.fn().mockResolvedValue(true),
-			}) as never,
-		);
+		await installLspServiceDouble({
+			supportsLSP: vi.fn().mockReturnValue(true),
+			hasLSP: vi.fn().mockResolvedValue(true),
+		});
 		vi.mocked(dispatchLintWithResult).mockReset();
 		vi.mocked(dispatchLintWithResult).mockResolvedValue({
 			diagnostics: [],

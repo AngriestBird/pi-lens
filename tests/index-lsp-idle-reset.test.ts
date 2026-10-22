@@ -6,6 +6,7 @@ import { _resetSubagentModeForTests } from "../clients/subagent-mode.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+import { installLspServiceDouble } from "./support/lsp-service-seam.js";
 import {
 	aliveServerHolder,
 	lspStatusRecorder,
@@ -41,11 +42,7 @@ function createMockPi(overrides: Record<string, boolean> = {}) {
 async function setupLspStatusRepaint(
 	options: { flags?: Record<string, boolean> } = {},
 ) {
-	const { resetLSPService, service } = aliveServerHolder();
-	vi.doMock("../clients/lsp/capabilities.js", () => ({
-		getLSPService: service,
-		resetLSPService,
-	}));
+	const { resetLSPService, overrides } = aliveServerHolder();
 	vi.doMock("../clients/bootstrap.js", async () => {
 		const { bootstrapSeamMock } = await import("./support/bootstrap-mock.js");
 		return bootstrapSeamMock(async () => ({
@@ -55,6 +52,10 @@ async function setupLspStatusRepaint(
 		}));
 	});
 
+	// After the `vi.resetModules()` in beforeEach and every doMock above, before
+	// the entry import: the install evaluates the fresh graph, whose import-time
+	// configure would otherwise replace the lifecycle (lsp-service-seam, step 2).
+	await installLspServiceDouble(overrides, { beforeReset: resetLSPService });
 	const { default: registerExtension } = await import("../index.js");
 	const { pi, handlers } = createMockPi({
 		"no-lsp": false,
@@ -125,7 +126,6 @@ describe("index.ts LSP idle reset", () => {
 		vi.unstubAllEnvs();
 		vi.restoreAllMocks();
 		// resetModules does not clear the mock registry (#2883).
-		vi.doUnmock("../clients/lsp/capabilities.js");
 		vi.doUnmock("../clients/bootstrap.js");
 	});
 

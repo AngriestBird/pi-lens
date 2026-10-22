@@ -22,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetIgnoredConfigWarnCache } from "../../clients/config-warn.js";
+import { resetUserNotifier } from "../../clients/user-notify.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const notices: string[] = [];
@@ -37,12 +38,6 @@ vi.mock("../../clients/extension-log.js", async (importOriginal) => {
 			notices.push(entry.message);
 		},
 	};
-});
-
-vi.mock("../../clients/user-notify.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("../../clients/user-notify.js")>();
-	return { ...actual, notifyUserDegradation: () => {} };
 });
 
 vi.mock("../../clients/degradation-ledger.js", async (importOriginal) => {
@@ -91,6 +86,7 @@ let previousHome: string | undefined;
 
 beforeEach(() => {
 	notices.length = 0;
+	resetUserNotifier();
 	ledgerRows.length = 0;
 	fault.throwOnResolve = false;
 	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
@@ -99,6 +95,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	resetUserNotifier();
 	fault.throwOnResolve = false;
 	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
 	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
