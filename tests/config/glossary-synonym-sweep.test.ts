@@ -444,7 +444,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// protocol's own field name, not a delivery tier).
 		"clients/gzip-stage-write.ts": 4,
 		"clients/install-diagnostics.ts": 4,
-		// 26 -> 28 (#4530), and the new launch.ts and metrics-history.ts rows:
+		// 26 -> 28 (#4530), and the new launch.ts row:
 		// starts that moved onto the spawn seam read the spawn result's `error`
 		// field (SpawnResult.error), not a delivery tier.
 		"clients/installer/index.ts": 28,
@@ -466,7 +466,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/ipc.ts": 8,
 		"clients/mcp/review.ts": 8,
 		"clients/mcp/session.ts": 1,
-		"clients/metrics-history.ts": 1,
 		"clients/module-report.ts": 27,
 		// 3 -> 5 (#4493): readGitHead and listGitHeadDelta read the spawn
 		// result's `error` field (SpawnResult.error), not a delivery tier.
@@ -1554,7 +1553,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/govulncheck-client.ts": 5,
 		"clients/grammar-source.ts": 2,
 		"clients/host-ports.ts": 2,
-		// 42 -> 44 (#4530), and the new launch.ts and metrics-history.ts rows:
+		// 42 -> 44 (#4530), and the new launch.ts row:
 		// starts that moved onto the spawn seam read SpawnResult.status.
 		"clients/installer/index.ts": 44,
 		"clients/installer/managed-tool-refresh.ts": 9,
@@ -1574,7 +1573,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/server.ts": 4,
 		"clients/mcp/analyze.ts": 9,
 		"clients/mcp/review.ts": 1,
-		"clients/metrics-history.ts": 1,
 		"clients/module-report.ts": 6,
 		// 24 -> 26 (#4493): readGitHead and listGitHeadDelta read the spawn
 		// result's exit `status`, not a delivery status.
