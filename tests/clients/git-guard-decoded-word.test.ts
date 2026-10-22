@@ -18,10 +18,12 @@
  * model cannot read (see `ACCEPTED`).
  *
  * The fail-closed rule the table pins, in `hidesGuardedVerb`: a word the word
- * model cannot read (an ANSI-C escape, or an expansion) guards the command
- * when it precedes a word that is, or may be, `commit` or `push`, or when it is
- * git's own verb. An ANSI-C escape inside a command string a launcher or
- * `eval` receives guards the command at the string's re-lex.
+ * model cannot read (an ANSI-C escape, or an expansion) may be any word. It
+ * guards the command when it precedes a word that is, or may be, `commit` or
+ * `push`, or a word that holds a guarded command (the unread word may be a
+ * launcher's switch or `eval`), or when it is git's own verb. An ANSI-C escape
+ * inside a command string a launcher or `eval` receives guards the command at
+ * the string's re-lex.
  */
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -352,6 +354,113 @@ const ROWS: readonly Row[] = [
 		bash: null,
 		guard: false,
 	},
+	// Round 4: a word the model cannot read may be a launcher's switch or
+	// `eval`, so a later word that holds a guarded command guards the command.
+	// Recurrence: verify r3 F1 on #4752, round 3 deleted the launcher clause and
+	// `bash $'\x2dc' 'git push'` ran unguarded with every row green. F2 and F3:
+	// `nix-shell --command` and an `eval` behind `builtin` or `command`.
+	{
+		row: "bash, escaped -c switch",
+		command: "bash $'\\x2dc' 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "sh, escaped -c switch",
+		command: "sh $'\\x2dc' 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "dash, escaped -c switch",
+		command: "dash $'\\x2dc' 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "bash, escaped c of the switch",
+		command: "bash $'-\\x63' 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "bash, switch escaped whole",
+		command: "bash $'\\x2d\\x63' 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "nix-shell, escaped --run switch",
+		command: "nix-shell $'\\x2d\\x2drun' 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "unknown launcher, escaped -c switch",
+		command: "launcher $'\\x2dc' 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escaped eval",
+		command: "$'\\x65val' 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escaped builtin before eval",
+		command: "$'\\x62uiltin' eval 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "nix-shell --command",
+		command: "nix-shell --command 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "builtin eval",
+		command: "builtin eval 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "command eval",
+		command: 'command eval "git push"',
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escaped -c switch, string runs no governed verb",
+		command: "bash $'\\x2dc' 'git status'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "expansion as the launcher, string runs no governed verb",
+		command: "$sh -c 'git status'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "nix-shell --command, string runs no governed verb",
+		command: "nix-shell --command 'git status'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "command eval, string runs no governed verb",
+		command: "command eval 'git status'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "eval as text",
+		command: "echo eval 'git push'",
+		bash: null,
+		guard: false,
+	},
 	{
 		row: "expansion as the executable",
 		command: "$g push",
@@ -492,6 +601,66 @@ const ACCEPTED: ReadonlyArray<{
 	},
 ];
 
+/**
+ * The round 4 state table, as rows: each launcher, its switch (or `eval`) and
+ * its command string, each spelled plain or with every character escaped, and
+ * a `git status` twin of each. Bash decodes an escape before the command runs,
+ * so every spelling runs what its plain twin runs. Recurrence: four rounds
+ * patched one launcher spelling at a time, and the round 3 deletion of the
+ * launcher clause passed every row because no row spelled the switch escaped.
+ */
+const escapeEach = (word: string) =>
+	`$'${[...word].map((ch) => `\\x${ch.charCodeAt(0).toString(16)}`).join("")}'`;
+interface LauncherRow {
+	command: string;
+	verb: "push" | "status";
+	/** Over-guards the fail-closed rule accepts for a status twin. */
+	unreadString: boolean;
+	twoUnreadWords: boolean;
+}
+const LAUNCHER_TABLE: readonly LauncherRow[] = (() => {
+	const rows = new Map<string, LauncherRow>();
+	const launchers: ReadonlyArray<readonly [string | null, string]> = [
+		["bash", "-c"],
+		["sh", "-c"],
+		["dash", "-c"],
+		["nix-shell", "--run"],
+		["nix-shell", "--command"],
+		["launcher", "-c"],
+		[null, "eval"],
+		["builtin", "eval"],
+		["command", "eval"],
+	];
+	for (const [executable, start] of launchers)
+		for (const escapeExecutable of [false, true])
+			for (const escapeStart of [false, true])
+				for (const string of ["plain", "escaped", "expansion"] as const)
+					for (const verb of ["push", "status"] as const) {
+						const words = [
+							executable === null
+								? undefined
+								: escapeExecutable
+									? escapeEach(executable)
+									: executable,
+							escapeStart ? escapeEach(start) : start,
+							string === "plain"
+								? `'git ${verb}'`
+								: string === "escaped"
+									? `$'git\\x20${verb}'`
+									: `"git $${verb === "push" ? "v" : "s"}"`,
+						];
+						const command = words.filter(Boolean).join(" ");
+						rows.set(command, {
+							command,
+							verb,
+							unreadString: string !== "plain",
+							twoUnreadWords:
+								executable !== null && escapeExecutable && escapeStart,
+						});
+					}
+	return [...rows.values()];
+})();
+
 let root: string;
 let home: string;
 let log: string;
@@ -507,9 +676,13 @@ beforeAll(() => {
 	fs.writeFileSync(stub, '#!/bin/sh\nprintf \'%s\\0\' "$1" >> "$GITLOG"\n');
 	fs.chmodSync(stub, 0o755);
 	// Command-string launchers the gate knows by name, as stand-ins that do
-	// what the real ones do with `-c` / `--run`: run the string in a shell.
+	// what the real ones do with `-c`, `--run` and `--command`: run the string
+	// in a shell.
 	for (const [name, script] of [
-		["nix-shell", '#!/bin/sh\n[ "$1" = --run ] && exec sh -c "$2"\n'],
+		[
+			"nix-shell",
+			'#!/bin/sh\ncase "$1" in --run | --command) exec sh -c "$2" ;; esac\n',
+		],
 		["launcher", '#!/bin/sh\n[ "$1" = -c ] && exec sh -c "$2"\n'],
 	] as const) {
 		const launcher = path.join(home, "bin", name);
@@ -535,6 +708,8 @@ function bashRan(command: string): "commit" | "push" | null {
 				GITLOG: log,
 				g: "git",
 				v: "push",
+				s: "status",
+				sh: "sh",
 			},
 			stdio: "ignore",
 			timeout: 10_000,
@@ -607,6 +782,38 @@ describe.skipIf(process.platform === "win32")(
 			);
 			expect(PLAIN.length).toBe(693);
 		}, 120_000);
+
+		it("guards every launcher spelling of the state table (r4)", () => {
+			const failures: string[] = [];
+			let accepted = 0;
+			for (const row of LAUNCHER_TABLE) {
+				const ran = bashRan(row.command);
+				const want = row.verb === "push" ? "push" : null;
+				if (ran !== want)
+					failures.push(`${JSON.stringify(row.command)}: bash ran ${ran}`);
+				const gate = guarded(row.command);
+				if (gate === (ran !== null)) continue;
+				// A status twin the gate cannot read: its string (an escape, or an
+				// expansion as git's verb), or an unread word before an unread word.
+				if (
+					gate &&
+					row.verb === "status" &&
+					(row.unreadString || row.twoUnreadWords)
+				) {
+					accepted++;
+					continue;
+				}
+				failures.push(
+					`${JSON.stringify(row.command)}: bash ran ${ran}, the gate ${gate ? "guards" : "misses"}`,
+				);
+			}
+			expect(failures).toEqual([]);
+			// 9 launchers, 3 string spellings, 2 verbs, 4 switch spellings (bare
+			// eval has 2): 204 rows. 68 status twins hold an unread string and 8
+			// spell both the launcher and its switch escaped.
+			expect(LAUNCHER_TABLE.length).toBe(204);
+			expect(accepted).toBe(76);
+		}, 60_000);
 	},
 );
 

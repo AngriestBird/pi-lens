@@ -533,8 +533,8 @@ export const wallClockBudgetInclude = [
 	"tests/clients/dispatch/smoke-fixture-coverage.test.ts",
 	// #4321: the real Biome binary's 80-column wrapping is the subject (flake-shape admission).
 	"tests/clients/format-service-tab-width-real-biome.test.ts",
-	// #4739: real `bash -c` is the oracle for about 4 200 spellings of git and its
-	// verbs, bare and inside subshells, groups and `eval` strings (flake-shape
+	// #4739: real `bash -c` is the oracle for about 4 400 spellings of git and its
+	// verbs, bare and inside subshells, groups, `eval` strings and launchers (flake-shape
 	// admission); one spawn per row, about 11 s serial. No wall-clock assertion: the file pins its
 	// exact row count, which bounds the cost.
 	"tests/clients/git-guard-decoded-word.test.ts",

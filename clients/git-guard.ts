@@ -788,20 +788,25 @@ function commandStringHasGuardedVerb(
 }
 
 /**
- * Whether a word the model cannot read may be git or its verb (#4739). The
+ * Whether a word the model cannot read may start a guarded command (#4739). The
  * word model says what it cannot read (`DecodedShellWord.hidden`); this is the
- * gate's answer, and it fails closed. An unreadable word guards the command
- * when it could be the executable (it precedes a word that is, or may be, a
- * governed verb), or when it is git's own verb. An ANSI-C escape handed to a
- * shell (`bash -c $'git\x20push'`) is `commandStringHasGuardedVerb`'s case.
- * `docker push $IMAGE` reads nothing it cannot see before its verb, and stays
- * unguarded.
+ * gate's answer, and it fails closed: the word may be any word. As git, a
+ * later word that is, or may be, a governed verb guards the command
+ * (`$'\x67it' push`, `$g push`). As `eval`, a launcher or its command-string
+ * switch, a later word that holds a guarded command guards it
+ * (`bash $'\x2dc' 'git push'`, `$'\x65val' 'git push'`, round 4). Each later
+ * word is read alone, as `-c` takes one: read joined, `$SHELL -c 'git status'`
+ * would put git at a non-leading index. Git's own verb is the caller's case,
+ * and an escape inside a string handed to a shell (`bash -c $'git\x20push'`)
+ * is `commandStringHasGuardedVerb`'s. `docker push $IMAGE` reads nothing it
+ * cannot see before its verb, and stays unguarded.
  *
  * Only a policy gate (`indirectAlwaysMatches`) answers this way: the guard that
  * protects an agent from its own accident would block commands it can read.
  */
 function hidesGuardedVerb(
 	words: readonly DecodedShellWord[],
+	depth: number,
 	matcher: GitVerbMatcher,
 ): boolean {
 	if (!matcher.indirectAlwaysMatches) return false;
@@ -810,7 +815,12 @@ function hidesGuardedVerb(
 		firstHidden >= 0 &&
 		words
 			.slice(firstHidden + 1)
-			.some((word) => word.hidden || matcher.matchesVerb(word.text, []))
+			.some(
+				(word) =>
+					word.hidden ||
+					matcher.matchesVerb(word.text, []) ||
+					commandStringHasGuardedVerb([word], depth + 1, matcher),
+			)
 	);
 }
 
@@ -835,7 +845,10 @@ function containsGuardedGitVerb(
 	const commandTokens = commandWords.map((word) => word.text);
 	if (isCommandStringWrapper(commandTokens[0] ?? "")) {
 		const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
-		const runIndex = lower.findIndex((token) => token === "--run");
+		// nix-shell documents `--command` as `--run` in an interactive shell (#4739 r4).
+		const runIndex = lower.findIndex(
+			(token) => token === "--run" || token === "--command",
+		);
 		if (runIndex >= 0 && runIndex + 1 < commandTokens.length) {
 			return commandStringHasGuardedVerb(
 				commandWords.slice(runIndex + 2),
@@ -843,16 +856,6 @@ function containsGuardedGitVerb(
 				matcher,
 			);
 		}
-	}
-	// `eval` joins its arguments and runs the result as a command string, as a
-	// shell does for `-c`. A literal handed to it is read again, so
-	// `eval "git push"` is the `git push` it runs (#4739 round 3). A string built
-	// by data flow (`eval "$CMD"`) stays out of reach: it exists only at run time.
-	if (
-		executableName(commandTokens[0] ?? "") === "eval" &&
-		commandStringHasGuardedVerb(commandWords.slice(1), depth + 1, matcher)
-	) {
-		return true;
 	}
 	// These commands consume their following words as text/patterns; a bare
 	// git token in their arguments is not an indirect executable invocation.
@@ -863,7 +866,26 @@ function containsGuardedGitVerb(
 	) {
 		return false;
 	}
-	if (hidesGuardedVerb(commandWords, matcher)) return true;
+	// `eval` joins its arguments and runs the result as a command string, as a
+	// shell does for `-c`. A literal handed to it is read again, so
+	// `eval "git push"` is the `git push` it runs (#4739 round 3). Like a
+	// non-leading git, an `eval` after the first word is read too: `builtin eval`,
+	// `command eval` and `if eval` run it (round 4). A string built by data flow
+	// (`eval "$CMD"`) stays out of reach: it exists only at run time.
+	const evalIndex = commandTokens.findIndex(
+		(token) => executableName(token) === "eval",
+	);
+	if (
+		evalIndex >= 0 &&
+		commandStringHasGuardedVerb(
+			commandWords.slice(evalIndex + 1),
+			depth + 1,
+			matcher,
+		)
+	) {
+		return true;
+	}
+	if (hidesGuardedVerb(commandWords, depth, matcher)) return true;
 	const gitIndex = commandTokens.findIndex((token) => isGitExecutable(token));
 	if (gitIndex >= 0) {
 		// Any non-leading git invocation is indirect. Do not maintain a wrapper
