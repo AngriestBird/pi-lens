@@ -1992,7 +1992,8 @@ export function syncGitGuardRecord(
 	// This session's own new evidence replaces its own partition and leads the
 	// record (#4733 r5 F21: the writer of new sections owns the record); a write
 	// with none keeps the stored order, so the stored owner stays while its
-	// sections survive (#4733 r1 F1).
+	// sections survive (#4733 r1 F1). The partition holds file sections only, so
+	// it bears no write stamp: only text no file owns expires by one (#4750).
 	const partitions =
 		entries.length > 0
 			? [
@@ -2002,7 +2003,6 @@ export function syncGitGuardRecord(
 							.map((entry) => `${entry.filePath}: ${entry.summary}`)
 							.join("\n"),
 						blockingFiles: inlineFiles,
-						blockerWrittenAt: Date.now(),
 					},
 					...trimmed.filter((partition) => partition.sessionId !== me),
 				]
