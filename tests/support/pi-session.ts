@@ -31,7 +31,7 @@
  * so a case asserts an effect of the extension's registered behaviour rather
  * than the shape of a handler's return value. It does NOT pin event payload
  * shapes: `pi-mock.ts`'s `emit` is for the payloads a scripted provider cannot
- * produce and for files the admit list still holds (AGENTS.md "Testing"), and
+ * produce and for files the admit list still holds (AGENTS.md "Test requirements"), and
  * tier 1's `pi-runner.ts` owns registration questions.
  *
  * SIX CONSEQUENCES OF LOADING THROUGH PI'S OWN LOADER, all relied on below:
