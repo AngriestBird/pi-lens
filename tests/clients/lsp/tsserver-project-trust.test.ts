@@ -882,8 +882,12 @@ describe.skipIf(process.platform === "win32")(
 			// followed by the "no compiler resolved" notice, which would blame
 			// resolution for a compiler pi found and refused.
 			// #4530: the project's PATH entry is dropped from the lookup's search
-			// path before any answer exists, so the trust notice names that.
-			expect(warnMessages()).toEqual([
+			// path before any answer exists, so the trust notice names that. The
+			// notice is once per ENTRY, and the host PATH can carry its own entry
+			// that resolves inside this project (husky's relative
+			// `node_modules/.bin` against the project cwd), so the kinds are
+			// compared, not the count.
+			expect([...new Set(warnMessages())]).toEqual([
 				"search-path entry inside the project ignored: mark the project trusted in pi or upgrade pi",
 			]);
 		});
