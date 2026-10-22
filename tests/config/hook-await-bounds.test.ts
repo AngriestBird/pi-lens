@@ -3075,7 +3075,10 @@ function measureSyncHookReads(): Record<string, number> {
  * under `bounded()`. #4725 lowered it to 9 and `clients/git-guard.ts` from 2
  * to 1 by FOLDING, not migrating: the turn end's two `turn-end-findings`
  * reads and git-guard's two now share one synchronous read
- * (`storedRecord`), so one site is left to move to `readCacheAsync`.
+ * (`storedRecord`), so one site is left to move to `readCacheAsync`. #4738
+ * folded two more the same way, 9 to 7: the turn-end composer's dedupe and
+ * main writes read the record through `readTurnEndGuardRecord`, which is
+ * that same `storedRecord` read.
  *
  * One of `runtime-agent-end.ts`'s two is `typeof cacheManager.readCache ===
  * "function"` — a capability probe, not a read. It is counted on purpose:
@@ -3088,7 +3091,7 @@ const SYNC_HOOK_READS: Readonly<Record<string, number>> = {
 	"clients/runtime-agent-end.ts": 2,
 	"clients/runtime-context.ts": 8,
 	"clients/runtime-session.ts": 8,
-	"clients/runtime-turn.ts": 9,
+	"clients/runtime-turn.ts": 7,
 	"clients/test-runner-delivery.ts": 4,
 	"tools/lens-diagnostics.ts": 2,
 };
@@ -3098,7 +3101,7 @@ const SYNC_HOOK_READS: Readonly<Record<string, number>> = {
  * `origin/master` before this slice. #3300 lowers it per migrated population;
  * nothing raises it.
  */
-const SYNC_HOOK_READ_CEILING = 35;
+const SYNC_HOOK_READ_CEILING = 33;
 
 /** `auditRegistry` takes flat strings; the structure is folded in here. */
 function exemptionReasons(): Record<string, string> {

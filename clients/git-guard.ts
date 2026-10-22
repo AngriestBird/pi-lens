@@ -1050,6 +1050,9 @@ function sectionFileGone(section: BlockerSection, cwd: string): boolean {
 			}) === undefined
 		);
 	} catch {
+		// none: a stat that fails any other way (EACCES, ELOOP) is no proof the
+		// file is gone, so its section stays and the gate keeps refusing on it,
+		// naming the file: the refusal is this failure's record.
 		return false;
 	}
 }
