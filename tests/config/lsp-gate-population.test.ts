@@ -131,11 +131,35 @@ const fixtures = LSP_FIXTURES as Fixture[];
 const FSPROJ_ADMITTED =
 	/^\s*<Project(?:\s+Sdk="[^"]*")?\s*>(?:\s*<PropertyGroup>(?:\s*<[A-Za-z]+>[^<]*<\/[A-Za-z]+>)*\s*<\/PropertyGroup>|\s*<ItemGroup>(?:\s*<Compile Include="[^"]*"\s*\/>)*\s*<\/ItemGroup>)*\s*<\/Project>\s*$/;
 
+// One left-to-right scan that skips comment and CDATA spans, as an XML reader
+// does, instead of replace-then-match: removing a span can splice its
+// neighbours into a new opener (`<!<!---->--`), which CodeQL flags (alert 78,
+// js/incomplete-multi-character-sanitization). A spliced opener stays in the
+// output, where the grammar below refuses it. An unterminated span runs to the
+// end of the text and is dropped.
+function stripCommentsAndCdata(xml: string): string {
+	let live = "";
+	let at = 0;
+	while (at < xml.length) {
+		const close = xml.startsWith("<!--", at)
+			? "-->"
+			: xml.startsWith("<![CDATA[", at)
+				? "]]>"
+				: null;
+		if (close === null) {
+			live += xml[at];
+			at += 1;
+			continue;
+		}
+		const end = xml.indexOf(close, at + 4);
+		if (end < 0) break;
+		at = end + close.length;
+	}
+	return live;
+}
+
 function fsprojCompileIncludes(xml: string): string[] {
-	const live = xml
-		.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "")
-		.replace(/<!--[\s\S]*?-->/g, "")
-		.replace(/<!--[\s\S]*$/, "");
+	const live = stripCommentsAndCdata(xml);
 	if (!FSPROJ_ADMITTED.test(live)) return [];
 	return [...live.matchAll(/<Compile Include="([^"]*)"/g)].map(
 		(match) => match[1],
@@ -318,6 +342,18 @@ describe("LSP clean-gate population (#3217)", () => {
 		[
 			"an ItemGroup inside a Target",
 			`<Project><Target Name="T"><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Target></Project>`,
+		],
+		[
+			"a split comment opener that a strip would splice together",
+			`<Project><ItemGroup><!<!---->-- <Compile Include="Program.fs" /> --></ItemGroup></Project>`,
+		],
+		[
+			"a split CDATA opener that a strip would splice together",
+			`<Project><ItemGroup><![CD<!---->ATA[ ]]><Compile Include="Program.fs" /></ItemGroup></Project>`,
+		],
+		[
+			"a nested comment",
+			`<Project><ItemGroup><!-- <!-- x --> <Compile Include="Program.fs" /> --></ItemGroup></Project>`,
 		],
 		[
 			"an ItemGroup under a conditioned When",
