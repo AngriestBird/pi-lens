@@ -135,8 +135,6 @@ function isLspSpawnHeavy(source: string): boolean {
  * reds any exemption whose file stops being a candidate (#1735).
  */
 const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
-	"tests/clients/lsp/terraform-ls-tfvars-language-id.test.ts":
-		"launches a real terraform-ls child only when the binary is present (skipped otherwise); asserts the didOpen languageId contract, not a contended diagnostics budget — same shape as the clangd entry",
 	"tests/clients/lsp/clangd-lazy-indexing.test.ts":
 		"launches a real clangd child only when the binary is present (skipped otherwise); asserts lazy-indexing flags, not a contended diagnostics budget",
 	"tests/clients/lsp/client-crash-logging.test.ts":

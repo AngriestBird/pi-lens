@@ -364,6 +364,10 @@ const lspSpawnHeavyInclude = [
 	"tests/clients/lsp/touch-debounce-content-gate.test.ts",
 	// #4299: real wrapper compiler-resolution security witness.
 	"tests/clients/lsp/tsserver-project-trust-wire.test.ts",
+	// #4755: a real terraform-ls child (skipped when the binary is absent) behind
+	// a real initialize handshake, then a first-diagnostics wait of up to 15 s per
+	// case — the #1022/#2332 shape of its lane siblings.
+	"tests/clients/lsp/terraform-ls-tfvars-language-id.test.ts",
 	// #4320: the watched-files wire frames only exist on a real stdio connection
 	// to a real fake-server child; the handshake is the same #1022/#2332 shape as
 	// its lane siblings.
