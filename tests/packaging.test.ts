@@ -440,6 +440,7 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		"1.1.0",
 		"1.2.0",
 		"1.3.0",
+		"1.4.0",
 	];
 	const VERIFIED_MINOR_LINES = [
 		"0.86",
@@ -449,6 +450,7 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		"1.1",
 		"1.2",
 		"1.3",
+		"1.4",
 	];
 
 	it("declares a window at all", () => {
@@ -483,8 +485,8 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		).toBe(false);
 	});
 
-	it("keeps the next unverified host out (1.4.0 stays out)", () => {
-		expect(semver.satisfies("1.4.0", window)).toBe(false);
+	it("keeps the next unverified host out (1.5.0 stays out)", () => {
+		expect(semver.satisfies("1.5.0", window)).toBe(false);
 	});
 
 	// Recurrence prevented (#4513): the ceiling moved from <1.2.0 to <1.4.0 while

@@ -154,7 +154,7 @@ newest-in-range lane reads it, bounded above so `"*"` can never mean
 matrix has passed on. A newer host enters the window in ONE change: run this
 matrix on it, add it to that test's verified list, and move the workflow's
 ceiling together. P1 is one verified host per minor line from 0.86 onward;
-0.86–1.3 are in-window, and every minor line below 0.86 falls outside the
+0.86–1.4 are in-window, and every minor line below 0.86 falls outside the
 window entirely, so none needs a dedicated host. A ceiling past an unrun
 minor still claims that minor, so the verified-minor ratchet names the admitted
 lines explicitly.
@@ -170,7 +170,7 @@ the old hosts; a real 0.80.10 session delivered the staged guidance at
 
 ### Verified hosts
 
-The certified policy is `>=0.86.1 <1.4.0`, and this table is the whole verified
+The certified policy is `>=0.86.1 <1.5.0`, and this table is the whole verified
 set: `tests/packaging.test.ts` fails when it and `PI_HOST_SUPPORTED_RANGE`
 disagree. Each listed minor line has a release-QA witness; the workflow ceiling
 and `tests/packaging.test.ts` list are updated together.
@@ -184,6 +184,7 @@ and `tests/packaging.test.ts` list are updated together.
 | 1.1.0 | 2026-10-08 | 2fda17a53d62267cd9035fa04380bbf0e2de4318 | 15 pass / 1 skipped (git-install-loads) |
 | 1.2.0 | 2026-10-16 | 9400454891d5a1beb0a4d2d9452dece276e22e71 | 15 pass / 1 skipped (git-install-loads) |
 | 1.3.0 | 2026-10-16 | 9400454891d5a1beb0a4d2d9452dece276e22e71 | 15 pass / 1 skipped (git-install-loads) |
+| 1.4.0 | 2026-10-22 | 75a1a3c893ed0ac44a3081dd3d475c1e72349099 | 15 pass / 1 skipped (git-install-loads) |
 
 Re-run any row with `node scripts/release-qa.mjs --pi <host>` at the listed commit.
 

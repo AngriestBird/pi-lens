@@ -154,11 +154,11 @@ env:
   # supported window is stated; tests/packaging.test.ts pins it against the
   # release-qa verified hosts. BUMP BY HAND, together with that list, only
   # after release-qa has run on the newer host. P1 is one verified host per
-  # minor line from 0.86 onward; 0.86-1.3 are in-window, and every minor line
+  # minor line from 0.86 onward; 0.86-1.4 are in-window, and every minor line
   # below 0.86 falls outside the window and needs no dedicated host. A pi below
   # 0.86 emits no `context_with_system`, so pi-lens delivers no findings there
   # since #4644 (#4688: the floor moved rather than reviving the old hosts).
-  PI_HOST_SUPPORTED_RANGE: ">=0.86.1 <1.4.0"
+  PI_HOST_SUPPORTED_RANGE: ">=0.86.1 <1.5.0"
 
 jobs:
   # #4291: classify the diff once. `smoke` is true when a pull request touches

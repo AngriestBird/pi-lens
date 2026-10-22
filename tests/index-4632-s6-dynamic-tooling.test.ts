@@ -209,11 +209,28 @@ describe("dynamic tooling on the real host (#4632 slice 6)", () => {
 				expect(rowsAfter).toBe(rowsBefore + 1);
 			} else {
 				// pi restored the loadout from the branched transcript before
-				// `session_start`, so the plan finds the set already correct and
-				// records no mutation. An EMPTY activation memory would make the
-				// plan shrink the activated tool away (and record it); the posture
-				// above is the witness that the memory matched the parent.
-				expect(rowsAfter).toBe(rowsBefore);
+				// `session_start`. An EMPTY activation memory would make the plan
+				// shrink the activated tool away (and record it); the posture above
+				// is the witness that the memory matched the parent.
+				//
+				// Recurrence prevented (#4741): pi 1.4 restores the recorded loadout
+				// PLUS every extension tool the branch never mentioned, and a lazy
+				// tool the model never activated is never mentioned. So pi <=1.3
+				// hands the plan a correct set (no mutation), while pi 1.4 activates
+				// the other lazy tools and the plan removes exactly those, once,
+				// before the first request. Pinning "no mutation" reds on 1.4;
+				// pinning only the posture would let a plan that rewrites more than
+				// the host's extras (or adds a tool) pass.
+				const rewrites = (
+					await latencyMetadata(
+						rebuilt,
+						"tool_set_mutation",
+						(metadata) => metadata.reason === "session_rebuild_restore",
+					)
+				)
+					.slice(rowsBefore)
+					.map((metadata) => [metadata.addedCount, metadata.removedCount]);
+				expect([[], [[0, LAZY_TOOLS.length - 1]]]).toContainEqual(rewrites);
 			}
 			expect(rebuilt.errors).toEqual([]);
 		},
