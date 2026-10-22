@@ -314,6 +314,13 @@ describe("an auxiliary's failed config is not a clean scan (#4764)", () => {
 		expect(messages).toHaveLength(1);
 		expect(messages[0]?.reason).toContain("indexing folder a");
 		expect(group("lsp-server-message")?.count).toBe(2);
+		// The phase record exists on its own (the durable half is the ledger), so
+		// the Observability section's `lsp_server_message` is read back here.
+		expect(
+			getRecentLoggedPhases().some(
+				(entry) => entry.phase === "lsp_server_message",
+			),
+		).toBe(true);
 	}, 30_000);
 
 	// The cap must never swallow the one message that changes a verdict: a
