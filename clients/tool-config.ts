@@ -156,6 +156,16 @@ export const PI_LENS_TOOL_NAMES = TOOL_REGISTRY.flatMap((tool) =>
 	tool.piName === undefined ? [] : [tool.piName],
 ) as readonly string[];
 
+/**
+ * Whether pi-lens registers this tool on pi. Its mixed read/write operations
+ * are never promoted by the third-party learning mechanism (#4139), and it is
+ * never diffed as an opaque call (#4732): each is read-only or records its
+ * writes through the mutation bridge.
+ */
+export function isPiLensToolName(toolName: string): boolean {
+	return PI_LENS_TOOL_NAMES.includes(toolName);
+}
+
 export type ToolRegistryEntry = (typeof TOOL_REGISTRY)[number];
 
 export type LensToolHost = "pi" | "mcp";

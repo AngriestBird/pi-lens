@@ -316,6 +316,178 @@ describe("#4733 r5 G1: the observed path answers its own dispatch latch", () => 
 	});
 });
 
+describe("#4737 r2: an observed edit's blocker gates the commit before turn_end", () => {
+	it("refuses a commit on an observed edit's blocker, and a whole-file clean observed write reopens it", async () => {
+		// RECURRENCE GUARDED: #4737 r2 (#4732). The observed path analysed the
+		// write but never published the verdict, so a blocker an unknown tool's
+		// edit raised did not stop `git commit` until turn_end, and #4732 sends
+		// every tool that is not known read-only down that path.
+		const env = setupTestEnvironment("pi-lens-4737-observed-gate-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const guarded = (name: string) =>
+				name === "no-lsp" || name === "lens-guard";
+			const observedWrite = async (
+				toolName: string,
+				next: string,
+				result: Record<string, unknown>,
+			) => {
+				const event = { ...patchEvent(filePath, `call-${toolName}`), toolName };
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						...toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						getFlag: guarded,
+					}),
+				);
+				fs.writeFileSync(filePath, next);
+				vi.mocked(runPipeline).mockResolvedValueOnce(result as never);
+				await handleToolResult({
+					...toolResultDeps({ event, runtime, cacheManager }),
+					getFlag: guarded,
+				});
+			};
+			let commits = 0;
+			const commitBlocked = async () => {
+				const event = {
+					toolName: "bash",
+					toolCallId: `commit-${++commits}`,
+					input: { command: 'git commit -m "wip"' },
+				};
+				const verdict = (await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						...toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						getFlag: guarded,
+					}),
+				)) as { block?: boolean } | undefined;
+				return verdict?.block === true;
+			};
+			const summary =
+				"🔴 STOP — 1 issue(s) must be fixed:\n  L2: eval() is banned";
+
+			await observedWrite("patch_bad", SOURCE.replace("2", "eval(x)"), {
+				...PIPELINE_RESULT,
+				output: summary,
+				hasBlockers: true,
+				currentBlockerCount: 1,
+				inlineBlockerSummary: summary,
+				inlineBlockerSources: ["ast-grep-napi"],
+				inlineBlockerLines: [2],
+			});
+			expect(await commitBlocked()).toBe(true);
+
+			await observedWrite("patch_good", SOURCE, {
+				...PIPELINE_RESULT,
+				currentBlockerCount: 0,
+				fileVerdictComplete: true,
+			});
+			expect(await commitBlocked()).toBe(false);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
+describe("#4737 r2 F3: an observed clean run retires its own blocker without a whole-file verdict", () => {
+	it("opens the commit gate and drops the file's section when the observed run that fixed it reached no whole-file verdict", async () => {
+		// RECURRENCE GUARDED: #4737 r2 F3 (state-table row O3). The observed path
+		// retires its own entry only as an authored run: the #4137 refusal keeps a
+		// record an unauthored run read the same bytes of. The sha matters: with
+		// none, that refusal cannot fire, so the caller's `authored: true` had no
+		// witness and the row was proven only by reading the shared publisher.
+		const env = setupTestEnvironment("pi-lens-4737-observed-retire-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const guarded = (name: string) =>
+				name === "no-lsp" || name === "lens-guard";
+			const observedWrite = async (
+				toolName: string,
+				next: string,
+				result: Record<string, unknown>,
+			) => {
+				const event = { ...patchEvent(filePath, `call-${toolName}`), toolName };
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						...toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						getFlag: guarded,
+					}),
+				);
+				fs.writeFileSync(filePath, next);
+				vi.mocked(runPipeline).mockResolvedValueOnce(result as never);
+				await handleToolResult({
+					...toolResultDeps({ event, runtime, cacheManager }),
+					getFlag: guarded,
+				});
+			};
+			let commits = 0;
+			const commitBlocked = async () => {
+				const event = {
+					toolName: "bash",
+					toolCallId: `commit-${++commits}`,
+					input: { command: 'git commit -m "wip"' },
+				};
+				const verdict = (await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						...toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						getFlag: guarded,
+					}),
+				)) as { block?: boolean } | undefined;
+				return verdict?.block === true;
+			};
+			const section = () =>
+				cacheManager
+					.readCache<{ blockerContent?: string }>(
+						"turn-end-findings",
+						env.tmpDir,
+						Number.POSITIVE_INFINITY,
+					)
+					?.data?.blockerContent?.includes(`${filePath}:`) ?? false;
+			const summary =
+				"🔴 STOP — 1 issue(s) must be fixed:\n  L2: eval() is banned";
+			// One content identity for both results: the bytes the record is about.
+			const fileContent = { size: 42, sha256: "a".repeat(64) };
+
+			await observedWrite("patch_bad", SOURCE.replace("2", "eval(x)"), {
+				...PIPELINE_RESULT,
+				output: summary,
+				hasBlockers: true,
+				currentBlockerCount: 1,
+				inlineBlockerSummary: summary,
+				inlineBlockerSources: ["ast-grep-napi"],
+				inlineBlockerLines: [2],
+				inlineBlockerFileContent: fileContent,
+			});
+			expect(await commitBlocked()).toBe(true);
+			expect(section()).toBe(true);
+
+			// Clean, but no whole-file verdict (a server went unconfirmed).
+			await observedWrite("patch_good", SOURCE, {
+				...PIPELINE_RESULT,
+				currentBlockerCount: 0,
+				fileVerdictComplete: false,
+				inlineBlockerFileContent: fileContent,
+			});
+			expect(await commitBlocked()).toBe(false);
+			expect(section()).toBe(false);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
 describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn state", () => {
 	it("observes the write and records it as an edit with the tool's own attribution", async () => {
 		const env = setupTestEnvironment("pi-lens-2430-first-");
@@ -2203,5 +2375,148 @@ describe("#3763 a dead handler's mutation receipt stays out of session 2's turn"
 			// dropped receipt falls back to never reaches a pipeline.
 			expect(vi.mocked(runPipeline).mock.calls.length).toBe(dispatchedBefore);
 		});
+	});
+});
+
+// #4732: an unknown tool is also diffed as an opaque call. Recurrence
+// prevented: the diff dispatched the observed path as an unauthored replay
+// first, and that replay (it carries the call's id) settled the call's
+// observation under the name `write`, so the net never learned the tool and
+// the change log named the wrong tool. The named path is the settle's; the
+// diff answers for every OTHER file the call wrote.
+describe("#4732 an observed tool's opaque diff", () => {
+	it("leaves the named path to the settle and dispatches the rest once", async () => {
+		const env = setupTestEnvironment("pi-lens-4732-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const event = patchEvent(filePath, "call-4732-observed");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 3;", ""].join("\n"),
+			);
+			const sidePath = path.join(env.tmpDir, "side.ts");
+			fs.writeFileSync(sidePath, "export const side = 1;\n");
+			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
+
+			const sources = readChangesSince(env.tmpDir, 0).map((entry) => [
+				path.basename(entry.filePath),
+				entry.source,
+			]);
+			expect(sources.sort()).toEqual([
+				["observed.ts", "agent-tool:patch_file"],
+				["side.ts", "opaque-script"],
+			]);
+			// The settle, not the replay, answered: the net learned the tool.
+			expect(
+				classifyMutatingTool(patchEvent(filePath, "call-4732-next")),
+			).toMatchObject({
+				toolName: "patch_file",
+				provenance: "learned",
+			});
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// A RELATIVE path has no recorded attribution for a tool the classifier
+	// does not know, so the result used to return at `path_attribution_missing`
+	// and the observation armed from the call's own cwd was never settled. The
+	// path is still refused as a guess; the observation answers for it.
+	it("settles the observation of a tool that named a relative path", async () => {
+		const env = setupTestEnvironment("pi-lens-4732-relative-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "relative.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const event = patchEvent("relative.ts", "call-4732-relative");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 3;", ""].join("\n"),
+			);
+			fs.writeFileSync(
+				path.join(env.tmpDir, "relative-side.ts"),
+				"export const side = 1;\n",
+			);
+			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
+
+			expect(
+				readChangesSince(env.tmpDir, 0)
+					.map((entry) => [path.basename(entry.filePath), entry.source])
+					.sort(),
+			).toEqual([
+				["relative-side.ts", "opaque-script"],
+				["relative.ts", "agent-tool:patch_file"],
+			]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// An observation another session armed under the same call id is not this
+	// call's: its settle refuses it (catalog shape 22), so the diff must not
+	// leave the path to it, or the write reaches nothing (shape 54).
+	it("keeps a path whose observation belongs to another session", async () => {
+		const env = setupTestEnvironment("pi-lens-4732-stale-observation-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "stale.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			await armObservedMutation({
+				toolCallId: "call-4732-stale",
+				toolName: "patch_file",
+				targetPath: filePath,
+				cwd: env.tmpDir,
+				sessionGeneration: runtime.sessionGeneration + 1,
+				turnIndex: runtime.turnIndex,
+			});
+			// A tool with no path field: its own call arms nothing over the
+			// other session's entry.
+			const event = {
+				toolName: "gen_tool",
+				toolCallId: "call-4732-stale",
+				input: { query: "regenerate" },
+				content: [{ type: "text", text: "ok" }],
+			};
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
+
+			expect(
+				readChangesSince(env.tmpDir, 0).map((entry) => [
+					path.basename(entry.filePath),
+					entry.source,
+				]),
+			).toEqual([["stale.ts", "opaque-script"]]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
 	});
 });

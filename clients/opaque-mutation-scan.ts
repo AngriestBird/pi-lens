@@ -37,6 +37,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import {
 	resolveGitCheckout,
 	resolveGitIdentity,
@@ -56,6 +57,7 @@ import { freshnessFromMtime } from "./freshness.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { createSingleFlight } from "./single-flight.js";
 import { truncatedByOutputCap } from "./spawn-output-cap.js";
+import { isPiLensToolName } from "./tool-config.js";
 
 interface FileStatEntry {
 	mtimeMs: number;
@@ -123,15 +125,60 @@ export interface PendingOpaqueBaseline {
 	dirtyPaths?: readonly string[];
 }
 
+/** A literal tool name of one member of pi's typed `tool_call` union. */
+type LiteralToolName<E> = E extends { toolName: infer N extends string }
+	? string extends N
+		? never
+		: N
+	: never;
+
+/**
+ * #4732: what each of pi's built-in tools can write. Typed against the host's
+ * own `ToolCallEvent` union, so a pi release that adds a built-in tool fails to
+ * compile here until the tool is placed, and a name pi drops fails too.
+ *
+ * - `opaque`: a shell, which writes whatever its command does.
+ * - `named`: a structured writer; the classified chain records the one path
+ *   it names (`classifyMutatingTool`).
+ * - `none`: read-only.
+ */
+const PI_BUILTIN_TOOL_WRITES = new Map<string, "opaque" | "named" | "none">(
+	Object.entries({
+		bash: "opaque",
+		powershell: "opaque",
+		write: "named",
+		edit: "named",
+		read: "none",
+		grep: "none",
+		find: "none",
+		ls: "none",
+	} as const satisfies Record<
+		LiteralToolName<ToolCallEvent>,
+		"opaque" | "named" | "none"
+	>),
+);
+
 /**
  * Opaque recovery feeds dispatch and LSP resync; it is not read evidence.
  * Keep its lifecycle gate shared by the pre-call baseline and post-call take.
+ *
+ * #4732: fail closed. A tool is diffed unless its name is known not to write a
+ * path pi-lens does not already record: pi's read-only and structured built-ins
+ * ({@link PI_BUILTIN_TOOL_WRITES}) and pi-lens's own pi tools
+ * ({@link isPiLensToolName}), which are read-only or record every write through the
+ * mutation bridge. Every other name (another extension's tool, an MCP tool
+ * routed through pi, the outer codemode call) is opaque. A tool whose EVENT the
+ * structured classifier recognizes is excluded at the record site, which has
+ * the event.
  */
 export function shouldRunOpaqueRecovery(
 	toolName: string,
 	workspaceRoot: string | undefined,
 ): workspaceRoot is string {
-	return toolName === "bash" && workspaceRoot !== undefined;
+	if (workspaceRoot === undefined) return false;
+	const builtin = PI_BUILTIN_TOOL_WRITES.get(toolName);
+	if (builtin !== undefined) return builtin === "opaque";
+	return !isPiLensToolName(toolName);
 }
 
 /**
@@ -549,6 +596,15 @@ export class OpaqueBaselineStore {
 		if (evicted.length > 0) recordBaselineLoss("cap");
 	}
 
+	/**
+	 * #4732: whether `tool_call` recorded a baseline for this call. A tool other
+	 * than bash recovers only then, so its `tool_result` follows the decision its
+	 * own `tool_call` made instead of re-deriving it (shape 19).
+	 */
+	has(slot: string, callId: string): boolean {
+		return this.pending.has(OpaqueBaselineStore.keyOf(slot, callId));
+	}
+
 	take(
 		slot: string,
 		callId: string | undefined,
@@ -567,11 +623,32 @@ export class OpaqueBaselineStore {
 
 const BASELINE_LOSS_REASONS = {
 	overwrite:
-		"a pending bash baseline was replaced before its tool_result took it; that call reports partial-recognition-no-baseline and withholds blockers (host without distinct tool-call ids, or a reused id)",
-	cap: `more than ${OPAQUE_BASELINE_PENDING_CAP} bash baselines awaited a tool_result; the oldest was dropped`,
+		"a pending opaque baseline (bash or another captured tool) was replaced before its tool_result took it; that call reports partial-recognition-no-baseline and withholds blockers (host without distinct tool-call ids, or a reused id)",
+	cap: `more than ${OPAQUE_BASELINE_PENDING_CAP} opaque baselines (bash or other captured tools) awaited a tool_result; the oldest was dropped`,
 	unsettled:
-		"a bash baseline outlived its turn with no tool_result (the call was blocked or aborted before it ran) and was retired; a result that still arrives reports partial-recognition-no-baseline",
+		"an opaque baseline (bash or another captured tool) outlived its turn with no tool_result (the call was blocked or aborted before it ran) and was retired; a result that still arrives reports partial-recognition-no-baseline",
 } as const;
+
+/**
+ * #4732: record, once per cause and session, that a tool other than bash was
+ * not diffed or its diff could not answer, so its writes went unobserved.
+ * Subject `no-tool-call-id`: the host gave the call no id, and a shared slot
+ * would let it take a bash call's baseline. Any other subject is the recovery's
+ * unknown verdict (`git-failed`, `file-cap-exceeded`, ...).
+ */
+export function recordOpaqueCaptureRefused(
+	cause: string,
+	toolName: string,
+): void {
+	recordDegradationOnce({
+		kind: "opaque-capture-refused",
+		subject: cause,
+		reason:
+			cause === "no-tool-call-id"
+				? `a call of ${toolName} carried no tool-call id, so its writes were not diffed (a shared slot would take a bash call's baseline)`
+				: `the opaque diff of a ${toolName} call could not answer (${cause}); the files it wrote were not observed`,
+	});
+}
 
 function recordBaselineLoss(cause: keyof typeof BASELINE_LOSS_REASONS): void {
 	incrementDegradationCount({

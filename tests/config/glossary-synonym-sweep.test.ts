@@ -752,7 +752,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// verdict in a loop, so `recognizedAuthored = scanned.filter(...)` is gone.
 		// The bash drift pass buckets its opaque paths in a `Map` (the
 		// `sendsByRoot` idiom beside it) rather than filtering per root.
-		"clients/runtime-tool-result.ts": 5,
+		// 5 -> 6 (#4732): the opaque paths drop the ones an armed observation
+		// of the same call answers for; one `Array.prototype.filter`.
+		"clients/runtime-tool-result.ts": 6,
 		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers

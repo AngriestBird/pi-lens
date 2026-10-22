@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { Type } from "../../clients/deps/typebox.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { scannerReportParentDir } from "../../clients/scanner-temp-root.js";
 import { pinFixtureHome } from "../clients/test-utils.js";
@@ -122,6 +123,50 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		// The diagnostics tool's own answer, not a value this test supplied.
 		expect(resultText).toContain("No issues in the current turn delta.");
 		expect(toolResult.isError).toBeFalsy();
+	});
+
+	// #4732: a case that drives a tool pi-lens has never met registers it
+	// through pi's own `customTools`. Recurrence prevented: the option is
+	// dropped on its way to `createAgentSessionFromServices`, and pi answers
+	// the call as an unknown tool, so a witness of that tool observes nothing.
+	it("runs a tool the case registers through pi's own tool loop", async () => {
+		const cwd = path.join(fixture.root, "custom-tool", "proj");
+		const ran: string[] = [];
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd,
+			customTools: [
+				{
+					name: "fixture_probe",
+					label: "Fixture probe",
+					description: "Record that pi ran it.",
+					parameters: Type.Object({ tag: Type.String() }),
+					async execute(toolCallId, params) {
+						ran.push(`${toolCallId}:${(params as { tag: string }).tag}`);
+						return {
+							content: [{ type: "text", text: "probed" }],
+							details: undefined,
+						};
+					},
+				},
+			],
+			responses: [
+				fauxAssistantMessage([fauxToolCall("fixture_probe", { tag: "t1" })]),
+				fauxAssistantMessage(fauxText("done")),
+			],
+		});
+
+		await handle.prompt("probe");
+
+		// pi executed it with the arguments the model sent, under pi's own call
+		// id, and answered the model with a successful tool result for it.
+		expect(ran).toHaveLength(1);
+		expect(ran[0]).toMatch(/^.+:t1$/);
+		const toolResult = handle.requests[1]?.find(
+			(message) => message.role === "toolResult",
+		) as { toolName?: unknown; isError?: unknown } | undefined;
+		expect(toolResult?.toolName).toBe("fixture_probe");
+		expect(toolResult?.isError).toBeFalsy();
 	});
 
 	it("reopens the persisted session file for the next turn", async () => {

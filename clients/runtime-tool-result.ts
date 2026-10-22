@@ -18,6 +18,7 @@ import {
 	opaquePrescanRoot,
 	readGitHead,
 	readSameHeadDiscards,
+	recordOpaqueCaptureRefused,
 	recoverOpaqueChangesViaGit,
 	resolveOpaqueRecoveryRoots,
 	serializeHeadLook,
@@ -86,6 +87,7 @@ import {
 import {
 	hasPendingObservation,
 	noteMutationHandled,
+	pendingObservationPaths,
 	settleObservedMutation,
 } from "./observed-mutation.js";
 import {
@@ -1294,6 +1296,142 @@ function refreshCachedExports(
 }
 
 /**
+ * #4737 r2: publish one returned dispatch's inline verdict for `filePath` to the
+ * commit gate's state: the inline-blocker map (record or clear, ordered by the
+ * dispatch's token), the analysis anchor, the `--lens-guard` status and the
+ * `turn-end-findings` record. Both callers of `dispatchPipelineAnalysis` run it
+ * on a result that did not crash: the classified chain, and the observed path,
+ * whose blocker otherwise gated a commit only from turn_end (#4732 sends every
+ * tool that is not known read-only there). Every write goes through the
+ * handler's captured `writeSession`.
+ */
+function publishInlineVerdict(args: {
+	runtime: RuntimeCoordinator;
+	cacheManager: CacheManager;
+	filePath: string;
+	result: PipelineResult;
+	writeSession: LineageHandle;
+	writeIndex: number;
+	writeOrderTurn: number;
+	/** #4137: whether this run may retire a record about the bytes it read. */
+	authored: boolean;
+	getFlag: ToolResultDeps["getFlag"];
+	turnStateCwd: string;
+	analysisRootMode: AnalysisRootMode;
+}): void {
+	const {
+		runtime,
+		cacheManager,
+		filePath,
+		result,
+		writeSession,
+		writeIndex,
+		writeOrderTurn,
+		authored,
+		getFlag,
+		turnStateCwd,
+		analysisRootMode,
+	} = args;
+	// #3596: a replaced session's handler latches nothing in the live session.
+	const resultLive = writeSession.guardedWrite(filePath, () => true) === true;
+	// #3507: both verbs are ordered by this dispatch's token, so an older
+	// pipeline that settles after a newer one of the same file changes nothing.
+	let inlineVerdictApplied: boolean;
+	// #4733 r3 F15: this write's clear removed the file's own blocker entry.
+	let ownBlockerRetired = false;
+	const { inlineBlockerSummary } = result;
+	if (inlineBlockerSummary) {
+		// #1561: stamp the verdict with THIS dispatch's write token — the same
+		// counter `lsp_diagnostics`' reconciliation seam draws from — so a later
+		// confirmed-clean result can be ordered against it instead of racing it.
+		inlineVerdictApplied =
+			writeSession.guardedWrite(filePath, () =>
+				runtime.recordInlineBlockers(
+					filePath,
+					inlineBlockerSummary,
+					// #3506: the token of the bytes the pipeline analysed.
+					result.writeIndex ?? writeIndex,
+					result.inlineBlockerSources,
+					result.inlineBlockerLines,
+					result.inlineBlockerFileContent,
+					// #3246: the structured blockers the summary was rendered from, so a
+					// later `lens_diagnostic_mark` can be applied to this record at turn
+					// end instead of replaying pre-mark text.
+					result.inlineBlockerDiagnostics,
+					// #3559: a re-token's own turn.
+					result.orderTurn ?? writeOrderTurn,
+					// #3503: the freshness baseline is the analysis read.
+					result.analysisReadAtMs,
+				),
+			) !== undefined;
+	} else {
+		// `clearInlineBlockers` applies with no entry too, so the entry is read
+		// before it.
+		// Optional: a runtime double without the accessor never retires.
+		const hadOwnBlocker = runtime.hasInlineBlocker?.(filePath) ?? false;
+		inlineVerdictApplied =
+			writeSession.guardedWrite(filePath, () =>
+				runtime.clearInlineBlockers(
+					filePath,
+					result.writeIndex ?? writeIndex,
+					result.orderTurn ?? writeOrderTurn,
+					// #4137 round 3: a run without authorship does not retire a
+					// record about the very bytes it read. The already-analysed latch
+					// is a cost rule, not the record's guard.
+					// #4484: and no run retires a record while its own observation
+					// still holds a blocker.
+					{
+						authored,
+						sha256: result.inlineBlockerFileContent?.sha256,
+						blocking: result.currentBlockerCount ?? 0,
+					},
+				),
+			) ?? false;
+		// An errored run reached no observation, whatever it cleared.
+		ownBlockerRetired =
+			hadOwnBlocker && inlineVerdictApplied && !result.isError;
+	}
+	// #4484 round 3: the anchor follows the record, so it moves only with a
+	// verdict that applied.
+	if (inlineVerdictApplied)
+		runtime.setAnalysisAnchor(filePath, result.analysisAnchor);
+
+	// A superseded verdict must not latch the commit gate either (#3507).
+	if (resultLive) {
+		runtime.updateGitGuardStatus(
+			inlineVerdictApplied && result.hasBlockers,
+			result.output,
+		);
+		if (getFlag("lens-guard")) {
+			// #4733 r1 F2: a clean verdict over the whole file, applied, with no
+			// blocker left in the observation; anything less observes nothing.
+			// #4733 r5 G3: a blocking finding the seed called pre-existing is still
+			// reported, so it is not a clean verdict for another session's section.
+			const wholeFileClean =
+				inlineVerdictApplied &&
+				!result.isError &&
+				!result.hasBlockers &&
+				result.currentBlockerCount === 0 &&
+				(result.preExistingBlockerCount ?? 0) === 0 &&
+				result.fileVerdictComplete === true;
+			syncGitGuardRecord(
+				runtime,
+				cacheManager,
+				turnStateCwd,
+				// #4733 r2 F11: a write speaks for its file's recorded sections only
+				// with that verdict, whichever session wrote them. #4733 r3 F15: or,
+				// for this session's own record, when it retired the file's own
+				// blocker entry (the rule the sibling callers use); without
+				// `wholeFileClean` another session's section stays.
+				wholeFileClean || ownBlockerRetired ? filePath : undefined,
+				analysisRootMode,
+				wholeFileClean,
+			);
+		}
+	}
+}
+
+/**
  * #2464: the pipeline's own lint/diagnostics dispatch, factored out of the
  * block below that ALSO writes `turn-state.json` modified ranges and the
  * attributed change-log receipt (`cacheManager.addModifiedRange` /
@@ -1896,6 +2034,33 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// extension's `tool_result` hook can rewrite to success. Before any return.
 	if (event.isError === true && toolCallId !== undefined)
 		deps.readGuard?.dropProvisionalReadByCall(toolCallId);
+	// #4732: the command text bash's recovery reads its roots and recognized
+	// writes from, and whether this is a call of another tool whose own
+	// `tool_call` recorded an opaque baseline. That record is the decision (the
+	// gate, the structured classifier and the id rule all ran there); this side
+	// follows it instead of re-deriving it (shape 19).
+	const bashCommand =
+		event.toolName === "bash" &&
+		typeof (event.input as { command?: unknown }).command === "string"
+			? (event.input as { command: string }).command
+			: undefined;
+	const opaqueNonBash =
+		event.toolName !== "bash" &&
+		toolCallId !== undefined &&
+		shouldRunOpaqueRecovery(event.toolName, workspaceRoot) &&
+		getOpaqueBaselineStore().has(
+			opaqueBaselineSlot(
+				opaquePrescanRoot(deps.cwd, workspaceRoot),
+				runtime.sessionGeneration,
+			),
+			toolCallId,
+		);
+	// #4732: a captured tool's relative path field that has no attribution
+	// (none is recorded for a tool the classifier does not know) is still
+	// refused as a PATH, but the handler goes on: the diff below recovers the
+	// call's writes, and an observation the #2430 net armed for the call (from
+	// the cwd the call ran in) settles as for an absolute path.
+	let unattributedOpaque = false;
 	const attribution =
 		toolCallId !== undefined
 			? runtime.takeToolCallAttribution(toolCallId)
@@ -1976,12 +2141,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			durationMs: 0,
 			metadata: { toolCallId, rawFilePath, guessedPath },
 		});
-		return readNote.length > 0
-			? {
-					content: [...readNote, ...event.content],
-					structuredContent: event.structuredContent,
-				}
-			: undefined;
+		if (!opaqueNonBash)
+			return readNote.length > 0
+				? {
+						content: [...readNote, ...event.content],
+						structuredContent: event.structuredContent,
+					}
+				: undefined;
+		unattributedOpaque = true;
+		resolutionBasis = workspaceRoot;
 	} else {
 		// Either an ABSOLUTE path (bash-synthetic writes always pass one —
 		// unambiguous regardless of any basis, see the bash-write dispatch
@@ -1999,8 +2167,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// #4577: a path recovered from disk is already an identity, not a spelling
 	// the model typed — `_pathAlreadyResolved` carries that provenance from the
 	// recovery caller instead of this handler guessing it from the string.
-	const filePath =
-		rawFilePath && deps._pathAlreadyResolved
+	const filePath = unattributedOpaque
+		? undefined
+		: rawFilePath && deps._pathAlreadyResolved
 			? rawFilePath
 			: resolveToolCallFilePath(rawFilePath, resolutionBasis, workspaceRoot)
 					?.path;
@@ -2061,11 +2230,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// synthetic `write` event so its diagnostics, fileSeq, and change-log refresh.
 	// Without (2) a `git checkout -- f` restore keeps serving the pre-restore
 	// (e.g. broken-state) warnings on every later lens_diagnostics call.
-	if (
-		event.toolName === "bash" &&
-		typeof (event.input as { command?: unknown }).command === "string"
-	) {
-		const command = (event.input as { command: string }).command;
+	// #4732: the same recovery, publish and dispatch serve every other tool
+	// whose `tool_call` recorded a baseline. It has no command text, so it
+	// recognizes nothing, recovers from the session root only, and every path
+	// it wrote is opaque evidence (unauthored, no blockers).
+	if (bashCommand !== undefined || opaqueNonBash) {
+		const command = bashCommand ?? "";
+		/** What the rows below name the call by: its command, or its tool. */
+		const opaqueLabel = bashCommand ?? event.toolName;
 		const recognized = extractWrittenPathsFromCommand(command, workspaceRoot);
 		// #2050: the trees this command's writes are recovered from. The session
 		// root is where the host ran it; every further root is a checkout the
@@ -2126,6 +2298,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// them) — a deliberate divergence from the isError filter above, which
 		// exists for restore semantics where attribution would lie.
 		let opaquePaths: string[] = [];
+		// #4737 r3: the recovered paths the observation answers for: sent with
+		// the call's population, never recorded or dispatched by this half.
+		let observedOpaquePaths: string[] = [];
 		let hadOpaqueRecovery = false;
 		/** Each root's own surviving recovery: what git reported AND we claim. */
 		const recoveredByRoot = new Map<string, Set<string>>();
@@ -2253,6 +2428,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			);
 			for (const outcome of outcomes) {
 				if (outcome.verdict === "unknown") {
+					// #4732: bash already says this through its coverage row and its
+					// withheld blockers; another tool's writes simply go unseen.
+					if (bashCommand === undefined)
+						recordOpaqueCaptureRefused(outcome.reason, event.toolName);
 					// #2060: deliberately WIDER than the old `recognized.length > 0`
 					// guard. A fully opaque command whose probe failed is the shape
 					// whose coverage is least knowable, and it used to record
@@ -2269,7 +2448,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					logLatency({
 						type: "phase",
 						phase: "opaque_mutation_incoming_excluded",
-						filePath: command.slice(0, 80),
+						filePath: opaqueLabel.slice(0, 80),
 						durationMs: Date.now() - started,
 						result: `excluded:${outcome.excluded}`,
 						metadata: { root: outcome.root },
@@ -2278,7 +2457,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					logLatency({
 						type: "phase",
 						phase: "opaque_mutation_status_pair_unknown",
-						filePath: command.slice(0, 80),
+						filePath: opaqueLabel.slice(0, 80),
 						durationMs: Date.now() - started,
 						result: `kept:${outcome.unknownPairs}`,
 						metadata: { root: outcome.root },
@@ -2301,6 +2480,22 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					recognizedWritten.map((p) => normalizeMapKey(realpathOrResolve(p))),
 				);
 				opaquePaths = opaquePaths.filter((p) => !survivingKeys.has(p));
+			}
+			// #4732: a path the #2430 net armed an observation of for this same
+			// call is the settle's to answer, with the tool's own attribution.
+			// #4737 r3: it still goes out in the awaited primary send below, so a
+			// sibling dispatched first never reads its old bytes (#4507).
+			if (opaquePaths.length > 0 && opaqueNonBash) {
+				const observed = new Set(
+					pendingObservationPaths(toolCallId, runtime.sessionGeneration).map(
+						(p) => normalizeMapKey(realpathOrResolve(p)),
+					),
+				);
+				if (observed.size > 0) {
+					for (const p of opaquePaths)
+						if (observed.has(p)) observedOpaquePaths.push(p);
+					opaquePaths = opaquePaths.filter((p) => !observed.has(p));
+				}
 			}
 			hadOpaqueRecovery = opaquePaths.length > 0;
 			if (recoveredByRoot.size > 0 || unknownRoots.size > 0) {
@@ -2333,7 +2528,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				logLatency({
 					type: "phase",
 					phase: "opaque_mutation_coverage_unknown",
-					filePath: command.slice(0, 80),
+					filePath: opaqueLabel.slice(0, 80),
 					durationMs: Date.now() - started,
 					result: unknownReason,
 					metadata: {
@@ -2390,7 +2585,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						deps.sessionId,
 					),
 					trigger: "tool_result",
-					label: command,
+					label: opaqueLabel,
 					...(discarded ? { discarded } : {}),
 					runtime,
 				}),
@@ -2486,7 +2681,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// checked while z.ts was still unsent, and the phantom STOP came back.
 		// A live primary takes the capped sends far inside the budget; one that
 		// does not answers the dispatches after it no better (no verdict).
-		if (workspaceRoot && written.length > 0) {
+		const sentPopulation = [...written, ...observedOpaquePaths];
+		if (workspaceRoot && sentPopulation.length > 0) {
 			const primaryStarted = Date.now();
 			// The servers must also have READ the sends before a dispatch reads a
 			// check (#4528 r1 F1): the held-primary pass's drain barrier.
@@ -2503,7 +2699,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// is the recovered subset's detached follow-up.
 			ensureDiskChangeSubscribers();
 			const sendsByRoot = new Map<string, string[]>();
-			for (const file of written) {
+			for (const file of sentPopulation) {
 				// #2050: the root that OWNS the file. A recovered path from a linked
 				// worktree belongs to that worktree's clients, not to the session
 				// root's (which hold no document for it); the fallback keeps the
@@ -3089,8 +3285,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// bytes is read HERE, before the yield. Otherwise the racing call rewrites
 	// the file while this one is awaiting and this one registers under the
 	// OTHER call's state hash, collapsing two distinct pipelines into one.
+	// #4732: a write pi-lens replays from an opaque diff carries its call's id,
+	// and that call's observation is the call's own to settle, never a replay's.
 	const observationPending =
 		!getFlag("no-read-guard") &&
+		!isBashDerivedReplay(event) &&
 		hasPendingObservation(resolveToolCallCorrelationId(event));
 	// #2464 review round 2 (S2): NOT gated on `mutation !== undefined` any more.
 	// The observed path now dispatches on call ONE of an unknown tool too, and
@@ -3105,7 +3304,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		const observed = await settleObservedMutation({
 			toolCallId: resolveToolCallCorrelationId(event),
 			toolName: event.toolName,
-			sessionGeneration: runtime.sessionGeneration,
+			// #4737 r2: the session captured at entry. After the opaque recovery's
+			// await the live one can be a replacement that reused this call id.
+			sessionGeneration: writeSession.scopeId,
 			// #3613 F2: the budget of this session's own turn.
 			turnIndex: runtime.turnKey(deps.sessionId),
 			signal: getAmbientAbortSignal(),
@@ -3205,41 +3406,25 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// once the bridge has recorded the edit, re-running the classified chain
 		// double-records it regardless of how the tool classifies. They are
 		// consulted for what this block can still usefully DO.
-		if (filePath && !isExternalOrVendorFile(filePath, workspaceRoot)) {
+		// #4737 r3: an unset `filePath` (the result refused a relative path no
+		// attribution backs) still dispatches what the settle recorded; only the
+		// steps keyed on the tool's named path need it.
+		if (!filePath || !isExternalOrVendorFile(filePath, workspaceRoot)) {
 			// On call ONE the tool is not classified at all, so there is no
 			// `mutation.kind` to read. The observation itself is the authority and
 			// it only ever records "edit" (`settleObservedMutation` hard-codes
 			// `kind: "edit"`, and #2430 tier 4 only ever classifies a learned tool
 			// as "edit"), so the two agree wherever both exist.
 			const observedKind: MutationKind = mutation?.kind ?? "edit";
-			const observedStateHash =
-				preSettleStateHash ?? getFileStateHash(filePath);
-			const observedAppliedPairs = recordNativeAppliedPairs({
-				runtime,
-				input: event.input,
-				kind: observedKind,
-				filePath,
-				stateHash: observedStateHash,
-			});
-			// #3763: the settle awaited; a replaced session's receipt stays out
-			// of the live session's turn.
-			const receiptOutcome = writeSession.guardedWrite(filePath, () =>
-				(
-					runtime as Partial<RuntimeCoordinator>
-				).recordMutationToolReceipt?.call(runtime, filePath, observedKind),
-			);
-			refreshCachedExports(runtime, filePath);
-			// Same fallback formula the classified chain uses below, minus its
-			// `_bypassDebounce` branch (#2464 review round 2, S3): that branch was
-			// unreachable here. Both callers that set `_bypassDebounce` arrive with
-			// no pending baseline — `scheduleDebounced`'s re-entry because THIS
-			// call already consumed it at the settle above, and the bash-derived
-			// synthetic write because `runtime-tool-call.ts` excludes `bash` from
-			// arming outright (`toolName !== "bash"`). `observedKind` is always
-			// "edit", so the un-receipted default is "deferred" either way.
-			const observedAutofixMode: "immediate" | "deferred" =
-				receiptOutcome?.autofixMode ??
-				(observedKind === "edit" ? "deferred" : "immediate");
+			const observedAppliedPairs = filePath
+				? recordNativeAppliedPairs({
+						runtime,
+						input: event.input,
+						kind: observedKind,
+						filePath,
+						stateHash: preSettleStateHash ?? getFileStateHash(filePath),
+					})
+				: [];
 			// Analyse the files the observation actually RECORDED, not merely the
 			// path the tool named. A directory is never a pipeline target.
 			const observedDispatchPaths = observedChangedPaths
@@ -3260,6 +3445,29 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					reason: `observed mutation dispatch capped at ${OBSERVED_DISPATCH_MAX_PATHS}; ${observedDispatchDropped} path(s) not dispatched`,
 				});
 			}
+			// #4737 r3 F1, r4: each recorded file's own receipt and exports, before
+			// the client wait below can return. The receipt is the write->edit
+			// turn transition (it releases a file an earlier write's autofix
+			// marked fixed, so the deferred pass fixes these bytes too), and a
+			// removed export left cached blocks the next write of that name.
+			// #3763: the settle awaited; a replaced session's receipt stays out of
+			// the live session's turn. The fallback is the classified chain's,
+			// minus its `_bypassDebounce` branch (#2464 review round 2, S3), which
+			// no caller reaching this block sets.
+			const observedAutofixModes = new Map<string, "immediate" | "deferred">();
+			for (const observedPath of observedChangedPaths)
+				writeSession.guardedWrite(observedPath, () => {
+					refreshCachedExports(runtime, observedPath);
+					const receipt = (
+						runtime as Partial<RuntimeCoordinator>
+					).recordMutationToolReceipt?.call(
+						runtime,
+						observedPath,
+						observedKind,
+					);
+					if (receipt)
+						observedAutofixModes.set(observedPath, receipt.autofixMode);
+				});
 			if (observedDispatchPaths.length > 0) {
 				const observedClients = ensureToolResultClients(deps);
 				if (
@@ -3286,6 +3494,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					// one's writes would be dropped, so its run is wasted work.
 					if (writeSession.guardedWrite(observedPath, () => true) !== true)
 						continue;
+					// #4737 r4: the file's own class, never the named path's: a refused
+					// relative path leaves `filePath` unset, and a sibling is not the
+					// file the tool named.
+					const observedRootMode = classifyAnalysisRoot(
+						observedPath,
+						workspaceRoot,
+					).mode;
 					const observedDispatchSignal = deps.signal;
 					const observedJoinSignal = deps.signal;
 					const observedStateHashForPath = getFileStateHash(observedPath);
@@ -3309,6 +3524,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						}
 						continue;
 					}
+					// #4737 r2: one token and one root for the dispatch and the verdict
+					// it publishes.
+					const observedWriteIndex = runtime.nextWriteIndex();
+					const observedWriteOrderTurn = runtime.writeOrderTurn;
+					const observedTurnStateCwd = path.resolve(workspaceRoot);
 					const observedDispatchOutcome = await bounded(
 						dispatchPipelineAnalysis({
 							deps,
@@ -3318,12 +3538,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 								observedPath,
 								workspaceRoot,
 							),
-							turnStateCwd: path.resolve(workspaceRoot),
-							analysisRootMode,
-							autofixMode: observedAutofixMode,
+							turnStateCwd: observedTurnStateCwd,
+							analysisRootMode: observedRootMode,
+							autofixMode:
+								observedAutofixModes.get(observedPath) ??
+								(observedKind === "edit" ? "deferred" : "immediate"),
 							modifiedRanges: undefined,
-							writeIndex: runtime.nextWriteIndex(),
-							writeOrderTurn: runtime.writeOrderTurn,
+							writeIndex: observedWriteIndex,
+							writeOrderTurn: observedWriteOrderTurn,
 							initialStateHash: observedStateHashForPath,
 							readGuardCorrelationId: observedReadGuardCorrelationId,
 							requestedEditIndexes: getRequestedEditIndexes(
@@ -3369,6 +3591,24 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							`tool_result: pipeline analysis crashed for the observed mutation on ${observedPath}; the recorded edit stands, analysis did not run this turn`,
 						);
 						return observedDispatchOutcome.response;
+					}
+					// #4737 r2: the verdict gates the commit now, as the classified
+					// chain's does, not from turn_end. The observation is the
+					// authorship evidence (the claim above runs with `authored: true`).
+					if (observedDispatchOutcome) {
+						publishInlineVerdict({
+							runtime,
+							cacheManager,
+							filePath: observedPath,
+							result: observedDispatchOutcome.result,
+							writeSession,
+							writeIndex: observedWriteIndex,
+							writeOrderTurn: observedWriteOrderTurn,
+							authored: true,
+							getFlag,
+							turnStateCwd: observedTurnStateCwd,
+							analysisRootMode: observedRootMode,
+						});
 					}
 				}
 				dbg(
@@ -4093,101 +4333,19 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		analysisRootMode,
 	});
 
-	// #3507: both verbs are ordered by this dispatch's token, so an older
-	// pipeline that settles after a newer one of the same file changes nothing.
-	let inlineVerdictApplied: boolean;
-	// #4733 r3 F15: this write's clear removed the file's own blocker entry.
-	let ownBlockerRetired = false;
-	const { inlineBlockerSummary } = result;
-	if (inlineBlockerSummary) {
-		// #1561: stamp the verdict with THIS dispatch's write token — the same
-		// counter `lsp_diagnostics`' reconciliation seam draws from — so a later
-		// confirmed-clean result can be ordered against it instead of racing it.
-		inlineVerdictApplied =
-			writeSession.guardedWrite(filePath, () =>
-				runtime.recordInlineBlockers(
-					filePath,
-					inlineBlockerSummary,
-					// #3506: the token of the bytes the pipeline analysed.
-					result.writeIndex ?? writeIndex,
-					result.inlineBlockerSources,
-					result.inlineBlockerLines,
-					result.inlineBlockerFileContent,
-					// #3246: the structured blockers the summary was rendered from, so a
-					// later `lens_diagnostic_mark` can be applied to this record at turn
-					// end instead of replaying pre-mark text.
-					result.inlineBlockerDiagnostics,
-					// #3559: a re-token's own turn.
-					result.orderTurn ?? writeOrderTurn,
-					// #3503: the freshness baseline is the analysis read.
-					result.analysisReadAtMs,
-				),
-			) !== undefined;
-	} else {
-		// `clearInlineBlockers` applies with no entry too, so the entry is read
-		// before it.
-		// Optional: a runtime double without the accessor never retires.
-		const hadOwnBlocker = runtime.hasInlineBlocker?.(filePath) ?? false;
-		inlineVerdictApplied =
-			writeSession.guardedWrite(filePath, () =>
-				runtime.clearInlineBlockers(
-					filePath,
-					result.writeIndex ?? writeIndex,
-					result.orderTurn ?? writeOrderTurn,
-					// #4137 round 3: a run without authorship does not retire a
-					// record about the very bytes it read. The already-analysed latch
-					// is a cost rule, not the record's guard.
-					// #4484: and no run retires a record while its own observation
-					// still holds a blocker.
-					{
-						authored: bashAuthorshipConfirmed,
-						sha256: result.inlineBlockerFileContent?.sha256,
-						blocking: result.currentBlockerCount ?? 0,
-					},
-				),
-			) ?? false;
-		// An errored run reached no observation, whatever it cleared.
-		ownBlockerRetired =
-			hadOwnBlocker && inlineVerdictApplied && !result.isError;
-	}
-	// #4484 round 3: the anchor follows the record, so it moves only with a
-	// verdict that applied.
-	if (inlineVerdictApplied)
-		runtime.setAnalysisAnchor(filePath, result.analysisAnchor);
-
-	// A superseded verdict must not latch the commit gate either (#3507).
-	if (resultLive) {
-		runtime.updateGitGuardStatus(
-			inlineVerdictApplied && result.hasBlockers,
-			result.output,
-		);
-		if (getFlag("lens-guard")) {
-			// #4733 r1 F2: a clean verdict over the whole file, applied, with no
-			// blocker left in the observation; anything less observes nothing.
-			// #4733 r5 G3: a blocking finding the seed called pre-existing is still
-			// reported, so it is not a clean verdict for another session's section.
-			const wholeFileClean =
-				inlineVerdictApplied &&
-				!result.isError &&
-				!result.hasBlockers &&
-				result.currentBlockerCount === 0 &&
-				(result.preExistingBlockerCount ?? 0) === 0 &&
-				result.fileVerdictComplete === true;
-			syncGitGuardRecord(
-				runtime,
-				cacheManager,
-				turnStateCwd,
-				// #4733 r2 F11: a write speaks for its file's recorded sections only
-				// with that verdict, whichever session wrote them. #4733 r3 F15: or,
-				// for this session's own record, when it retired the file's own
-				// blocker entry (the rule the sibling callers use); without
-				// `wholeFileClean` another session's section stays.
-				wholeFileClean || ownBlockerRetired ? filePath : undefined,
-				analysisRootMode,
-				wholeFileClean,
-			);
-		}
-	}
+	publishInlineVerdict({
+		runtime,
+		cacheManager,
+		filePath,
+		result,
+		writeSession,
+		writeIndex,
+		writeOrderTurn,
+		authored: bashAuthorshipConfirmed,
+		getFlag,
+		turnStateCwd,
+		analysisRootMode,
+	});
 
 	// #2050 AC3 / #2657: `linked-worktree` is a WRITABLE class
 	// (`canWriteAnalysisRoot`), so the pipeline above ran the full set — format,

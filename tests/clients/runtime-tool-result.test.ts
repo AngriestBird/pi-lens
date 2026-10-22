@@ -3990,6 +3990,51 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 		},
 	);
 
+	it("a replaced session's late clean verdict leaves the live session's commit gate as it was (#4737 r2)", async () => {
+		// RECURRENCE GUARDED: #4737 r2. The verdict publisher both callers share
+		// re-derives the gate's status and rewrites the record. Run for a dead
+		// handler, its no-blocker sync cleared the live session's unknown-state
+		// latch, and the next commit ran on state no one had re-checked.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const entered = gatedPromise<void>();
+		const release = gatedPromise<void>();
+		vi.mocked(runPipeline).mockReset();
+		vi.mocked(runPipeline).mockImplementationOnce(async () => {
+			entered.resolve();
+			await release.promise;
+			return {
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+				currentBlockerCount: 0,
+				fileVerdictComplete: true,
+			} as never;
+		});
+		await acrossReplacement(
+			"4737-late-clean",
+			async ({ tmpDir, filePath, runtime, cacheManager }) => {
+				const handler = handleToolResult(
+					toolResultDeps({
+						filePath,
+						runtime,
+						cacheManager,
+						flags: ["lens-guard"],
+					}),
+				);
+				await entered.promise;
+				runtime.resetForSession();
+				runtime.beginTurn();
+				runtime.markGitGuardCacheUnknown("cache_corrupt");
+				release.resolve();
+				await handler;
+				expect(evaluateGitGuard(runtime, cacheManager, tmpDir).block).toBe(
+					true,
+				);
+			},
+		);
+	});
+
 	it("a session-1 pipeline finishing in session 2's turn does not mark session 2's bytes analysed (#3763)", async () => {
 		// #3763 item 2: the already-analysed latch is keyed by the LIVE turn
 		// index, so a dead pipeline that settled after session 2's turn_start
