@@ -1,7 +1,11 @@
 /**
  * Check C8 of the agent-contract audit (#4361): every `AGENTS.md "<section>"`
- * or `AGENTS.md, "<section>"` citation in tests/, scripts/, .github/ and docs/
- * must name a live heading in AGENTS.md.
+ * or `AGENTS.md, "<section>"` citation in tests/, scripts/, .github/, docs/,
+ * clients/, .changelog/ and the repo-root config files must name a live heading
+ * in AGENTS.md. The repo-root files read are dotfiles and config-extension files
+ * (.toml, .json, .yml, .yaml, .cjs, .mjs); root markdown (AGENTS, HISTORY,
+ * CHANGELOG, README) is not read. Compiled `.js` and `.d.ts` next to a `.ts`
+ * source are skipped, since `npm run build` writes them in place.
  *
  * Recurrence this prevents: PLAN_4361 (2026-10-18) measured five headings that
  * the agent docs still cited after AGENTS.md had moved them: "Probe hygiene",
@@ -32,7 +36,22 @@ import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const SELF = path.relative(REPO_ROOT, import.meta.filename);
-const SWEEP_ROOTS = ["tests", "scripts", ".github", "docs"];
+const SWEEP_ROOTS = [
+	"tests",
+	"scripts",
+	".github",
+	"docs",
+	"clients",
+	".changelog",
+];
+const ROOT_CONFIG_EXTENSIONS = new Set([
+	".toml",
+	".json",
+	".yml",
+	".yaml",
+	".cjs",
+	".mjs",
+]);
 const SKIP_DIRS = new Set(["node_modules", ".git", "fixtures", ".probe-home"]);
 const EXTENSIONS = new Set([
 	".ts",
@@ -47,14 +66,40 @@ const EXTENSIONS = new Set([
 const CITATION = /AGENTS\.md,?[ \t]+"([^"]+)"/g;
 const COMMENT_PREFIX = /^[ \t]*(?:\/\/+|\*|#)[ \t]?/;
 
+/** A compiled `.js` or `.d.ts` emitted next to its `.ts` source by the build. */
+function isBuildOutput(dir: string, name: string): boolean {
+	const source = name.endsWith(".d.ts")
+		? name.replace(/\.d\.ts$/, ".ts")
+		: name.endsWith(".js")
+			? name.replace(/\.js$/, ".ts")
+			: undefined;
+	return source !== undefined && fs.existsSync(path.join(dir, source));
+}
+
 function walk(dir: string, out: string[]): void {
 	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
 		if (entry.isDirectory()) {
 			if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name), out);
-		} else if (EXTENSIONS.has(path.extname(entry.name))) {
+		} else if (
+			EXTENSIONS.has(path.extname(entry.name)) &&
+			!isBuildOutput(dir, entry.name)
+		) {
 			out.push(path.join(dir, entry.name));
 		}
 	}
+}
+
+/** Repo-root config files: dotfiles and config-extension files, not root markdown. */
+function rootConfigFiles(): string[] {
+	return fs
+		.readdirSync(REPO_ROOT, { withFileTypes: true })
+		.filter(
+			(entry) =>
+				entry.isFile() &&
+				(entry.name.startsWith(".") ||
+					ROOT_CONFIG_EXTENSIONS.has(path.extname(entry.name))),
+		)
+		.map((entry) => path.join(REPO_ROOT, entry.name));
 }
 
 function liveHeadings(): Set<string> {
@@ -107,13 +152,14 @@ function citationsIn(file: string): { line: number; name: string }[] {
 }
 
 describe("AGENTS.md section citations resolve (#4361 C8)", () => {
-	it("every quoted AGENTS.md section cited under tests/ scripts/ .github/ docs/ is a live heading", () => {
+	it("every quoted AGENTS.md section cited under the swept roots is a live heading", () => {
 		const headings = liveHeadings();
 		const files: string[] = [];
 		for (const root of SWEEP_ROOTS) {
 			const dir = path.join(REPO_ROOT, root);
 			if (fs.existsSync(dir)) walk(dir, files);
 		}
+		files.push(...rootConfigFiles());
 		const sweptFiles = files.filter(
 			(file) => path.relative(REPO_ROOT, file) !== SELF,
 		);
@@ -124,9 +170,12 @@ describe("AGENTS.md section citations resolve (#4361 C8)", () => {
 			})),
 		);
 
-		// A dead sweep passes everything: the headings and the files must be read.
+		// A dead sweep passes everything: the headings, the files and the
+		// citations must all be read. The citation floor catches a matcher
+		// neutered to match nothing, which the other two floors cannot see.
 		assertNonEmptyScan("AGENTS.md headings read", headings.size, 20);
 		assertNonEmptyScan("citation sweep files", sweptFiles.length, 500);
+		assertNonEmptyScan("AGENTS.md citations read", citations.length, 15);
 
 		const dangling = citations
 			.filter((hit) => !headings.has(hit.name))

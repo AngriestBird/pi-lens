@@ -173,7 +173,7 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		// separator, so on a Windows runner every one of the 811 lookups misses,
 		// every config falls back to `table.max`, and the balance assertion below
 		// is then 1.00x by construction -- vacuous (F1, docs/pi-lens-reviewer.md "Windows path
-		// shapes" 1/2). The miss guard is what keeps that from passing silently.
+		// shapes"). The miss guard is what keeps that from passing silently.
 		const misses = listModelConfigs(ROOT).filter(
 			(config) => !(modelCostId(ROOT, config) in table.files),
 		);

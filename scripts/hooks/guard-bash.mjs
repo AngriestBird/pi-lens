@@ -31,10 +31,10 @@
  *     {@link classifyNodeModulesDelete}
  *   - an unpinned `node` probe that LOADS built runtime code from clients/
  *     or dist/ (not merely a payload that mentions "clients/" in passing --
- *     review round 2 F5) with no PI_LENS_HOME pin (docs/engineering-principles.md "Probe
- *     hygiene")
+ *     review round 2 F5) with no PI_LENS_HOME pin (AGENTS.md "Paths, data,
+ *     and operating systems")
  *   - `TMPDIR`/`TMP`/`TEMP` aimed at the vitest harness's own home
- *     (docs/engineering-principles.md "Probe hygiene", #3026) -- see {@link classifyTempDirVars}
+ *     (AGENTS.md "Paths, data, and operating systems", #3026) -- see {@link classifyTempDirVars}
  *   - a WRITE under `/tmp` (#4348; tmpfs on the maintainer host): a redirect
  *     (`>`, `>>`, `2>`, `&>`, `>&file`), `tee`, a `cp`/`mv`/`install` target
  *     (last operand or `-t DIR`), `mkdir`, `touch` -- see {@link
@@ -255,9 +255,9 @@ export const RULE_MESSAGES = {
 	worktreeUnresolved:
 		"git worktree remove on a path this hook cannot resolve statically is forbidden (#3988) -- the #3173 node_modules-symlink check cannot run on it. The path, or the directory it is relative to, comes from a `$(...)`/backtick substitution, a `$VAR` with no value in the command or the hook environment, a `~user` or glob spelling, or an unresolvable `cd`/`git -C`/`popd`. Spell the worktree's absolute path literally (or `cd` to a literal directory first), or use `node scripts/prune-agent-worktrees.mjs`.",
 	probe:
-		"an unpinned node probe that LOADS runtime code from clients/ or dist/ is forbidden (docs/engineering-principles.md Probe hygiene) -- prefix `PI_LENS_HOME=<worktree>/.probe-home`.",
+		"an unpinned node probe that LOADS runtime code from clients/ or dist/ is forbidden (AGENTS.md Paths, data, and operating systems) -- prefix `PI_LENS_HOME=<worktree>/.probe-home`.",
 	tmpdirCollision:
-		"TMPDIR/TMP/TEMP must not point at the vitest harness home (docs/engineering-principles.md Probe hygiene) -- tests/support/vitest-setup.ts keeps the real TMPDIR on purpose and mkdtemps PI_LENS_HOME under os.tmpdir(), so a TMPDIR inside `.probe-home` moves the harness home into a git-ignored directory in the worktree and reds unrelated suites (#3026). Pin PI_LENS_HOME/PILENS_DATA_DIR there; give TMPDIR its own directory.",
+		"TMPDIR/TMP/TEMP must not point at the vitest harness home (AGENTS.md Paths, data, and operating systems) -- tests/support/vitest-setup.ts keeps the real TMPDIR on purpose and mkdtemps PI_LENS_HOME under os.tmpdir(), so a TMPDIR inside `.probe-home` moves the harness home into a git-ignored directory in the worktree and reds unrelated suites (#3026). Pin PI_LENS_HOME/PILENS_DATA_DIR there; give TMPDIR its own directory.",
 	sharedKill:
 		"pkill/killall with a bare (unscoped) pattern is forbidden (#3556) -- it matches machine-wide and can kill another concurrent session's TLC/vitest/etc run on this shared host -- kill the recorded PID of your own background job instead (`kill <pid>`), or use `pkill -f` with a pattern that includes your worktree's absolute path so only your own processes match.",
 	tmpCheckout:
@@ -2559,7 +2559,7 @@ function classifyNode(args, env, rawSegment, cwd, initialIdentity) {
 const TEMP_DIR_VARS = ["TMPDIR", "TMP", "TEMP"];
 
 /**
- * The directory name docs/engineering-principles.md "Probe hygiene" prescribes for a pinned
+ * The directory name AGENTS.md "Paths, data, and operating systems" prescribes for a pinned
  * `PI_LENS_HOME` (and the {@link RULE_MESSAGES}.probe message hands out).
  */
 const HARNESS_HOME_SEGMENT = ".probe-home";

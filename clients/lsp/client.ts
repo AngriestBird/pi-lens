@@ -2833,7 +2833,7 @@ export function setupIncomingHandlers(
 						emptyFirstPublish: strategy.emptyFirstPublish,
 						// `pubVersion`, the `[lsp-pub]` trace's own field name for the
 						// publish's LSP document version — not a lifecycle identity, and
-						// not the retired glossary spelling (AGENTS.md "generation").
+						// not the retired glossary spelling (AGENTS.md "session, turn or generation lifecycle").
 						pubVersion: docVersion ?? "push-unversioned",
 					},
 				});
