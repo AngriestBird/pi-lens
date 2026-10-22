@@ -20,9 +20,10 @@
  * table): the second session's blocking write (`syncGitGuardRecord`, entries
  * branch), its fix (the same function, no entries), and its fix turn's
  * turn-end composer write. The composer's repeated-findings rewrite and its
- * read of a day-old record are not reachable here: pi-lens sees no modified
- * file in the second session's turns, so those turns compose nothing for it.
- * They are pinned with the real `handleTurnEnd` in
+ * read of a day-old record are not reached here: no turn of the second
+ * session repeats its findings or meets a day-old record. (Before #4751 none
+ * of its turns composed anything: its writes went to a partition its turn end
+ * never read.) They are pinned with the real `handleTurnEnd` in
  * `tests/clients/turn-end-cap-consumed-state.test.ts`.
  *
  * Lane: ubuntu Unit tests.
