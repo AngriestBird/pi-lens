@@ -509,6 +509,12 @@ export const wallClockBudgetInclude = [
 	// #4148: a 199K-blank-line rule is a real event-loop occupancy witness for
 	// validateRule's synchronous language extraction, so it runs serialized.
 	"tests/clients/ast-grep-rule-regex-budget.test.ts",
+	// #4713 R11, R12: real `bash -c` is the oracle for 2 625 generated cd,
+	// empty-word and redirect-target spellings (flake-shape admission); about
+	// 5 s of serial spawns. No wall-clock budget assertion: the file pins its
+	// exact row count, one spawn per row, which bounds the cost without a
+	// clock that a loaded host would make flake.
+	"tests/clients/bash-word-composition.test.ts",
 	"tests/clients/biome-config-decorator-metadata.test.ts",
 	"tests/clients/build-identity.test.ts",
 	// #4046: the impact-cascade and reverse-dependency cases assert a t(4N)/t(N)
@@ -647,6 +653,10 @@ export const wallClockBudgetInclude = [
 	"tests/config/strictness-ratchet.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
 	"tests/config/workflow-writers-governance.test.ts",
+	// #2050: the same real-worktree admission, driven through a real pi session
+	// and pi's own `bash` tool, so the child shells and git processes ride along
+	// in the serialized lane too.
+	"tests/index-2050-worktree-bash-dispatch-witness.test.ts",
 	// #4504: a real linked worktree (`git worktree add`) and the real
 	// tool_call/tool_result seams that key the opaque prescan (flake-shape
 	// admission); the git children ride along in the serialized lane.
@@ -730,6 +740,9 @@ export const wallClockBudgetInclude = [
 	"tests/scripts/lint-js.test.ts",
 	"tests/scripts/lockfile-completeness.test.ts",
 	"tests/scripts/lsp-idle-eviction-promote.test.ts",
+	// #4717: the lexer-seam entry points run in a fresh node over a scripts
+	// copy with no node_modules (real child process, flake-shape admission).
+	"tests/scripts/markdown-lexer-entry-points.test.ts",
 	// #4048: the mutation helper's real child and SIGINT restoration witness
 	// require a quiet serialized phase; its bounded timer and never-settling
 	// fixture are the process boundary under test (flake-shape admission).

@@ -33,6 +33,12 @@ import {
 // into `probe-home-state.ts` and read back here instead. See that module's doc
 // comment for the full account.
 import { getProbeHomeRedirectEvent } from "./probe-home-state.js";
+// #4689: path-utils is a dependency leaf below this module, so its identity
+// fallback tally is pulled here at read time, like the sinks above.
+import {
+	getPathIdentityFallbacks,
+	resetPathIdentityFallbacks,
+} from "./path-utils.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -1146,6 +1152,15 @@ export type DegradationKind =
 	| "opaque-baseline-lost"
 	/** Opaque mutation was analyzed without granting autonomous writer rights. */
 	| "opaque-mutation-ownership-boundary"
+	/**
+	 * #2050: a bash command named a git checkout that got NO opaque baseline, so
+	 * its writes were not observed. Subject is the normalized root (once per
+	 * root per session), or `cap` when the command named more checkouts than
+	 * `OPAQUE_RECOVERY_ROOT_CAP`. Deliberately not `opaque-baseline-lost`, which
+	 * is a baseline that WAS taken and then dropped: this one was never taken,
+	 * because the root is not a linked worktree of the session's repository.
+	 */
+	| "opaque-recovery-root-refused"
 	/** Opengrep completed with partial parsing warnings (#2943). */
 	| "opengrep-partial-scan"
 	/** Opengrep refused the requested root or reported a scan error (#2943). */
@@ -1179,6 +1194,17 @@ export type DegradationKind =
 	 * be indistinguishable from finding nothing.
 	 */
 	| "path-attribution-orphan-unresolved"
+	/**
+	 * #4689: deriving a path identity (`clients/path-utils.ts`, the realpath of
+	 * the nearest existing ancestor plus the missing tail) met a realpath error
+	 * other than a missing component (an unreadable ancestor, a cyclic link),
+	 * so the key fell back to an ancestor's identity and may differ from the
+	 * key another spelling of the same file derives. Same read-time fold as
+	 * `log-sink-write-failure`: path-utils cannot import this module, so
+	 * `getDegradationSummary()` PULLS its tally. One entry per errno code;
+	 * subject is the code, reason the count and the first refused spelling.
+	 */
+	| "path-identity-fallback"
 	/**
 	 * Same as `orphan-backstop-kill-unverified`, for the registry-driven
 	 * reaper path, which spelled the identical attempt-counted-as-kill defect
@@ -1804,6 +1830,18 @@ export type DegradationKind =
 	/** A loader request named a configured-disabled tool. */
 	| "tool-disabled"
 	| "tool-result-adopted-project"
+	/**
+	 * An edit in a linked worktree of this repository was analysed with the full
+	 * pipeline. Once per worktree root per session: the row exists so "analysis
+	 * ran and the root was foreign to the session" is never only in `latency.log`
+	 * (#2050 AC3).
+	 */
+	| "tool-result-linked-worktree"
+	/**
+	 * That analysis produced no finding at all, so the agent gets one advisory
+	 * instead of an ambiguous silence. Once per worktree root per session.
+	 */
+	| "tool-result-linked-worktree-clean"
 	/** A project edit was outside the session root and skipped analysis (#4218). */
 	| "tool-result-outside-project-root"
 	/** #3612: a lazy-tool activation arrived before its activation's session scope began. */
@@ -2286,6 +2324,21 @@ export function getDegradationSummary(): DegradationGroup[] {
 	// Folded in at read time, not written into `groups` (#1970) — see the
 	// `log-sink-write-failure` doc comment on `DegradationKind` for why this
 	// kind never goes through `recordDegradation`.
+	// #4689, same read-time fold: see the `path-identity-fallback` doc comment.
+	const identityFallbacks = getPathIdentityFallbacks();
+	if (identityFallbacks.length > 0) {
+		summary.push({
+			kind: "path-identity-fallback",
+			count: identityFallbacks.reduce((total, row) => total + row.count, 0),
+			droppedCount: 0,
+			latestReasons: identityFallbacks.map((row) => ({
+				subject: truncateForLedger(row.code),
+				reason: truncateForLedger(
+					`${row.count} fallback(s) to an ancestor identity; first: ${row.firstPath}`,
+				),
+			})),
+		});
+	}
 	const sinkFailures = getSinkWriteFailures();
 	if (sinkFailures.length > 0) {
 		summary.push({
@@ -2521,6 +2574,9 @@ export function resetDegradationLedger(): void {
 	// keep crossing the bound), so clearing it costs nothing and a later
 	// session re-observes the fact fresh.
 	resetSinkRotations();
+	// #4689, the same re-arm: an identity fallback recurs on the next key the
+	// kernel refuses, so a later session re-observes it.
+	resetPathIdentityFallbacks();
 	// #2146 review F3: the OTHER pulled source, `getProcessSingletonResets()`,
 	// deliberately does NOT re-arm here, and the difference from its neighbour
 	// above is the point. A sink write failure recurs — new writes fail, so

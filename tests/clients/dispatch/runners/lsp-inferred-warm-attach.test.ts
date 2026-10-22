@@ -29,15 +29,9 @@ vi.mock("../../../../clients/warm-attach.js", () => ({
 		mocked.attachedCodeActions(...args),
 }));
 
-vi.mock("../../../../clients/lsp/capabilities.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../../../clients/lsp/capabilities.js")
-	>("../../../../clients/lsp/capabilities.js");
-	return { ...actual, getLSPService: () => mocked.service };
-});
-
 import lspRunner from "../../../../clients/dispatch/runners/lsp.js";
 import { ENVIRONMENT_GAP_MARKER } from "../../../../clients/lsp/environment-gap.js";
+import { installLspService } from "../../../support/lsp-service-seam.js";
 
 const INFERRED_BODY = { configFileName: "/dev/null/inferredProject1*" };
 
@@ -88,7 +82,7 @@ describe("LSP dispatch runner — warm attach skips the membership probe (#1645 
 		mocked.attachedDiagnostics.mockReset();
 		mocked.attachedCodeActions.mockReset();
 		mocked.attachedCodeActions.mockResolvedValue({ available: false });
-		mocked.service = makeService();
+		mocked.service = installLspService(makeService());
 		cwd = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-warm-attach-")),
 		);

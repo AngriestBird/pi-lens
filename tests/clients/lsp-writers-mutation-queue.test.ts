@@ -44,13 +44,6 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
 	logLatency,
 }));
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: () => lsp.service,
-}));
-
 import {
 	applyConservativeActionableWarningFixes,
 	type ActionableWarningsReport,
@@ -63,6 +56,7 @@ import { setHostFileMutationQueueLoader } from "../../clients/file-mutation-queu
 import { setupIncomingHandlers } from "../../clients/lsp/client.js";
 import { applyWorkspaceEdit } from "../../clients/lsp/edits.js";
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
+import { installLspService } from "../support/lsp-service-seam.js";
 
 function gate() {
 	let open!: () => void;
@@ -167,11 +161,13 @@ function useActionableFix(codeAction: () => Promise<unknown[]>) {
 			packages: { "node_modules/eslint": { version: "9.0.0" } },
 		}),
 	);
-	lsp.service = makeLspServiceDouble({
-		supportsLSP: () => true,
-		openFile: async () => undefined,
-		codeAction,
-	});
+	lsp.service = installLspService(
+		makeLspServiceDouble({
+			supportsLSP: () => true,
+			openFile: async () => undefined,
+			codeAction,
+		}),
+	);
 }
 
 /** One autofix-eligible warning on line 1 of F. */
@@ -247,11 +243,13 @@ describe("#3541: each LSP writer applies its edit inside pi's mutation queue", (
 	});
 
 	it("lsp_navigation's applied rename does not erase an agent edit made while it applies", async () => {
-		lsp.service = makeLspServiceDouble({
-			supportsLSP: () => true,
-			hasLSP: async () => true,
-			rename: async () => valueEdit(),
-		});
+		lsp.service = installLspService(
+			makeLspServiceDouble({
+				supportsLSP: () => true,
+				hasLSP: async () => true,
+				rename: async () => valueEdit(),
+			}),
+		);
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
 		await assertAgentEditSurvives(async () => {
 			const result = await tool.execute(

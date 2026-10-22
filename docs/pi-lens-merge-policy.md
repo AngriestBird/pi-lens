@@ -21,9 +21,9 @@ reachable.
 
 Every PR body starts with `## Why`, `## Notes for the reviewer`, and
 `## Change outline`, followed by the existing `## Summary`, `## Tests`,
-`## Blast radius`, `## Class sweep`, and `## Observability` sections. The
-change outline is the changed symbol's caller/callee tree with `+`/`-` on
-moved lines; include only structural views that changed.
+`## Blast radius`, `## Class sweep`, `## Observability`, and `## Fold check`
+sections. The change outline is the changed symbol's caller/callee tree with
+`+`/`-` on moved lines; include only structural views that changed.
 
 ## The loop, per PR
 
@@ -312,7 +312,7 @@ operator's private notes, so a different orchestrator can run the same train.
   | a change that touches identifier uses of a glossary-retired synonym | run `tests/config/glossary-synonym-sweep.test.ts` on the head AND on the merge with `origin/master`, then re-pin in the PR from the sweep's own `UNPINNED`/`STALE` output — #3279, #3283, #3284, #3288 |
   | a new `vi.mock` in a test file | run `tests/config/vi-mock-export-sweep.test.ts`; whole-module mocks of a production module must spread `importOriginal` — PR #3268's CI red, fixed by trailing commit `621d61c5c` |
   | a changelog fragment | front matter `section: <Section>` plus `audience: user` or `audience: internal` and exactly one top-level entry; new user entries open with a bold lead of at most 100 characters (refs excluded), never `CHANGELOG.md`, validated by `node scripts/check-changelog-fragments.mjs` — PR #3268 r1 shipped `category:` and a paragraph |
-  | a PR body | the header gate: exactly one-sentence `## Why`, `## Notes for the reviewer`, `## Change outline`, plus Summary / Tests with `### Test assessment` / Blast radius / Class sweep / Observability; run `node scripts/check-pr-body.mjs --lint-local` before pushing — three PRs this week needed orchestrator body edits |
+  | a PR body | the header gate: exactly one-sentence `## Why`, `## Notes for the reviewer`, `## Change outline`, plus Summary / Tests with `### Test assessment` / Blast radius / Class sweep / Fold check / Observability; run `node scripts/check-pr-body.mjs --lint-local` before pushing — three PRs this week needed orchestrator body edits |
   | a whole-tree docs restructure of `AGENTS.md` | every governance test that reads `AGENTS.md`, with markers on their own lines — PR #3265 r1 |
   | a raw poll in a test | the flake-shape ratchet; the fix is the governed wait, never a header admission — #2781 r1 |
   | a new, renamed or deleted rule file under `rules/` | `npm run docs:rule-catalogs` and commit the generated catalog; `tests/scripts/rule-catalogs.test.ts` is a strict consumer of every rule file, not of rule ids — #3214 r1 |

@@ -63,7 +63,10 @@ import {
 	_resetStateCacheForTests,
 	markDisposition,
 } from "../../clients/diagnostic-dispositions.js";
-import { evaluateGitGuard } from "../../clients/git-guard.js";
+import {
+	evaluateGitGuard,
+	syncGitGuardRecord,
+} from "../../clients/git-guard.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { beginScope, retireScope } from "../../clients/session-scope.js";
@@ -1536,6 +1539,58 @@ describe("F6: a resolved retirement the signature dedupe would suppress (#3813)"
 			rig.runtime.beginTurn();
 			retire();
 			expect(await endTurn(rig)).toContain(line);
+		} finally {
+			rig.cleanup();
+		}
+	});
+});
+
+describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
+	// RECURRENCE GUARDED: #4733 r5 F21. The repeated-findings rewrite at turn end
+	// kept the stored owner while it wrote only this session's sections. When
+	// another session had written over the record, this session's own fix then
+	// read the record as foreign, latched `session_mismatch`, and every commit
+	// stayed refused.
+	it("a repeated turn end over another session's record stamps this session, so its own fix opens the gate", async () => {
+		const rig = makeRig("pi-lens-4733-f21-");
+		try {
+			rig.lensGuard = true;
+			const source = "eval(x);\n";
+			const blocker = () => {
+				const file = touch(rig, "a.ts", source);
+				rig.runtime.recordInlineBlockers(
+					file,
+					"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+					rig.runtime.nextWriteIndex(),
+					["ast-grep"],
+					[1],
+				);
+				return file;
+			};
+			const file = blocker();
+			expect(await endTurn(rig)).toContain("eval() is banned");
+			const record = () =>
+				rig.cacheManager.readCache<{ sessionId?: string }>(
+					"turn-end-findings",
+					rig.cwd,
+					Number.POSITIVE_INFINITY,
+				)?.data;
+			// Another session writes over the record after this turn end.
+			rig.cacheManager.writeCache(
+				"turn-end-findings",
+				{ ...record(), sessionId: "another-session" },
+				rig.cwd,
+			);
+			rig.runtime.beginTurn();
+			blocker();
+			// The same findings again: the dedupe rewrites the record.
+			await endTurn(rig);
+			// The fix: this session retires its own entry, with no whole-file verdict.
+			rig.runtime.clearInlineBlockers(file, rig.runtime.nextWriteIndex());
+			syncGitGuardRecord(rig.runtime, rig.cacheManager, rig.cwd, file);
+			expect(evaluateGitGuard(rig.runtime, rig.cacheManager, rig.cwd)).toEqual({
+				block: false,
+			});
 		} finally {
 			rig.cleanup();
 		}

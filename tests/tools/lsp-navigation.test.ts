@@ -36,10 +36,6 @@ const mocked = vi.hoisted(() => ({
 	service: null as unknown,
 }));
 
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: () => mocked.service,
-}));
-
 // #4638 review (F10): the declaration owner is wrapped, not replaced — every
 // other export stays real — so the snapshot's per-file walks can be counted.
 const walkedDeclarations = vi.hoisted(() => ({ files: [] as string[] }));
@@ -59,6 +55,7 @@ vi.mock("../../clients/python-environment.js", async (importOriginal) => {
 
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
+import { installLspService } from "../support/lsp-service-seam.js";
 
 const tmpPath = (name: string): string => path.join(os.tmpdir(), name);
 const tmpFileUrl = (name: string): string => pathToFileURL(tmpPath(name)).href;
@@ -83,69 +80,71 @@ describe("lsp_navigation tool", () => {
 		// present — the real `LSPService` always has it — so the double keeps the
 		// factory's `touchFile`, and the scoped-open case below asserts the touch
 		// (with its options), which is the call production actually makes.
-		mocked.service = makeLspServiceDouble({
-			supportsLSP: vi.fn().mockReturnValue(true),
-			hasLSP: vi.fn().mockResolvedValue(true),
-			getDiagnostics: vi.fn().mockResolvedValue([]),
-			getOperationSupport: vi.fn().mockResolvedValue(null),
-			getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
-			codeAction: vi
-				.fn()
-				.mockResolvedValue([
-					{ title: "Move to new file", kind: "refactor.move.newFile" },
+		mocked.service = installLspService(
+			makeLspServiceDouble({
+				supportsLSP: vi.fn().mockReturnValue(true),
+				hasLSP: vi.fn().mockResolvedValue(true),
+				getDiagnostics: vi.fn().mockResolvedValue([]),
+				getOperationSupport: vi.fn().mockResolvedValue(null),
+				getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
+				codeAction: vi
+					.fn()
+					.mockResolvedValue([
+						{ title: "Move to new file", kind: "refactor.move.newFile" },
+					]),
+				rename: vi.fn().mockResolvedValue(null),
+				// #3601: a rename edit that writes a file besides its target is applied
+				// only to a file the client tracks. These cases are about provenance,
+				// not staleness, so every file reads as tracked in sync with the disk,
+				// sent long before the rename.
+				getTrackedContent: vi.fn((filePath: string) => ({
+					hash: hashDiagnosticContent(fs.readFileSync(filePath, "utf-8")),
+					changedAtMs: 0,
+				})),
+				renameFile: vi.fn().mockResolvedValue({
+					applied: false,
+					serverIds: [],
+					willRenameFailures: [],
+					didRenameFailures: [],
+					droppedConflicts: 0,
+					inputEditCount: 0,
+					summary: [],
+				}),
+				references: vi.fn().mockResolvedValue([
+					{
+						uri: tmpFileUrl("sample.ts"),
+						range: {
+							start: { line: 1, character: 1 },
+							end: { line: 1, character: 5 },
+						},
+					},
 				]),
-			rename: vi.fn().mockResolvedValue(null),
-			// #3601: a rename edit that writes a file besides its target is applied
-			// only to a file the client tracks. These cases are about provenance,
-			// not staleness, so every file reads as tracked in sync with the disk,
-			// sent long before the rename.
-			getTrackedContent: vi.fn((filePath: string) => ({
-				hash: hashDiagnosticContent(fs.readFileSync(filePath, "utf-8")),
-				changedAtMs: 0,
-			})),
-			renameFile: vi.fn().mockResolvedValue({
-				applied: false,
-				serverIds: [],
-				willRenameFailures: [],
-				didRenameFailures: [],
-				droppedConflicts: 0,
-				inputEditCount: 0,
-				summary: [],
+				typeDefinition: vi.fn().mockResolvedValue([
+					{
+						uri: tmpFileUrl("types.ts"),
+						range: {
+							start: { line: 9, character: 0 },
+							end: { line: 9, character: 4 },
+						},
+					},
+				]),
+				declaration: vi.fn().mockResolvedValue([]),
+				workspaceSymbol: vi.fn().mockResolvedValue([]),
+				getAdvertisedCommands: vi
+					.fn()
+					.mockResolvedValue(["_typescript.organizeImports"]),
+				executeCommand: vi
+					.fn()
+					.mockResolvedValue({ executed: true, result: null }),
+				documentSymbol: vi.fn().mockResolvedValue([]),
+				incomingCalls: vi.fn().mockResolvedValue([]),
+				outgoingCalls: vi.fn().mockResolvedValue([]),
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				getWorkspaceDiagnosticsSupport: vi
+					.fn()
+					.mockResolvedValue({ mode: "push-only" }),
 			}),
-			references: vi.fn().mockResolvedValue([
-				{
-					uri: tmpFileUrl("sample.ts"),
-					range: {
-						start: { line: 1, character: 1 },
-						end: { line: 1, character: 5 },
-					},
-				},
-			]),
-			typeDefinition: vi.fn().mockResolvedValue([
-				{
-					uri: tmpFileUrl("types.ts"),
-					range: {
-						start: { line: 9, character: 0 },
-						end: { line: 9, character: 4 },
-					},
-				},
-			]),
-			declaration: vi.fn().mockResolvedValue([]),
-			workspaceSymbol: vi.fn().mockResolvedValue([]),
-			getAdvertisedCommands: vi
-				.fn()
-				.mockResolvedValue(["_typescript.organizeImports"]),
-			executeCommand: vi
-				.fn()
-				.mockResolvedValue({ executed: true, result: null }),
-			documentSymbol: vi.fn().mockResolvedValue([]),
-			incomingCalls: vi.fn().mockResolvedValue([]),
-			outgoingCalls: vi.fn().mockResolvedValue([]),
-			getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-			getWorkspaceDiagnosticsSupport: vi
-				.fn()
-				.mockResolvedValue({ mode: "push-only" }),
-		});
+		);
 	});
 
 	it("reports cached LSP capabilities without requiring path", async () => {
@@ -293,6 +292,122 @@ describe("lsp_navigation tool", () => {
 				.incomingCalls,
 		).toHaveBeenCalledOnce();
 		expect(result.details?.operation).toBe("incomingCalls");
+	});
+
+	// #4687: the schema carries callHierarchyItem as an opaque object, so the
+	// LSP CallHierarchyItem shape is checked at execute, before any server call
+	// (MCP never validates the schema at all). Recurrence: a malformed item
+	// reaching `uriToPath` or the server, where it fails as an opaque error or
+	// an empty "no callers" answer instead of a refusal naming the field.
+	const wellFormedItem = () => ({
+		name: "foo",
+		kind: 12,
+		uri: tmpFileUrl("item.py"),
+		range: {
+			start: { line: 1, character: 0 },
+			end: { line: 1, character: 3 },
+		},
+		selectionRange: {
+			start: { line: 1, character: 0 },
+			end: { line: 1, character: 3 },
+		},
+	});
+	it.each([
+		[
+			"absent",
+			(): unknown => undefined,
+			"callHierarchyItem parameter required",
+		],
+		[
+			"a string",
+			(): unknown => "foo",
+			"callHierarchyItem must be the object prepareCallHierarchy returned",
+		],
+		// #4723 F7: an array is an object to `typeof`; without the array branch
+		// it would be reported as a missing `name` instead of the wrong shape.
+		[
+			"an array",
+			(): unknown => [],
+			"callHierarchyItem must be the object prepareCallHierarchy returned",
+		],
+		[
+			"no uri",
+			(): unknown => ({ ...wellFormedItem(), uri: undefined }),
+			"callHierarchyItem.uri must be a string",
+		],
+		[
+			"a string kind",
+			(): unknown => ({ ...wellFormedItem(), kind: "Function" }),
+			"callHierarchyItem.kind must be a number",
+		],
+		[
+			"no range",
+			(): unknown => ({ ...wellFormedItem(), range: undefined }),
+			"callHierarchyItem.range must be a range object",
+		],
+		[
+			"a string selectionRange.end.character",
+			(): unknown => {
+				const item = wellFormedItem();
+				return {
+					...item,
+					selectionRange: {
+						...item.selectionRange,
+						end: { line: 1, character: "3" },
+					},
+				};
+			},
+			"callHierarchyItem.selectionRange.end.character must be a number",
+		],
+	] satisfies ReadonlyArray<readonly [string, () => unknown, string]>)(
+		"refuses a callHierarchyItem that is %s before any server call",
+		async (_label, makeItem, message) => {
+			for (const operation of ["incomingCalls", "outgoingCalls"] as const) {
+				const service = mocked.service as Record<
+					string,
+					ReturnType<typeof vi.fn>
+				>;
+				service.getOperationSupport?.mockClear();
+				service[operation]?.mockClear();
+				const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+				const result = await tool.execute(
+					`bad-item-${operation}`,
+					{ operation, callHierarchyItem: makeItem() },
+					new AbortController().signal,
+					null,
+					{ cwd: "." },
+				);
+
+				expect(result.isError).toBe(true);
+				expect(result.details?.failureKind).toBe("bad_input");
+				expect(parseToolJson(result).errors).toEqual([
+					`${message} for ${operation}`,
+				]);
+				expect(service[operation]).not.toHaveBeenCalled();
+				expect(service.getOperationSupport).not.toHaveBeenCalled();
+			}
+		},
+	);
+
+	it("passes a call hierarchy item's extra fields (detail, data) to the server unchanged", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const callHierarchyItem = {
+			...wellFormedItem(),
+			detail: "module a",
+			data: { serverToken: 7 },
+		};
+		await tool.execute(
+			"item-extra",
+			{ operation: "outgoingCalls", callHierarchyItem },
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+
+		expect(
+			(mocked.service as { outgoingCalls: ReturnType<typeof vi.fn> })
+				.outgoingCalls,
+		).toHaveBeenCalledWith(callHierarchyItem);
 	});
 
 	it("adds workspaceSymbol hint when path is omitted and empty", async () => {
@@ -1773,7 +1888,7 @@ describe("lsp_navigation tool", () => {
 			sourcePath: string,
 			newFilePath: string,
 		) => {
-			mocked.service = harness.service;
+			mocked.service = installLspService(harness.service);
 			const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
 			return tool.execute(
 				callId,
@@ -2061,14 +2176,16 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 		);
 		previousDataDir = process.env.PILENS_DATA_DIR;
 		process.env.PILENS_DATA_DIR = path.join(cwd, "data");
-		mocked.service = makeLspServiceDouble({
-			supportsLSP: vi.fn().mockReturnValue(true),
-			getDiagnostics: vi.fn().mockResolvedValue([]),
-			getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-			getWorkspaceDiagnosticsSupport: vi
-				.fn()
-				.mockResolvedValue({ mode: "push-only" }),
-		});
+		mocked.service = installLspService(
+			makeLspServiceDouble({
+				supportsLSP: vi.fn().mockReturnValue(true),
+				getDiagnostics: vi.fn().mockResolvedValue([]),
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				getWorkspaceDiagnosticsSupport: vi
+					.fn()
+					.mockResolvedValue({ mode: "push-only" }),
+			}),
+		);
 		_resetDeferredForTests();
 		_resetStateCacheForTests();
 		// The phase ring is process state: an earlier case's record must not
@@ -2283,6 +2400,19 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
  * mutation target, filed as #4578.
  */
 describe("lsp_navigation path resolution (#4577 M2)", () => {
+	// #4723 F2: this block installs its own service. It used to inherit the
+	// last block's double; under --sequence.shuffle (seed 424) that was the
+	// delivery-gate double, whose hasLSP is false, so `references` never ran.
+	beforeEach(() => {
+		mocked.service = installLspService(
+			makeLspServiceDouble({
+				supportsLSP: vi.fn().mockReturnValue(true),
+				hasLSP: vi.fn().mockResolvedValue(true),
+				getOperationSupport: vi.fn().mockResolvedValue(null),
+			}),
+		);
+	});
+
 	it("resolves a ~ path to $HOME, not under the cwd", async () => {
 		const { home, restore } = pinFixtureHome("nav-tilde");
 		const filePath = path.join(home, "proj", "refs.ts");

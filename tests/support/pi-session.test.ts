@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { scannerReportParentDir } from "../../clients/scanner-temp-root.js";
+import { pinFixtureHome } from "../clients/test-utils.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
@@ -231,6 +232,33 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			// The file is shared by every case in this file: put the bytes back, so
 			// a corrupt line this case planted cannot red a neighbour.
 			fs.writeFileSync(file, settled);
+		}
+	});
+
+	// #4724: pi read the real `$HOME/.agents/skills`, so a host's skills reached
+	// every request and a prefix-ratio verdict differed between hosts.
+	it("keeps the host's own skills out of the session's system prompt", async () => {
+		// pinFixtureHome pins HOME and USERPROFILE to a home beside the worker's
+		// scratch root, never inside a fixture root the harness deletes (#4591).
+		const { home, restore } = pinFixtureHome("4729-host-skills");
+		const skill = path.join(home, ".agents", "skills", "host-only-probe");
+		fs.mkdirSync(skill, { recursive: true });
+		fs.writeFileSync(
+			path.join(skill, "SKILL.md"),
+			"---\nname: host-only-probe\ndescription: A skill only this host has.\n---\n\nBody.\n",
+		);
+		try {
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd: path.join(fixture.root, "host-skills", "proj"),
+				responses: [fauxAssistantMessage(fauxText("ok"))],
+			});
+			await handle.prompt("hello");
+			const system = handle.requests[0]?.[0];
+			expect(system).toMatchObject({ role: "system" });
+			expect(JSON.stringify(system)).not.toContain("host-only-probe");
+		} finally {
+			restore();
 		}
 	});
 
@@ -563,6 +591,68 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		} finally {
 			emitContext.mockRestore();
 		}
+	});
+
+	it("hands the provider the model's compat facts and switches models through pi's own setModel", async () => {
+		// #4687 item 7: the tier capability lands before its consumers. pi-ai's
+		// fauxProvider drops `compat` from its model definitions, so the helper
+		// sets it on the model object pi is handed; this case pins that the fact
+		// reaches the PROVIDER (the model a reply factory is called with) and that
+		// `switchModel` goes through `AgentSession.setModel`, which emits
+		// `model_select`. Recurrence: a case asserting a per-model decision on a
+		// model that silently carries no compat, so every cell reads "unknown".
+		const seen: Array<{ id?: unknown; compat?: unknown }> = [];
+		const reply =
+			(text: string) =>
+			(
+				_context: unknown,
+				_options: unknown,
+				_state: unknown,
+				model: unknown,
+			) => {
+				const typed = model as { id?: unknown; compat?: unknown };
+				seen.push({ id: typed.id, compat: typed.compat });
+				return fauxAssistantMessage(fauxText(text));
+			};
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "model-compat", "proj"),
+			modelCompat: {},
+			responses: [reply("first"), reply("second")],
+		});
+		const runner = handle.session.extensionRunner;
+		const emit = vi.spyOn(runner, "emit");
+		try {
+			await handle.prompt("first question");
+			await handle.switchModel({ supportsMidConvoSystemMessages: true });
+			await handle.prompt("second question");
+			const selected = emit.mock.calls
+				.map(([event]) => event as { type: string; model?: { id?: unknown } })
+				.filter((event) => event.type === "model_select")
+				.map((event) => event.model?.id);
+			expect(selected).toEqual(["faux-2"]);
+		} finally {
+			emit.mockRestore();
+		}
+
+		expect(seen).toEqual([
+			{ id: "faux-1", compat: {} },
+			{ id: "faux-2", compat: { supportsMidConvoSystemMessages: true } },
+		]);
+	});
+
+	it("gives the default model the faux provider's real mid-conversation system support", async () => {
+		// The faux provider answers from the raw transcript and never folds
+		// system messages into one head, so its honest fact is `true`; a case
+		// that needs a collapsing model passes `modelCompat: {}` (above).
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "model-default-compat", "proj"),
+			responses: [],
+		});
+		expect(
+			(handle.session.model as { compat?: unknown } | undefined)?.compat,
+		).toEqual({ supportsMidConvoSystemMessages: true });
 	});
 
 	it("records what the copy asks the host's UI to show", async () => {

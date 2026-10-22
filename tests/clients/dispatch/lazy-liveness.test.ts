@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPiMock, makeCtx } from "../../support/pi-mock.js";
-import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../../support/lsp-service-seam.js";
 
 const dispatchResult = {
 	diagnostics: [{ tool: "dispatch", message: "dispatch fired" }],
@@ -58,16 +58,15 @@ describe("dispatch session warm/first-use liveness (#1394)", () => {
 				},
 			}));
 		});
-		vi.doMock("../../../clients/lsp/capabilities.js", () => ({
-			getLSPService: () =>
-				makeLspServiceDouble({
-					touchFile: async () => [],
-					supportsLSP: () => false,
-					getStatus: () => [],
-					getAliveServerIds: () => [],
-				}),
-			resetLSPService: () => {},
-		}));
+		// Installed AFTER every doMock above and BEFORE the entry import:
+		// `vi.resetModules()` re-evaluates `clients/lsp/index.ts`, whose import-time
+		// configure replaces the lifecycle (tests/support/lsp-service-seam.ts, step 2).
+		await installLspServiceDouble({
+			touchFile: async () => [],
+			supportsLSP: () => false,
+			getStatus: () => [],
+			getAliveServerIds: () => [],
+		});
 		const { default: registerExtension } = await import("../../../index.js");
 		const pi = createPiMock({ "no-lsp": true, "no-autoformat": true });
 		registerExtension(pi.asExtensionAPI());

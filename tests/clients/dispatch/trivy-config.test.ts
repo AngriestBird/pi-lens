@@ -31,17 +31,13 @@ describe("trivy-config appliesTo", () => {
 
 // ── Terraform files skip the yaml/k8s content gate ─────────────────────────────
 
-const {
-	safeSpawnAsync,
-	isTrivyEnabled,
-	resolveSeverityFloor,
-	incrementDegradationCount,
-} = vi.hoisted(() => ({
-	safeSpawnAsync: vi.fn(),
-	isTrivyEnabled: vi.fn(),
-	resolveSeverityFloor: vi.fn(),
-	incrementDegradationCount: vi.fn(),
-}));
+const { safeSpawnAsync, isTrivyEnabled, resolveSeverityFloor } = vi.hoisted(
+	() => ({
+		safeSpawnAsync: vi.fn(),
+		isTrivyEnabled: vi.fn(),
+		resolveSeverityFloor: vi.fn(),
+	}),
+);
 
 vi.mock("../../../clients/safe-spawn.js", () => ({
 	safeSpawnAsync,
@@ -50,13 +46,6 @@ vi.mock("../../../clients/safe-spawn.js", () => ({
 vi.mock("../../../clients/trivy-client.js", () => ({
 	isTrivyEnabled,
 	resolveSeverityFloor,
-}));
-
-vi.mock("../../../clients/degradation-ledger.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../../clients/degradation-ledger.js")
-	>()),
-	incrementDegradationCount,
 }));
 
 vi.mock(
@@ -93,7 +82,6 @@ describe("trivy-config run() — terraform pass-through", () => {
 		safeSpawnAsync.mockReset();
 		isTrivyEnabled.mockReset();
 		resolveSeverityFloor.mockReset();
-		incrementDegradationCount.mockReset();
 		isTrivyEnabled.mockReturnValue(true);
 		resolveSeverityFloor.mockReturnValue(["HIGH", "CRITICAL"]);
 	});
@@ -184,12 +172,18 @@ describe("trivy-config run() — terraform pass-through", () => {
 		expect(result.status).not.toBe("succeeded");
 		expect(result.diagnostics).toEqual([]);
 
-		expect(incrementDegradationCount).toHaveBeenCalledTimes(1);
-		const record = incrementDegradationCount.mock.calls[0][0];
-		expect(record.kind).toBe("runner-empty-result");
-		expect(record.subject).toBe(tfFile);
-		expect(record.reason).toContain("trivy config");
-		expect(record.reason).toContain("1");
+		// The runner wrote to the ledger loaded after this case's
+		// `vi.resetModules()`, so it is read back through the same registry.
+		const { getDegradationSummary } =
+			await import("../../../clients/degradation-ledger.js");
+		const group = getDegradationSummary().find(
+			(row) => row.kind === "runner-empty-result",
+		);
+		expect(group?.count).toBe(1);
+		const record = group?.latestReasons[0];
+		expect(record?.subject).toBe(tfFile);
+		expect(record?.reason).toContain("trivy config");
+		expect(record?.reason).toMatch(/\bexited 1\b/);
 	});
 });
 

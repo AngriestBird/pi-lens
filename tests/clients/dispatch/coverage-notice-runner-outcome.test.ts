@@ -423,6 +423,107 @@ describe("coverage notice keys on the primary runner's usable result (#3867)", (
 		expect(result.output).not.toContain(PYTHON_COVERAGE_NOTICE);
 	});
 
+	it("names which check covered the file, and only when one did (#4733 r2)", async () => {
+		// RECURRENCE GUARDED: #4733 r2 (#4734's review). The commit gate's
+		// whole-file verdict read "the primary checked the file" from an unset
+		// `unconfirmedStatus`, which also holds when a defined primary group
+		// never ran. `coverage` is the rule's positive answer, set only where it
+		// found the file checked; each cell drives the real coverage rule.
+		const succeeded = async (): Promise<RunnerResult> => ({
+			status: "succeeded",
+			diagnostics: [],
+			semantic: "none",
+		});
+		const deferred = async (): Promise<RunnerResult> => ({
+			status: "deferred",
+			diagnostics: [],
+			semantic: "none",
+		});
+		const spawnFails = async (): Promise<RunnerResult> => {
+			throw new Error("spawn lsp ENOENT");
+		};
+		const cells: Array<{
+			name: string;
+			runners: Array<[string, () => Promise<RunnerResult>]>;
+			groups: RunnerGroup[];
+			file: string;
+			noLsp?: true;
+			expected: string | undefined;
+		}> = [
+			{
+				name: "the primary answered",
+				runners: [["lsp", succeeded]],
+				groups,
+				file: "test.ts",
+				expected: "primary",
+			},
+			{
+				name: "the primary is still in flight",
+				runners: [["lsp", deferred]],
+				groups,
+				file: "test.ts",
+				expected: "in_flight",
+			},
+			{
+				name: "a type-capable fallback answered for a broken primary",
+				runners: [
+					["lsp", spawnFails],
+					["mypy", succeeded],
+				],
+				groups: [
+					{ mode: "all", runnerIds: ["lsp"] },
+					{ mode: "fallback", runnerIds: ["mypy"] },
+				],
+				file: "src/typed.py",
+				expected: "fallback",
+			},
+			{
+				name: "the mode defines no primary group (--no-lsp)",
+				runners: [["eslint", succeeded]],
+				groups: [{ mode: "all", runnerIds: ["eslint"] }],
+				file: "test.ts",
+				noLsp: true,
+				expected: "unconfigured",
+			},
+			{
+				name: "the primary broke and nothing stood in",
+				runners: [["lsp", spawnFails]],
+				groups,
+				file: "test.ts",
+				expected: undefined,
+			},
+			{
+				name: "a defined primary group never ran, only a linter did",
+				runners: [["eslint", succeeded]],
+				groups: [{ mode: "all", runnerIds: ["eslint"] }],
+				file: "test.ts",
+				expected: undefined,
+			},
+		];
+		const seen: Array<[string, string | undefined]> = [];
+		for (const cell of cells) {
+			registry = new RunnerRegistry();
+			clearCoverageNoticeState();
+			for (const [id, run] of cell.runners) {
+				registry.register({
+					id,
+					appliesTo: ["jsts", "python"],
+					priority: 4,
+					run,
+				});
+			}
+			const ctx = createDispatchContext(
+				cell.file,
+				"/project",
+				{ getFlag: (flag: string) => cell.noLsp === true && flag === "no-lsp" },
+				new FactStore(),
+			);
+			const result = await pullWith(ctx, cell.groups);
+			seen.push([cell.name, result.coverage]);
+		}
+		expect(seen).toEqual(cells.map((cell) => [cell.name, cell.expected]));
+	});
+
 	it("carries the notice when a failed primary has a diagnostic but no failureKind", async () => {
 		// A `failed` with no `failureKind` is indistinguishable from a runner
 		// break (#3781); the parse-error arms carry a kind since #3796 item 3.
@@ -451,5 +552,149 @@ describe("coverage notice keys on the primary runner's usable result (#3867)", (
 		const result = await pull(context());
 
 		expect(result.output).toContain(COVERAGE_NOTICE);
+	});
+});
+
+// Recurrence: #4734 verify r2 F4. The clean advisory said a language server
+// checked a `--no-lsp` edit and found nothing, because an unset
+// `unconfirmedStatus` was read as "a primary answered". The dispatcher's one
+// return that knows is `primaryHasCoverage`, and only when the `lsp` runner is
+// what covered the file. Rows of the #4734 round-3 state table.
+describe("the language-server verdict the clean advisory reads (#4734 r3)", () => {
+	type Row = {
+		label: string;
+		file: string;
+		noLsp?: boolean;
+		runners: Record<string, () => Promise<RunnerResult>>;
+		groups: RunnerGroup[];
+		/** Dispatch this many times on the push surface; the last result counts. */
+		pushes?: number;
+		expected: true | undefined;
+	};
+	const succeeded = async (): Promise<RunnerResult> => ({
+		status: "succeeded",
+		diagnostics: [],
+		semantic: "none",
+	});
+	const rows: Row[] = [
+		{
+			label: "row 14: the lsp runner answered",
+			file: "test.ts",
+			runners: { lsp: succeeded },
+			groups: [{ mode: "all", runnerIds: ["lsp"] }],
+			expected: true,
+		},
+		{
+			label: "row 8: --no-lsp leaves jsts no primary group",
+			file: "test.ts",
+			noLsp: true,
+			runners: { oxlint: succeeded },
+			groups: [{ mode: "all", runnerIds: ["oxlint"] }],
+			expected: undefined,
+		},
+		{
+			label: "row 10: --no-lsp, the pyright CLI primary answered",
+			file: "src/app.py",
+			noLsp: true,
+			runners: { pyright: succeeded },
+			groups: [{ mode: "all", runnerIds: ["pyright"] }],
+			expected: undefined,
+		},
+		{
+			label: "row 10: the lsp runner skipped, the pyright CLI answered",
+			file: "src/app.py",
+			runners: {
+				lsp: async () => ({
+					status: "skipped",
+					diagnostics: [],
+					semantic: "none",
+				}),
+				pyright: succeeded,
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp", "pyright"] }],
+			expected: undefined,
+		},
+		{
+			label: "row 11: a silent server's partial notice, latched",
+			file: "test.ts",
+			runners: {
+				lsp: async () => ({
+					status: "skipped",
+					diagnostics: [],
+					semantic: "none",
+					unconfirmedServerIds: ["opengrep"],
+				}),
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp"] }],
+			pushes: 2,
+			expected: undefined,
+		},
+		{
+			label: "row 12: the lsp runner is deferred",
+			file: "test.ts",
+			runners: {
+				lsp: async () => ({
+					status: "deferred",
+					diagnostics: [],
+					semantic: "none",
+				}),
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp"] }],
+			expected: undefined,
+		},
+		{
+			label: "row 13: the lsp runner failed, a fallback linter covered",
+			file: ".github/workflow.json",
+			runners: {
+				lsp: async () => {
+					throw new Error("lsp skipped: server is not ready");
+				},
+				"trivy-config": succeeded,
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp", "trivy-config"] }],
+			expected: undefined,
+		},
+	];
+
+	beforeEach(() => {
+		clearCoverageNoticeState();
+		clearLatencyReports();
+		resetObservedRunnerLatency();
+		resetPendingRunnerFindings();
+	});
+
+	it.for(rows)("$label", async (row) => {
+		const registry = new RunnerRegistry();
+		for (const [id, run] of Object.entries(row.runners)) {
+			registry.register({
+				id,
+				appliesTo: ["jsts", "python", "json"],
+				priority: id === "lsp" ? 4 : 5,
+				run,
+			});
+		}
+		const ctx = () =>
+			createDispatchContext(
+				row.file,
+				"/project",
+				{ getFlag: (flag: string) => row.noLsp === true && flag === "no-lsp" },
+				new FactStore(),
+			);
+		let result = await dispatchForFile(ctx(), row.groups, registry);
+		for (let push = 1; push < (row.pushes ?? 1); push += 1) {
+			result = await dispatchForFile(ctx(), row.groups, registry);
+		}
+
+		// Every row but 14 reaches the pipeline as the clean-line shape: no text,
+		// no `unconfirmedStatus`. Only the verdict tells them apart.
+		expect({
+			output: result.output,
+			unconfirmedStatus: result.unconfirmedStatus,
+			primaryLspChecked: result.primaryLspChecked,
+		}).toEqual({
+			output: "",
+			unconfirmedStatus: undefined,
+			primaryLspChecked: row.expected,
+		});
 	});
 });

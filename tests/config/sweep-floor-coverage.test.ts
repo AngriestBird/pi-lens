@@ -32,7 +32,7 @@ const SELF = "tests/config/sweep-floor-coverage.test.ts";
  */
 export function looksSweepShaped(source: string): boolean {
 	const enumerates =
-		/(?:fs\.readdirSync|(?<![A-Za-z0-9_$])readdirSync|fs\.promises\.readdir|(?<![A-Za-z0-9_$.])readdir(?!Sync)|globSync|listSourceFiles|clientSourceFiles)/.test(
+		/(?:fs\.readdirSync|(?<![A-Za-z0-9_$])readdirSync|fs\.promises\.readdir|(?<![A-Za-z0-9_$.])readdir(?!Sync)|globSync|listSourceFiles|clientSourceFiles|walkFiles)/.test(
 			source,
 		) ||
 		/(?:assertNonEmptyScan|auditRegistry|scanDualInstanceImports|LSP_SERVERS|LSP_FIXTURES|ALL_FORMATTERS|DYNAMIC_OR_EXEMPT|isTimingSensitive|scanHostEventShapeViolations)/.test(
@@ -178,6 +178,10 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"path behavior cases, not a production population sweep",
 	"tests/clients/pi-host-contract.test.ts":
 		"host contract cases, not a production population sweep",
+	"tests/clients/project-data-dir-slug.test.ts":
+		"data-dir naming and adoption cases (#4689 r5): it lists one fixture " +
+		"data dir and asserts a migration drain is empty, not a production " +
+		"population sweep",
 	"tests/clients/project-diagnostics/scanner.test.ts":
 		"scanner behavior cases, not a production population sweep",
 	"tests/clients/project-snapshot.test.ts":
@@ -287,6 +291,14 @@ describe("looksSweepShaped emptiness detection (#2088 fix round 3, R1)", () => {
 	// `empties` regex above must red this exact case.
 	it("recognizes the expect(x.length).toBe(0) spelling", () => {
 		const source = `${enumerateLine}\nexpect(violations.length).toBe(0);`;
+		expect(looksSweepShaped(source)).toBe(true);
+	});
+
+	// #4104 F4: the repo-wide walker is an enumeration. A sweep that walks
+	// through walkFiles and asserts emptiness is sweep-shaped, so a support
+	// module with that walk is not invisible to the floor-coverage census.
+	it("recognizes a walkFiles enumeration (#4104 F4)", () => {
+		const source = `const files = walkFiles(ROOT, () => true, () => {});\nexpect(files).toEqual([]);`;
 		expect(looksSweepShaped(source)).toBe(true);
 	});
 

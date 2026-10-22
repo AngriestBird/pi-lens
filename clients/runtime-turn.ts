@@ -25,6 +25,7 @@ import {
 	clearGitGuardTestFailure,
 	mergeGitGuardTestFailure,
 	resyncGitGuardAfterInlinePolicy,
+	retireSettledGitGuardRecord,
 	writeGitGuardRecord,
 	type TurnEndFindingsCache,
 } from "./git-guard.js";
@@ -1307,16 +1308,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// A genuinely clean session must invalidate the persisted guard record.
 		// Blocker records are retained only while the runtime still reports one.
 		if (getFlag("lens-guard") && !runtime.gitGuardHasBlockers) {
-			const guardRecord = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
-				"turn-end-findings",
-				cwd,
-			)?.data;
-			if (
-				guardRecord?.sessionId === runtime.telemetrySessionId &&
-				guardRecord.testFailures !== true
-			) {
-				cacheManager.clearCache("turn-end-findings", cwd);
-			}
+			retireSettledGitGuardRecord(runtime, cacheManager, cwd);
 		}
 		// #713: subagent sessions use a shorter idle reset (nominally 60s) — a
 		// short-lived task agent holding a warm fleet for 4 minutes after its
@@ -4056,10 +4048,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					incrementDegradationCount({
 						kind: "test-runner-batch-capped",
 						subject: `${cwd}:deferral-exhausted`,
-						reason: `test target was cut after ${attempts} turn(s) at the turn-end budget and is retired for this session — too slow for a per-turn batch; run it explicitly (target: ${path.relative(cwd, testFile)})`,
+						reason: `test target was cut after ${attempts} turn(s) at the turn-end budget and is retired for this session — too slow for a per-turn batch; run it explicitly (target: ${toRunnerDisplayPath(cwd, testFile)})`,
 					});
 					dbg(
-						`turn_end: retiring deferred test target ${path.relative(cwd, testFile)} after ${attempts} cut batch(es) — too slow for the turn-end budget, run it explicitly`,
+						`turn_end: retiring deferred test target ${toRunnerDisplayPath(cwd, testFile)} after ${attempts} cut batch(es) — too slow for the turn-end budget, run it explicitly`,
 					);
 				}
 				continue;
@@ -4104,7 +4096,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				deferralAttempts: attempts,
 			});
 			dbg(
-				`turn_end: re-running deferred test target ${path.relative(cwd, testFile)} (${carried.runner}) from the previous turn's cut batch`,
+				`turn_end: re-running deferred test target ${toRunnerDisplayPath(cwd, testFile)} (${carried.runner}) from the previous turn's cut batch`,
 			);
 		}
 		if (deadDeferred > 0) {
@@ -4175,7 +4167,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (retiredKeys.has(targetKey)) {
 					retiredSkips++;
 					dbg(
-						`turn_end: ${display} → test target retired earlier this session (outran the turn-end batch budget), skipping spawn (${path.relative(cwd, target.testFile)})`,
+						`turn_end: ${display} → test target retired earlier this session (outran the turn-end batch budget), skipping spawn (${toRunnerDisplayPath(cwd, target.testFile)})`,
 					);
 					continue;
 				}
@@ -4188,7 +4180,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (isExcludedTestTarget(target.testFile, testRoot)) {
 					excludedTargets++;
 					dbg(
-						`turn_end: ${display} → test target excluded by the built-in turn-end policy, skipping spawn (${path.relative(cwd, target.testFile)})`,
+						`turn_end: ${display} → test target excluded by the built-in turn-end policy, skipping spawn (${toRunnerDisplayPath(cwd, target.testFile)})`,
 					);
 					continue;
 				}
@@ -4200,7 +4192,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (!fs.existsSync(target.testFile)) {
 					missingTargetFiles++;
 					dbg(
-						`turn_end: ${display} → test file missing, skipping spawn (${path.relative(cwd, target.testFile)})`,
+						`turn_end: ${display} → test file missing, skipping spawn (${toRunnerDisplayPath(cwd, target.testFile)})`,
 					);
 					continue;
 				}
@@ -4210,7 +4202,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 				targets.push({ ...target, sourceFile: abs, testRoot });
 				dbg(
-					`turn_end: ${display} → test ${target.runner} ${path.relative(cwd, target.testFile)} (${target.strategy}${isNeighbor ? ", cascade-neighbor" : ""})`,
+					`turn_end: ${display} → test ${target.runner} ${toRunnerDisplayPath(cwd, target.testFile)} (${target.strategy}${isNeighbor ? ", cascade-neighbor" : ""})`,
 				);
 			} else if (!target) {
 				noTestFile++;
@@ -4438,7 +4430,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					const deferralNote =
 						deferred.length > 0
 							? `${deferred.length} test target(s) did not finish within the turn-end batch budget and are deferred to the next turn (they run first): ${deferredTargets
-									.map((t) => path.relative(cwd, t.testFile))
+									.map((t) => toRunnerDisplayPath(cwd, t.testFile))
 									.join(", ")}`
 							: "";
 					/**
@@ -6043,6 +6035,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (existingGuard) {
 					writeGitGuardRecord(cacheManager, runtime, cwd, {
 						...(existingGuard as TurnEndFindingsCache),
+						// #4733 r5 F21: the blocker sections are this session's own
+						// (another session's are replaced, not kept), so is the record.
+						sessionId: runtime.telemetrySessionId,
 						content,
 						blockerContent:
 							blockerParts.length > 0
@@ -6187,16 +6182,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			resolvedParts.length === 0 &&
 			!runtime.gitGuardHasBlockers
 		) {
-			const guardRecord = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
-				"turn-end-findings",
-				cwd,
-			)?.data;
-			if (
-				guardRecord?.sessionId === runtime.telemetrySessionId &&
-				guardRecord.testFailures !== true
-			) {
-				cacheManager.clearCache("turn-end-findings", cwd);
-			}
+			retireSettledGitGuardRecord(runtime, cacheManager, cwd);
 		}
 	}
 

@@ -168,6 +168,7 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_gitGuardCacheUnknownReason: "reset",
 	_gitGuardHasBlockers: "reset",
 	_gitGuardSummary: "reset",
+	_gitGuardUnansweredDispatches: "reset",
 	_hasStableSessionId: "reset",
 	_inlineBlockerWriteOrder: "reset",
 	_lifecycleReason:

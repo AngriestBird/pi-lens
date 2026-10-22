@@ -352,25 +352,6 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the argv case must not probe or install ruff: the resolver stands in for the availability probe and the spawn boundary is doubled to record argv, while resolveToolCwd and ruffConfigArgs run for real",
 		},
-	// 2026-10-16 (#4483): the first-write seed witness keeps every pi-lens
-	// module on the tool_call-to-turn-end chain real; only the language-server
-	// process behind the LSP capability adapter is stood in for, for the
-	// language-server guard cell (acceptance 5).
-	"in-process-mock:index-4483-first-write-seed-witness.test.ts::clients/lsp/capabilities":
-		{
-			detector: "in-process-mock",
-			reason:
-				"the language-server process is the boundary; the capability adapter is where every host witness stands in for it",
-		},
-	// 2026-10-15 (#4484): the host witness keeps every pi-lens module on the
-	// write-to-turn-end chain real; only the language-server process behind the
-	// LSP capability adapter is stood in for, answering from the bytes it gets.
-	"in-process-mock:index-4484-unfixed-blocker-witness.test.ts::clients/lsp/capabilities":
-		{
-			detector: "in-process-mock",
-			reason:
-				"the language-server process is the boundary; the capability adapter is where every host witness stands in for it",
-		},
 	// 2026-10-17 (#4504): the witness runs the real session_start / tool_call /
 	// tool_result handlers and only the per-file dispatch is stood in for, so
 	// the run observes what the opaque prescan recorded and recovered, not a
@@ -381,14 +362,25 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the synthetic dispatch of a recovered opaque write is not the subject; a resolved pipeline verdict keeps a linter child out of a witness about the prescan's own record",
 		},
-	// 2026-10-17 (#4554): the assertion is on the module-level
-	// `resetLSPService` CALL the shared teardown makes, and the shared service
-	// double does not expose that call as a spy; no server process is spawned.
+	// 2026-10-17 (#4554, reason corrected in #4709): two activations in one
+	// process each assert their own module-level `resetLSPService` spy. The
+	// singleton lifecycle keeps one `beforeReset` at a time, so installing the
+	// second activation's spy hides the first's (the r7 cell reads it after).
 	"in-process-mock:index-4554-last-member-teardown.test.ts::clients/lsp/capabilities":
 		{
 			detector: "in-process-mock",
 			reason:
-				"the assertion is on the module-level resetLSPService call the shared teardown makes, which the shared service double does not expose as a spy; the stand-in spawns no language server",
+				"two activations in one process each assert their own module-level resetLSPService spy, and the singleton lifecycle holds one beforeReset at a time, so the seam cannot tell the activations apart; the stand-in spawns no language server",
+		},
+	// 2026-10-21 (#4675 r2): the format smoke runs the REAL FormatService and
+	// formatter selection; installation is the network boundary, so the stub
+	// answers `ensureTool`/`getToolPath` and the child process is doubled below
+	// it (AGENTS.md shape 66).
+	"in-process-mock:scripts/smoke-tools-format-install.test.ts::clients/installer/index":
+		{
+			detector: "in-process-mock",
+			reason:
+				"tool installation and discovery are the network boundary; the stub hands the real formatter resolution a managed path while the FormatService, selection and formatFile stay real and only the formatter child is doubled",
 		},
 	// 2026-10-21 (#4638 review F10): the owner is wrapped, not replaced — every
 	// other export stays real — so the edit path's walks can be counted per file
@@ -398,17 +390,6 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			detector: "in-process-mock",
 			reason:
 				"the wrapper spreads the actual module and only counts calls to the declaration resolver, which is the behaviour under test (zero I/O for a file without jedi's row)",
-		},
-	// 2026-10-19 (#3734): `rename_file`'s staleness capture needs a client that
-	// answers `workspace/willRenameFiles` with chosen offsets; only the shell the
-	// tool resolves is stood in for, so the real service, the rename guard,
-	// `applyWorkspaceEdit`, pi's queue and the ledger all run, and no language
-	// server is spawned.
-	"in-process-mock:tools/lsp-navigation-rename-file-staleness.test.ts::clients/lsp/capabilities":
-		{
-			detector: "in-process-mock",
-			reason:
-				"the language-server process is the boundary; the shell the tool resolves returns a real LSPService whose only client is a willRenameFiles answer, so no server is spawned",
 		},
 	// 2026-10-21 (#4638 review F10): the wrapper spreads the actual owner module
 	// and counts only the declaration resolver, so the snapshot filter's effect on
@@ -485,6 +466,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"real git worktree metadata is written and registered by Git; an in-process double cannot prove linked-worktree ownership",
+	},
+	// 2026-10-21 (#4713 R11): real `bash -c` is the oracle for which
+	// directory each generated spelling enters and where its redirect lands;
+	// the generator exists because hand-written expectations missed spellings.
+	"real-process-spawn:clients/bash-word-composition.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"real bash decides which directory each generated spelling enters and where its write lands; a stubbed shell answers neither",
 	},
 	"real-process-spawn:clients/biome-config-decorator-metadata.test.ts": {
 		detector: "real-process-spawn",
@@ -688,6 +677,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// store, a worktree-local toplevel — and `git worktree add` is the only way
 	// to make one. The prescan's own recovery is git's `status --porcelain`, so
 	// a stubbed git would answer neither question.
+	// 2026-10-19 (#2050): a real linked worktree (`git worktree add`), pi's own
+	// `bash` tool running the script, and the real tree-sitter dispatch are the
+	// subject; a stubbed shell or git could not answer whether the worktree's
+	// own `git status` saw the write.
+	"real-process-spawn:index-2050-worktree-bash-dispatch-witness.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the subject is what a real bash command does to a real linked worktree, detected by git's own status; a stubbed shell or git answers neither",
+	},
 	"real-process-spawn:index-4504-opaque-prescan-root-witness.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -922,6 +920,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the real pinned npm child is required to reproduce lockfile optional-binding rewrites; a process double cannot validate npm behavior",
+	},
+	// 2026-10-21 (#4717): two CI jobs import the PR-body script with no
+	// install; only a fresh node over a scripts copy with no node_modules
+	// proves the lexer's lazy marked load keeps them resolvable.
+	"real-process-spawn:scripts/markdown-lexer-entry-points.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"what a fresh node resolves from a scripts tree with no node_modules is the boundary under test; an in-process import shares vitest's resolved modules",
 	},
 	// 2026-10-16 (#4510): the killed-runner witness ends its own vitest
 	// launcher from outside the worker (the kill guard refuses process.kill).

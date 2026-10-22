@@ -97,6 +97,54 @@ function isValidOperation(value: string): value is LspNavigationOperation {
 	return (VALID_OPERATIONS as readonly string[]).includes(value);
 }
 
+/** Why `value` is not an LSP `Range`, as a field-path suffix, or undefined. */
+function rangeProblem(value: unknown): string | undefined {
+	if (!value || typeof value !== "object") return " must be a range object";
+	for (const end of ["start", "end"] as const) {
+		const position = (value as Record<string, unknown>)[end];
+		if (!position || typeof position !== "object")
+			return `.${end} must be a position object`;
+		for (const axis of ["line", "character"] as const) {
+			if (typeof (position as Record<string, unknown>)[axis] !== "number")
+				return `.${end}.${axis} must be a number`;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * #4687: the schema carries `callHierarchyItem` as an opaque object, so the
+ * shape the LSP `CallHierarchyItem` requires is checked here, before any server
+ * call, on pi and on MCP alike (MCP never validates a schema). Fails closed: a
+ * missing or malformed field is named; extra fields (`detail`, `tags`, `data`)
+ * pass through unchanged, since a server may need `data` back.
+ */
+function checkCallHierarchyItem(
+	value: unknown,
+): { item: LSPCallHierarchyItem } | { problem: string } {
+	if (value === undefined || value === null)
+		return { problem: "callHierarchyItem parameter required" };
+	if (typeof value !== "object" || Array.isArray(value))
+		return {
+			problem:
+				"callHierarchyItem must be the object prepareCallHierarchy returned",
+		};
+	const item = value as Record<string, unknown>;
+	for (const [field, type] of [
+		["name", "string"],
+		["kind", "number"],
+		["uri", "string"],
+	] as const) {
+		if (typeof item[field] !== type)
+			return { problem: `callHierarchyItem.${field} must be a ${type}` };
+	}
+	for (const field of ["range", "selectionRange"] as const) {
+		const problem = rangeProblem(item[field]);
+		if (problem) return { problem: `callHierarchyItem.${field}${problem}` };
+	}
+	return { item: value as LSPCallHierarchyItem };
+}
+
 function operationSupportStatus(
 	operation: LspNavigationOperation,
 	support: import("../clients/lsp/client.js").LSPOperationSupport | null,
@@ -807,8 +855,8 @@ export function createLspNavigationTool(
 		}),
 		parameters: Type.Object({
 			operation: Type.String({
-				description:
-					"LSP operation to perform. Valid values: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities.",
+				enum: [...VALID_OPERATIONS],
+				description: "LSP operation.",
 			}),
 			path: Type.Optional(
 				Type.String({
@@ -890,34 +938,15 @@ export function createLspNavigationTool(
 					description: "Maximum symbol matches.",
 				}),
 			),
+			// #4687: opaque on the wire (the nested schema was 817 bytes per
+			// request); `checkCallHierarchyItem` checks the shape at execute.
 			callHierarchyItem: Type.Optional(
 				Type.Object(
-					{
-						name: Type.String(),
-						kind: Type.Number(),
-						uri: Type.String(),
-						range: Type.Object({
-							start: Type.Object({
-								line: Type.Number(),
-								character: Type.Number(),
-							}),
-							end: Type.Object({
-								line: Type.Number(),
-								character: Type.Number(),
-							}),
-						}),
-						selectionRange: Type.Object({
-							start: Type.Object({
-								line: Type.Number(),
-								character: Type.Number(),
-							}),
-							end: Type.Object({
-								line: Type.Number(),
-								character: Type.Number(),
-							}),
-						}),
-					},
 					{},
+					{
+						description:
+							"An item prepareCallHierarchy returned, passed back unchanged.",
+					},
 				),
 			),
 		}),
@@ -1810,9 +1839,10 @@ export function createLspNavigationTool(
 								);
 					}
 					case "incomingCalls": {
-						if (!callHierarchyItem) {
+						const checked = checkCallHierarchyItem(callHierarchyItem);
+						if ("problem" in checked) {
 							throw new Error(
-								"__BADINPUT__ callHierarchyItem parameter required for incomingCalls",
+								`__BADINPUT__ ${checked.problem} for incomingCalls`,
 							);
 						}
 						// #1803 fix-round F1: needsFilePath is false for call-hierarchy
@@ -1829,36 +1859,33 @@ export function createLspNavigationTool(
 						// every other capability-gated operation already reports.
 						supported = operationSupportStatus(
 							operation,
-							await lspService.getOperationSupport(
-								uriToPath(callHierarchyItem.uri),
-							),
+							await lspService.getOperationSupport(uriToPath(checked.item.uri)),
 						);
 						if (supported === false) {
 							throw new Error(
 								"__UNSUPPORTED__ Active LSP server does not advertise support for incomingCalls",
 							);
 						}
-						return lspService.incomingCalls(callHierarchyItem);
+						return lspService.incomingCalls(checked.item);
 					}
 					case "outgoingCalls": {
-						if (!callHierarchyItem) {
+						const checked = checkCallHierarchyItem(callHierarchyItem);
+						if ("problem" in checked) {
 							throw new Error(
-								"__BADINPUT__ callHierarchyItem parameter required for outgoingCalls",
+								`__BADINPUT__ ${checked.problem} for outgoingCalls`,
 							);
 						}
 						// #1803 fix-round F1: same pre-check as incomingCalls above.
 						supported = operationSupportStatus(
 							operation,
-							await lspService.getOperationSupport(
-								uriToPath(callHierarchyItem.uri),
-							),
+							await lspService.getOperationSupport(uriToPath(checked.item.uri)),
 						);
 						if (supported === false) {
 							throw new Error(
 								"__UNSUPPORTED__ Active LSP server does not advertise support for outgoingCalls",
 							);
 						}
-						return lspService.outgoingCalls(callHierarchyItem);
+						return lspService.outgoingCalls(checked.item);
 					}
 					default:
 						return [];

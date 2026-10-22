@@ -67,6 +67,10 @@
 		"tests/mcp/session-end.smoke.test.ts",
 		"tests/clients/*.test.ts",
 		"tests/clients/**/*.test.ts",
+		// #2050: the top-level real-host witnesses (a real linked worktree, a
+		// real pi session) are wall-clock lane members, so the lane coverage
+		// gate (#2837) requires them as entries too.
+		"tests/index-*.test.ts",
 		// #4583: a tools test is a wall-clock lane member now, and the lane
 		// coverage gate (#2837) requires every member to be a knip entry.
 		"tests/tools/*.test.ts",
