@@ -43,6 +43,20 @@ export interface TurnEndFindingsCache {
 	testFailureFiles?: string[];
 	blockerContent?: string;
 	provenance?: AdvisoryProvenance;
+	/**
+	 * Other sessions' blocker sections this record carries (#4738), one entry
+	 * per owner, none of them `sessionId`. The top-level `blockerContent` and
+	 * `blockingFiles` are `sessionId`'s own; a record without this field (every
+	 * shape released before #4738) is one owner's.
+	 */
+	carriedBlockers?: BlockerPartition[];
+}
+
+/** One session's blocker sections in the record, with their owner (#4738). */
+export interface BlockerPartition {
+	sessionId: string;
+	blockerContent: string;
+	blockingFiles: string[];
 }
 
 type GuardDecision = {
@@ -196,8 +210,39 @@ function blockingProvenance(
 	) {
 		return undefined;
 	}
-	const provenanceKeys = blockingFiles.map((file) => guardPathKey(file, cwd));
+	const { sections, unowned } = splitBlockerSections(
+		blockerContent,
+		blockingFiles as string[],
+		cwd,
+	);
+	// No line opened a section, so there is nothing for `blockingFiles` to be
+	// checked against and nothing a per-file dispatch may claim authority over.
+	// All-blank-but-non-empty text lands here (HIGH-3287-1, round 1's fail-open):
+	// `[].every(…)` is vacuously true, so treating zero sections as "nothing left
+	// to attribute" let a clean dispatch of an unrelated file DELETE a record
+	// whose `blockingFiles` named a different file, and the gate then answered
+	// `no_record`. Unattributed is not clean.
+	if (unowned || sections.length === 0) return undefined;
+	return sections;
+}
+
+/**
+ * `blockerContent` split into the sections `blockingFiles` owns, and whether
+ * any text is left that no entry owns: a body line with no section open, or a
+ * section attributed to a file `blockingFiles` omits. `blockingProvenance`
+ * trusts the text only when nothing is unowned; the turn-end composer keeps
+ * another session's owned sections and replaces the rest (#4738).
+ */
+function splitBlockerSections(
+	blockerContent: string,
+	blockingFiles: readonly string[],
+	cwd: string,
+): { sections: BlockerSection[]; unowned: boolean } {
+	const provenanceKeys = new Set(
+		blockingFiles.map((file) => guardPathKey(file, cwd)),
+	);
 	const sections: BlockerSection[] = [];
+	let unowned = false;
 	let open: BlockerSection | undefined;
 	for (const line of blockerContent.split("\n")) {
 		// A ZERO-LENGTH line only: the composer's part separator. A
@@ -211,24 +256,15 @@ function blockingProvenance(
 		if (file === undefined) {
 			// Body of the open section, or — with no section open — text that no
 			// entry of `blockingFiles` can be held responsible for.
-			if (!open) return undefined;
-			open.lines.push(line);
+			if (open) open.lines.push(line);
+			else unowned = true;
 			continue;
 		}
 		open = { key: guardPathKey(file, cwd), file, lines: [line] };
-		sections.push(open);
+		if (provenanceKeys.has(open.key)) sections.push(open);
+		else unowned = true;
 	}
-	// No line opened a section, so there is nothing for `blockingFiles` to be
-	// checked against and nothing a per-file dispatch may claim authority over.
-	// All-blank-but-non-empty text lands here (HIGH-3287-1, round 1's fail-open):
-	// `[].every(…)` is vacuously true, so treating zero sections as "nothing left
-	// to attribute" let a clean dispatch of an unrelated file DELETE a record
-	// whose `blockingFiles` named a different file, and the gate then answered
-	// `no_record`. Unattributed is not clean.
-	if (sections.length === 0) return undefined;
-	return sections.every((section) => provenanceKeys.includes(section.key))
-		? sections
-		: undefined;
+	return { sections, unowned };
 }
 
 function getShellCommand(input: unknown): string {
@@ -851,8 +887,40 @@ function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
 		) &&
 		(record.affectedFilesTruncated === undefined ||
 			typeof record.affectedFilesTruncated === "boolean") &&
-		(record.blockingFiles === undefined || Array.isArray(record.blockingFiles))
+		(record.blockingFiles === undefined ||
+			Array.isArray(record.blockingFiles)) &&
+		carriesWellFormedBlockers(record)
 	);
+}
+
+/**
+ * The only `carriedBlockers` a record may hold (#4738): absent, or a list of
+ * non-empty partitions, each with a string owner other than the record's own
+ * and every owner distinct, beside a non-empty top-level `blockerContent` (a
+ * writer keeps a carried partition only under a top-level one). Any other form
+ * is not a record, so the gate refuses it.
+ */
+function carriesWellFormedBlockers(
+	record: Partial<TurnEndFindingsCache>,
+): boolean {
+	const carried = record.carriedBlockers;
+	if (carried === undefined) return true;
+	if (!Array.isArray(carried) || carried.length === 0) return false;
+	if (typeof record.blockerContent !== "string" || !record.blockerContent)
+		return false;
+	const owners = new Set<string>([String(record.sessionId)]);
+	return carried.every((partition) => {
+		const ok =
+			!!partition &&
+			typeof partition.sessionId === "string" &&
+			!owners.has(partition.sessionId) &&
+			typeof partition.blockerContent === "string" &&
+			partition.blockerContent.length > 0 &&
+			Array.isArray(partition.blockingFiles) &&
+			partition.blockingFiles.every((file) => typeof file === "string");
+		if (ok) owners.add(partition.sessionId);
+		return ok;
+	});
 }
 
 /** A stored record's fields as read, before any of them is trusted. */
@@ -923,8 +991,187 @@ function claimsNoBlocker(fields: StoredRecord | undefined): boolean {
 			fields.testFailureContent === "") &&
 		(fields.testFailureFiles === undefined ||
 			(Array.isArray(fields.testFailureFiles) &&
-				fields.testFailureFiles.length === 0))
+				fields.testFailureFiles.length === 0)) &&
+		// #4738: another session's carried blocker contradicts it too.
+		fields.carriedBlockers === undefined
 	);
+}
+
+/**
+ * Every session's blocker sections in `record`, the top-level owner's first
+ * (#4738). A record from before #4738 has no `carriedBlockers`, so it reads as
+ * one partition owned by its `sessionId`.
+ */
+function recordPartitions(record: TurnEndFindingsCache): BlockerPartition[] {
+	const top: BlockerPartition[] = record.blockerContent
+		? [
+				{
+					sessionId: record.sessionId,
+					blockerContent: record.blockerContent,
+					blockingFiles: record.blockingFiles ?? [],
+				},
+			]
+		: [];
+	return [...top, ...(record.carriedBlockers ?? [])];
+}
+
+/**
+ * The record fields for `partitions`, the first at top level and the rest
+ * carried (#4738). `owner` is the first partition's session, `undefined` when
+ * none is left, so the caller names the owner of a record that holds no
+ * blocker section.
+ */
+export function blockerPartitionFields(
+	partitions: readonly BlockerPartition[],
+): {
+	owner: string | undefined;
+	blockerContent: string | undefined;
+	blockingFiles: string[] | undefined;
+	carriedBlockers: BlockerPartition[] | undefined;
+} {
+	const [top, ...carried] = partitions;
+	return {
+		owner: top?.sessionId,
+		blockerContent: top?.blockerContent,
+		blockingFiles: top?.blockingFiles,
+		carriedBlockers: carried.length > 0 ? carried : undefined,
+	};
+}
+
+/**
+ * True when the file a section names no longer exists: `ENOENT`/`ENOTDIR`
+ * only, so an unreadable file is not gone. A stat, never a read.
+ */
+function sectionFileGone(section: BlockerSection, cwd: string): boolean {
+	try {
+		return (
+			nodeFs.statSync(resolveGuardPath(section.file, cwd), {
+				throwIfNoEntry: false,
+			}) === undefined
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * `partition` with the sections `leaves` admits removed, the files `dropKeys`
+ * names gone from its `blockingFiles` (#4738). Text the parse cannot attribute
+ * keeps the whole partition, byte for byte (fail closed, #1561); so does a
+ * partition that loses no section.
+ */
+function trimPartition(
+	partition: BlockerPartition,
+	cwd: string,
+	dropKeys: ReadonlySet<string>,
+	leaves: (section: BlockerSection) => boolean,
+): { kept: BlockerPartition | undefined; dropped: number } {
+	const sections = blockingProvenance(
+		partition.blockerContent,
+		partition.blockingFiles,
+		cwd,
+	);
+	if (!sections) return { kept: partition, dropped: 0 };
+	const blockingFiles = partition.blockingFiles.filter(
+		(file) => !dropKeys.has(guardPathKey(file, cwd)),
+	);
+	const keptSections = sections.filter((section) => !leaves(section));
+	const dropped = sections.length - keptSections.length;
+	if (keptSections.length === 0) return { kept: undefined, dropped };
+	return {
+		kept: {
+			sessionId: partition.sessionId,
+			blockerContent:
+				dropped > 0
+					? keptSections.map((section) => section.lines.join("\n")).join("\n\n")
+					: partition.blockerContent,
+			blockingFiles,
+		},
+		dropped,
+	};
+}
+
+/** One row per write that drops another session's or a shared record's sections (#4738). */
+function logSectionsDropped(
+	cwd: string,
+	by: "turn_end" | "write",
+	basis: "own_session" | "file_gone" | "no_file",
+): void {
+	logLatency({
+		type: "phase",
+		toolName: "git-guard",
+		filePath: cwd,
+		phase: "sections_dropped",
+		durationMs: 0,
+		result: basis,
+		metadata: { by, basis },
+	});
+}
+
+/**
+ * The other sessions' blocker sections a turn-end rewrite carries (#4738).
+ *
+ * The composer's write is this session's whole evidence, so it replaces this
+ * session's own partition, and only that. Another session's FILE section stays
+ * until its file is re-checked whole and clean (`syncGitGuardRecord`) or is
+ * gone (the gate's `affected_files_resolved` rule). Text of another session's
+ * that names no file (a project lane's report: trivy, knip, secrets, cascade)
+ * has no file to re-check; the turn end that re-runs those lanes replaces it,
+ * which is the rule every session's composer applied before #4738.
+ *
+ * @returns the stored value, read whatever its age (#4725: the composer read
+ * it through the freshness window, so a day-old record was invisible to it and
+ * its write replaced the record whole), and the partitions to carry.
+ */
+export function readTurnEndGuardRecord(
+	cacheManager: CacheManager,
+	runtime: RuntimeCoordinator,
+	cwd: string,
+): {
+	stored: Partial<TurnEndFindingsCache> | undefined;
+	carried: BlockerPartition[];
+} {
+	const stored = storedRecord(cacheManager, cwd)?.fields;
+	return { stored, carried: carriedTurnEndBlockers(stored, runtime, cwd) };
+}
+
+function carriedTurnEndBlockers(
+	stored: StoredRecord | undefined,
+	runtime: RuntimeCoordinator,
+	cwd: string,
+): BlockerPartition[] {
+	if (!isTurnEndFindingsCache(stored)) return [];
+	const me = runtime.telemetrySessionId;
+	const carried: BlockerPartition[] = [];
+	let gone = false;
+	let unattributed = false;
+	for (const partition of recordPartitions(stored)) {
+		if (partition.sessionId === me) continue;
+		const split = splitBlockerSections(
+			partition.blockerContent,
+			partition.blockingFiles.filter(
+				(file) => typeof file === "string" && file.trim().length > 0,
+			),
+			cwd,
+		);
+		if (split.unowned) unattributed = true;
+		const live = split.sections.filter(
+			(section) => !sectionFileGone(section, cwd),
+		);
+		if (live.length < split.sections.length) gone = true;
+		if (live.length === 0) continue;
+		carried.push({
+			sessionId: partition.sessionId,
+			blockerContent:
+				live.length === split.sections.length && !split.unowned
+					? partition.blockerContent
+					: live.map((section) => section.lines.join("\n")).join("\n\n"),
+			blockingFiles: partition.blockingFiles,
+		});
+	}
+	if (unattributed) logSectionsDropped(cwd, "turn_end", "no_file");
+	if (gone) logSectionsDropped(cwd, "turn_end", "file_gone");
+	return carried;
 }
 
 /**
@@ -963,7 +1210,7 @@ function makesNoClaim(fields: StoredRecord | undefined): boolean {
 function logRecordRetired(
 	cwd: string,
 	by: "turn_end" | "write",
-	basis: "own_session" | "no_blocker" | "no_claim" | "rechecked",
+	basis: "own_session" | "no_blocker" | "no_claim" | "rechecked" | "file_gone",
 ): void {
 	logLatency({
 		type: "phase",
@@ -1000,7 +1247,8 @@ export function retireSettledGitGuardRecord(
 	if (!stored) return false;
 	const own =
 		stored.sessionId === runtime.telemetrySessionId &&
-		stored.testFailures !== true;
+		stored.testFailures !== true &&
+		stored.carriedBlockers === undefined;
 	const basis = own
 		? "own_session"
 		: claimsNoBlocker(stored)
@@ -1008,11 +1256,79 @@ export function retireSettledGitGuardRecord(
 			: makesNoClaim(stored)
 				? "no_claim"
 				: undefined;
-	if (!basis) return false;
-	cacheManager.clearCache("turn-end-findings", cwd);
-	runtime.clearGitGuardCacheUnknown();
-	logRecordRetired(cwd, "turn_end", basis);
-	return true;
+	if (basis) {
+		cacheManager.clearCache("turn-end-findings", cwd);
+		runtime.clearGitGuardCacheUnknown();
+		logRecordRetired(cwd, "turn_end", basis);
+		return true;
+	}
+	return retireOwnPartition(runtime, cacheManager, cwd, stored);
+}
+
+/**
+ * The settled turn end's share of a record it does not own whole (#4738):
+ * this session's own blocker sections leave (its runtime holds no blocker),
+ * every other session's stay but for a section whose file is gone, and the
+ * record is deleted only when none is left.
+ *
+ * @returns true when the record was deleted.
+ */
+function retireOwnPartition(
+	runtime: RuntimeCoordinator,
+	cacheManager: CacheManager,
+	cwd: string,
+	stored: StoredRecord,
+): boolean {
+	if (!isTurnEndFindingsCache(stored)) return false;
+	const me = runtime.telemetrySessionId;
+	// A record this session owns whole: the rule above decided it.
+	if (stored.sessionId === me && stored.carriedBlockers === undefined)
+		return false;
+	let ownDropped = false;
+	let goneDropped = 0;
+	const kept: BlockerPartition[] = [];
+	for (const partition of recordPartitions(stored)) {
+		if (partition.sessionId === me) {
+			ownDropped = true;
+			continue;
+		}
+		const trimmed = trimPartition(partition, cwd, new Set(), (section) =>
+			sectionFileGone(section, cwd),
+		);
+		goneDropped += trimmed.dropped;
+		if (trimmed.kept) kept.push(trimmed.kept);
+	}
+	if (!ownDropped && goneDropped === 0) return false;
+	if (ownDropped && kept.length > 0)
+		logSectionsDropped(cwd, "turn_end", "own_session");
+	if (goneDropped > 0 && kept.length > 0)
+		logSectionsDropped(cwd, "turn_end", "file_gone");
+	const testFailures = stored.testFailures === true;
+	if (kept.length === 0 && !testFailures) {
+		cacheManager.clearCache("turn-end-findings", cwd);
+		runtime.clearGitGuardCacheUnknown();
+		logRecordRetired(cwd, "turn_end", ownDropped ? "own_session" : "file_gone");
+		return true;
+	}
+	const fields = blockerPartitionFields(kept);
+	const owner = fields.owner ?? stored.sessionId;
+	writeGitGuardRecord(cacheManager, runtime, cwd, {
+		...stored,
+		content: [
+			fields.blockerContent,
+			testFailures ? stored.testFailureContent : undefined,
+		]
+			.filter((value): value is string => !!value)
+			.join("\n\n"),
+		blockerContent: fields.blockerContent,
+		blockingFiles: fields.blockingFiles,
+		carriedBlockers: fields.carriedBlockers,
+		hasBlockers: kept.length > 0 || testFailures,
+		sessionId: owner,
+		// Nothing new to deliver: the sections kept were already in the record.
+		consumed: stored.consumed === true,
+	});
+	return false;
 }
 
 /**
@@ -1174,7 +1490,8 @@ function unconfirmedRecordRemedy(
 	if (
 		record &&
 		inspection === "fresh" &&
-		record.sessionId === runtime.telemetrySessionId
+		record.sessionId === runtime.telemetrySessionId &&
+		record.carriedBlockers === undefined
 	) {
 		// #4733 r1 F5: a write re-checks this session's own files, and clears no
 		// test failure, so a record that holds one names the passing run too.
@@ -1182,11 +1499,19 @@ function unconfirmedRecordRemedy(
 			? `Write the affected files again so pi-lens re-checks them. ${testRemedy} Then retry.`
 			: undefined;
 	}
-	const sections = record?.blockerContent
-		? blockingProvenance(record.blockerContent, record.blockingFiles, cwd)
-		: undefined;
+	// #4738: every owner's sections, each parsed against its own files.
+	const parsed = record
+		? recordPartitions(record).map((partition) =>
+				blockingProvenance(
+					partition.blockerContent,
+					partition.blockingFiles,
+					cwd,
+				),
+			)
+		: [];
+	const sections = parsed.flatMap((owned) => owned ?? []);
 	const parts: string[] = [];
-	if (sections) {
+	if (sections.length > 0) {
 		// #4733 r1 F6: a file outside the project is counted, never printed:
 		// its spelling is not the model's to see.
 		const named = new Set<string>();
@@ -1211,11 +1536,12 @@ function unconfirmedRecordRemedy(
 		parts.push(
 			`The record names blockers in ${shown} that pi-lens cannot confirm. Fix them and write each file again: a clean pi-lens check of a file clears its part of the record.`,
 		);
-	} else if (makesNoClaim(fields)) {
+	}
+	if (!record && makesNoClaim(fields)) {
 		parts.push(
 			"The record makes no blocker claim pi-lens can check, so no re-check of one file clears it; a turn that ends with no blocker clears it.",
 		);
-	} else if (!record || record.blockerContent) {
+	} else if (!record || parsed.some((owned) => owned === undefined)) {
 		parts.push(
 			"The record holds blockers pi-lens cannot attribute to a file, so no re-check of one file clears them; this session's next turn-end findings replace it.",
 		);
@@ -1380,22 +1706,51 @@ export function syncGitGuardRecord(
 	const editedKey = editedFilePath
 		? guardPathKey(editedFilePath, cwd)
 		: undefined;
-	const existingBlockingFiles = existing?.blockingFiles ?? [];
+	const me = runtime.telemetrySessionId;
 	const blockerSections = existing?.blockerContent
-		? blockingProvenance(existing.blockerContent, existingBlockingFiles, cwd)
+		? blockingProvenance(
+				existing.blockerContent,
+				existing.blockingFiles ?? [],
+				cwd,
+			)
 		: undefined;
-	// A record another session wrote speaks for that session's checks, and
-	// this session may take back only what its own clean dispatch re-checked:
-	// the edited file's blocker sections (#4725). It stays that session's
-	// record, so the gate keeps refusing it until the last section goes.
-	const foreign =
-		!!existing && existing.sessionId !== runtime.telemetrySessionId;
-	const recheckedForeign =
+	// #4738: every session's sections, each partition with its owner. A write
+	// takes back only what it re-checked: this session's own section of the
+	// edited file, another session's only with a whole-file clean verdict
+	// (#4725, #4733 r1 F2), and another session's section whose file is gone
+	// (the gate's `affected_files_resolved` rule). Every other section stays,
+	// with its owner.
+	const dropKey = new Set(editedKey ? [editedKey] : []);
+	let droppedForeign = 0;
+	let droppedOwn = 0;
+	let goneForeign = 0;
+	const trimmed: BlockerPartition[] = [];
+	for (const partition of existing ? recordPartitions(existing) : []) {
+		const own = partition.sessionId === me;
+		const speaksForFile = !!editedKey && (own || editedCleanVerdict);
+		const result = trimPartition(
+			partition,
+			cwd,
+			speaksForFile ? dropKey : new Set(),
+			(section) => {
+				if (speaksForFile && section.key === editedKey) return true;
+				if (own || !sectionFileGone(section, cwd)) return false;
+				goneForeign += 1;
+				return true;
+			},
+		);
+		if (own) droppedOwn += result.dropped;
+		else droppedForeign += result.dropped;
+		if (result.kept) trimmed.push(result.kept);
+	}
+	const foreign = !!existing && existing.sessionId !== me;
+	// Another session's record, and this write took nothing back from it.
+	if (
 		foreign &&
-		editedCleanVerdict &&
 		entries.length === 0 &&
-		!!blockerSections?.some((section) => section.key === editedKey);
-	if (foreign && entries.length === 0 && !recheckedForeign) {
+		droppedForeign === 0 &&
+		droppedOwn === 0
+	) {
 		markCacheUnknown(runtime, "session_mismatch");
 		return;
 	}
@@ -1417,56 +1772,49 @@ export function syncGitGuardRecord(
 		markCacheUnknown(runtime, "blocking_provenance_untrusted");
 		return;
 	}
+	// This session's own new evidence replaces its own partition and leads the
+	// record (#4733 r5 F21: the writer of new sections owns the record); a write
+	// with none keeps the stored order, so the stored owner stays while its
+	// sections survive (#4733 r1 F1).
+	const partitions =
+		entries.length > 0
+			? [
+					{
+						sessionId: me,
+						blockerContent: entries
+							.map((entry) => `${entry.filePath}: ${entry.summary}`)
+							.join("\n"),
+						blockingFiles: inlineFiles,
+					},
+					...trimmed.filter((partition) => partition.sessionId !== me),
+				]
+			: trimmed;
+	const fields = blockerPartitionFields(partitions);
 	const testFiles = existing?.testFailureFiles ?? [];
-	const remainingBlockingFiles =
-		editedKey && existingBlockingFiles.length > 0
-			? existingBlockingFiles.filter(
-					(file) => guardPathKey(file, cwd) !== editedKey,
-				)
-			: existingBlockingFiles;
 	let affectedFiles = [...(existing?.affectedFiles ?? []), ...inlineFiles];
 	if (!entries.length && editedKey && existing) {
 		const isStillTestFailure = testFiles.some(
 			(file) => guardPathKey(file, cwd) === editedKey,
 		);
-		const isUnknownBlockingPath =
-			existingBlockingFiles.length === 0 && !!existing.blockerContent;
-		if (!isStillTestFailure && !isUnknownBlockingPath) {
+		// A section left for the edited file, or text no file owns, keeps it
+		// affected.
+		const stillRecorded = partitions.some((partition) => {
+			const sections = blockingProvenance(
+				partition.blockerContent,
+				partition.blockingFiles,
+				cwd,
+			);
+			return !sections || sections.some((section) => section.key === editedKey);
+		});
+		if (!isStillTestFailure && !stillRecorded) {
 			affectedFiles = affectedFiles.filter(
 				(file) => guardPathKey(file, cwd) !== editedKey,
 			);
 		}
 	}
-	// A clean per-file dispatch is authoritative for that file, so it drops
-	// THIS file's blocker sections from the persisted record; retaining them
-	// would resurrect a blocker the dispatch just cleared on every later
-	// git-guard lookup. Every other file's section stays. Records whose text
-	// cannot be attributed remain fail-closed: they returned above.
-	//
-	// The question is asked of the SECTIONS, not of `blockingFiles` (#3282): the
-	// turn-end composer persists `blockingFiles: affectedFiles`
-	// (`clients/runtime-turn.ts`, the lens-guard record write) — every file the
-	// turn touched, blocking or not — so "the list has shrunk to nothing" never
-	// became true for a turn that edited a clean file alongside a blocking one,
-	// and the fixed blocker was quoted back at every commit for the rest of the
-	// session. Dropping only the edited file's sections (#4725, which needs it
-	// for a record from another session that names several files) keeps the
-	// text in step with `remainingBlockingFiles` below, so the next lookup still
-	// attributes every section it keeps.
-	const keptSections =
-		!entries.length && editedKey && blockerSections
-			? blockerSections.filter((section) => section.key !== editedKey)
-			: undefined;
-	const blockerContent =
-		entries.length > 0
-			? entries.map((entry) => `${entry.filePath}: ${entry.summary}`).join("\n")
-			: keptSections && keptSections.length < (blockerSections?.length ?? 0)
-				? keptSections.length > 0
-					? keptSections.map((section) => section.lines.join("\n")).join("\n\n")
-					: undefined
-				: existing?.blockerContent;
+	const blockerContent = fields.blockerContent;
 	const hasTestFailures = existing?.testFailures === true;
-	const hasBlockers = !!blockerContent || hasTestFailures;
+	const hasBlockers = partitions.length > 0 || hasTestFailures;
 	const content = [
 		blockerContent,
 		hasTestFailures ? existing?.testFailureContent : undefined,
@@ -1482,27 +1830,33 @@ export function syncGitGuardRecord(
 		// described and refused every commit after it, with no re-run able to
 		// clear it.
 		runtime.clearGitGuardCacheUnknown();
-		if (recheckedForeign) logRecordRetired(cwd, "write", "rechecked");
+		if (droppedForeign > goneForeign)
+			logRecordRetired(cwd, "write", "rechecked");
+		else if (goneForeign > 0) logRecordRetired(cwd, "write", "file_gone");
 		return;
 	}
+	if (goneForeign > 0) logSectionsDropped(cwd, "write", "file_gone");
+	// #4725: what is left of another session's record is still that session's,
+	// and so is its delivery state: this session re-checked one file, not the
+	// rest. A record whose blocker sections are all gone keeps its owner for the
+	// test failures it still holds.
+	const owner = fields.owner ?? existing?.sessionId ?? me;
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
 		content: content || existing?.content || "",
 		blockerContent,
-		blockingFiles: entries.length > 0 ? inlineFiles : remainingBlockingFiles,
+		blockingFiles: fields.blockingFiles ?? [],
+		carriedBlockers: fields.carriedBlockers,
 		hasBlockers,
 		affectedFiles,
-		// #4725: what is left of another session's record is still that
-		// session's, and so is its delivery state: this session re-checked one
-		// file, not the rest.
-		sessionId:
-			recheckedForeign && existing
-				? existing.sessionId
-				: runtime.telemetrySessionId,
+		sessionId: owner,
 		projectSeqStart: runtime.turnStartProjectSeq,
 		projectSeqEnd: runtime.projectSeq,
 		fileSeqByPath,
 		fileContentHashes: {},
-		consumed: recheckedForeign && existing?.consumed === true,
+		consumed:
+			owner !== me &&
+			owner === existing?.sessionId &&
+			existing.consumed === true,
 		testFailures: existing?.testFailures,
 		testFailureContent: existing?.testFailureContent,
 		testFailureFiles: existing?.testFailureFiles,
@@ -1539,6 +1893,8 @@ export function mergeGitGuardTestFailure(
 		content: [blockerContent, content].filter(Boolean).join("\n\n"),
 		blockerContent,
 		blockingFiles: existing?.blockingFiles ?? [],
+		// #4738: other sessions' sections ride along with their owners.
+		carriedBlockers: existing?.carriedBlockers,
 		testFailureContent: content,
 		testFailureFiles: testFailureFiles,
 		hasBlockers: true,
@@ -1770,7 +2126,12 @@ export function evaluateGitGuard(
 	if (record.affectedFilesTruncated) {
 		return unknown(cwd, "affected_files_truncated");
 	}
-	if (record.sessionId !== runtime.telemetrySessionId) {
+	// #4738: the record speaks for every session that owns a section of it, so
+	// this session judges it alone only when it is the only owner.
+	if (
+		record.sessionId !== runtime.telemetrySessionId ||
+		record.carriedBlockers !== undefined
+	) {
 		return unknown(cwd, "session_mismatch", {}, recordRemedy());
 	}
 	if (record.projectSeqEnd !== runtime.projectSeq) {

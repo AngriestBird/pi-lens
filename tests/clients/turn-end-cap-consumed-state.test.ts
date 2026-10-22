@@ -1551,7 +1551,10 @@ describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
 	// another session had written over the record, this session's own fix then
 	// read the record as foreign, latched `session_mismatch`, and every commit
 	// stayed refused.
-	it("a repeated turn end over another session's record stamps this session, so its own fix opens the gate", async () => {
+	// #4738: the other session's section of the same file is that session's and
+	// is carried, so this session's own fix leaves it; a whole-file clean check
+	// of the file then clears it and opens the gate.
+	it("a repeated turn end over another session's record stamps this session, so its own fix leaves only the other session's section", async () => {
 		const rig = makeRig("pi-lens-4733-f21-");
 		try {
 			rig.lensGuard = true;
@@ -1570,11 +1573,10 @@ describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
 			const file = blocker();
 			expect(await endTurn(rig)).toContain("eval() is banned");
 			const record = () =>
-				rig.cacheManager.readCache<{ sessionId?: string }>(
-					"turn-end-findings",
-					rig.cwd,
-					Number.POSITIVE_INFINITY,
-				)?.data;
+				rig.cacheManager.readCache<{
+					sessionId?: string;
+					carriedBlockers?: Array<{ sessionId: string }>;
+				}>("turn-end-findings", rig.cwd, Number.POSITIVE_INFINITY)?.data;
 			// Another session writes over the record after this turn end.
 			rig.cacheManager.writeCache(
 				"turn-end-findings",
@@ -1585,9 +1587,28 @@ describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
 			blocker();
 			// The same findings again: the dedupe rewrites the record.
 			await endTurn(rig);
+			expect(record()?.sessionId).toBe(SESSION);
+			expect(
+				record()?.carriedBlockers?.map((partition) => partition.sessionId),
+			).toEqual(["another-session"]);
 			// The fix: this session retires its own entry, with no whole-file verdict.
 			rig.runtime.clearInlineBlockers(file, rig.runtime.nextWriteIndex());
 			syncGitGuardRecord(rig.runtime, rig.cacheManager, rig.cwd, file);
+			// Only the other session's section is left, and it is still theirs.
+			expect(record()?.sessionId).toBe("another-session");
+			expect(record()?.carriedBlockers).toBeUndefined();
+			const refusal = evaluateGitGuard(rig.runtime, rig.cacheManager, rig.cwd);
+			expect(refusal).toMatchObject({ block: true, unknown: true });
+			expect(refusal.reason).toContain("The record names blockers in a.ts ");
+			// A whole-file clean check of a.ts speaks for every session's section.
+			syncGitGuardRecord(
+				rig.runtime,
+				rig.cacheManager,
+				rig.cwd,
+				file,
+				"session",
+				true,
+			);
 			expect(evaluateGitGuard(rig.runtime, rig.cacheManager, rig.cwd)).toEqual({
 				block: false,
 			});

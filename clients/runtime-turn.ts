@@ -22,11 +22,14 @@ import type {
 	CascadeSkipReason,
 } from "./cascade-types.js";
 import {
+	blockerPartitionFields,
 	clearGitGuardTestFailure,
 	mergeGitGuardTestFailure,
+	readTurnEndGuardRecord,
 	resyncGitGuardAfterInlinePolicy,
 	retireSettledGitGuardRecord,
 	writeGitGuardRecord,
+	type BlockerPartition,
 	type TurnEndFindingsCache,
 } from "./git-guard.js";
 import { cascadeSettleWaitMs } from "./cascade-budget.js";
@@ -6029,24 +6032,38 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				"turn_end: duplicate findings detected (same session), suppressing re-prompt",
 			);
 			if (getFlag("lens-guard")) {
-				const existingGuard = cacheManager.readCache<
-					Partial<TurnEndFindingsCache>
-				>("turn-end-findings", cwd)?.data;
+				// #4738: read whatever its age; another session's sections ride along.
+				const { stored: existingGuard, carried } = readTurnEndGuardRecord(
+					cacheManager,
+					runtime,
+					cwd,
+				);
 				if (existingGuard) {
+					// #4733 r5 F21: this session's blocker sections lead the record, so
+					// it is this session's; another session's are carried (#4738).
+					const own: BlockerPartition[] =
+						blockerParts.length > 0
+							? [
+									{
+										sessionId: runtime.telemetrySessionId,
+										blockerContent: capTurnEndMessage(
+											blockerParts.join("\n\n"),
+										),
+										blockingFiles: existingGuard.affectedFiles ?? [],
+									},
+								]
+							: [];
+					const blockers = blockerPartitionFields([...own, ...carried]);
 					writeGitGuardRecord(cacheManager, runtime, cwd, {
 						...(existingGuard as TurnEndFindingsCache),
-						// #4733 r5 F21: the blocker sections are this session's own
-						// (another session's are replaced, not kept), so is the record.
-						sessionId: runtime.telemetrySessionId,
+						sessionId: blockers.owner ?? runtime.telemetrySessionId,
 						content,
-						blockerContent:
-							blockerParts.length > 0
-								? capTurnEndMessage(blockerParts.join("\n\n"))
-								: undefined,
+						blockerContent: blockers.blockerContent,
+						carriedBlockers: blockers.carriedBlockers,
 						hasBlockers:
-							blockerParts.length > 0 || existingGuard.testFailures === true,
-						blockingFiles:
-							blockerParts.length > 0 ? existingGuard.affectedFiles : undefined,
+							blockers.owner !== undefined ||
+							existingGuard.testFailures === true,
+						blockingFiles: blockers.blockingFiles,
 						projectSeqStart: runtime.turnStartProjectSeq,
 						projectSeqEnd: runtime.projectSeq,
 						fileSeqByPath: Object.fromEntries(
@@ -6077,12 +6094,18 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		for (const [filePath, seq] of runtime.getFileSeqEntries()) {
 			fileSeqByPath[normalizeMapKey(path.resolve(filePath))] = seq;
 		}
-		if (getFlag("lens-guard")) {
-			const existingGuard = cacheManager.readCache<
-				Partial<TurnEndFindingsCache>
-			>("turn-end-findings", cwd)?.data;
+		// #4738: read whatever its age; another session's sections ride along,
+		// under either flag.
+		const { stored: existingGuard, carried } = readTurnEndGuardRecord(
+			cacheManager,
+			runtime,
+			cwd,
+		);
+		if (getFlag("lens-guard") || carried.length > 0) {
+			// With `--lens-guard` off this session claims nothing, so a record that
+			// holds another session's blocker keeps theirs alone.
 			const blockingContent =
-				blockerParts.length > 0
+				getFlag("lens-guard") && blockerParts.length > 0
 					? capTurnEndMessage(blockerParts.join("\n\n"))
 					: undefined;
 			const affectedFiles = [
@@ -6094,15 +6117,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						.map((neighbor) => resolveRunnerPath(cwd, neighbor.filePath)),
 				),
 			];
+			const own: BlockerPartition[] = blockingContent
+				? [
+						{
+							sessionId: runtime.telemetrySessionId,
+							blockerContent: blockingContent,
+							blockingFiles: affectedFiles,
+						},
+					]
+				: [];
+			const blockers = blockerPartitionFields([...own, ...carried]);
 			writeGitGuardRecord(cacheManager, runtime, cwd, {
 				content: [content, existingGuard?.testFailureContent]
 					.filter((value): value is string => !!value)
 					.join("\n\n"),
-				blockerContent: blockingContent,
-				blockingFiles: blockerParts.length > 0 ? affectedFiles : undefined,
-				hasBlockers: !!blockingContent || existingGuard?.testFailures === true,
+				blockerContent: blockers.blockerContent,
+				blockingFiles: blockers.blockingFiles,
+				carriedBlockers: blockers.carriedBlockers,
+				hasBlockers:
+					blockers.owner !== undefined || existingGuard?.testFailures === true,
 				affectedFiles,
-				sessionId: runtime.telemetrySessionId,
+				sessionId: blockers.owner ?? runtime.telemetrySessionId,
 				projectSeqStart: runtime.turnStartProjectSeq,
 				projectSeqEnd: runtime.projectSeq,
 				fileSeqByPath,
