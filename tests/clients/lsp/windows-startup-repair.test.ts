@@ -5,6 +5,16 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setPlatform } from "../../support/platform-stub.js";
 
+/**
+ * The Windows registry PATH read starts `powershell.exe` through the spawn
+ * seam's `spawnSync` (#4530; it was a raw `execFileSync`). An empty answer
+ * keeps the launch on the process PATH, as the `execFileSync` double's empty
+ * string did before.
+ */
+function emptyRegistryRead() {
+	return { status: 0, stdout: "", stderr: "" };
+}
+
 const ensureTool = vi.hoisted(() => vi.fn(async () => undefined));
 const logExtension = vi.hoisted(() => vi.fn());
 // The global-bin fallback is the launcher's OTHER presence seam, and it sits at
@@ -68,6 +78,7 @@ function mockExit1Launch(globalBinary?: string): void {
 	findGlobalBinary.mockResolvedValue(globalBinary);
 	spawnDouble.mockImplementation(exitWith(1));
 	vi.doMock("node:child_process", () => ({
+		spawnSync: vi.fn(emptyRegistryRead),
 		execFileSync: vi.fn(() => ""),
 		spawn: spawnDouble,
 	}));
@@ -117,6 +128,7 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 		const originalPlatform = process.platform;
 		setPlatform("win32");
 		vi.doMock("node:child_process", () => ({
+			spawnSync: vi.fn(emptyRegistryRead),
 			execFileSync: vi.fn(() => ""),
 			spawn: vi.fn(exitWith(1)),
 		}));
@@ -388,6 +400,7 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 		fs.mkdirSync(binDir, { recursive: true });
 		fs.writeFileSync(shim, `@"%~dp0\\..\\server\\bin\\server.js" %*`);
 		vi.doMock("node:child_process", () => ({
+			spawnSync: vi.fn(emptyRegistryRead),
 			execFileSync: vi.fn((command: string) =>
 				command === "where" ? `${shim}\\r\\n` : "",
 			),
