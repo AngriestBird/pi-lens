@@ -4748,11 +4748,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return { messages: resultMessages };
 			}
 
-			// The placement rule reads pi's own last message; with retention on,
-			// `base` may hold re-sent spans, so the message to extend is found by
-			// its position there, never by `base.at(-1)`.
+			// The placement rule reads pi's own last message. With retention on,
+			// `base` ends with that same message too: a retained span after it is
+			// an "after" entry, which only a non-prompt last message gets, so the
+			// prompt path below never meets one.
 			const lastMessage = existingMessages[existingMessages.length - 1];
-			const lastPosition = rebuilt?.lastRawPosition ?? base.length - 1;
+			const lastPosition = base.length - 1;
 			// #4743: a retained injection says in its own bytes that it is a
 			// snapshot, so the label is part of what every later request repeats.
 			const snapshotLabel = ledger ? retainedSnapshotLabel() : undefined;
@@ -4821,11 +4822,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				),
 			};
 
-			const resultMessages = [
-				...base.slice(0, lastPosition),
-				updatedLastMessage,
-				...base.slice(lastPosition + 1),
-			];
+			const resultMessages = [...base.slice(0, -1), updatedLastMessage];
 			logContextObservation(
 				resultMessages,
 				"append-to-last-user",

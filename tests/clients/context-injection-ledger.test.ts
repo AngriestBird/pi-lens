@@ -89,7 +89,6 @@ describe("context-injection ledger (#4743)", () => {
 			"answer",
 		]);
 		expect(again.retainedPositions).toEqual([1, 4]);
-		expect(again.lastRawPosition).toBe(5);
 		expect(again.reemitted).toBe(2);
 	});
 

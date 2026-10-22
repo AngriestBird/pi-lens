@@ -77,8 +77,6 @@ type RetainedEntry =
 export interface LedgerRebuild {
 	/** pi's transcript with every still-valid entry re-applied. */
 	readonly messages: LedgerMessage[];
-	/** Position in {@link messages} of pi's last transcript message. */
-	readonly lastRawPosition: number;
 	/** Positions where a re-sent span begins (for the divergence record). */
 	readonly retainedPositions: readonly number[];
 	readonly reemitted: number;
@@ -155,7 +153,6 @@ export function createInjectionLedger(): InjectionLedger {
 
 	const noSession = (raw: ReadonlyArray<LedgerMessage>): LedgerRebuild => ({
 		messages: raw as LedgerMessage[],
-		lastRawPosition: raw.length - 1,
 		retainedPositions: [],
 		reemitted: 0,
 		reemittedBytes: 0,
@@ -212,13 +209,11 @@ export function createInjectionLedger(): InjectionLedger {
 			valid.length === 0 ? (raw as LedgerMessage[]) : [];
 		const retainedPositions: number[] = [];
 		let reemittedBytes = 0;
-		let lastRawPosition = valid.length === 0 ? raw.length - 1 : -1;
 		if (valid.length > 0)
 			raw.forEach((message, index) => {
 				const entries = byAnchor.get(index);
 				if (!entries) {
 					messages.push(message);
-					lastRawPosition = messages.length - 1;
 					return;
 				}
 				let content = message.content;
@@ -235,7 +230,6 @@ export function createInjectionLedger(): InjectionLedger {
 				if (extended) retainedPositions.push(messages.length);
 				// Copy on write: pi's own message object is never changed.
 				messages.push(extended ? { ...message, content } : message);
-				lastRawPosition = messages.length - 1;
 				for (const entry of entries) {
 					if (entry.kind !== "after") continue;
 					retainedPositions.push(messages.length);
@@ -290,7 +284,6 @@ export function createInjectionLedger(): InjectionLedger {
 
 		return {
 			messages,
-			lastRawPosition,
 			retainedPositions,
 			reemitted: valid.length,
 			reemittedBytes,
