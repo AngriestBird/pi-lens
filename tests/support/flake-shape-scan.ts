@@ -246,7 +246,7 @@ const VITEST_IN_ARGV = /\bvitest\b/i;
 // it as a production seam, and its call site spawns the real `git ls-files`
 // child that decides which fixture inputs survive a fresh checkout.
 const SUPPORT_SPAWN_HELPER_CALL =
-	/\b(gitFixtureSpawnAsync|gitExecFileSync|gitExecSync|execFileSync|execSync|spawnWedgedChild|safeSpawnAsync|collectUntrackedIgnoredIds|withRealPi)\s*\(/g;
+	/\b(gitFixtureSpawnAsync|gitExecFileSync|gitExecSync|execFileSync|execSync|spawnWedgedChild|safeSpawnAsync|collectUntrackedIgnoredIds|withRealPi|installPathProbeStub)\s*\(/g;
 const MOCK_CALL = /\bvi\.(?:mock|doMock|hoisted)\s*\(\s*["']([^"']+)["']/g;
 const HELPER_MODULE_SUFFIXES: Record<string, readonly string[]> = {
 	gitFixtureSpawnAsync: ["/git-fixture-env", "/git-fixture-env.js"],
@@ -259,6 +259,13 @@ const HELPER_MODULE_SUFFIXES: Record<string, readonly string[]> = {
 		"/real-pi-harness",
 		"/real-pi-harness.js",
 		"/real-pi-harness.ts",
+	],
+	// The stub spawns nothing itself: it puts executable stand-ins first on PATH
+	// so the production package-manager lookup spawns them for real (#4709).
+	installPathProbeStub: [
+		"/path-probe-stub",
+		"/path-probe-stub.js",
+		"/path-probe-stub.ts",
 	],
 	execFileSync: ["node:child_process", "child_process"],
 	execSync: ["node:child_process", "child_process"],

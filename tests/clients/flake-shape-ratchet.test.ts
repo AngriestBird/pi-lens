@@ -593,6 +593,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real Lean elaboration and diagnostic publication require Lake and elan across the child-process boundary; the serialized wall-clock lane isolates the handshake and diagnostic wait",
 	},
+	"real-process-spawn:clients/mcp/review-rebuild.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the resolver verdict runRebuild acts on comes from the real package-manager lookup spawning the real which and executable stand-in managers on PATH; a doubled resolver hands each case the manager it then asserts on",
+	},
 	"real-process-spawn:clients/metrics-history-stderr.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -658,6 +663,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"real git children expose shared-checkout branch-switch races that an in-process model cannot reach",
+	},
+	"real-process-spawn:clients/test-runner-resolve-exec.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the global-bin and fallback arms of resolveExec are decided by the real package-manager lookup, which spawns the real which and executable stand-in managers; a doubled findGlobalBinary returns the path the case then asserts on",
 	},
 	"real-process-spawn:config/gitignore-tracked-shadow.test.ts": {
 		detector: "real-process-spawn",
@@ -1128,6 +1138,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"real git children prove the support-side fixture scrubs GIT_DIR/GIT_WORK_TREE and pins cwd before a test spawns git",
+	},
+	"real-process-spawn:support/path-probe-stub.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the stub exists so production lookups spawn real executable stand-ins; its fidelity (hermetic PATH, the served query, restore) is only observable through a real child",
 	},
 	// 2026-09-17 (#3179): the race is cross-process by construction —
 	// readdirSync/statSync inside node's own recursive-watch polyfill are
@@ -2022,6 +2037,28 @@ describe("flake-shape scan — real-process-spawn", () => {
 			'import { collectUntrackedIgnoredIds } from "../../clients/git-tracked-ignore.js";',
 			'vi.mock("../../clients/git-tracked-ignore.js");',
 			"await collectUntrackedIgnoredIds(root);",
+		].join("\n");
+		expect(scanRealProcessSpawn("fixture.test.ts", mocked)).toEqual([]);
+	});
+
+	it("flags installPathProbeStub as a support spawn helper, and its mocked-module escape (#4709)", () => {
+		// Recurrence: the stub spawns nothing itself, so the files that use it
+		// ran real `which` and stand-in package managers with no baseline row,
+		// header or serialized lane (#4709 slice 3b).
+		const source = [
+			'const prose = "installPathProbeStub(root)";',
+			"// installPathProbeStub(root) is only documentation here.",
+			'it("looks up a planted binary", async () => {',
+			"	const stub = installPathProbeStub(root);",
+			"});",
+		].join("\n");
+		expect(
+			scanRealProcessSpawn("fixture.test.ts", source).map((h) => h.reason),
+		).toEqual(["installPathProbeStub( support spawn helper"]);
+
+		const mocked = [
+			'vi.mock("../support/path-probe-stub.js");',
+			"const stub = installPathProbeStub(root);",
 		].join("\n");
 		expect(scanRealProcessSpawn("fixture.test.ts", mocked)).toEqual([]);
 	});
