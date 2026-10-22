@@ -403,6 +403,31 @@ describe.skipIf(!POSIX)("cells the rule leaves admitted (#4530)", () => {
 		expect(ran(marker)).toBe(true);
 	});
 
+	it("I12: a dotfiles checkout rooted at HOME does not make HOME's tool dirs project bytes", async () => {
+		// HOME is itself a checkout, and the session is a plain directory in it,
+		// so the session's checkout is HOME's: the git clause stays off there.
+		fs.mkdirSync(path.join(layout.home, ".git"));
+		fs.writeFileSync(
+			path.join(layout.home, ".git", "HEAD"),
+			"ref: refs/heads/main\n",
+		);
+		const session = path.join(layout.home, "notes");
+		fs.mkdirSync(session);
+		enterSession(session);
+		const marker = path.join(layout.root, "home-tool-ran");
+		const bin = path.join(layout.home, ".local", "bin");
+		plant(bin, marker);
+
+		const result = await safeSpawnAsync(TOOL, [], {
+			env: { PATH: bin },
+			timeout: 10_000,
+		});
+
+		expect(result.status).toBe(0);
+		expect(ran(marker)).toBe(true);
+		expect(trustRefusals()).toEqual([]);
+	});
+
 	it("I15/A2: a file the caller names is not a lookup", async () => {
 		const marker = path.join(layout.root, "named-ran");
 		const named = plant(path.join(layout.main, "node_modules", ".bin"), marker);
