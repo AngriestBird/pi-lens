@@ -129,7 +129,7 @@ const fixtures = LSP_FIXTURES as Fixture[];
 // makes the manifest unreadable, so the census reds and a human looks. A
 // per-element reading cannot see what makes an item live.
 const FSPROJ_ADMITTED =
-	/^\s*<Project(?:\s+Sdk="[^"]*")?\s*>(?:\s*<PropertyGroup>(?:\s*<[A-Za-z]+>[^<]*<\/[A-Za-z]+>)*\s*<\/PropertyGroup>|\s*<ItemGroup>(?:\s*<Compile Include="[^"]*"\s*\/>)*\s*<\/ItemGroup>)*\s*<\/Project>\s*$/;
+	/^\s*<Project(?:\s+Sdk="[^"]*")?\s*>(?:\s*<PropertyGroup>(?:\s*<(?<leaf>[A-Za-z]+)>[^<]*<\/\k<leaf>>)*\s*<\/PropertyGroup>|\s*<ItemGroup>(?:\s*<Compile Include="[^"]*"\s*\/>)*\s*<\/ItemGroup>)*\s*<\/Project>\s*$/;
 
 // One left-to-right scan that skips comment and CDATA spans, as an XML reader
 // does, instead of replace-then-match: removing a span can splice its
@@ -366,6 +366,10 @@ describe("LSP clean-gate population (#3217)", () => {
 		[
 			"a conditioned PropertyGroup",
 			`<Project><PropertyGroup Condition="false"><A>b</A></PropertyGroup><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Project>`,
+		],
+		[
+			"a property whose closing tag names another element",
+			`<Project><PropertyGroup><A>x</B></PropertyGroup><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Project>`,
 		],
 		[
 			"a conditioned PropertyGroup child",
