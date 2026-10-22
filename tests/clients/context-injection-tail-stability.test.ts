@@ -346,6 +346,30 @@ describe("request N+1 keeps the exact prefix request N sent", () => {
 			retention: { retainedNew: false, declined: "entry-cap" },
 		});
 	});
+
+	it("switching injection off forgets what was retained, so switching it back on does not bring it back", async () => {
+		const handle = await session("tail-toggle", [
+			fauxAssistantMessage("first answer"),
+			fauxAssistantMessage("quiet answer"),
+			fauxAssistantMessage("last answer"),
+		]);
+		stage(handle.cwd, FIRST);
+		await handle.prompt("first question");
+		await handle.prompt("/lens-context-toggle");
+		await handle.prompt("quiet question");
+		await handle.prompt("/lens-context-toggle");
+		await handle.prompt("last question");
+		const [n, off, on] = handle.requests;
+		expect(handle.requests).toHaveLength(3);
+		expect(count(n, FIRST)).toBe(1);
+		// Off: no pi-lens bytes at all, retained ones included.
+		expect(count(off, FIRST)).toBe(0);
+		// Back on: the requests sent while off are the prefix to keep, so the
+		// old entry stays gone (recurrence: it reappeared mid-conversation and
+		// broke the prefix the off requests had built).
+		expect(count(on, FIRST)).toBe(0);
+		expectWholePrefix(off, on);
+	});
 });
 
 /**
