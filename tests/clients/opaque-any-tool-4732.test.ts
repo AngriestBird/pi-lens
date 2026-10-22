@@ -67,15 +67,21 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { subscribeDiskChange } from "../../clients/disk-changes.js";
 import {
 	flushLatencyLog,
 	getLatencyLogPath,
 } from "../../clients/latency-logger.js";
 import {
+	MUTATION_BRIDGE_KEY,
+	registerMutationBridge,
+} from "../../clients/mutation-bridge.js";
+import {
 	resetOpaqueMutationState,
 	shouldRunOpaqueRecovery,
 } from "../../clients/opaque-mutation-scan.js";
 import { hasPendingObservation } from "../../clients/observed-mutation.js";
+import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
@@ -83,6 +89,26 @@ import { execSync } from "../support/git-fixture-env.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 import { readNdjsonRows } from "../support/ndjson-rows.js";
 import { removeTempDirSync } from "./test-utils.js";
+
+/**
+ * The bridge `index.ts` mounts, so an observed call's settle records what it
+ * saw (unmounted, every replay is refused and nothing is dispatched). It is a
+ * process-global, first-wins singleton: mounted once per file over a holder
+ * each case's runtime takes.
+ */
+const bridgeTarget: { runtime?: RuntimeCoordinator; root: string } = {
+	root: "",
+};
+if (!(MUTATION_BRIDGE_KEY in (globalThis as object)))
+	registerMutationBridge({
+		getRuntime: () => bridgeTarget.runtime as never,
+		getCacheManager: () => new CacheManager(false),
+		getProjectRoot: () => bridgeTarget.root,
+		getDispatchCwd: () => bridgeTarget.root,
+		countFileLines,
+		isRecordable: () => true,
+		dbg: () => {},
+	});
 
 describe("shouldRunOpaqueRecovery: an unknown tool is opaque (#4732)", () => {
 	const root = path.join(os.tmpdir(), "pi-lens-opaque-any-tool-gate");
@@ -166,6 +192,8 @@ describe("which calls pay for git status (#4732)", () => {
 		const runtime = new RuntimeCoordinator();
 		runtime.projectRoot = repoDir;
 		runtime.setTelemetryIdentity({ sessionId });
+		bridgeTarget.runtime = runtime;
+		bridgeTarget.root = repoDir;
 		return runtime;
 	}
 
@@ -213,8 +241,11 @@ describe("which calls pay for git status (#4732)", () => {
 		).length;
 	}
 
-	/** The `opaque_mutation_prescan` rows this case added, by label. */
-	async function prescanRowsSince(offset: number): Promise<string[]> {
+	/** The latency rows of one phase this case added. */
+	async function phaseRowsSince(
+		offset: number,
+		phase: string,
+	): Promise<Array<{ toolName?: string; filePath?: string }>> {
 		await flushLatencyLog();
 		const logPath = getLatencyLogPath();
 		const text = fs.existsSync(logPath)
@@ -222,11 +253,23 @@ describe("which calls pay for git status (#4732)", () => {
 			: "";
 		const scratch = path.join(tmpRoot, "latency-tail.ndjson");
 		fs.writeFileSync(scratch, text);
-		const read = readNdjsonRows<{ phase?: string; filePath?: string }>(scratch);
+		const read = readNdjsonRows<{
+			phase?: string;
+			toolName?: string;
+			filePath?: string;
+		}>(scratch);
 		expect(read.skipped).toBe(0);
-		return read.rows
-			.filter((row) => row.phase === "opaque_mutation_prescan")
-			.map((row) => row.filePath ?? "");
+		return read.rows.filter((row) => row.phase === phase);
+	}
+
+	/** The files whose pipeline ran to its `total` row since `offset`, by tool. */
+	async function analysedSince(offset: number): Promise<string[]> {
+		return (await phaseRowsSince(offset, "total"))
+			.map(
+				(row) =>
+					`${row.toolName} ${path.relative(repoDir, row.filePath ?? "")}`,
+			)
+			.sort();
 	}
 
 	async function latencyOffset(): Promise<number> {
@@ -328,9 +371,11 @@ describe("which calls pay for git status (#4732)", () => {
 			// Acceptance: an allowlisted call records no new latency phase; a
 			// captured one records exactly its own prescan row.
 			const label = toolName === "bash" ? "node -e ''" : toolName;
-			expect(await prescanRowsSince(offset)).toEqual(
-				expected > 0 ? [label] : [],
-			);
+			expect(
+				(await phaseRowsSince(offset, "opaque_mutation_prescan")).map(
+					(row) => row.filePath ?? "",
+				),
+			).toEqual(expected > 0 ? [label] : []);
 			// A call whose own `tool_call` took no baseline (allowlisted, or an
 			// event the classifier knows) is not recovered at its result either,
 			// so it is never reported as an unanswered diff.
@@ -422,6 +467,76 @@ describe("which calls pay for git status (#4732)", () => {
 		fs.writeFileSync(later, "export const later = 2;\n");
 		await handleToolResult(resultDeps(runtime, second));
 		expect(hasPendingObservation(id)).toBe(false);
+	});
+
+	it("analyses an observed call's file when the result refuses its relative path", async () => {
+		// RECURRENCE GUARDED: #4737 r3 (Greptile PRRT_kwDORt8rec6vD_bg). With the
+		// read guard on, the result side refuses a relative path no attribution
+		// backs, so filePath is unset. The recovery leaves the file to the
+		// observation, and the observed dispatch ran only under `filePath`, so
+		// the file was recorded but never analysed: no lint, and no verdict for
+		// the commit gate.
+		const runtime = runtimeFor("4737-r3-relative");
+		const event = {
+			toolName: "relative_ext_tool",
+			toolCallId: "4737-r3-relative-1",
+			input: { path: "seed.ts" },
+		};
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, event)),
+		);
+		const offset = await latencyOffset();
+		fs.writeFileSync(seed(), "export const seed = 2;\n");
+		await handleToolResult(resultDeps(runtime, event));
+		expect(await analysedSince(offset)).toEqual(["relative_ext_tool seed.ts"]);
+	});
+
+	it("sends an observed file to the servers before a sibling the same call rewrote is checked", async () => {
+		// RECURRENCE GUARDED: #4737 r3 (Greptile PRRT_kwDORt8rec6vD_bk; #4507).
+		// The observation filter took the observed file out of `written`, so the
+		// awaited primary send carried only its sibling, and the sibling's
+		// synthetic dispatch checked an importer against its dependency's old
+		// bytes before the observed path's own dispatch sent them.
+		const runtime = runtimeFor("4737-r3-order");
+		const dependency = path.join(repoDir, "z.ts");
+		const importer = path.join(repoDir, "a.ts");
+		fs.writeFileSync(dependency, "export const z = 1;\n");
+		fs.writeFileSync(
+			importer,
+			'import { z } from "./z";\nexport const a = z;\n',
+		);
+		const sent: string[] = [];
+		const off = subscribeDiskChange("4737-r3-order", (change) => {
+			if (change.paths !== "unknown" && change.sources.includes("bash-write"))
+				for (const file of change.paths) sent.push(path.basename(file));
+		});
+		const event = {
+			toolName: "order_ext_tool",
+			toolCallId: "4737-r3-order-1",
+			input: { path: dependency },
+		};
+		let offset = 0;
+		try {
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(callDeps(runtime, event)),
+			);
+			offset = await latencyOffset();
+			fs.writeFileSync(dependency, "export const zz = 1;\n");
+			fs.writeFileSync(
+				importer,
+				'import { zz } from "./z";\nexport const a = zz;\n',
+			);
+			await handleToolResult(resultDeps(runtime, event));
+		} finally {
+			off();
+		}
+		// The awaited send runs before every synthetic dispatch of the call.
+		expect(sent.sort()).toEqual(["a.ts", "z.ts"]);
+		// One net each: the recovery dispatches a.ts, the observation z.ts.
+		expect(await analysedSince(offset)).toEqual([
+			"order_ext_tool z.ts",
+			"write a.ts",
+		]);
 	});
 
 	it("refuses a non-bash call with no tool-call id, once per session", async () => {

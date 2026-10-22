@@ -2298,6 +2298,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// them) — a deliberate divergence from the isError filter above, which
 		// exists for restore semantics where attribution would lie.
 		let opaquePaths: string[] = [];
+		// #4737 r3: the recovered paths the observation answers for: sent with
+		// the call's population, never recorded or dispatched by this half.
+		let observedOpaquePaths: string[] = [];
 		let hadOpaqueRecovery = false;
 		/** Each root's own surviving recovery: what git reported AND we claim. */
 		const recoveredByRoot = new Map<string, Set<string>>();
@@ -2480,14 +2483,19 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			}
 			// #4732: a path the #2430 net armed an observation of for this same
 			// call is the settle's to answer, with the tool's own attribution.
+			// #4737 r3: it still goes out in the awaited primary send below, so a
+			// sibling dispatched first never reads its old bytes (#4507).
 			if (opaquePaths.length > 0 && opaqueNonBash) {
 				const observed = new Set(
 					pendingObservationPaths(toolCallId, runtime.sessionGeneration).map(
 						(p) => normalizeMapKey(realpathOrResolve(p)),
 					),
 				);
-				if (observed.size > 0)
+				if (observed.size > 0) {
+					for (const p of opaquePaths)
+						if (observed.has(p)) observedOpaquePaths.push(p);
 					opaquePaths = opaquePaths.filter((p) => !observed.has(p));
+				}
 			}
 			hadOpaqueRecovery = opaquePaths.length > 0;
 			if (recoveredByRoot.size > 0 || unknownRoots.size > 0) {
@@ -2673,7 +2681,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// checked while z.ts was still unsent, and the phantom STOP came back.
 		// A live primary takes the capped sends far inside the budget; one that
 		// does not answers the dispatches after it no better (no verdict).
-		if (workspaceRoot && written.length > 0) {
+		const sentPopulation = [...written, ...observedOpaquePaths];
+		if (workspaceRoot && sentPopulation.length > 0) {
 			const primaryStarted = Date.now();
 			// The servers must also have READ the sends before a dispatch reads a
 			// check (#4528 r1 F1): the held-primary pass's drain barrier.
@@ -2690,7 +2699,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// is the recovered subset's detached follow-up.
 			ensureDiskChangeSubscribers();
 			const sendsByRoot = new Map<string, string[]>();
-			for (const file of written) {
+			for (const file of sentPopulation) {
 				// #2050: the root that OWNS the file. A recovered path from a linked
 				// worktree belongs to that worktree's clients, not to the session
 				// root's (which hold no document for it); the fallback keeps the
@@ -3397,30 +3406,35 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// once the bridge has recorded the edit, re-running the classified chain
 		// double-records it regardless of how the tool classifies. They are
 		// consulted for what this block can still usefully DO.
-		if (filePath && !isExternalOrVendorFile(filePath, workspaceRoot)) {
+		// #4737 r3: an unset `filePath` (the result refused a relative path no
+		// attribution backs) still dispatches what the settle recorded; only the
+		// steps keyed on the tool's named path need it.
+		if (!filePath || !isExternalOrVendorFile(filePath, workspaceRoot)) {
 			// On call ONE the tool is not classified at all, so there is no
 			// `mutation.kind` to read. The observation itself is the authority and
 			// it only ever records "edit" (`settleObservedMutation` hard-codes
 			// `kind: "edit"`, and #2430 tier 4 only ever classifies a learned tool
 			// as "edit"), so the two agree wherever both exist.
 			const observedKind: MutationKind = mutation?.kind ?? "edit";
-			const observedStateHash =
-				preSettleStateHash ?? getFileStateHash(filePath);
-			const observedAppliedPairs = recordNativeAppliedPairs({
-				runtime,
-				input: event.input,
-				kind: observedKind,
-				filePath,
-				stateHash: observedStateHash,
-			});
+			const observedAppliedPairs = filePath
+				? recordNativeAppliedPairs({
+						runtime,
+						input: event.input,
+						kind: observedKind,
+						filePath,
+						stateHash: preSettleStateHash ?? getFileStateHash(filePath),
+					})
+				: [];
 			// #3763: the settle awaited; a replaced session's receipt stays out
 			// of the live session's turn.
-			const receiptOutcome = writeSession.guardedWrite(filePath, () =>
-				(
-					runtime as Partial<RuntimeCoordinator>
-				).recordMutationToolReceipt?.call(runtime, filePath, observedKind),
-			);
-			refreshCachedExports(runtime, filePath);
+			const receiptOutcome = filePath
+				? writeSession.guardedWrite(filePath, () =>
+						(
+							runtime as Partial<RuntimeCoordinator>
+						).recordMutationToolReceipt?.call(runtime, filePath, observedKind),
+					)
+				: undefined;
+			if (filePath) refreshCachedExports(runtime, filePath);
 			// Same fallback formula the classified chain uses below, minus its
 			// `_bypassDebounce` branch (#2464 review round 2, S3): that branch was
 			// unreachable here. Both callers that set `_bypassDebounce` arrive with
