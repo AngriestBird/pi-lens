@@ -29,6 +29,10 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { createAvailabilityLatch } from "../../clients/dispatch/runners/utils/availability-policy.js";
 import {
+	clearFormatterCache,
+	gofmtFormatter,
+} from "../../clients/formatters.js";
+import {
 	isCommandAvailable,
 	isSpawnableCommand,
 	resetPathWalkMemo,
@@ -130,6 +134,7 @@ beforeEach(() => {
 	_resetPackageManagerCache();
 	_resetJvmRuntimeCacheForTests();
 	resetPathWalkMemo();
+	clearFormatterCache();
 	layout = makeLayout();
 	cleanups.push(withEnv({ HOME: layout.home, PI_LENS_HOME: layout.data }));
 	// Hermetic: PATH holds only the stub's stand-ins and the host's `which`,
@@ -152,6 +157,7 @@ afterEach(() => {
 	_resetPackageManagerCache();
 	_resetJvmRuntimeCacheForTests();
 	resetPathWalkMemo();
+	clearFormatterCache();
 });
 
 describe.skipIf(!POSIX)("bare lookups under untrusted pi trust (#4530)", () => {
@@ -330,6 +336,30 @@ describe.skipIf(!POSIX)("bare lookups under untrusted pi trust (#4530)", () => {
 
 		expect(await findCommandAsync(TOOL)).toBeNull();
 		expect(trustRefusals()).toEqual([`project-command:${target}`]);
+	});
+
+	it("A5: a formatter's `which` answer that links into the project is no answer", async () => {
+		const target = plant(
+			path.join(layout.main, "tools"),
+			path.join(layout.root, "unused"),
+			"gofmt",
+		);
+		const global = path.join(layout.outside, "global-bin");
+		fs.mkdirSync(global);
+		const link = path.join(global, "gofmt");
+		fs.symlinkSync(target, link);
+		cleanups.push(
+			withEnv({ PATH: `${process.env.PATH}${path.delimiter}${global}` }),
+		);
+		const file = path.join(layout.main, "main.go");
+
+		expect(await gofmtFormatter.resolveCommand?.(file, layout.main)).toBeNull();
+		setProjectTrustState("trusted");
+		expect(await gofmtFormatter.resolveCommand?.(file, layout.main)).toEqual([
+			link,
+			"-w",
+			file,
+		]);
 	});
 
 	it("A9: the installer does not report a project binary as an installed tool", async () => {
