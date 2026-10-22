@@ -782,8 +782,11 @@ function commandStringHasGuardedVerb(
  * Whether a word the model cannot read may start a guarded command (#4739). The
  * word model says what it cannot read (`DecodedShellWord.hidden`); this is the
  * gate's answer, and it fails closed: the word may be any word. As git, a
- * later word that is, or may be, a governed verb guards the command
- * (`$g push`). As `eval`, a launcher or its command-string switch, a later
+ * later word that is a governed verb guards the command (`$g push`), and so
+ * does a later unread word when the first unread word is the command word
+ * itself (`$g $v`). After a readable command word an unread word is an
+ * argument, so `cp $SRC $DST` stays plain (round 6); `env $g $v` is the cost,
+ * as on master. As `eval`, a launcher or its command-string switch, a later
  * word that holds a guarded command guards it (`bash $c 'git push'`,
  * `$e 'git push'`, round 4). Each later word is read alone, as `-c` takes one:
  * read joined, `$SHELL -c 'git status'` would put git at a non-leading index.
@@ -807,7 +810,7 @@ function hidesGuardedVerb(
 			.slice(firstHidden + 1)
 			.some(
 				(word) =>
-					word.hidden ||
+					(firstHidden === 0 && word.hidden) ||
 					matcher.matchesVerb(word.text, []) ||
 					commandStringHasGuardedVerb([word], depth + 1, matcher),
 			)

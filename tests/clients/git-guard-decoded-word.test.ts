@@ -568,6 +568,14 @@ const ROWS: readonly Row[] = [
 		guard: true,
 	},
 	{
+		// Recurrence: round 6 limits the later-unread-word clause to an unread
+		// executable; dropping that arm would miss this (verify r5 class A).
+		row: "expansions as the executable and the verb (r6 keep)",
+		command: "$g $v",
+		bash: "push",
+		guard: true,
+	},
+	{
 		row: "expansion as the verb",
 		command: "git $v",
 		bash: "push",
@@ -656,6 +664,55 @@ const ROWS: readonly Row[] = [
 	{
 		row: "expansion in a text consumer",
 		command: "echo $g push",
+		bash: null,
+		guard: false,
+	}, // Round 6 (verify r5 class A): an unread word after a readable command
+	// word is an argument; a second unread word does not make it git.
+	{
+		row: "an unread argument and a readable one (r6)",
+		command: "cp $SRC dst",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "two unread arguments of an ordinary command (r6)",
+		command: "cp $SRC $DST",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "two unread arguments of a read-only git verb (r6)",
+		command: "git status $A $B",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "two unread arguments of git add (r6)",
+		command: "git add $A $B",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "two unread arguments of a reader (r6)",
+		command: "cat $A $B",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "an unread output and URL (r6)",
+		command: "curl -s -o $OUT $URL",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "an unread output and URL, wget (r6)",
+		command: "wget -q -O $OUT $URL",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "brace words of xargs (r6)",
+		command: "xargs -I{} echo {}",
 		bash: null,
 		guard: false,
 	},
