@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetBoundedTelemetry } from "../../clients/bounded-telemetry.js";
 import {
 	getDegradationSummary,
@@ -20,6 +20,21 @@ import {
 } from "../../clients/test-runner-client.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { setProjectTrustState } from "../../clients/project-trust.js";
+
+// Host isolation only (#4709 slice 3b round 2): the cases here that reach
+// runTestFileAsync without a local runner would otherwise run the REAL
+// `findGlobalBinary`, which spawns the host's `which`/npm/pnpm/yarn and so
+// depends on what the maintainer's machine has installed. No case in this file
+// asserts on the lookup (the observing cases moved to
+// test-runner-resolve-exec.test.ts, against the PATH-probe stub), so the
+// answer is a constant `undefined`. Recurrence: Greptile P2 on #4754, where
+// dropping this mock leaked 21 host probes per run (npm, pnpm and yarn each).
+vi.mock("../../clients/package-manager.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/package-manager.js")
+	>()),
+	findGlobalBinary: async () => undefined,
+}));
 
 const cleanups: Array<() => void> = [];
 

@@ -56,6 +56,7 @@ import {
 
 describe.skipIf(!PATH_PROBE_STUB_SUPPORTED)("runRebuild", () => {
 	let env: ReturnType<typeof setupTestEnvironment>;
+	let stubEnv: ReturnType<typeof setupTestEnvironment>;
 	let repoRoot: string;
 	let stub: PathProbeStub;
 
@@ -66,17 +67,25 @@ describe.skipIf(!PATH_PROBE_STUB_SUPPORTED)("runRebuild", () => {
 		env = setupTestEnvironment("pi-lens-rebuild-");
 		repoRoot = env.tmpDir;
 		fs.writeFileSync(path.join(repoRoot, "tsconfig.dist.json"), "{}");
-		stub = installPathProbeStub(repoRoot);
+		// The stand-ins live OUTSIDE the project handed to runRebuild: a PATH
+		// entry under the project root is what a trust rule over the lookup
+		// refuses (#4530), and the project here must stay a clean project.
+		stubEnv = setupTestEnvironment("pi-lens-rebuild-stub-");
+		stub = installPathProbeStub(stubEnv.tmpDir);
 	});
 
 	afterEach(() => {
 		stub.restore();
 		_resetPackageManagerCache();
+		stubEnv.cleanup();
 		env.cleanup();
 	});
 
 	it("runs the resolved manager's script and reports it", async () => {
 		fs.writeFileSync(path.join(repoRoot, "bun.lock"), "");
+		// npm is installed too and wins the preference order, so bun is chosen
+		// only because the project's lockfile declares it.
+		stub.plantManager("npm");
 		stub.plantBun();
 		safeSpawnAsync.mockResolvedValue({
 			stdout: "done",
@@ -133,6 +142,9 @@ describe.skipIf(!PATH_PROBE_STUB_SUPPORTED)("runRebuild", () => {
 
 	it("reports failure on a non-zero exit", async () => {
 		fs.writeFileSync(path.join(repoRoot, "pnpm-lock.yaml"), "");
+		// npm outranks pnpm in the preference order; pnpm wins only through the
+		// lockfile.
+		stub.plantManager("npm");
 		stub.plantManager("pnpm");
 		safeSpawnAsync.mockResolvedValue({
 			stdout: "",
