@@ -374,9 +374,10 @@ function canonicalizeGuardCommand(command: string): string {
 	let collapsed = "";
 	let pendingSpace = false;
 	quote = undefined;
-	ansiC = false;
-	for (let i = 0; i < result.length; i++) {
-		const ch = result[i] as string;
+	// This pass does not know ANSI-C strings (#4739): on `$'\''` its quote state
+	// flips, and only which blanks it collapses changes. The lexer splits on
+	// every blank either way, and no decision reads the collapsed blanks.
+	for (const ch of result) {
 		if (!quote && ch === "\n") {
 			collapsed += ch;
 			pendingSpace = false;
@@ -391,10 +392,6 @@ function canonicalizeGuardCommand(command: string): string {
 		collapsed += ch;
 		if (!quote && (ch === "'" || ch === '"')) {
 			quote = ch === "'" ? "single" : "double";
-			ansiC = ch === "'" && opensAnsiC(result, i);
-		} else if (quote === "single" && ansiC && ch === "\\") {
-			collapsed += result[i + 1] ?? "";
-			i += 1;
 		} else if (
 			(quote === "single" && ch === "'") ||
 			(quote === "double" && ch === '"')

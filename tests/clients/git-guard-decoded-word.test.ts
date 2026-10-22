@@ -127,6 +127,13 @@ const ROWS: readonly Row[] = [
 		guard: true,
 	},
 	{
+		// The body scanner ended the string at the escaped quote and lost the `)`.
+		row: "escaped quote in ANSI-C inside a substitution",
+		command: "echo $(: $'\\'' ; git push)",
+		bash: "push",
+		guard: true,
+	},
+	{
 		// So did the `$IFS` pass: it read `git${IFS}push` as quoted text.
 		row: "escaped quote in ANSI-C, then git${IFS}push",
 		command: ": $'\\'' ; git${IFS}push",
@@ -218,6 +225,12 @@ const ROWS: readonly Row[] = [
 	{
 		row: "double-quoted expansion as the executable",
 		command: '"$g" push',
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "locale-quoted expansion as the executable",
+		command: '$"$g" push',
 		bash: "push",
 		guard: true,
 	},
