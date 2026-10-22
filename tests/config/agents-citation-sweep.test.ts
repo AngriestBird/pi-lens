@@ -30,9 +30,10 @@
  * empty sweep (a dead sweep passes everything).
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import { assertNonEmptyScan, listSourceFiles } from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const SELF = path.relative(REPO_ROOT, import.meta.filename);
@@ -52,18 +53,22 @@ const ROOT_CONFIG_EXTENSIONS = new Set([
 	".cjs",
 	".mjs",
 ]);
-const SKIP_DIRS = new Set(["node_modules", ".git", "fixtures", ".probe-home"]);
 const EXTENSIONS = new Set([
 	".ts",
 	".tsx",
+	".mts",
 	".js",
 	".mjs",
 	".cjs",
 	".md",
 	".yml",
 	".yaml",
+	".json",
+	".toml",
+	".sh",
+	".txt",
 ]);
-const CITATION = /AGENTS\.md,?[ \t]+"([^"]+)"/g;
+const CITATION = /AGENTS\.md,?[ \t]+(["'])([^\n]+?)\1/g;
 const COMMENT_PREFIX = /^[ \t]*(?:\/\/+|\*|#)[ \t]?/;
 
 /** A compiled `.js` or `.d.ts` emitted next to its `.ts` source by the build. */
@@ -76,17 +81,34 @@ function isBuildOutput(dir: string, name: string): boolean {
 	return source !== undefined && fs.existsSync(path.join(dir, source));
 }
 
-function walk(dir: string, out: string[]): void {
-	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-		if (entry.isDirectory()) {
-			if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name), out);
-		} else if (
-			EXTENSIONS.has(path.extname(entry.name)) &&
-			!isBuildOutput(dir, entry.name)
-		) {
-			out.push(path.join(dir, entry.name));
+/**
+ * Every swept source: the shared walker (`listSourceFiles`, which skips
+ * `.git`, `node_modules`, `.claude` and `.probe-home`) over each root, then
+ * the citation filters layered on top: fixture captures, build output and
+ * this file are out.
+ */
+function sweptSources(): string[] {
+	const files: string[] = [];
+	for (const root of SWEEP_ROOTS) {
+		const dir = path.join(REPO_ROOT, root);
+		if (fs.existsSync(dir)) {
+			files.push(
+				...listSourceFiles(dir, {
+					extensions: [...EXTENSIONS],
+					skipDeclarations: false,
+				}),
+			);
 		}
 	}
+	files.push(...rootConfigFiles());
+	return files.filter((file) => {
+		const rel = path.relative(REPO_ROOT, file);
+		return (
+			rel !== SELF &&
+			!rel.split(path.sep).includes("fixtures") &&
+			!isBuildOutput(path.dirname(file), path.basename(file))
+		);
+	});
 }
 
 /** Repo-root config files: dotfiles and config-extension files, not root markdown. */
@@ -143,7 +165,7 @@ function citationsIn(file: string): { line: number; name: string }[] {
 			if ((match.index ?? 0) < line.length) {
 				found.push({
 					line: index + 1,
-					name: match[1].replace(/\s+/g, " ").trim(),
+					name: match[2].replace(/\s+/g, " ").trim(),
 				});
 			}
 		}
@@ -151,18 +173,24 @@ function citationsIn(file: string): { line: number; name: string }[] {
 	return found;
 }
 
+/**
+ * The resolver: the citations whose quoted name is not a live heading. The
+ * real sweep and the planted case both call this, so a change to either the
+ * matcher or the resolver is seen by the planted case.
+ */
+function danglingCitations(
+	citations: { file: string; line: number; name: string }[],
+	headings: Set<string>,
+): string[] {
+	return citations
+		.filter((hit) => !headings.has(hit.name))
+		.map((hit) => `${hit.file}:${hit.line} AGENTS.md "${hit.name}"`);
+}
+
 describe("AGENTS.md section citations resolve (#4361 C8)", () => {
 	it("every quoted AGENTS.md section cited under the swept roots is a live heading", () => {
 		const headings = liveHeadings();
-		const files: string[] = [];
-		for (const root of SWEEP_ROOTS) {
-			const dir = path.join(REPO_ROOT, root);
-			if (fs.existsSync(dir)) walk(dir, files);
-		}
-		files.push(...rootConfigFiles());
-		const sweptFiles = files.filter(
-			(file) => path.relative(REPO_ROOT, file) !== SELF,
-		);
+		const sweptFiles = sweptSources();
 		const citations = sweptFiles.flatMap((file) =>
 			citationsIn(file).map((hit) => ({
 				file: path.relative(REPO_ROOT, file),
@@ -177,9 +205,47 @@ describe("AGENTS.md section citations resolve (#4361 C8)", () => {
 		assertNonEmptyScan("citation sweep files", sweptFiles.length, 500);
 		assertNonEmptyScan("AGENTS.md citations read", citations.length, 15);
 
-		const dangling = citations
-			.filter((hit) => !headings.has(hit.name))
-			.map((hit) => `${hit.file}:${hit.line} AGENTS.md "${hit.name}"`);
-		expect(dangling, "dangling AGENTS.md section citations").toEqual([]);
+		expect(
+			danglingCitations(citations, headings),
+			"dangling AGENTS.md section citations",
+		).toEqual([]);
+	});
+
+	// Recurrence (CodeRabbit, PR 4767 round 3): C8 derives its population from
+	// the tree. A matcher or resolver that silently reports nothing keeps the
+	// real sweep green, and the citation-count floor only catches zero matches.
+	// This planted file carries one dangling and one live citation in both quote
+	// spellings. The same matcher and resolver must report exactly the dangling
+	// two, or the guard is not proven to red on a real miss.
+	it("reports a planted dangling citation through the same matcher and resolver", () => {
+		const headings = liveHeadings();
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-c8-planted-"));
+		try {
+			const planted = path.join(dir, "planted.ts");
+			fs.writeFileSync(
+				planted,
+				[
+					'// see AGENTS.md "No Such Planted Heading" for the rule',
+					"// and AGENTS.md 'Another Missing Heading' too",
+					'// live: AGENTS.md "Test requirements" still resolves',
+					"",
+				].join("\n"),
+			);
+			const hits = citationsIn(planted).map((hit) => ({
+				file: "planted.ts",
+				...hit,
+			}));
+			expect(hits.map((hit) => hit.name)).toEqual([
+				"No Such Planted Heading",
+				"Another Missing Heading",
+				"Test requirements",
+			]);
+			expect(danglingCitations(hits, headings)).toEqual([
+				'planted.ts:1 AGENTS.md "No Such Planted Heading"',
+				'planted.ts:2 AGENTS.md "Another Missing Heading"',
+			]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

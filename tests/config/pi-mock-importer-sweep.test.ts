@@ -131,7 +131,7 @@ describe("pi-mock importer ratchet (#4632, recurrence #4631)", () => {
 				"PI_MOCK_IMPORTERS (tests/support/pi-mock-importers.ts); the double throws " +
 				"at load otherwise. Host-semantics cases go through tier 1 " +
 				"(tests/support/pi-runner.ts) or tier 2 (tests/support/pi-session.ts); " +
-				"AGENTS.md 'Testing' says which. A row for a file that no longer uses " +
+				"AGENTS.md 'Test requirements' says which. A row for a file that no longer uses " +
 				"the double must be deleted.",
 		});
 		expect(audit.problems).toEqual([]);
