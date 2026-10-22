@@ -289,6 +289,12 @@ const ROWS: readonly Row[] = [
 		guard: true,
 	},
 	{
+		row: "eval, single-quoted string, commit",
+		command: "eval 'git commit -m x'",
+		bash: "commit",
+		guard: true,
+	},
+	{
 		row: "eval after a double dash",
 		command: 'eval -- "git push"',
 		bash: "push",
