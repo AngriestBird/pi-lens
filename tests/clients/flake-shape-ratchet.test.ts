@@ -1738,7 +1738,7 @@ describe("flake-shape ratchet — admission gate", () => {
 	// #3546 MUTATION: the cache must be load-bearing, not dead code — poison
 	// it and show `supportHelperHasLaneProof`'s answer for a REAL admitted
 	// entry flips, then show it flips back once the cache is restored. This
-	// is the guard's own red-on-neuter proof (AGENTS.md "mutation-proof").
+	// is the guard's own red-on-neuter proof (docs/engineering-principles.md "Mutation output is quoted, not ticked").
 	it("MUTATION (#3546): a poisoned import-targets cache flips supportHelperHasLaneProof's answer", () => {
 		const included = new Set([
 			...wallClockBudgetInclude(),

@@ -335,7 +335,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		expect(mutatedJob.if).toBeUndefined();
 	});
 
-	// Mutation-proof, the OTHER direction (AGENTS.md "mutate both ways"):
+	// Mutation-proof, the OTHER direction (docs/engineering-principles.md "Mutation output is quoted, not ticked"):
 	// swapping `always()` for `success()` (GitHub's own implicit default when
 	// no `if:` is given -- functionally identical to #2723's actual bug)
 	// must fail this file's own gate assertion just as surely as deleting

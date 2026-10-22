@@ -1909,7 +1909,7 @@ export async function computeCascadeForFile(
 		// the four display sites below rendered. Aggregate, not per neighbour: a
 		// cascade walks up to `CASCADE_NEIGHBOUR_BUDGET` (40) neighbours per edit,
 		// so a record inside the loop would be per-occurrence logging on a per-edit
-		// path — one bounded row per RUN instead (AGENTS.md "bounded observability").
+		// path — one bounded row per RUN instead (docs/engineering-principles.md "Every new failure path gets bounded observability").
 		// `policyElapsedMs` accumulates ONLY the stack's own time (round 2, F2): a
 		// clock started here would have spanned the whole `touchFile` fan-out and
 		// reported the neighbour WALK as the policy phase — hundreds of ms against

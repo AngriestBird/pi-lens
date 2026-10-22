@@ -19,7 +19,7 @@
  * unknown one fails rather than being skipped, which is what makes "advertise a
  * new capability with no sender" red.
  *
- * Detector policy (AGENTS.md "detectors match code, not prose"): the needle IS
+ * Detector policy (docs/engineering-principles.md "Detectors match code, not prose"): the needle IS
  * a string literal — the wire method name — so the scan keeps strings and
  * blanks COMMENTS (`stripSource(..., { strings: "keep" })`). A comment or a
  * doc-block quoting `"textDocument/didSave"` therefore cannot satisfy the

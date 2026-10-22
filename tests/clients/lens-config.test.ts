@@ -230,6 +230,24 @@ describe("global pi-lens config", () => {
 		expect(resolvePiLensFlag("immediate-format", false, parsed)).toBe(true);
 	});
 
+	// #4637: known project sections must not be diagnosed as spelling mistakes.
+	it.each(["rules", "maxProjectFiles", "reviewGraph", "trivy", "helm"])(
+		"names the project scope of %s in global config (#4637)",
+		(key) => {
+			const home = makeTempHome();
+			const configPath = writeConfig(home, JSON.stringify({ [key]: {} }));
+			expect(loadPiLensGlobalConfig(configPath)).not.toHaveProperty(key);
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					`"${key}" is a project-scoped pi-lens setting; set it in <project>/.pi-lens.json, not in the global config; ignored`,
+				),
+			);
+			expect(console.error).not.toHaveBeenCalledWith(
+				expect.stringContaining(`unknown key "${key}"`),
+			);
+		},
+	);
+
 	it("warns once on an unknown top-level config key but not on recognized ones", () => {
 		const home = makeTempHome();
 		const configPath = writeConfig(

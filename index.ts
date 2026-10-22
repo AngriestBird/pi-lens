@@ -201,9 +201,12 @@ import { logVanishedInstances } from "./clients/vanished-instance-marker.js";
 import {
 	buildMemorySample,
 	formatMemoryHealthLine,
+	type MemorySample,
 	recordMemorySampleOutcome,
+	recordMemoryTurnEnd,
 	resetMemorySamplerCadence,
 	shouldEmitMemorySampleAdaptive,
+	takeMemoryIdleGapMs,
 } from "./clients/memory-sampler.js";
 import { dumpActiveHandles } from "./clients/debug-handles.js";
 import {
@@ -3231,6 +3234,44 @@ function activateExtension(hostPi: ExtensionAPI) {
 		handleToolExecutionEnd(event, runtime.readGuard);
 	});
 
+	/** #1123 item 2 / #1332: one `memory_sample` latency record. `idleGapMs` is
+	 *  the post-idle tag (#1332); null for the periodic cadence sample. Returns
+	 *  the sample, or null when the observability failed; it never fails the
+	 *  turn it rides on. */
+	const emitMemorySample = (idleGapMs: number | null): MemorySample | null => {
+		try {
+			const sample = buildMemorySample(
+				runtime.wordIndex,
+				undefined,
+				undefined,
+				{
+					sessionAgeMs: Math.max(0, Date.now() - runtime.sessionStartedAt),
+					sessionStartedAt: runtime.sessionStartedAt,
+					turnCount: runtime.turnIndex,
+					// #2130: root discriminator. Two roots in one host emitted
+					// the same turnIndex with nothing to separate them.
+					root: getActivePrimaryRoot(),
+				},
+			);
+			logLatency({
+				type: "phase",
+				filePath: "<pi-lens>",
+				phase: "memory_sample",
+				durationMs: 0,
+				metadata: {
+					turnIndex: runtime.turnIndex,
+					...sample,
+					...(idleGapMs === null
+						? { idle: false }
+						: { idle: true, idleMs: idleGapMs }),
+				},
+			});
+			return sample;
+		} catch {
+			return null;
+		}
+	};
+
 	// --- Turn end: batch jscpd/madge on collected files, then clear state ---
 	// Clear cascade snapshot at start of each new turn so stale data never leaks
 	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
@@ -3250,6 +3291,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// advances only its own turn identity and per-turn records; the
 		// coordinator's turn state is the primary's.
 		runtime.beginTurn(getStableSessionId(ctx));
+		// #1332: post-idle heap reading. Bounded by this session's turn-end marker:
+		// at most one idle sample per idle period.
+		const idleGapMs = takeMemoryIdleGapMs(getStableSessionId(ctx), Date.now());
+		if (idleGapMs !== null) emitMemorySample(idleGapMs);
 		// Capture before any awaited turn-end work can let a sibling session start.
 		turnStartScope = scope ?? runtime.sessionScope;
 		if (
@@ -3571,6 +3616,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
 	const onTurnEnd = async (_event: any, ctx: any) => {
 		if (!lensEnabled) return;
+		// #1332: the idle gap is measured from here to this session's next turn
+		// start; another session's turn never reads it (#4761 review F1).
+		recordMemoryTurnEnd(getStableSessionId(ctx), Date.now());
 		// Esc/abort during the turn-end flush (knip/madge/tests + debounced
 		// dispatch) kills in-flight children instead of waiting out their timeout.
 		try {
@@ -3706,31 +3754,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// turn), and a subagent's fractional turn key never meets `% N`.
 			const cadenceTurn = runtime.turnStartCount;
 			if (shouldEmitMemorySampleAdaptive(cadenceTurn)) {
-				try {
-					const sample = buildMemorySample(
-						runtime.wordIndex,
-						undefined,
-						undefined,
-						{
-							sessionAgeMs: Math.max(0, Date.now() - runtime.sessionStartedAt),
-							sessionStartedAt: runtime.sessionStartedAt,
-							turnCount: runtime.turnIndex,
-							// #2130: root discriminator. Two roots in one host emitted
-							// the same turnIndex with nothing to separate them.
-							root: getActivePrimaryRoot(),
-						},
-					);
-					logLatency({
-						type: "phase",
-						filePath: "<pi-lens>",
-						phase: "memory_sample",
-						durationMs: 0,
-						metadata: { turnIndex: runtime.turnIndex, ...sample },
-					});
+				const sample = emitMemorySample(null);
+				if (sample)
 					recordMemorySampleOutcome(sample.process.heapUsedBytes, cadenceTurn);
-				} catch {
-					// best-effort observability — never fail turn_end over this
-				}
 			}
 
 			// #1123 item 3: bounded smells re-check, same cadence style as the memory

@@ -4614,6 +4614,10 @@ export class LSPService {
 									silent,
 									options.saved === true,
 									options.readStamp,
+									// #2066: the #1095 fingerprint `touchFile` already computed for
+									// these exact bytes (`contentHash` above). Without it the send
+									// walks the document again for the same sha256.
+									contentHash,
 								)
 								.then((sent) => sent !== false);
 							// #1714: the document is now in this auxiliary's input queue,

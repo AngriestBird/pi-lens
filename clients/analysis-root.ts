@@ -273,7 +273,7 @@ function holdsProjectConfig(dir: string): boolean {
 /**
  * May this ROOT receive session bookkeeping? The session root, a directory
  * under it, and the session repository's linked worktrees may; an adopted
- * project must not (AGENTS.md "Analysis-root invariant"). The root form of
+ * project must not (AGENTS.md "What it is"). The root form of
  * {@link resolveAnalysisRoot}, which answers "session" for any file under the
  * session root (a monorepo package's client is rooted there, #4532 round 5,
  * review F7): checkout identity is read at the root itself, not at a child
