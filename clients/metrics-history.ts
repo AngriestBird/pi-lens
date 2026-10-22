@@ -86,7 +86,9 @@ function getCurrentCommit(startDir: string): string {
 		timeout: 5000,
 		cwd: spawnDir,
 	});
-	if (result.error || result.status !== 0) return "unknown";
+	// A failed lookup, a refused spawn and a failed `rev-parse` all leave
+	// stdout empty (git prints its error on stderr only), so an empty answer
+	// is the failure; a separate status check could not change the result.
 	return result.stdout.trim() || "unknown";
 }
 
