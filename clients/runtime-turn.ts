@@ -6149,6 +6149,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		} else {
 			const allAffectedFiles = [
+				// #4617: confirmed-clean checks can resolve a file without writing it.
+				...resolvedBlockerFileList.map((entry) => entry.filePath),
 				...files.map((file) => resolveRunnerPath(cwd, file)),
 				...cascadeResults.flatMap((result) =>
 					result.neighbors
