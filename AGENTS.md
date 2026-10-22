@@ -1516,8 +1516,8 @@ file-scoped worklist and receives no project-wide scanner output.
   record's writers in `clients/git-guard.ts` and the turn-end composer read it
   at any age. Each blocker section keeps the session that wrote it (top-level
   `sessionId`, other owners in `carriedBlockers`; a record without that field
-  is one owner's), and a writer replaces only its own session's sections
-  (#4738). Another session's section leaves only for a file a dispatch checked
+  is one owner's), and a writer replaces only its own session's sections.
+  Another session's section leaves only for a file a dispatch checked
   whole and found clean (`checkedWholeFile`), or whose file is gone. The gate
   judges a record alone only when this session is its sole owner. A settled
   turn end drops this session's sections and retires a record that is this
