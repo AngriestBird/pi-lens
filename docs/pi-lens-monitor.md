@@ -34,6 +34,11 @@ memory growth:
   row in latency.log records the release and its trigger).
 - samplerDurationMs measures the sampler's own record-assembly wall time,
   excluding the surrounding turn.
+- idle is false on the periodic sample. It is true on the one sample written
+  at a session's first turn start after its own turn end, when that gap is
+  longer than the TS idle-evict window (`getLspIdleEvictMs()`, 20 minutes by
+  default). That record also carries idleMs, the measured gap. The heap
+  reading is process-wide; the gap belongs to the session whose turn started.
 
 All fields are in the existing record and are O(1) reads or latest-value
 snapshots; no additional telemetry sink is created.
