@@ -303,30 +303,6 @@ describe("smoke-tools --lsp-gate readiness rung (#3405)", () => {
 
 		expect(execute).toHaveBeenCalledOnce();
 	});
-
-	// Recurrence (#3405 H1): the Expert fixture's bad.ex sat at the Mix project
-	// root, outside the default `elixirc_paths` (["lib"]), so Expert never had a
-	// compile error to publish and the row read as a server limit for six
-	// weeks. The seeded file must live under lib/ and the project must not
-	// redirect its compile paths.
-	it("seeds the Expert error where Mix compiles it", () => {
-		const expert = LSP_FIXTURES.find((entry) => entry.lang === "expert") as {
-			dir: string;
-			file: string;
-			lspGate?: boolean;
-			lspGateReadiness?: unknown;
-		};
-		const repoRoot = path.resolve(import.meta.dirname, "../..");
-		expect(expert.file.startsWith("lib/")).toBe(true);
-		expect(fs.existsSync(path.join(repoRoot, expert.dir, expert.file))).toBe(
-			true,
-		);
-		expect(
-			fs.readFileSync(path.join(repoRoot, expert.dir, "mix.exs"), "utf8"),
-		).not.toContain("elixirc_paths");
-		expect(expert.lspGate).toBe(true);
-		expect(expert.lspGateReadiness).toBeTruthy();
-	});
 });
 
 // #4320/#4346: the witness's verdicts, through its real entry with a scripted

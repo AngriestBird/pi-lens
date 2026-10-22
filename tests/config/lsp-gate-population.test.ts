@@ -16,7 +16,7 @@
 // commented-out block can satisfy any assertion here (#3217 F5 — the
 // "detectors match code, not prose" screen, satisfied structurally instead of
 // by comment-and-string blanking).
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -199,6 +199,45 @@ describe("LSP clean-gate population (#3217)", () => {
 			);
 			expect(source, fixture.lang).toContain(fixture.lspGateMarker);
 		}
+	});
+
+	// #3405 H1 recurrence: the Expert row's seeded bad.ex sat at the Mix project
+	// root, outside the default `elixirc_paths` (["lib"]), so Expert had no
+	// compile error to publish and the row read as a server limit for six weeks
+	// (the same fixture was already known to be uncompiled:
+	// scripts/capture-runner-fixtures.mjs). The F# row had the same shape: an
+	// fsproj with no Compile item does not own Program.fs. A seed outside its
+	// project's compile set proves nothing about the server. Scope: the two
+	// manifest kinds whose compile set is explicit and cheap to read.
+	it("seeds every Mix and F# fixture inside its project's compile set (#3405)", () => {
+		let checked = 0;
+		for (const fixture of fixtures) {
+			const dir = path.join(repoRoot, fixture.dir);
+			const manifests = readdirSync(dir);
+			const fsproj = manifests.find((name) => name.endsWith(".fsproj"));
+			if (manifests.includes("mix.exs")) {
+				const mix = readFileSync(path.join(dir, "mix.exs"), "utf8");
+				expect(
+					mix,
+					`${fixture.lang}: mix.exs redirects compile paths`,
+				).not.toContain("elixirc_paths");
+				expect(
+					fixture.file.startsWith("lib/"),
+					`${fixture.lang}: ${fixture.file} is outside Mix's default elixirc_paths ["lib"]`,
+				).toBe(true);
+				checked += 1;
+			}
+			if (fsproj) {
+				const project = readFileSync(path.join(dir, fsproj), "utf8");
+				expect(
+					project.includes(`<Compile Include="${fixture.file}"`),
+					`${fixture.lang}: ${fsproj} lists no Compile item for ${fixture.file}`,
+				).toBe(true);
+				checked += 1;
+			}
+		}
+		// Floor: elixir, expert and fsharp. An empty scan would pass vacuously.
+		expect(checked).toBeGreaterThanOrEqual(3);
 	});
 
 	it("requires every exemption to state a reason, not just carry the key", () => {

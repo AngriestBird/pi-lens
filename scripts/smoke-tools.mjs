@@ -1065,13 +1065,15 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "elixir",
-		setup: "mix compile",
+		setup: "mix deps.get",
 		lspGateExempt:
 			"availability limit: elixir-ls has no installer registry entry and remained unavailable on nightly 36053702231; the mix project setup is ready for the installer follow-up; see #3311",
 		lspGateMarker: "undefined_function()",
 		serverId: "elixir",
-		dir: "tests/fixtures/tool-smoke/elixir",
-		file: "bad.ex",
+		// Same fixture as Expert's row: tool-smoke/elixir keeps bad.ex at the
+		// project root, which Mix never compiles (#3405).
+		dir: "tests/fixtures/tool-smoke/elixir-mix",
+		file: "lib/bad.ex",
 		serverHint: "elixir-ls",
 		tools: ["elixir-ls"],
 		disableServers: ["expert"],
@@ -1094,7 +1096,7 @@ const LSP_FIXTURES = [
 		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
-		dir: "tests/fixtures/tool-smoke/expert",
+		dir: "tests/fixtures/tool-smoke/elixir-mix",
 		file: "lib/bad.ex",
 		serverHint: "Expert (alternate of ElixirLS)",
 		tools: ["expert"],
