@@ -184,7 +184,7 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 
 	// The gate the look asks: the session root and its repository's linked
 	// worktrees may allocate session bookkeeping; an adopted project may not
-	// (AGENTS.md "Analysis-root invariant", Greptile round 3).
+	// (AGENTS.md "What it is" (analysis-root invariant), Greptile round 3).
 	it("calls the session root and its linked worktrees bookkeeping roots, an adopted project not", () => {
 		// A linked worktree laid out the way git writes it: a `.git` FILE naming
 		// a gitdir under the session checkout's own `.git/worktrees/`.
@@ -237,7 +237,7 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		}
 	});
 
-	// Greptile round 3: AGENTS.md "Analysis-root invariant" — an adopted root may
+	// Greptile round 3: AGENTS.md "What it is" (analysis-root invariant) — an adopted root may
 	// host a client and receive the look, but never session bookkeeping, so the
 	// look must allocate no project sequence for it.
 	it("restarts an adopted root's client without session bookkeeping", async () => {

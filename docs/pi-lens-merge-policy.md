@@ -186,7 +186,7 @@ bound helper because the brief deferred the fold without a reason.
 
 ## External reports (orchestrator)
 
-The contract lives in AGENTS.md, "Issue triage (standing rule)" — assess the
+The contract lives in AGENTS.md, "Issue triage & labels" — assess the
 report against the code before accepting or dispatching, ask the one or two
 facts that would change the design, **do not dispatch work that depends on an
 unanswered load-bearing question**, mirror the answer on the issue and point

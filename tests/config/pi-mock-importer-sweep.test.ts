@@ -9,7 +9,7 @@
  * (what pi does with a handler's return value, what the model receives, how pi
  * orders a session) belong to tier 1 (`tests/support/pi-runner.ts`, a real
  * `ExtensionRunner`) or tier 2 (`tests/support/pi-session.ts`, a real
- * `AgentSession`), see AGENTS.md "Testing".
+ * `AgentSession`), see AGENTS.md "Test requirements".
  *
  * THE GATE IS A LOAD-TIME ADMIT LIST, not a scan. `pi-mock.ts` calls
  * `piMockAdmission` (`tests/support/pi-mock-importers.ts`) when it loads and
