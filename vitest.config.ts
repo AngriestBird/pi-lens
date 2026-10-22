@@ -459,6 +459,11 @@ const lspSpawnHeavyInclude = [
 	// project command overrides); waits on real handshakes and pull rounds like
 	// #4320's.
 	"tests/tools/lsp-diagnostics-opengrep-disabled-4323.test.ts",
+	// #4763: the production lsp_diagnostics handler and LSPService over real
+	// stdio fake-server children (the JSON server and an Opengrep stand-in that
+	// publishes its empty pre-rules set, then the finding, 250 ms apart); waits on
+	// real handshakes and publish rounds, the #1022/#2332 shape of #4323's.
+	"tests/tools/lsp-diagnostics-opengrep-pre-rules-4763.test.ts",
 	// #3750: launches the fake server THROUGH the production `RustServer`,
 	// `OCamlServer` and `GoServer` entries (PATH shims) and waits on a real
 	// initialize handshake plus a pull round trip per case -- the same

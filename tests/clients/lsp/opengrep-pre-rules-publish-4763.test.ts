@@ -1,3 +1,4 @@
+// flake-shape: in-process-mock — the lsp_aux_wait_outcome and lsp_rules_refreshed rows are outside the getRecentLoggedPhases ring (LAST_PHASE_EXCLUDED) and test mode skips the file sink, so a passed-through logLatency spy is the only reader of the per-touch published counts and held-publish counter (#4763)
 /**
  * #4763 — the publish handler's hold on opengrep's EMPTY publish that precedes
  * `semgrep/rulesRefreshed`.
