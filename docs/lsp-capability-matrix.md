@@ -139,7 +139,7 @@ Two bounded guards keep that preservation from hiding a dead instrument
 re-observe is stamped once with the date of its first miss and degrades to
 `unknown` once five calendar days have elapsed since it (skipped nights do not
 stall it, and a re-observation clears the stamp). `empty-first` cells are never
-expired: they back the live `emptyFirstPublish` markers (php, terraform) and
+expired: they back the live `emptyFirstPublish` markers (php) and
 expiring one would erase the measurement behind a marker. That exception is
 bounded too (#4615): the refresh stamps the FIRST night it does not re-observe an
 `empty-first` cell, and the first-publish census reds once that stamp is five
@@ -189,7 +189,7 @@ carries the named admission until then.
 | dockerfile | docker-langserver | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | dockerfile-official | docker-language-server (official) | push-only | publishes-versioned | direct | 2 | dev+ci |
 | toml | taplo | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| terraform | terraform-ls | push-only | publishes-unversioned | empty-first | 2* | dev+ci |
+| terraform | terraform-ls | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | prisma | @prisma/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | php | intelephense | push-only | publishes-unversioned | empty-first | 2* | dev+ci |
 | zig | zls | push-only | publishes-unversioned | direct | 2* | dev+ci |
@@ -295,5 +295,5 @@ date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
 counts (#3989). Regenerated every run; never a measurement.
 
 ```json
-{"first-publish":{"terraform":{"pendingFirstPublish":"direct","runs":1}},"idle-eviction":{"docker-official":{"nights":[{"day":"2026-10-21","rssMb":64,"coldMs":811}]},"kotlin":{"nights":[{"day":"2026-10-21","rssMb":292,"coldMs":2130}]},"powershell":{"nights":[{"day":"2026-10-21","rssMb":166,"coldMs":2718}]},"rust":{"nights":[{"day":"2026-10-21","rssMb":598,"coldMs":2343}]},"svelte":{"nights":[{"day":"2026-10-21","rssMb":232,"coldMs":2383}]},"zizmor":{"nights":[{"day":"2026-10-21","rssMb":57,"coldMs":1613}]}}}
+{"idle-eviction":{"docker-official":{"nights":[{"day":"2026-10-21","rssMb":64,"coldMs":811}]},"kotlin":{"nights":[{"day":"2026-10-21","rssMb":292,"coldMs":2130}]},"powershell":{"nights":[{"day":"2026-10-21","rssMb":166,"coldMs":2718}]},"rust":{"nights":[{"day":"2026-10-21","rssMb":598,"coldMs":2343}]},"svelte":{"nights":[{"day":"2026-10-21","rssMb":232,"coldMs":2383}]},"zizmor":{"nights":[{"day":"2026-10-21","rssMb":57,"coldMs":1613}]}}}
 ```
