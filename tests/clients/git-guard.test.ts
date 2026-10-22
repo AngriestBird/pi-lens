@@ -3438,6 +3438,53 @@ describe("#4750: another session's text no file owns expires by its own write st
 		}
 	});
 
+	it("a settled turn end that drops this session's partition leaves the next owner's own stamp at the top", () => {
+		// RECURRENCE GUARDED: #4750. The settled rewrite spreads the stored
+		// record, so without the next owner's stamp the top would keep this
+		// session's later one, and the other session's report would outlive its
+		// window by the gap between the two writes.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-settled-stamp-");
+		try {
+			const mine = path.join(env.tmpDir, "b.ts");
+			fs.writeFileSync(mine, "x;\n");
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			const theirStamp = Date.now() - 20 * 60_000;
+			const ownText = composerSections([mine]);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: ownText,
+					blockerContent: ownText,
+					hasBlockers: true,
+					affectedFiles: [mine],
+					blockingFiles: [mine],
+					blockerWrittenAt: Date.now(),
+					carriedBlockers: [
+						{
+							sessionId: EARLIER,
+							blockerContent: TRIVY_LANE,
+							blockingFiles: [],
+							blockerWrittenAt: theirStamp,
+						},
+					],
+				}),
+			);
+
+			retireSettledGitGuardRecord(runtime, cache, env.tmpDir);
+
+			const stored = storedData(cache, env.tmpDir);
+			expect([owners(stored), stored?.blockerWrittenAt]).toEqual([
+				[EARLIER],
+				theirStamp,
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("refuses a record whose write stamp is not a number, at the top or carried", () => {
 		// RECURRENCE GUARDED: #4750. A stamp no age can be computed from would
 		// read as never past the window, so a corrupt record would keep text no
