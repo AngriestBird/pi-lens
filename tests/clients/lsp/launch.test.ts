@@ -134,9 +134,14 @@ describe("lsp launch", () => {
 		// resolver off `file-utils.ts` onto the cycle-free `probe-home-state.ts`
 		// leaf, so this doubles THAT module; doubling file-utils.js alone leaves
 		// launch.ts writing to the real (vitest-pinned) log root.
-		vi.doMock("../../../clients/probe-home-state.js", () => ({
-			getGlobalPiLensLogDir: () => tempDir,
-		}));
+		vi.doMock(
+			"../../../clients/probe-home-state.js",
+			async (importOriginal) => ({
+				// #4530: the data-dir resolver (`machineStateDir`) stays real.
+				...(await importOriginal()),
+				getGlobalPiLensLogDir: () => tempDir,
+			}),
+		);
 
 		try {
 			const { launchLSP } = await import("../../../clients/lsp/launch.js");

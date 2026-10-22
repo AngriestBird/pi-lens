@@ -444,7 +444,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// protocol's own field name, not a delivery tier).
 		"clients/gzip-stage-write.ts": 4,
 		"clients/install-diagnostics.ts": 4,
-		"clients/installer/index.ts": 26,
+		// 26 -> 28 (#4530), and the new launch.ts and metrics-history.ts rows:
+		// starts that moved onto the spawn seam read the spawn result's `error`
+		// field (SpawnResult.error), not a delivery tier.
+		"clients/installer/index.ts": 28,
 		"clients/installer/managed-tool-refresh.ts": 2,
 		"clients/instance-reaper.ts": 4,
 		"clients/instance-registry-lock.ts": 3,
@@ -458,10 +461,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/client.ts": 13,
 		"clients/lsp/index.ts": 24,
 		"clients/lsp/jvm-runtime.ts": 1,
+		"clients/lsp/launch.ts": 1,
 		"clients/lsp/server.ts": 13,
 		"clients/mcp/ipc.ts": 8,
 		"clients/mcp/review.ts": 8,
 		"clients/mcp/session.ts": 1,
+		"clients/metrics-history.ts": 1,
 		"clients/module-report.ts": 27,
 		// 3 -> 5 (#4493): readGitHead and listGitHeadDelta read the spawn
 		// result's `error` field (SpawnResult.error), not a delivery tier.
@@ -484,7 +489,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-agent-end.ts": 6,
 		"clients/runtime-tool-call.ts": 7,
 		"clients/runtime-turn.ts": 10,
-		"clients/safe-spawn.ts": 52,
+		// 52 -> 53 (#4530): a lookup refusal builds its SpawnResult's `error`.
+		"clients/safe-spawn.ts": 53,
 		"clients/security-scan-client.ts": 2,
 		"clients/sg-runner.ts": 32,
 		"clients/shared-checkout-guard.ts": 1,
@@ -771,8 +777,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// and the runs that carry an unconfirmed bucket, three
 		// `Array.prototype.filter` calls, not a delivery filter.
 		"clients/runtime-turn.ts": 33,
-		"clients/safe-spawn.ts": 4,
+		"clients/safe-spawn.ts": 5,
 		"clients/scratch-tree-policy.ts": 2,
+		"clients/session-repository.ts": 1,
 		"clients/session-state-store.ts": 1,
 		"clients/sgconfig.ts": 3,
 		"clients/situational-tool-telemetry.ts": 2,
@@ -1026,8 +1033,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/ephemeral-root.ts": 13,
 		// 61 -> 68 (#4689 r4): the data-dir adoption joins its walk with the
 		// node `path` module (no `path` binding of its own). 68 -> 70 (r5): the
-		// done-marker's path and its parent.
-		"clients/file-utils.ts": 70,
+		// done-marker's path and its parent. 70 -> 68 (#4530): machineStateDir
+		// moved to probe-home-state.ts, below the spawn seam.
+		"clients/file-utils.ts": 68,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realpathOrResolve`,
@@ -1047,7 +1055,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/gzip-stage-write.ts": 2,
 		"clients/inline-blocker-dispositions.ts": 2,
 		"clients/install-diagnostics.ts": 11,
-		"clients/installer/index.ts": 107,
+		"clients/installer/index.ts": 108,
 		"clients/installer/managed-tool-refresh.ts": 4,
 		"clients/instance-reaper.ts": 4,
 		// 8 -> 9 (#3498): the own-hold skip's degradation `subject`,
@@ -1103,7 +1111,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 34 -> 32 (#4532 round 4): the three copies of the bare-spelling test
 		// (`!isFullyQualified && !includes(path.sep) && !includes("/")`) became
 		// one `isBareCommand`, so two of the three `path.sep` reads are gone.
-		"clients/lsp/launch.ts": 32,
+		"clients/lsp/launch.ts": 29,
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.
@@ -1153,7 +1161,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opengrep-config.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
 		// `path.delimiter` and tests each entry with `path.isAbsolute`.
-		"clients/package-manager.ts": 23,
+		// 23 -> 16 (#4530): the bin layouts and their walk moved to
+		// session-repository.ts, below the spawn seam.
+		"clients/package-manager.ts": 16,
 		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
 		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
@@ -1165,7 +1175,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/path-utils.ts": 38,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
-		"clients/probe-home-state.ts": 10,
+		// 10 -> 12 (#4530): machineStateDir moved here from file-utils.ts.
+		"clients/probe-home-state.ts": 12,
 		"clients/project-changes.ts": 5,
 		"clients/project-conventions.ts": 5,
 		"clients/project-diagnostics/cache.ts": 4,
@@ -1254,9 +1265,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// identities.
 		"clients/runtime-turn.ts": 19,
 		"clients/rust-client.ts": 5,
-		"clients/safe-spawn.ts": 26,
+		// 26 -> 32 (#4530): the search-path scoping and lookup split PATH on
+		// `path.delimiter` and resolve each entry with `path` namespace calls.
+		"clients/safe-spawn.ts": 32,
 		"clients/search-read-registration.ts": 3,
 		"clients/security-scan-client.ts": 4,
+		// #4530: the bin layouts moved here from package-manager.ts.
+		"clients/session-repository.ts": 9,
 		"clients/session-state-store.ts": 3,
 		"clients/sessionstart-logger.ts": 2,
 		"clients/sg-runner.ts": 12,
@@ -1539,7 +1554,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/govulncheck-client.ts": 5,
 		"clients/grammar-source.ts": 2,
 		"clients/host-ports.ts": 2,
-		"clients/installer/index.ts": 42,
+		// 42 -> 44 (#4530), and the new launch.ts and metrics-history.ts rows:
+		// starts that moved onto the spawn seam read SpawnResult.status.
+		"clients/installer/index.ts": 44,
 		"clients/installer/managed-tool-refresh.ts": 9,
 		"clients/instance-reaper.ts": 15,
 		"clients/jscpd-client.ts": 3,
@@ -1553,9 +1570,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/edits.ts": 2,
 		"clients/lsp/index.ts": 4,
 		"clients/lsp/jvm-runtime.ts": 1,
+		"clients/lsp/launch.ts": 1,
 		"clients/lsp/server.ts": 4,
 		"clients/mcp/analyze.ts": 9,
 		"clients/mcp/review.ts": 1,
+		"clients/metrics-history.ts": 1,
 		"clients/module-report.ts": 6,
 		// 24 -> 26 (#4493): readGitHead and listGitHeadDelta read the spawn
 		// result's exit `status`, not a delivery status.
@@ -1576,7 +1595,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-context.ts": 4,
 		"clients/runtime-coordinator.ts": 4,
 		"clients/runtime-turn.ts": 6,
-		"clients/safe-spawn.ts": 24,
+		"clients/safe-spawn.ts": 25,
 		"clients/security-scan-client.ts": 2,
 		"clients/sg-runner.ts": 32,
 		"clients/shared-checkout-guard.ts": 2,

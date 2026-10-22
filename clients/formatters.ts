@@ -48,6 +48,7 @@ import {
 	VENV_BIN_DIRS,
 } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { admittedLookupAnswer } from "./session-repository.js";
 import { establishToolAgreement } from "./tool-agreement.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { probeToolAsync } from "./tool-probe.js";
@@ -523,9 +524,12 @@ async function which(command: string): Promise<string | null> {
 	const hostStallMs = stallSampler.stop();
 	const elapsedMs = Date.now() - startedAt;
 
+	// #4530: the answer is started later by its path, past the spawn seam's
+	// lookup judgment, so it is judged here: a global entry linking into the
+	// project is no answer until pi trusts the project.
 	const resolved =
 		!result.error && result.status === 0
-			? (result.stdout?.trim().split(/\r?\n/)[0] ?? null)
+			? admittedLookupAnswer(result.stdout ?? "")
 			: null;
 	if (resolved) {
 		entry.resolved = resolved;

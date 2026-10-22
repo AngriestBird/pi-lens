@@ -1012,7 +1012,13 @@ export function isUnderDir(child: string, parent: string): boolean {
 	return isWithinForm(normalizeFilePath(child), normalizeFilePath(parent));
 }
 
-function isWithinForm(child: string, parent: string): boolean {
+/**
+ * `child` at or under `parent`, as text, for two paths already in one form
+ * (forward slashes, folded the same way). No filesystem access: callers that
+ * hold kernel-real paths (#4530's session-repository judge) compare with this
+ * instead of paying `isUnderDir`'s two normalizations per comparison.
+ */
+export function isWithinForm(child: string, parent: string): boolean {
 	// Ensure parent ends with / for prefix matching
 	const parentPrefix = parent.endsWith("/") ? parent : `${parent}/`;
 	return child === parent || child.startsWith(parentPrefix);

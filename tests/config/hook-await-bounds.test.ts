@@ -2534,7 +2534,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// All three are intrinsically bounded local work on the install path; none
 	// can take the hook's signal until #2523 AC4 threads it, so this records the
 	// measured increase rather than hiding it.
-	"clients/installer/index.ts": 219,
+	// 219 → 221 (#4530): the Python user-base probe and the archive command
+	// runner moved from hand-built child promises onto safeSpawnAsync, so each
+	// is now an awaited seam call, bounded by its own timeout
+	// (USER_BASE_PROBE_TIMEOUT_MS=5000, ARCHIVE_COMMAND_TIMEOUT_MS=120000) and
+	// no longer hanging on a child that never exits.
+	"clients/installer/index.ts": 221,
 	"clients/installer/managed-tool-refresh.ts": 29,
 	// #3538/#3539 add five in each. The reaper reads start times and owner
 	// tags before its backstop decision and asks again before every signal

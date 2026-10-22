@@ -139,6 +139,12 @@ describe("lifetime signal cleanup (#3239)", () => {
 		});
 		try {
 			const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
+			// #4530: this host's path judgment reads the Windows-shaped PATH below as a
+			// relative directory under the session cwd, so the session's trust is
+			// adopted; the Windows trust cells run on the Windows lane.
+			const { setProjectTrustState } =
+				await import("../../clients/project-trust.js");
+			setProjectTrustState("trusted");
 			const {
 				getDegradationSummary: freshSummary,
 				resetDegradationLedger: freshReset,

@@ -667,6 +667,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real Windows command-line parsing decides argument boundaries no in-process parser can validate",
 	},
+	// 2026-10-22 (#4530): whether the kernel ran a planted project executable
+	// is only observable from a real child writing its marker file.
+	"real-process-spawn:clients/session-repository-trust-4530.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a real child writing a marker file is the only evidence of which bytes a lookup started; a stubbed spawn cannot show the kernel ran the project's file",
+	},
 	"real-process-spawn:clients/shared-checkout-guard.test.ts": {
 		detector: "real-process-spawn",
 		reason:

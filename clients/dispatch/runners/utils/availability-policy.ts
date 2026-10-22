@@ -24,6 +24,7 @@
  */
 
 import { logLatency } from "../../../latency-logger.js";
+import { getProjectTrustGeneration } from "../../../project-trust.js";
 
 export type AvailabilityOutcome =
 	| "success"
@@ -672,6 +673,13 @@ export function createAvailabilityLatch(
 	let provisional = false;
 	const maxCooldownMs = options.maxCooldownMs ?? TRANSIENT_MAX_COOLDOWN_MS;
 	let installGeneration = installRetryGeneration;
+	// #4530: a verdict answers for the project trust it was written under. A
+	// lookup's search path, and the bytes it may answer with, change when pi's
+	// trust answer changes, so a verdict from another trust generation is
+	// dropped at the next read and the caller probes again: a tool refused
+	// while the project was untrusted is found once it is trusted, and an
+	// answer found while trusted is not served after trust is withdrawn.
+	let verdictTrustGeneration = getProjectTrustGeneration();
 
 	function clearVerdict(): void {
 		available = null;
@@ -708,8 +716,16 @@ export function createAvailabilityLatch(
 		return Math.max(retryAtMs, installRetryAtMs);
 	}
 
+	function syncTrustGeneration(): void {
+		const current = getProjectTrustGeneration();
+		if (verdictTrustGeneration === current) return;
+		verdictTrustGeneration = current;
+		clearVerdict();
+	}
+
 	return {
 		read(): boolean | null {
+			syncTrustGeneration();
 			syncInstallGeneration();
 			// A provisional `true` expires exactly like a transient `false`: the
 			// answer was served, the sweep is still owed (#1568).
@@ -723,6 +739,7 @@ export function createAvailabilityLatch(
 			return Date.now() >= effectiveRetryAtMs() ? null : false;
 		},
 		noteAvailable(nextCause: AvailabilityCause = "ok"): void {
+			syncTrustGeneration();
 			installGeneration = installRetryGeneration;
 			available = true;
 			outcome = "success";
@@ -735,6 +752,7 @@ export function createAvailabilityLatch(
 			provisional = false;
 		},
 		noteProvisionallyAvailable(transientCause: AvailabilityCause): number {
+			syncTrustGeneration();
 			syncInstallGeneration();
 			available = true;
 			outcome = "success";
@@ -762,6 +780,7 @@ export function createAvailabilityLatch(
 			nextCause: AvailabilityCause,
 			opts?: { operationClass?: "probe" | "install" },
 		): number {
+			syncTrustGeneration();
 			syncInstallGeneration();
 			available = false;
 			outcome = nextOutcome;
@@ -804,6 +823,7 @@ export function createAvailabilityLatch(
 		},
 		reset(): void {
 			installGeneration = installRetryGeneration;
+			verdictTrustGeneration = getProjectTrustGeneration();
 			clearVerdict();
 		},
 		getOutcome: () => outcome,

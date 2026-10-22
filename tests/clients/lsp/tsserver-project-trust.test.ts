@@ -881,8 +881,10 @@ describe.skipIf(process.platform === "win32")(
 			// One notice per generation (#4414 F1): the genuine trust refusal is not
 			// followed by the "no compiler resolved" notice, which would blame
 			// resolution for a compiler pi found and refused.
+			// #4530: the project's PATH entry is dropped from the lookup's search
+			// path before any answer exists, so the trust notice names that.
 			expect(warnMessages()).toEqual([
-				"project-local LSP binary refused: mark the project trusted in pi or upgrade pi",
+				"search-path entry inside the project ignored: mark the project trusted in pi or upgrade pi",
 			]);
 		});
 	},
