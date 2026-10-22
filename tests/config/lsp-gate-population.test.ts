@@ -240,6 +240,30 @@ describe("LSP clean-gate population (#3217)", () => {
 		expect(checked).toBeGreaterThanOrEqual(3);
 	});
 
+	// #3405: the save witness proves a saved EDIT is recompiled. Its expected
+	// error must be absent from the seed's own source and present in the edit,
+	// or the witness passes on the seed's diagnostic and proves nothing.
+	it("keeps each save witness's expected error out of the seed and inside the edit (#3405)", () => {
+		const witnessed = fixtures.filter(
+			(fixture) => (fixture as { saveWitness?: unknown }).saveWitness,
+		) as (Fixture & { saveWitness: { text: string; match: string } })[];
+		expect(witnessed.map((fixture) => fixture.lang)).toContain("expert");
+		for (const fixture of witnessed) {
+			const seed = readFileSync(
+				path.join(repoRoot, fixture.dir, fixture.file),
+				"utf8",
+			);
+			const expected = new RegExp(fixture.saveWitness.match);
+			expect(seed, `${fixture.lang}: the seed already matches`).not.toMatch(
+				expected,
+			);
+			expect(
+				fixture.saveWitness.text,
+				`${fixture.lang}: the edit never produces the expected error`,
+			).toMatch(expected);
+		}
+	});
+
 	it("requires every exemption to state a reason, not just carry the key", () => {
 		const { exempt } = lspGatePopulation() as { exempt: Fixture[] };
 		for (const fixture of exempt) {

@@ -925,8 +925,8 @@ const LSP_FIXTURES = [
 	{
 		lang: "fsharp",
 		setup: "dotnet restore",
-		lspGate: true,
-		lspGateReadiness: { deadlineMs: 150_000, intervalMs: 1000 },
+		lspGateExempt:
+			"observed: 0 diagnostics collected within 8000ms after `dotnet restore` (app.fsproj restored in 212ms, runs 36058292424/36059988117), and the SAME zero at the 1500ms default (run 36054901266) — so the wait budget is not the binding constraint. This gate records COLLECTED diagnostics, not publishes, so it is not an authoritative empty publish; the publish-level evidence is separate and consistent: #3311's clean-signal probe recorded dirtyPubs=0 for fsautocomplete on run 35990178129, and mode=push-only has no pull fallback, i.e. the workspace load never completes. Not a proven server property. Next step: load the project the way an editor does (a `dotnet build`, or a workspace/peek after initialize) and re-measure with PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS; and #3405 run 39845687189 measured the same zero with Program.fs listed as a Compile item in app.fsproj and the lsp_diagnostics call polled for 150s (61 calls), so the missing Compile item was not the cause; see #3311",
 		lspGateMarker: 'let gateSeed : int = "not a number"',
 		dir: "tests/fixtures/tool-smoke/fsharp",
 		file: "Program.fs",
@@ -1088,11 +1088,17 @@ const LSP_FIXTURES = [
 		setup: "mix deps.get",
 		lspGate: true,
 		// Expert compiles only once its Mix project is active, which boots a
-		// separate BEAM node, and a save-only send does not wait for the publish
-		// it triggers: the cold call answers 0 and a later call answers the
-		// finding (#3405, 2026-10-16 comment). The deadline is a measurement
-		// under measurement; see the PR body.
+		// separate BEAM node: the cold call answers 0 and a later call answers
+		// the seeded error (#3405). The deadline is a measurement; see the PR
+		// body.
 		lspGateReadiness: { deadlineMs: 150_000, intervalMs: 1000 },
+		// The seed above is compiled at activation whether or not a didSave is
+		// sent; an edit made after the server is up is recompiled only on a save.
+		saveWitness: {
+			text: "defmodule Smoke do\n  def greet do\n    undefined_after_edit()\n  end\nend\n",
+			match: "undefined_after_edit",
+			deadlineMs: 60_000,
+		},
 		lspGateMarker: "undefined_function()",
 		lang: "expert",
 		serverId: "expert",
@@ -2556,6 +2562,68 @@ export async function runCreatedModuleWitness(
 }
 
 /**
+ * Save witness (#3405): the clean gate's seeded error is compiled when a
+ * save-triggered server activates its project, with or without a didSave
+ * (measured: Expert published the seed with every didSave suppressed, CI runs
+ * in the PR body), so a gate that only reads the seed cannot see the save at
+ * all. The save matters for an EDIT made after the server is up: Expert
+ * recompiles only on `textDocument/didSave`. The edited file is written with a
+ * different error and polled through the same handler (the explicit query
+ * touches it as a save); the new error must appear within the deadline. A
+ * client that stops sending didSave never gets there, and this row reds.
+ */
+export async function runSaveWitness(
+	fx,
+	{ absFile, execute, workspace, deadlineMs, intervalMs = 1000 },
+) {
+	const witness = fx.saveWitness;
+	const runner = `${fx.serverHint} saved edit`;
+	try {
+		fs.writeFileSync(absFile, witness.text);
+		const answered = await pollUntil(
+			async () => {
+				const result = await execute(
+					`smoke-lsp-save-${fx.lang}`,
+					{
+						path: absFile,
+						waitMs: LSP_DIAGNOSTICS_WAIT_MS,
+						serverScope: "primary",
+					},
+					undefined,
+					null,
+					{ cwd: workspace },
+				);
+				return new RegExp(witness.match).test(
+					String(result?.content?.[0]?.text ?? ""),
+				);
+			},
+			{ deadlineMs: deadlineMs ?? witness.deadlineMs, intervalMs },
+		);
+		return [
+			{
+				lang: fx.lang,
+				runner,
+				state: answered.ok ? "pass" : "fail",
+				detail: answered.ok
+					? `the edited file's new error was published on call ${answered.polls} (${answered.elapsedMs} ms after the edit)`
+					: `the edited file's new error (${witness.match}) was not published in ${answered.polls} calls over ${answered.elapsedMs} ms (#3405: a save-triggered server recompiles on didSave)`,
+				diags: answered.ok ? 1 : 0,
+			},
+		];
+	} catch (err) {
+		return [
+			{
+				lang: fx.lang,
+				runner,
+				state: "fail",
+				detail: `save witness error: ${err?.message ?? err}`,
+				diags: 0,
+			},
+		];
+	}
+}
+
+/**
  * Gating LSP layer (#2780): run the real lsp_diagnostics handler against each
  * installed primary fixture and require at least one primary finding. This is
  * intentionally separate from the handshake layer, whose contract is only
@@ -2625,6 +2693,7 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 	}
 	const rows = [];
 	const witnessRows = [];
+	const saveWitnessRows = [];
 	let handshakeCensus = {};
 	const censusPath = process.env.PI_LENS_HOME
 		? path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json")
@@ -2725,6 +2794,16 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 			}
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
+			if (fx.saveWitness && verdict.state === "pass") {
+				saveWitnessRows.push(
+					...(await runSaveWitness(fx, {
+						absFile,
+						workspace,
+						execute: (...args) => createLspDiagnosticsTool().execute(...args),
+						...deps?.saveWitnessPoll,
+					})),
+				);
+			}
 			if (fx.createdModuleWitness && verdict.state === "pass") {
 				const getLSPService =
 					deps?.getLSPService ??
@@ -2762,9 +2841,14 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 		{ failOnSkipOnly: true },
 	);
 	console.log(formatGateCensus(population, rows, langs));
-	if (witnessRows.length === 0) return failures;
+	const saveFailures = saveWitnessRows.length
+		? report(saveWitnessRows, "LSP save witness (#3405)")
+		: 0;
+	if (witnessRows.length === 0) return failures + saveFailures;
 	return (
-		failures + report(witnessRows, "LSP created-module witness (#4320/#4346)")
+		failures +
+		saveFailures +
+		report(witnessRows, "LSP created-module witness (#4320/#4346)")
 	);
 }
 
