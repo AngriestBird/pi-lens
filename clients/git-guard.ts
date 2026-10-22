@@ -847,16 +847,12 @@ function containsGuardedGitVerb(
 	}
 	// `eval` joins its arguments and runs the result as a command string, as a
 	// shell does for `-c`. A literal handed to it is read again, so
-	// `eval "git push"` is the `git push` it runs (#4739 round 3). A string built
+	// `eval "git push"` is the `git push` it runs (#4739 round 3). A leading `--`
+	// is an option word the existing unknown-switch path already skips. A string built
 	// by data flow (`eval "$CMD"`) stays out of reach: it exists only at run time.
 	if (executableName(commandTokens[0] ?? "") === "eval") {
-		const stringAt = commandTokens[1] === "--" ? 2 : 1;
 		if (
-			commandStringHasGuardedVerb(
-				commandWords.slice(stringAt),
-				depth + 1,
-				matcher,
-			)
+			commandStringHasGuardedVerb(commandWords.slice(1), depth + 1, matcher)
 		) {
 			return true;
 		}
