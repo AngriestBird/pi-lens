@@ -13,16 +13,25 @@
  * otherwise, like its clangd sibling). Measured server behavior (0.39.0):
  *  - the WRONG id reports "Unexpected attribute" for a declared variable in a
  *    .tfvars after open + didChange (negative control: fails pre-fix);
- *  - the RIGHT id reports nothing for the same edits, for ANY .tfvars
- *    basename (variables.tfvars and test.tfvars behave identically);
- *  - under the right id terraform-ls publishes tfvars/module results on the
- *    module DIRECTORY uri, and still validates .tf modules ("No declaration
- *    found for var.x" on an outputs.tf), so validation is not suppressed.
+ *  - the RIGHT id reports nothing for the same edits, and still reports a
+ *    genuine error (an invalid expression) in the same file;
+ *  - terraform-ls publishes a variables file's diagnostics only for AUTOLOADED
+ *    names (`terraform.tfvars`, `*.auto.tfvars`, and their `.json` forms;
+ *    `AutoloadedOnly()` in internal/features/variables). Any other basename
+ *    (`dev.tfvars`, `test.tfvars`) never gets a file diagnostic under
+ *    `terraform-vars`, so every fixture here is `terraform.tfvars`: no
+ *    assertion on another name could observe a server answer. That silence
+ *    for non-autoloaded names is an accepted residual of the id change.
+ *
+ * Every wait is a `vi.waitFor` on the file's own publication counter
+ * (`getDiagnosticsVersionForPath`) captured BEFORE the notify. `waitForDiagnostics`
+ * resolves on timeout, so a silent server would otherwise satisfy a clean
+ * assertion (the #4755 review, F2).
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLSPClient } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { findCommandAsync } from "../../../clients/safe-spawn.js";
@@ -41,7 +50,10 @@ const OUTPUTS_TF = [
 	"}",
 	"",
 ].join("\n");
-const TEST_TFVARS = 'env = "x"\n';
+const CLEAN_TFVARS = 'env = "x"\n';
+/** A genuine vars error: terraform-ls reports "Invalid expression". */
+const BROKEN_TFVARS = "env = \n";
+const WAIT_MS = 15_000;
 
 describe.skipIf(!TERRAFORM_LS)("terraform-ls .tfvars language id", () => {
 	let env: ReturnType<typeof setupTestEnvironment>;
@@ -57,7 +69,7 @@ describe.skipIf(!TERRAFORM_LS)("terraform-ls .tfvars language id", () => {
 		moduleDir = path.join(projectDir, "env");
 		fs.mkdirSync(moduleDir, { recursive: true });
 		fs.writeFileSync(path.join(moduleDir, "variables.tf"), VARIABLES_TF);
-		tfvarsPath = path.join(moduleDir, "test.tfvars");
+		tfvarsPath = path.join(moduleDir, "terraform.tfvars");
 
 		if (TERRAFORM_LS === null) throw new Error("terraform-ls unavailable");
 
@@ -90,86 +102,107 @@ describe.skipIf(!TERRAFORM_LS)("terraform-ls .tfvars language id", () => {
 		env.cleanup();
 	});
 
-	function unexpectedAttribute(): boolean {
-		return client!
-			.getDiagnostics(tfvarsPath)
-			.some((d) => d.message.includes("Unexpected attribute"));
+	function lspClient() {
+		if (client === undefined) throw new Error("LSP client not initialized");
+		return client;
 	}
 
-	/** The wrong pre-fix id: module-code decoding of a variables file. */
-	async function openAsTerraform(text: string): Promise<void> {
-		if (client === undefined) throw new Error("LSP client not initialized");
-		await client.notify.open(
-			tfvarsPath,
+	function messages(file: string): string[] {
+		return lspClient()
+			.getDiagnostics(file)
+			.map((d) => d.message);
+	}
+
+	/**
+	 * Open `file` with `languageId`, then send a didChange (terraform-ls can stay
+	 * silent after a first didOpen alone, measured on 0.39.0). Returns the
+	 * file's publication counter read BEFORE the notify, so a later
+	 * `vi.waitFor` can require it to advance. `vi.waitFor` rejects on timeout;
+	 * `waitForDiagnostics` resolves on it, which let a silent server pass.
+	 */
+	async function openFile(
+		file: string,
+		languageId: string,
+		text: string,
+	): Promise<number> {
+		const c = lspClient();
+		const baseline = c.getDiagnosticsVersionForPath(file);
+		await c.notify.open(
+			file,
 			text,
-			"terraform",
+			languageId,
 			undefined,
 			undefined,
 			undefined,
 			Date.now(),
 		);
-		// terraform-ls reports after the change reaches the server (measured on
-		// 0.39.0; a first didOpen alone can stay silent).
-		await client.notify.change(tfvarsPath, `${text}# touched\n`);
-		await client!.waitForDiagnostics(tfvarsPath, 15_000).catch(() => {});
+		await c.notify.change(file, `${text}# touched\n`);
+		return baseline;
+	}
+
+	/** Wait until `file` has been published past `baseline` AND `holds` passes. */
+	async function untilPublished(
+		file: string,
+		baseline: number,
+		holds: (msgs: string[]) => void,
+	): Promise<void> {
+		await vi.waitFor(
+			() => {
+				expect(
+					lspClient().getDiagnosticsVersionForPath(file),
+					`no publication for ${file}`,
+				).toBeGreaterThan(baseline);
+				holds(messages(file));
+			},
+			{ timeout: WAIT_MS, interval: 100 },
+		);
 	}
 
 	it("reports `Unexpected attribute` when a .tfvars is announced as terraform", async () => {
-		if (client === undefined) throw new Error("LSP client not initialized");
-		await openAsTerraform(TEST_TFVARS);
-		expect(
-			unexpectedAttribute(),
-			JSON.stringify(client!.getDiagnostics(tfvarsPath)),
-		).toBe(true);
+		// Negative control: the pre-fix id must reproduce the bug on the same
+		// autoloaded fixture the fixed-id cases use.
+		const baseline = await openFile(tfvarsPath, "terraform", CLEAN_TFVARS);
+		await untilPublished(tfvarsPath, baseline, (msgs) =>
+			expect(msgs.join("\n")).toContain("Unexpected attribute"),
+		);
 	}, 60_000);
 
-	it("reports nothing unexpected when a .tfvars is announced as terraform-vars", async () => {
-		if (client === undefined) throw new Error("LSP client not initialized");
-		// Same scenario as the negative control above, with the languageId the
-		// registry now sends. Under the right id terraform-ls publishes its
-		// (empty) tfvars/module answer on the module DIRECTORY uri — wait there
-		// so the assertion runs after the server actually processed the change,
-		// not on timeout-on-a-silent-file.
-		await client!.notify.open(
-			tfvarsPath,
-			TEST_TFVARS,
-			"terraform-vars",
-			undefined,
-			undefined,
-			undefined,
-			Date.now(),
+	it("reports nothing when a .tfvars is announced as terraform-vars and edited clean", async () => {
+		// Recurrence: #4755's clean case passed on a server that never answered
+		// (waitForDiagnostics resolves on timeout; `[]` is also the no-answer
+		// state). Here the file first carries a genuine error, so the server must
+		// publish it (proving it answers for THIS path), then the clean edit must
+		// publish again past that counter with an empty set. Silence cannot pass.
+		await openFile(tfvarsPath, "terraform-vars", BROKEN_TFVARS);
+		await untilPublished(tfvarsPath, 0, (msgs) =>
+			expect(msgs.join("\n")).toContain("Invalid expression"),
 		);
-		await client!.notify.change(tfvarsPath, 'env = "y"\n');
-		await client!.waitForDiagnostics(moduleDir, 15_000).catch(() => {});
-		expect(
-			unexpectedAttribute(),
-			JSON.stringify(client!.getDiagnostics(tfvarsPath)),
-		).toBe(false);
+		const baseline = lspClient().getDiagnosticsVersionForPath(tfvarsPath);
+		await lspClient().notify.change(tfvarsPath, CLEAN_TFVARS);
+		await untilPublished(tfvarsPath, baseline, (msgs) =>
+			expect(msgs).toEqual([]),
+		);
+	}, 60_000);
+
+	it("still reports a genuine vars error under terraform-vars", async () => {
+		// The id change must not suppress validation: an invalid expression in
+		// the autoloaded file is reported by terraform-ls itself (0.39.0).
+		const baseline = await openFile(
+			tfvarsPath,
+			"terraform-vars",
+			BROKEN_TFVARS,
+		);
+		await untilPublished(tfvarsPath, baseline, (msgs) =>
+			expect(msgs.join("\n")).toContain("Invalid expression"),
+		);
 	}, 60_000);
 
 	it("still validates a .tf module under the terraform id", async () => {
-		// The correct id must not be a suppression mechanism: an output
-		// referencing var.does_not_exist is reported by terraform-ls itself
-		// (measured 0.39.0, no terraform CLI needed), so validation demonstrably
-		// still runs in the same session shape.
-		if (client === undefined) throw new Error("LSP client not initialized");
 		const outputsPath = path.join(moduleDir, "outputs.tf");
 		fs.writeFileSync(outputsPath, OUTPUTS_TF);
-		await client!.notify.open(
-			outputsPath,
-			OUTPUTS_TF,
-			"terraform",
-			undefined,
-			undefined,
-			undefined,
-			Date.now(),
+		const baseline = await openFile(outputsPath, "terraform", OUTPUTS_TF);
+		await untilPublished(outputsPath, baseline, (msgs) =>
+			expect(msgs.join("\n")).toContain("var.does_not_exist"),
 		);
-		await client!.notify.change(outputsPath, `${OUTPUTS_TF}# touched\n`);
-		await client!.waitForDiagnostics(outputsPath, 15_000).catch(() => {});
-		const diags = client!.getDiagnostics(outputsPath);
-		expect(
-			diags.filter((d) => d.message.includes("var.does_not_exist")),
-			JSON.stringify(diags),
-		).not.toHaveLength(0);
 	}, 60_000);
 });
