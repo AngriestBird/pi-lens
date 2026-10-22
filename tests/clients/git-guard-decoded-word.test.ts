@@ -261,6 +261,12 @@ const ROWS: readonly Row[] = [
 		guard: false,
 	},
 	{
+		row: "expansion in a shell string, which names no git",
+		command: 'bash -c "echo $g"',
+		bash: null,
+		guard: false,
+	},
+	{
 		row: "escape in an argument of an ordinary command",
 		command: "ls $'a\\tb'",
 		bash: null,
