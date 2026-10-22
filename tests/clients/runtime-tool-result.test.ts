@@ -3635,6 +3635,84 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 		);
 	});
 
+	it("keeps another session's section when a superseded write reaches a whole-file clean verdict (#4733 r6 F22)", async () => {
+		// RECURRENCE GUARDED: #4733 r6 F22. `wholeFileClean` reads only a verdict
+		// that applied. An older write of a file that settles after a newer one
+		// has its clear refused by the write order (#3507); without that conjunct
+		// its whole-file clean result dropped another session's section anyway.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		await acrossReplacement(
+			"4733-superseded-verdict",
+			async ({ tmpDir, filePath, runtime, cacheManager }) => {
+				runtime.setTelemetryIdentity({ sessionId: "session-A" });
+				const other = createTempFile(
+					tmpDir,
+					"other.ts",
+					"export const y = 1;\n",
+				);
+				fs.utimesSync(other, LONG_AGO, LONG_AGO);
+				const section = (file: string) =>
+					`${file}: 🔴 STOP — 1 issue(s) must be fixed:\n  L1: Debugger statement`;
+				const blockerContent = `${section(filePath)}\n\n${section(other)}`;
+				cacheManager.writeCache(
+					"turn-end-findings",
+					{
+						content: blockerContent,
+						blockerContent,
+						blockingFiles: [filePath, other],
+						hasBlockers: true,
+						affectedFiles: [filePath, other],
+						sessionId: "an-earlier-session",
+						projectSeqStart: 0,
+						projectSeqEnd: 0,
+						fileSeqByPath: {},
+						fileContentHashes: {},
+						consumed: true,
+					},
+					tmpDir,
+				);
+				const stored = () =>
+					cacheManager.readCache<{ blockerContent?: string }>(
+						"turn-end-findings",
+						tmpDir,
+						Number.POSITIVE_INFINITY,
+					)?.data;
+				runtime.beginTurn();
+				// One order turn for both writes, so only their write index orders them.
+				const orderTurn = runtime.writeOrderTurn;
+				const write = async (result: Record<string, unknown>) => {
+					vi.mocked(runPipeline).mockReset();
+					vi.mocked(runPipeline).mockResolvedValue({
+						output: "",
+						hasBlockers: false,
+						isError: false,
+						fileModified: false,
+						currentBlockerCount: 0,
+						orderTurn,
+						...result,
+					} as never);
+					clearLastAnalyzedStateCache();
+					await handleToolResult(
+						toolResultDeps({
+							filePath,
+							runtime,
+							cacheManager,
+							flags: ["lens-guard"],
+						}),
+					);
+				};
+
+				// The newer write settles first, with no whole-file verdict.
+				await write({ writeIndex: 900 });
+				expect(stored()?.blockerContent).toContain(section(filePath));
+				// The older write settles after it, with a whole-file clean verdict.
+				await write({ writeIndex: 100, fileVerdictComplete: true });
+				expect(stored()?.blockerContent ?? "").toContain(section(filePath));
+				expect(stored()?.blockerContent).toContain(section(other));
+			},
+		);
+	});
+
 	it.each([
 		["this session's own record", "session-A", {}, false, false],
 		["another session's record", "an-earlier-session", {}, false, true],
