@@ -475,8 +475,14 @@ async function analyzeLatency(files, state) {
 			} else if (entry.type === "phase") {
 				const phase = entry.phase ?? "unknown";
 				state.latency.phaseCounts.inc(phase);
-				if (phase === "skills_resolved")
-					state.latency.skillsResolved.inc(entry.metadata?.status);
+				if (phase === "skills_resolved") {
+					// A non-string or empty status is malformed: count it as unknown rather
+					// than render a blank label or [object Object].
+					const status = entry.metadata?.status;
+					state.latency.skillsResolved.inc(
+						typeof status === "string" && status !== "" ? status : "unknown",
+					);
+				}
 				if (phase.endsWith("_timeout")) state.latency.phaseTimeouts.inc(phase);
 				if (phase === "test_runner_verdict_delivery") {
 					const sessionId = entry.metadata?.sessionId ?? "unknown";

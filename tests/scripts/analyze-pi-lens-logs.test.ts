@@ -69,7 +69,10 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		// explicit failureKind (infra), one only diagnostics (heuristic → found-errors).
 		const latency = [
 			// #2639: skills outcomes must survive the offline report boundary.
-			...["healthy", "healthy", "missing", "empty", "unreadable"].map(
+			// `absent` is the label clients/bundled-resource-health.ts writes when the
+			// bundled skills/ dir is missing (ENOENT). `""` and `{}` are malformed
+			// statuses that must not render as a blank label or [object Object].
+			...["healthy", "healthy", "absent", "empty", "unreadable"].map(
 				(status) => ({
 					type: "phase",
 					phase: "skills_resolved",
@@ -84,6 +87,18 @@ describe("analyze-pi-lens-logs.mjs", () => {
 				phase: "skills_resolved",
 				ts: NOW,
 				metadata: { entryCount: 0 },
+			},
+			{
+				type: "phase",
+				phase: "skills_resolved",
+				ts: NOW,
+				metadata: { status: "" },
+			},
+			{
+				type: "phase",
+				phase: "skills_resolved",
+				ts: NOW,
+				metadata: { status: {} },
 			},
 			{
 				type: "phase",
@@ -393,10 +408,10 @@ describe("analyze-pi-lens-logs.mjs", () => {
 	it("tallies skills outcomes without counting unrelated phases (#2639)", () => {
 		expect(report.latency.skillsResolved).toEqual({
 			healthy: 2,
-			missing: 1,
+			absent: 1,
 			empty: 1,
 			unreadable: 1,
-			unknown: 2,
+			unknown: 4,
 		});
 	});
 
@@ -406,10 +421,10 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		expect(section).toBeDefined();
 		for (const [status, count] of [
 			["healthy", 2],
-			["missing", 1],
+			["absent", 1],
 			["empty", 1],
 			["unreadable", 1],
-			["unknown", 2],
+			["unknown", 4],
 		] as const) {
 			expect(section).toMatch(new RegExp(`^\\s+${count}  ${status}$`, "m"));
 		}
