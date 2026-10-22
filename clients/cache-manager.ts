@@ -454,9 +454,12 @@ export class CacheManager {
 	 * own reads, and its turn end found no files. The claim admits two forms
 	 * and refuses every other: a pi owner of THIS process with another id (an
 	 * in-process predecessor, whose files the successor's turn end replays),
-	 * and an envelope with no owner and no files. Files under another
-	 * process's owner, or under no owner, stay for the liveness rule and the
-	 * #2504 eviction.
+	 * and an envelope with no owner and no files. A predecessor past the
+	 * #2504 stale bound (`isTurnStateOwnerStale`) is still claimed, or the
+	 * successor's write would be stranded again, but its files are evicted
+	 * here, as the turn end would evict them: they are not this turn's work.
+	 * Files under another process's owner, or under no owner, stay for the
+	 * liveness rule and the #2504 eviction at turn end.
 	 */
 	claimPrimaryTurnState(
 		cwd: string,
@@ -467,22 +470,35 @@ export class CacheManager {
 				arm: "predecessor" | "empty";
 				filesKept: number;
 		  }
+		| {
+				from: string | undefined;
+				arm: "evicted";
+				filesKept: 0;
+				filesDropped: number;
+		  }
 		| undefined {
 		const envelope = this.readTurnStateEnvelope(cwd);
 		const owner = envelope.owner;
 		const filesKept = Object.keys(envelope.files ?? {}).length;
-		const arm =
+		const predecessor =
 			owner?.kind === "pi" &&
 			owner.pid === process.pid &&
-			owner.id !== sessionId
-				? "predecessor"
-				: owner === undefined && filesKept === 0
-					? "empty"
-					: undefined;
+			owner.id !== sessionId;
+		const arm = predecessor
+			? this.isTurnStateOwnerStale(owner)
+				? "evicted"
+				: "predecessor"
+			: owner === undefined && filesKept === 0
+				? "empty"
+				: undefined;
 		if (arm === undefined) return undefined;
+		const base =
+			arm === "evicted"
+				? { ...DEFAULT_TURN_STATE, files: {}, sessions: envelope.sessions }
+				: envelope;
 		this.writeTurnState(
 			{
-				...envelope,
+				...base,
 				sessionId,
 				owner: {
 					kind: "pi",
@@ -493,7 +509,9 @@ export class CacheManager {
 			},
 			cwd,
 		);
-		return { from: owner?.id, arm, filesKept };
+		return arm === "evicted"
+			? { from: owner?.id, arm, filesKept: 0, filesDropped: filesKept }
+			: { from: owner?.id, arm, filesKept };
 	}
 
 	/** Resolve the persisted primary/secondary turn-state partition. */
