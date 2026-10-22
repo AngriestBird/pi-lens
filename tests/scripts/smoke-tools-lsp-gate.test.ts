@@ -294,6 +294,9 @@ describe("smoke-tools --lsp-gate readiness rung (#3405)", () => {
 		const { output } = await runGateWithCensus("pass", execute);
 
 		expect(output).toContain("✗  typescript");
+		// the plain verdict, not a harness error from entering the rung without one
+		expect(output).toContain("lsp_diagnostics returned 0 diagnostic(s)");
+		expect(output).not.toContain("lsp_diagnostics error");
 		expect(execute).toHaveBeenCalledOnce();
 	});
 
