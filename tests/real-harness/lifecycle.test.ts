@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import semver from "semver";
 import { expect, describe, it } from "vitest";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 import { type RealPi, withRealPi } from "../support/real-pi-harness.js";
@@ -73,6 +74,26 @@ function toolSetRewritesAfter(pi: RealPi, skip: number): unknown[] {
 }
 
 /**
+ * The version of the `pi` the harness spawns: the child's own PATH puts the
+ * repo's `node_modules/.bin` first, so a global pi on the caller's PATH is not
+ * the host under test (#4741: a round-1 probe read the global one).
+ */
+function spawnedPiVersion(pi: RealPi): string {
+	const run = spawnSync("pi", ["--version"], {
+		env: pi.childEnvironment() as NodeJS.ProcessEnv,
+		encoding: "utf8",
+	});
+	return `${run.stdout}${run.stderr}`.trim();
+}
+
+/** pi 1.4 activates the extension tools a resumed branch never mentioned. */
+function hostActivatesUnmentioned(version: string): boolean {
+	const parsed = semver.coerce(version);
+	if (parsed === null) throw new Error(`unreadable pi version ${version}`);
+	return semver.gte(parsed, "1.4.0");
+}
+
+/**
  * Activate a lazy tool, then restart pi on the same session (`--continue`) and
  * return the roster before and on the first request after the restart. The
  * scripted provider restarts its script in the new process, so that first
@@ -83,6 +104,7 @@ async function activateThenResume(forgetMemory: boolean): Promise<{
 	activated: string[];
 	resumed: string[];
 	resumeRewrites: unknown[];
+	hostVersion: string;
 }> {
 	return withRealPi(
 		{
@@ -127,6 +149,7 @@ async function activateThenResume(forgetMemory: boolean): Promise<{
 				activated,
 				resumed: wireTools(pi, before),
 				resumeRewrites: toolSetRewritesAfter(pi, rewritesBeforeResume),
+				hostVersion: spawnedPiVersion(pi),
 			};
 		},
 	);
@@ -297,31 +320,43 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 	// disagrees with the restore, would change the advertised tool list (and the
 	// prompt-cache prefix) on every resume.
 	//
-	// Recurrence prevented (#4741): pi 1.4 is documented to activate the extension
-	// tools a resumed branch never recorded unless a tool declares
-	// `defaultActive: false`. Probed on 1.3.0 and 1.4.0 alike, the resumed process
-	// logs no rewrite when the remembered set already is the host's. A host that
-	// handed pi-lens the lazy tools active would make it rewrite the loadout on
-	// every resume (a visible flicker and a second prompt-prefix change) while
-	// the first request still looked right, so the roster assertion alone cannot
-	// see it.
+	// Recurrence prevented (#4741): pi 1.4 restores the recorded loadout PLUS every
+	// extension tool the branch never mentioned, and a lazy tool the model never
+	// activated is never mentioned. So pi 1.4 hands pi-lens every lazy tool
+	// active and the plan removes the ones it does not remember, in the same
+	// `session_start`, before the first request. The roster assertion proves the
+	// removal landed in time; the rewrite assertion pins its size. pi <= 1.3
+	// hands the plan the remembered set, so the plan rewrites nothing. A plan
+	// that drops the remembered tool, or leaves a lazy tool active, changes the
+	// size (and the roster) on either host.
 	it("keeps the activated lazy tool, and only it, when pi-lens remembers the activation across a resume", async () => {
-		const { activated, resumed, resumeRewrites } =
+		const { activated, resumed, resumeRewrites, hostVersion } =
 			await activateThenResume(false);
 		expect(resumed).toEqual(activated);
-		expect(resumeRewrites).toEqual([]);
+		expect(resumeRewrites, `pi ${hostVersion}`).toEqual(
+			hostActivatesUnmentioned(hostVersion)
+				? [[0, situationalTools.length - 1, "fresh_session_lazy_deactivation"]]
+				: [],
+		);
 	}, 60_000);
 
 	// pi 1.3 restores the transcript's loadout (ast_grep_search stays active);
 	// older hosts activate every registered tool. Either way pi-lens's plan
 	// decides: with no remembered activation the lazy tools go back to inactive.
 	it("deactivates the lazy tools the host restored or re-activated when pi-lens has no memory of them", async () => {
-		const { activated, resumed, resumeRewrites } =
+		const { activated, resumed, resumeRewrites, hostVersion } =
 			await activateThenResume(true);
 		expect(resumed).toEqual(
 			activated.filter((name) => !situationalTools.includes(name)),
 		);
-		// One rewrite, of the one lazy tool the host restored from the transcript.
-		expect(resumeRewrites).toEqual([[0, 1, "fresh_session_lazy_deactivation"]]);
+		// One rewrite: the lazy tool the host restored from the transcript on
+		// pi <= 1.3, every lazy tool the host activated on pi 1.4.
+		expect(resumeRewrites, `pi ${hostVersion}`).toEqual([
+			[
+				0,
+				hostActivatesUnmentioned(hostVersion) ? situationalTools.length : 1,
+				"fresh_session_lazy_deactivation",
+			],
+		]);
 	}, 60_000);
 });
