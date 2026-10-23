@@ -1309,7 +1309,7 @@ export interface LSPClientState {
 	 * publication an auxiliary sent that went on to the store. Within that phase
 	 * an unversioned empty publication is refused
 	 * ({@link auxiliaryEmptyIsNotEvidence}). Dropped with the path's diagnostics
-	 * in {@link clearDiagnosticsForPath} and at didClose, so it holds at most
+	 * in {@link clearDiagnosticsForPath} (didOpen, didChange, didClose), so it holds at most
 	 * the paths the diagnostics store holds.
 	 */
 	nonEmptyAnswerPhases?: Map<string, string>;
@@ -2732,9 +2732,9 @@ export function noteServerShowMessage(
  * client's last send of the path (-1 while it has none). Neither moves back
  * while a stamp for the path exists: the generation only grows, and the
  * version only grows within one open lifetime (a resync's close and reopen
- * carries it forward, #1095). A lifetime ends at didClose, which drops the
- * stamp, and a fresh open clears it (`clearDiagnosticsForPath`), so the
- * version's restart at 0 never meets an old stamp. Not
+ * carries it forward, #1095). A lifetime ends at didClose, whose
+ * `clearDiagnosticsForPath` drops the stamp, and a fresh open clears it again,
+ * so the version's restart at 0 never meets an old stamp. Not
  * `publicationCountsForPath(...).sent`: its save-rescan term is a balance
  * that `giveBackSaveRescan` decrements (#4790 review F1).
  */
@@ -5521,10 +5521,6 @@ async function closeDocumentOnce(
 		publicationCountsForPath(state, normalizedPath).sent,
 	);
 	state.documentVersions.delete(normalizedPath);
-	// #4786: the version restarts at 0 on the next open, and the not-open
-	// didChange fallback reopens without a clear, so a stamp from this lifetime
-	// must not survive it ({@link answerPhase}).
-	state.nonEmptyAnswerPhases?.delete(normalizedPath);
 	state.sentReadStamps.delete(normalizedPath);
 	state.documentOpenedAt.delete(normalizedPath);
 	state.diagnosticPublicationCounts.delete(normalizedPath);

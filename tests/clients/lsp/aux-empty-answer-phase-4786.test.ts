@@ -186,11 +186,13 @@ describe("#4786 an auxiliary's empty within its finding's phase", () => {
 	});
 
 	it("stores the empty for a document reopened at version 0 after a close", async () => {
-		// A didChange for a closed document reopens it at version 0 without
-		// clearing its diagnostics (the not-open fallback). A stamp kept from the
-		// closed lifetime's version 0 would then match the new send's phase and
-		// refuse the empty answering the new bytes. The document must exist on
-		// disk to reopen (`closedAndGone`), so it is this test file, never written.
+		// The phase's send half is the document version, which restarts at 0
+		// in a new lifetime. A didChange for a closed document reopens it at
+		// version 0 without a clear (the not-open fallback), so a stamp kept from
+		// the closed lifetime's version 0 would match the new send's phase and
+		// refuse the empty answering the new bytes. didClose's clear must drop
+		// it. The document must exist on disk to reopen (`closedAndGone`), so it
+		// is this test file, never written.
 		const DOC = fileURLToPath(import.meta.url);
 		const DOC_KEY = normalizeMapKey(DOC);
 		const DOC_URI = pathToFileURL(DOC).href;
