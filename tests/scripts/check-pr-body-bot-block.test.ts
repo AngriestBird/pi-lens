@@ -267,6 +267,57 @@ describe("readers that own a GitHub semantic read the full body (#4778 F2)", () 
 		expect(plain.printed).not.toContain("Detection");
 	});
 
+	// The title names `#4602`, and the body's `Closes #4602` sits behind the
+	// marker: GitHub honours it, so the placement lint must too.
+	it("honours a close keyword behind a marker for the title's issue", () => {
+		const text = `${authoredSmall}\n\n<!-- bot -->\n\nCloses #4602\n`;
+		const result = lintLocalPrBody(text, process.cwd(), (() => "") as never, {
+			title: "fix: x (closes #4602)",
+		});
+		expect(result.errors.join("\n")).not.toContain(
+			"Invalid close-keyword placement",
+		);
+	});
+
+	// The bug-label resolvers and the "label unreadable" warning read the
+	// closed issues of the whole body.
+	it("hands the whole body to the label reader and warns for an issue behind a marker", async () => {
+		const text = `${authoredSmall}\n\n<!-- bot -->\n\nCloses #4999\n`;
+		const resolveBugClosing = vi.fn().mockReturnValue(null);
+		lintLocalPrBody(text, process.cwd(), (() => "") as never, {
+			resolveBugClosing,
+		});
+		expect(resolveBugClosing).toHaveBeenCalledWith(text);
+		const unreadable = "could not read the closed issue label";
+		expect(
+			vi
+				.mocked(console.warn)
+				.mock.calls.flat()
+				.filter((line) => String(line).includes(unreadable)),
+		).toHaveLength(1);
+		vi.mocked(console.warn).mockClear();
+		// CI's entry: the label fetch fails, and the warning still names the
+		// issue only the cut text hides.
+		const failing = vi.fn().mockImplementation(async (url: string) => {
+			if (/\/issues\/\d+$/.test(String(url)))
+				return new Response("{}", { status: 500 });
+			if (String(url).includes("/files"))
+				return new Response("[]", { status: 200 });
+			return new Response(JSON.stringify({ body: text }), { status: 200 });
+		});
+		await lintPullRequestEvent(
+			failing,
+			{ pull_request: { number: 7, body: text } },
+			() => "",
+		);
+		expect(
+			vi
+				.mocked(console.warn)
+				.mock.calls.flat()
+				.filter((line) => String(line).includes(unreadable)),
+		).toHaveLength(1);
+	});
+
 	// The live #4581 shape: the author's `Closes #N` sits behind the bot block.
 	// A `folded` candidate needs it, and GitHub closes the issue from it.
 	it("lets a close keyword behind a marker satisfy a folded candidate", async () => {
