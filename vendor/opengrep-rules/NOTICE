@@ -1,0 +1,51 @@
+# Pinned Opengrep rule pack
+
+`rules.yaml` is the rule pack pi-lens hands to Opengrep on first run, offline,
+and until a refreshed pack is cached (#4765). It is a third-party work, not
+pi-lens code; pi-lens itself stays MIT.
+
+## Source and licence
+
+- Source: <https://github.com/opengrep/opengrep-rules>, commit
+  `f1d2b562b414783763fd02a6ed2736eaed622efa` (a fork of
+  `semgrep/semgrep-rules` taken on 2024-12-13, before Semgrep moved its rules
+  to the Semgrep Rules License).
+- Licence of that commit, from its `LICENSE` file (copied verbatim beside this
+  notice): "Commons Clause" License Condition v1.0 on `semgrep-rules`,
+  "License: LGPL 2.1", "Licensor: Semgrep, Inc.". The full LGPL-2.1 text is
+  `LGPL-2.1.txt`.
+- Rule files carry `metadata.license: Commons Clause License Condition
+  v1.0[LGPL-2.1-only]` or no licence field. One upstream rule is marked
+  `proprietary license - copyright (c) Semgrep, Inc.`; it is excluded (see
+  `manifest.json`, `excluded`). `scripts/build-opengrep-pack.mjs` drops any
+  rule whose licence is not on its short admitted list.
+
+## Why redistribution in the npm package is allowed
+
+- LGPL-2.1 section 1 allows verbatim copies "in any medium" with the copyright
+  and licence notices kept and a copy of the licence supplied. Section 2 allows
+  modified copies that carry a prominent modification notice and stay under the
+  LGPL. `rules.yaml` is modified only by concatenation and by prefixing each
+  rule id with its upstream path; its header says so.
+- The Commons Clause withholds one right: to "Sell" the Software, meaning to
+  provide to third parties, for a fee or other consideration, a product or
+  service whose value derives entirely or substantially from the Software.
+  pi-lens is free, MIT and not sold; its value is not derived from this pack.
+  A downstream party that sells a product built substantially on this pack is
+  bound by that condition.
+- LGPL-2.1 section 2 ("mere aggregation"): shipping the pack beside pi-lens does
+  not bring pi-lens under the LGPL. Opengrep reads the pack as data.
+
+## The refreshed pack is not this pack
+
+pi-lens refreshes the registry rule pack (`https://semgrep.dev/c/auto`) onto
+the user's own disk. Those rules are under the Semgrep Rules License v1.0, which
+does not allow redistribution ("This license does not allow you to distribute
+the rules"), so they are never copied into this package or into pi-lens's
+repository. The download runs on the user's machine, as `--config auto` did.
+
+## Rebuilding
+
+`node scripts/build-opengrep-pack.mjs --upstream <checkout at the commit above>
+--check` rebuilds `rules.yaml` and `manifest.json` from the rule ids already in
+the pack and exits 1 unless the output is byte-identical.

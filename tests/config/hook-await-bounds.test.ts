@@ -2535,7 +2535,14 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// can take the hook's signal until #2523 AC4 threads it, so this records the
 	// measured increase rather than hiding it.
 	"clients/installer/index.ts": 219,
-	"clients/installer/managed-tool-refresh.ts": 29,
+	// 29 -> 48 (#4765): refreshOpengrepRulePack (the background registry-pack
+	// refresh) awaits the pack download, its temp-file write, the
+	// `opengrep --validate` spawn, a stat/read/rename of the cached file and a
+	// scratch `rm`. It runs on the managed-tool refresh timer, never inline in a
+	// hook, and each network/spawn await carries its own timeout
+	// (PACK_FETCH_TIMEOUT_MS, PACK_VALIDATE_TIMEOUT_MS); none can take the hook's
+	// signal until #2523 AC4 threads it, so this records the measured increase.
+	"clients/installer/managed-tool-refresh.ts": 48,
 	// #3538/#3539 add five in each. The reaper reads start times and owner
 	// tags before its backstop decision and asks again before every signal
 	// (the identity query, its re-check, and the kill's own confirm await);

@@ -1,12 +1,23 @@
 import * as path from "node:path";
+import { resolveOpengrepRulePack } from "./opengrep-rule-pack.js";
 import { findLocalToolConfig } from "./path-utils.js";
 
 export interface ResolvedOpengrepConfig {
 	enabled: boolean;
-	/** Value to pass after --config. */
+	/** Value to pass after --config. Always set when `enabled`. */
 	configArg?: string;
-	source: "local" | "flag" | "disabled";
+	/**
+	 * `pack` is pi-lens's own rule file (cached registry pack, else the shipped
+	 * one): never a download, never `auto` (#4765).
+	 */
+	source: "local" | "flag" | "pack" | "disabled";
 	reason?: string;
+}
+
+/** The enabled shape, for callers that pass `{ enabled: true }`. */
+export interface EnabledOpengrepConfig extends ResolvedOpengrepConfig {
+	enabled: true;
+	configArg: string;
 }
 
 // Opengrep is a fork of Semgrep and natively consumes the same rule format, so
@@ -56,10 +67,22 @@ export function normalizeOpengrepConfigArg(
  *   - the repo carries a rule file (`.opengrep.yml`/`.semgrep.yml`, …) — the
  *     rule file IS the opt-in signal; or
  *   - `--lens-opengrep` is set — self-sufficient: with no local/explicit config
- *     it defaults to `--config auto` (Opengrep's login-free Community ruleset).
+ *     it uses pi-lens's own rule pack (`resolveOpengrepRulePack`: the refreshed
+ *     registry pack, else the pinned one that ships with pi-lens). It never
+ *     defaults to `--config auto`, which downloads the rules on every spawn
+ *     (#4765).
  *
- * `--lens-opengrep-config <auto|p/pack|path>` overrides the chosen config.
+ * `--lens-opengrep-config <auto|p/pack|path>` overrides the chosen config; a
+ * user who types `auto` asked for the download.
  */
+export function resolveOpengrepConfig(
+	cwd: string,
+	flags: { enabled: true; config?: string | boolean | undefined },
+): EnabledOpengrepConfig;
+export function resolveOpengrepConfig(
+	cwd: string,
+	flags?: { enabled?: boolean; config?: string | boolean | undefined },
+): ResolvedOpengrepConfig;
 export function resolveOpengrepConfig(
 	cwd: string,
 	flags?: { enabled?: boolean; config?: string | boolean | undefined },
@@ -73,12 +96,19 @@ export function resolveOpengrepConfig(
 	// A non-empty --lens-opengrep-config implies --lens-opengrep (passing a
 	// config is an unambiguous opt-in).
 	if (flags?.enabled || flagConfig) {
-		// Self-sufficient flag: explicit config → local rule file → `auto`.
+		// Self-sufficient flag: explicit config → local rule file → pi-lens pack.
 		const explicit = normalizeOpengrepConfigArg(flagConfig ?? localConfig, cwd);
+		if (explicit) {
+			return {
+				enabled: true,
+				configArg: explicit,
+				source: localConfig && !flagConfig ? "local" : "flag",
+			};
+		}
 		return {
 			enabled: true,
-			configArg: explicit ?? "auto",
-			source: explicit && localConfig && !flagConfig ? "local" : "flag",
+			configArg: resolveOpengrepRulePack().path,
+			source: "pack",
 		};
 	}
 

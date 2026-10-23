@@ -226,8 +226,9 @@ and were characterized `push-only` in the run above).
   on the "re-publishes" observation alone; the phase-aware probe refines it to 2\*.
 - **opengrep's first publish depends on its config (#4763).** With a local rule
   file the rules load before the first scan and `semgrep/rulesRefreshed` precedes
-  the first publish (`direct`, the column above). With `--config auto` (the
-  default pi-lens launch) opengrep scans the opened document before its rules
+  the first publish (`direct`, the column above); since #4765 pi-lens always
+  launches with a local file. With `--config auto` (the pre-#4765 default launch)
+  opengrep scans the opened document before its rules
   load, logs "Rules not loaded yet, not scanning anything" and publishes `[]`;
   it then sends `semgrep/rulesRefreshed` and republishes every open document
   (opengrep@60ed3b3 `Scan_helpers.run_semgrep` / `refresh_rules`, unchanged since

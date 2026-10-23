@@ -106,6 +106,7 @@
 		"docs/",
 		"grammars/",
 		"vendor/grammars/",
+		"vendor/opengrep-rules/",
 		"config/",
 		"rules/",
 		"skills/",

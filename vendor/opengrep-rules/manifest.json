@@ -1,0 +1,17 @@
+{
+  "upstream": {
+    "repository": "https://github.com/opengrep/opengrep-rules",
+    "commit": "f1d2b562b414783763fd02a6ed2736eaed622efa"
+  },
+  "license": "Commons Clause License Condition v1.0 + LGPL-2.1 (see LICENSE, NOTICE)",
+  "ruleCount": 1020,
+  "rulesSha256": "4d7dde2fb9f73ab6edf78754a3a9b593434f068f8b5abd3fb71a8fa83cd3c4f2",
+  "excluded": [
+    {
+      "id": "java.lang.security.audit.xss.no-direct-response-writer.no-direct-response-writer",
+      "license": "proprietary license - copyright © Semgrep, Inc."
+    }
+  ],
+  "sourceFiles": 984,
+  "sourcesSha256": "a9740b53a1170353fe8bab387054868c19496a06e0c97cc40fab2df144e5d4cc"
+}

@@ -1698,8 +1698,8 @@ function scheduleStartupScansWithClients(
 	// opengrep — full-workspace security/quality findings via a single CLI scan
 	// (#584). Structurally always-on (mirrors the LSP auxiliary's own
 	// enablement — see `OpengrepClient.resolveConfig`): the local rule file or
-	// `auto` registry ruleset always runs, `resolveOpengrepConfig` only picks
-	// which. Replaces the per-file LSP sweep as the source of opengrep
+	// pi-lens's own rule pack (never the `auto` download, #4765) always runs;
+	// `resolveOpengrepConfig` only picks which. Replaces the per-file LSP sweep as the source of opengrep
 	// findings for `lens_diagnostics mode=full` (`runWorkspaceDiagnostics` now
 	// excludes the opengrep server from its per-file "all"-scope touch —
 	// clients/lsp/index.ts `WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`); the per-edit
