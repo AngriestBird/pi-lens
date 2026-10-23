@@ -3,6 +3,7 @@ import { getDefaults, Lexer } from "marked";
 import { describe, expect, it } from "vitest";
 import {
 	blankMarkdownRegions,
+	markdownBlockComments,
 	markdownHeadings,
 } from "../../scripts/lib/markdown-lexer.mjs";
 import {
@@ -110,6 +111,45 @@ describe("markdownHeadings (#4717)", () => {
 		expect(markdownHeadings("x\r\n\r\n## Tests\r\ny")).toEqual([
 			{ line: 2, contentLine: 3, depth: 2, text: "Tests" },
 		]);
+	});
+});
+
+describe("markdownBlockComments (#4774)", () => {
+	it("names the first line of each top-level comment block", () => {
+		expect(
+			markdownBlockComments(
+				"Text.\n\n<!-- one -->\n\nMore.\n\n  <!--\ntwo\n-->",
+			),
+		).toEqual([2, 6]);
+	});
+
+	// Recurrence it prevents: a scan for `<!--` read a quoted opener as the start
+	// of a bot block and cut the author's last section short.
+	it.each([
+		["a fence", "```html\n<!-- x -->\n```"],
+		["a code span", "Reads `<!-- x -->` here."],
+		["inline text", "Text <!-- x --> more."],
+		["a list item", "- item\n  <!-- x -->"],
+		["a block quote", "> <!-- x -->"],
+		["indented code", "para\n\n    <!-- x -->"],
+	])("is blind to a comment in %s", (_name, markdown) => {
+		expect(markdownBlockComments(markdown)).toEqual([]);
+	});
+
+	it("is blind to a raw-HTML block that is not a comment", () => {
+		expect(markdownBlockComments("<details>\nx\n</details>")).toEqual([]);
+	});
+
+	// A comment a list item leaves open hides the top-level comment that closes
+	// it (#4717 N6), so that block is no marker of a bot.
+	it("is blind to a comment an earlier open comment hides", () => {
+		expect(markdownBlockComments("- item\n  <!--\n\n<!-- later -->")).toEqual(
+			[],
+		);
+	});
+
+	it("counts lines over CRLF text", () => {
+		expect(markdownBlockComments("x\r\n\r\n<!-- c -->\r\ny")).toEqual([2]);
 	});
 });
 
