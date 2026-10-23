@@ -984,7 +984,7 @@ file-scoped worklist and receives no project-wide scanner output.
   (or `os.userInfo()`), and a file that spells either is a named row in
   `tests/support/real-home-readers.ts` with a `// real-home: <reason>` header.
   The managed bin directory refuses to resolve outside a pinned `PI_LENS_HOME`
-  (`ensureManagedBinDir`, `clients/installer/index.ts`).
+  (`assertManagedBinDirInsidePinnedHome`, `clients/installer/index.ts`).
 - Vitest gives every worker its own `PI_LENS_HOME`, `<run-shared home>/worker-home-<run>-<pid>`
   (#3721); log sinks bind their path at module load, so a `PI_LENS_HOME` assigned
   in `beforeEach`/an `it` body moves nothing. A test process never truncates a log

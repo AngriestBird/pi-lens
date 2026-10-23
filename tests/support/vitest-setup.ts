@@ -623,6 +623,9 @@ process.env.PI_LENS_TMP_HYGIENE_FIXTURE_HOME = fixtureHomeRootIn(
 // file under HOME uses `pinFixtureHome`, as AGENTS.md requires: a path under a
 // `pi-*` temp directory is pi-owned housekeeping to `isPiOwnedTempPath`.
 //
+// The pinned home follows TMPDIR (`os.tmpdir()`), so on a host whose TMPDIR is
+// /tmp it is under /tmp: a suite that applies a /tmp rule to what `~` expands to
+// (tests/scripts/guard-bash-hook.test.ts) gives its classifier its own HOME.
 // A test that needs another home sets HOME itself and wins. Assigned once for
 // the process and never restored, like PI_LENS_HOME above: restoring between
 // cases would re-open the real home.

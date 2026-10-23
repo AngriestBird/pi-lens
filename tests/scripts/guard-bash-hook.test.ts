@@ -79,9 +79,19 @@ const PAYLOAD_CWD = "/home/dev/pi-lens-guard-bash-fixed-cwd";
 // happens to have PI_LENS_HOME set (probe hygiene: this repo's own worktree
 // convention sets it for ad-hoc probes), and a positive (PI_LENS_HOME
 // ambient) case sets it back deliberately.
-const BASE_ENV: NodeJS.ProcessEnv = Object.fromEntries(
-	Object.entries(process.env).filter(([key]) => key !== "PI_LENS_HOME"),
-);
+//
+// HOME is pinned to a synthetic path off /tmp for the same reason as PAYLOAD_CWD
+// (#4789 review F1). The vitest worker's own HOME is a scratch directory under
+// `os.tmpdir()` (tests/support/vitest-setup.ts), and on every host whose TMPDIR
+// is `/tmp` (GitHub runners, most shells) a `~` then expands under /tmp, where
+// the guard's own `tmpCheckout` rule denies the `~`-destination allow-list rows.
+// A row that needs another HOME overrides it, as `{ ...BASE_ENV, HOME: x }` does.
+const BASE_ENV: NodeJS.ProcessEnv = {
+	...Object.fromEntries(
+		Object.entries(process.env).filter(([key]) => key !== "PI_LENS_HOME"),
+	),
+	HOME: "/home/dev/guard-bash-hook-base-home",
+};
 
 function runHook(
 	command: string,
@@ -4071,12 +4081,15 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 			expect(
 				findDeny('W=".claude/worktrees/a"; git worktree add "$W"', PAYLOAD_CWD),
 			).toBeNull();
+			// hookVerdict, not findDeny: `~` expands from the HOME of the env it is
+			// given (BASE_ENV's off-/tmp one), not from the worker's pinned HOME.
 			expect(
-				findDeny(
+				hookVerdict(
 					"S=~/.local/share/pi-lens-orchestrator/tmp; W=$S/wt; git worktree add $W",
+					BASE_ENV,
 					PAYLOAD_CWD,
-				),
-			).toBeNull();
+				).status,
+			).toBe(0);
 		});
 
 		it("does not hang on a self-referential chain, and stays allowed (the cap breaks the loop, leaving unresolved $A as literal text)", () => {
@@ -4144,30 +4157,28 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 	describe("~ (HOME) expansion (review S1)", () => {
 		it("expands ~/… to a real HOME even when cwd is itself under /tmp", () => {
 			const underTmpCwd = "/tmp/some-review-worktree";
-			expect(
-				findDeny(
-					"git worktree add ~/.cache/pi-lens-orchestrator/worktrees/agent-x",
-					underTmpCwd,
-				),
-			).toBeNull();
-			expect(
-				findDeny(
-					"git worktree add ~/.local/share/pi-lens-orchestrator/tmp/lane-1",
-					underTmpCwd,
-				),
-			).toBeNull();
-			expect(
-				findDeny("git worktree add ~/.plegma/work/sub-1", underTmpCwd),
-			).toBeNull();
+			// hookVerdict, not findDeny: the classifier reads `~` from the env it
+			// is given, and the worker's own HOME is a scratch dir under /tmp
+			// whenever TMPDIR is /tmp (#4789 review F1).
+			for (const command of [
+				"git worktree add ~/.cache/pi-lens-orchestrator/worktrees/agent-x",
+				"git worktree add ~/.local/share/pi-lens-orchestrator/tmp/lane-1",
+				"git worktree add ~/.plegma/work/sub-1",
+			])
+				expect(
+					hookVerdict(command, BASE_ENV, underTmpCwd).status,
+					command,
+				).toBe(0);
 		});
 
 		it("expands ~ picked up MID-CHAIN through variable indirection", () => {
 			expect(
-				findDeny(
+				hookVerdict(
 					"S=~/.local/share/pi-lens-orchestrator/tmp; W=$S/wt; git worktree add $W",
+					BASE_ENV,
 					"/tmp/some-review-worktree",
-				),
-			).toBeNull();
+				).status,
+			).toBe(0);
 		});
 
 		it("bare ~ alone expands too, even when cwd is itself under /tmp", () => {
@@ -4177,8 +4188,9 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 			// cwd, the same way the `~/…` cases above do, so the assertion
 			// actually depends on the bare-`~` branch running.
 			expect(
-				findDeny("git worktree add ~", "/tmp/some-review-worktree"),
-			).toBeNull();
+				hookVerdict("git worktree add ~", BASE_ENV, "/tmp/some-review-worktree")
+					.status,
+			).toBe(0);
 		});
 	});
 });

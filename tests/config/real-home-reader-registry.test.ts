@@ -92,11 +92,19 @@ describe("a test that reads the real home is a named opt-out (#4789)", () => {
 
 	it("every registered reader carries the same reason as a header in its first lines", () => {
 		const bySource = new Map(walked.map(({ rel, source }) => [rel, source]));
-		const missing = Object.keys(REAL_HOME_READERS).filter((rel) => {
-			const source = bySource.get(rel);
-			return source === undefined || realHomeHeader(source) === undefined;
-		});
-		expect(missing).toEqual([]);
+		// Compared as text, not just present: a header rewritten to a different
+		// reason must red (#4789 review F2). A trailing period is the header's
+		// sentence end, not part of the reason.
+		const trim = (reason: string | undefined) => reason?.replace(/\.$/, "");
+		const disagree = Object.entries(REAL_HOME_READERS)
+			.filter(([rel, reason]) => {
+				const source = bySource.get(rel);
+				const header =
+					source === undefined ? undefined : realHomeHeader(source);
+				return trim(header) !== trim(reason);
+			})
+			.map(([rel]) => rel);
+		expect(disagree).toEqual([]);
 	});
 
 	it("plants: the detector refuses an alias, a renamed destructure and a bracket literal, and admits clean code and prose", () => {
