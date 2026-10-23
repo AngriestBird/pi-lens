@@ -2140,8 +2140,9 @@ export function diagnosticsVersionForPath(
 /**
  * #4782: emitted on `diagnosticEmitter` when a receipt leaves the quiet
  * window WITHOUT being stored, so a diagnostics wait that deferred to it
- * decides again (the timer's two unstored exits, and a
- * clear that cancels the timer). Never `"diagnostics"`: nothing new was stored, and a wait
+ * decides again (the timer's two unstored exits). A clear that cancels the
+ * timer emits nothing: it removed the stored answer too, so a waiting wait has
+ * nothing to settle on and keeps waiting (#4785 F4). Never `"diagnostics"`: nothing new was stored, and a wait
  * that read it as a store would settle on an empty cache.
  */
 const PENDING_RECEIPT_DROPPED = "pending-receipt-dropped";
@@ -2209,10 +2210,6 @@ export function clearDiagnosticsForPath(
 	state.workspacePullResultCache?.delete(normalizedPath);
 	legacy.diagnostics?.delete(normalizedPath);
 	legacy.diagnosticTimestamps?.delete(normalizedPath);
-	// #4785 F2: the cancelled receipt left the window unstored; a wait that
-	// deferred to it decides now, on the cleared state, not at its timeout.
-	if (pending)
-		state.diagnosticEmitter?.emit(PENDING_RECEIPT_DROPPED, normalizedPath);
 }
 
 /**
@@ -4598,11 +4595,20 @@ export async function clientWaitForDiagnostics(
 	if (storedAnswerSettles() && !laterReceiptPending()) {
 		return;
 	}
+	// #4785 F4: a wait resolves before its deadline only while an answer for
+	// the path is stored. The touch reads "no answer" only from a wait that ran
+	// to its budget (clients/lsp/index.ts), so an early resolve on a store a
+	// clear removed read as a confirmed clean.
+	const answerStored = (): boolean =>
+		hasFreshDiagnostics() &&
+		!isVersionStale() &&
+		(state.pushDiagnostics.has(normalizedPath) ||
+			state.documentPullDiagnostics.has(normalizedPath));
 
 	return new Promise<void>((resolve) => {
 		let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 		/** A settle came due while a later receipt was pending: the early
-		 * return above (#4785 F2), or the quiet window below. */
+		 * return above, or the quiet window below. */
 		let settleDeferred = storedAnswerSettles();
 
 		const finish = (): void => {
@@ -4632,17 +4638,21 @@ export async function clientWaitForDiagnostics(
 					settleDeferred = true;
 					return;
 				}
+				// A clear inside the window removed the store this window was
+				// armed for: keep waiting for the next one, or the deadline.
+				if (!answerStored()) return;
 				finish();
 			}, remaining);
 		};
 
 		// #4782: the pending receipt this wait deferred to was dropped unstored
-		// (superseded, refused from a rule-less scanner, or cancelled by a
-		// clear), so the wait decides as it would have without that receipt.
-		// A wait still inside its quiet window keeps it.
+		// (superseded, or refused from a rule-less scanner), so the wait decides
+		// as it would have without that receipt: on the stored answer, if a clear
+		// has not removed it since (#4785 F4). A wait still inside its quiet
+		// window keeps it.
 		const onReceiptDropped = (fp: string) => {
 			if (normalizeMapKey(fp) !== normalizedPath) return;
-			if (settleDeferred) finish();
+			if (settleDeferred && answerStored()) finish();
 		};
 
 		state.diagnosticEmitter.on("diagnostics", onDiagnostics);

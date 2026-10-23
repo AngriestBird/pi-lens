@@ -193,10 +193,11 @@ describe("#4782: a later receipt in the quiet window outranks the stored answer"
 		expect(settled.at).toBe(0);
 	});
 
-	// Recurrence: #4785 review F2. A clear (a resync of the path) cancels the
-	// pending receipt this wait deferred to; with no signal the wait burned its
-	// whole budget, where base returned at once.
-	it("decides at once when a clear cancels the pending receipt it deferred to", async () => {
+	// Recurrence: #4785 verify F4. Round 2 ended this wait at once when the
+	// clear cancelled the pending receipt, on a store the clear had emptied,
+	// and the touch read that early resolve as a confirmed clean. The wait now
+	// waits for the server's next answer (or its deadline).
+	it("waits for a later answer when a clear cancels the pending receipt it deferred to", async () => {
 		const { state, publish } = harness();
 		publish({ uri: URI, diagnostics: [FOUND] });
 		await vi.advanceTimersByTimeAsync(QUIET_MS);
@@ -204,27 +205,53 @@ describe("#4782: a later receipt in the quiet window outranks the stored answer"
 
 		const { wait, settled } = startWait(state);
 		clearDiagnosticsForPath(state, KEY);
-		await vi.advanceTimersByTimeAsync(WAIT_MS);
-		await wait;
-
-		expect(settled.read).toBeUndefined();
-		expect(settled.at).toBe(0);
-	});
-
-	// Recurrence: the F2 signal must not end a wait that never deferred: with
-	// nothing stored at its start it waits for a publish, as base did.
-	it("keeps waiting after a clear when nothing was stored at the start", async () => {
-		const { state, publish } = harness();
-		publish({ uri: URI, diagnostics: [FOUND] });
-
-		const { wait, settled } = startWait(state);
-		clearDiagnosticsForPath(state, KEY);
-		await vi.advanceTimersByTimeAsync(QUIET_MS + 50);
+		await vi.advanceTimersByTimeAsync(100);
 		publish({ uri: URI, diagnostics: [STALE] });
 		await vi.advanceTimersByTimeAsync(WAIT_MS);
 		await wait;
 
 		expect(settled.read).toEqual([STALE]);
+		expect(settled.at).toBeLessThan(WAIT_MS);
+	});
+
+	// Recurrence: #4785 verify F4, the window sibling (on master too). A clear
+	// inside the quiet window a store armed emptied the store, and the window
+	// still settled: an early resolve with nothing stored.
+	it("does not settle on a store that a clear removed inside the quiet window", async () => {
+		const { state, publish } = harness();
+		const { wait, settled } = startWait(state);
+		publish({ uri: URI, diagnostics: [FOUND] });
+		await vi.advanceTimersByTimeAsync(QUIET_MS + 50);
+		clearDiagnosticsForPath(state, KEY);
+		await vi.advanceTimersByTimeAsync(QUIET_MS);
+		publish({ uri: URI, diagnostics: [STALE] });
+		await vi.advanceTimersByTimeAsync(WAIT_MS);
+		await wait;
+
+		expect(settled.read).toEqual([STALE]);
+		expect(settled.at).toBeLessThan(WAIT_MS);
+	});
+
+	// Recurrence: #4785 verify F4 through the drop exit. After a clear, a
+	// superseded receipt's drop must not end a deferred wait on the emptied
+	// store; the answer for the new send does.
+	it("does not end a deferred wait on a drop after a clear emptied the store", async () => {
+		const { state, publish } = harness();
+		const NEW: LSPDiagnostic = { ...STALE, message: "the answer for v2" };
+		publish({ uri: URI, diagnostics: [FOUND], version: 1 });
+		await vi.advanceTimersByTimeAsync(QUIET_MS);
+		publish({ uri: URI, diagnostics: [], version: 1 });
+
+		const { wait, settled } = startWait(state);
+		clearDiagnosticsForPath(state, KEY);
+		state.documentVersions.set(KEY, 2);
+		publish({ uri: URI, diagnostics: [STALE], version: 1 });
+		await vi.advanceTimersByTimeAsync(QUIET_MS + 50);
+		publish({ uri: URI, diagnostics: [NEW], version: 2 });
+		await vi.advanceTimersByTimeAsync(WAIT_MS);
+		await wait;
+
+		expect(settled.read).toEqual([NEW]);
 		expect(settled.at).toBeLessThan(WAIT_MS);
 	});
 });
