@@ -34,7 +34,8 @@ const createLSPClient = vi.fn();
 // session-root registry lives in its own unmocked module, so the REAL
 // predicate decides the decline — that is the behavior under test. That
 // `initLSPConfig` populates that registry is pinned separately in
-// tests/clients/lsp/root-coalescing.test.ts, which mocks nothing.
+// tests/clients/lsp/root-coalescing.test.ts, whose only mock is a counting
+// pass-through on `stat` (#4788).
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
 
 describe("#2052 sweep over a foreign root does not report or cache a clean", () => {
