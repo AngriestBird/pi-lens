@@ -977,6 +977,44 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			expect(probeCallsOnServe).toBe(1);
 		});
 
+		// The single-`path` entry reads the attached reply through its own
+		// demotion call (`runFileDiagnostics`), so it seeds the carried answer
+		// separately from the batch.
+		it("renders the incumbent's membership verdict for a single path (inferred project)", async () => {
+			const [file] = writeFiles(["a.ts"]);
+			touchFile.mockResolvedValue({
+				diags: [
+					{
+						...declaredGap,
+						message: "Type 'number' is not assignable to type 'string'.",
+						code: 2322,
+					},
+				],
+				confirmation: "confirmed",
+			});
+			incumbentProbes = 0;
+			probe.mockImplementation(async () => {
+				if (!incumbentServing)
+					return { executed: false, reason: "no live client" };
+				incumbentProbes += 1;
+				return inferred;
+			});
+
+			await createLspDiagnosticsTool().execute(
+				"diag-cache-test",
+				{ path: file!, severity: "all", waitMs: 15_000 },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+
+			expect(isWarmAttached()).toBe(true);
+			const [written] = writtenFor(file!);
+			expect(written).toMatchObject({ semantic: "warning" });
+			expect(written?.message).toContain(INFERRED_PROJECT_MARKER);
+			expect(incumbentProbes).toBe(1);
+		});
+
 		it("keeps the incumbent's membership verdict on the replay after an install (inferred project)", async () => {
 			const [file] = writeFiles(["a.ts"]);
 
