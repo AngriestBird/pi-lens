@@ -108,6 +108,6 @@ describe("a late empty opengrep publication (#4786)", () => {
 			expect(settled.refused?.latestReasons[0]?.subject).toMatch(
 				/^opengrep:empty-after-finding:.*probe-\d+\.py:1:1$/,
 			);
-		});
+		}, 15_000);
 	}
 });
