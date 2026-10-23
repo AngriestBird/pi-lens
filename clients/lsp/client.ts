@@ -2137,6 +2137,15 @@ export function diagnosticsVersionForPath(
 	return state.diagnosticsVersionsByPath?.get(normalizedPath) ?? 0;
 }
 
+/**
+ * #4782: emitted on `diagnosticEmitter` when a receipt leaves the quiet
+ * window WITHOUT being stored, so a diagnostics wait that deferred to it
+ * decides again (the timer's two unstored exits, and a
+ * clear that cancels the timer). Never `"diagnostics"`: nothing new was stored, and a wait
+ * that read it as a store would settle on an empty cache.
+ */
+const PENDING_RECEIPT_DROPPED = "pending-receipt-dropped";
+
 /** Exported for tests: the quiet-window timer cancel on clear/resync is the
  * headline #1412 safety property (a stale versionless publication must never
  * land after the document content changed). */
@@ -2200,6 +2209,10 @@ export function clearDiagnosticsForPath(
 	state.workspacePullResultCache?.delete(normalizedPath);
 	legacy.diagnostics?.delete(normalizedPath);
 	legacy.diagnosticTimestamps?.delete(normalizedPath);
+	// #4785 F2: the cancelled receipt left the window unstored; a wait that
+	// deferred to it decides now, on the cleared state, not at its timeout.
+	if (pending)
+		state.diagnosticEmitter?.emit(PENDING_RECEIPT_DROPPED, normalizedPath);
 }
 
 /**
@@ -2799,14 +2812,6 @@ function retractUnscannedEmptyPublications(state: LSPClientState): number {
 	return retracted;
 }
 
-/**
- * #4782: emitted on `diagnosticEmitter` when a receipt leaves the quiet
- * window WITHOUT being stored, so a diagnostics wait that deferred to it
- * decides again. Never `"diagnostics"`: nothing new was stored, and a wait
- * that read it as a store would settle on an empty cache.
- */
-const PENDING_RECEIPT_DROPPED = "pending-receipt-dropped";
-
 export function setupIncomingHandlers(
 	state: LSPClientState,
 	initialization: Record<string, unknown> | undefined,
@@ -3157,6 +3162,16 @@ export function setupIncomingHandlers(
 				if (isSupersededPush()) {
 					countPublication(state, normalizedPath);
 					return;
+				}
+				// #4785 F1: a receipt still pending here arrived before this one
+				// (a #4764 retraction keeps its timer), so it is older: cancel it
+				// as a newer receipt does, or it overwrites this answer and the
+				// wait's pending-receipt rule defers to it.
+				const olderTimer = state.pendingDiagnostics.get(normalizedPath);
+				if (olderTimer) {
+					clearTimeout(olderTimer);
+					state.pendingDiagnostics.delete(normalizedPath);
+					countPublication(state, normalizedPath);
 				}
 				state.pushDiagnostics.set(normalizedPath, newDiags);
 				state.pushDiagnosticTimestamps.set(normalizedPath, Date.now());
@@ -4586,8 +4601,9 @@ export async function clientWaitForDiagnostics(
 
 	return new Promise<void>((resolve) => {
 		let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-		/** The quiet window came due while a later receipt was pending. */
-		let settleDeferred = false;
+		/** A settle came due while a later receipt was pending: the early
+		 * return above (#4785 F2), or the quiet window below. */
+		let settleDeferred = storedAnswerSettles();
 
 		const finish = (): void => {
 			if (debounceTimer) clearTimeout(debounceTimer);
@@ -4621,11 +4637,12 @@ export async function clientWaitForDiagnostics(
 		};
 
 		// #4782: the pending receipt this wait deferred to was dropped unstored
-		// (superseded, or refused from a rule-less scanner), so the stored answer
-		// is the latest again and decides as it did before the receipt arrived.
+		// (superseded, refused from a rule-less scanner, or cancelled by a
+		// clear), so the wait decides as it would have without that receipt.
+		// A wait still inside its quiet window keeps it.
 		const onReceiptDropped = (fp: string) => {
 			if (normalizeMapKey(fp) !== normalizedPath) return;
-			if (settleDeferred || storedAnswerSettles()) finish();
+			if (settleDeferred) finish();
 		};
 
 		state.diagnosticEmitter.on("diagnostics", onDiagnostics);

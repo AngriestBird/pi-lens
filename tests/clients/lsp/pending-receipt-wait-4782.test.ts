@@ -17,9 +17,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	clearDiagnosticsForPath,
 	clientWaitForDiagnostics,
 	type LSPClientState,
 	type LSPDiagnostic,
+	noteServerShowMessage,
 	setupIncomingHandlers,
 } from "../../../clients/lsp/client.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
@@ -43,8 +45,11 @@ type Publish = (params: {
 	version?: number;
 }) => void;
 
-function harness(): { state: LSPClientState; publish: Publish } {
-	const state = createMockState();
+function harness(overrides?: Partial<LSPClientState>): {
+	state: LSPClientState;
+	publish: Publish;
+} {
+	const state = createMockState(overrides);
 	state.openDocuments.add(KEY);
 	state.openDocumentUris?.set(KEY, URI);
 	state.documentVersions.set(KEY, 1);
@@ -156,6 +161,70 @@ describe("#4782: a later receipt in the quiet window outranks the stored answer"
 		await wait;
 
 		expect(settled.read).toEqual([]);
+		expect(settled.at).toBeLessThan(WAIT_MS);
+	});
+
+	// Recurrence: #4785 review F1. A seed-first store left the receipt pending
+	// before it alive, so the pending-receipt rule made the wait defer to that
+	// OLDER answer, which then overwrote the newer one. The path: an auxiliary
+	// with a stored empty answer and a finding pending; its #4764 config failure
+	// retracts the empty store and keeps the timer; the next publish seeds.
+	it("a seed-first store supersedes the receipt pending before it", async () => {
+		const { state, publish } = harness({
+			serverId: "eslint",
+			serverRole: "auxiliary",
+		});
+		const NEW: LSPDiagnostic = { ...STALE, message: "the newest answer" };
+		publish({ uri: URI, diagnostics: [] });
+		publish({ uri: URI, diagnostics: [STALE] });
+		noteServerShowMessage(state, {
+			type: 1,
+			message:
+				"Fatal error: failed to load config from https://example.invalid/p/default",
+		});
+		publish({ uri: URI, diagnostics: [NEW] });
+
+		const { wait, settled } = startWait(state);
+		await vi.advanceTimersByTimeAsync(WAIT_MS);
+		await wait;
+
+		expect(settled.read).toEqual([NEW]);
+		expect(state.pushDiagnostics.get(KEY)).toEqual([NEW]);
+		expect(settled.at).toBe(0);
+	});
+
+	// Recurrence: #4785 review F2. A clear (a resync of the path) cancels the
+	// pending receipt this wait deferred to; with no signal the wait burned its
+	// whole budget, where base returned at once.
+	it("decides at once when a clear cancels the pending receipt it deferred to", async () => {
+		const { state, publish } = harness();
+		publish({ uri: URI, diagnostics: [FOUND] });
+		await vi.advanceTimersByTimeAsync(QUIET_MS);
+		publish({ uri: URI, diagnostics: [] });
+
+		const { wait, settled } = startWait(state);
+		clearDiagnosticsForPath(state, KEY);
+		await vi.advanceTimersByTimeAsync(WAIT_MS);
+		await wait;
+
+		expect(settled.read).toBeUndefined();
+		expect(settled.at).toBe(0);
+	});
+
+	// Recurrence: the F2 signal must not end a wait that never deferred: with
+	// nothing stored at its start it waits for a publish, as base did.
+	it("keeps waiting after a clear when nothing was stored at the start", async () => {
+		const { state, publish } = harness();
+		publish({ uri: URI, diagnostics: [FOUND] });
+
+		const { wait, settled } = startWait(state);
+		clearDiagnosticsForPath(state, KEY);
+		await vi.advanceTimersByTimeAsync(QUIET_MS + 50);
+		publish({ uri: URI, diagnostics: [STALE] });
+		await vi.advanceTimersByTimeAsync(WAIT_MS);
+		await wait;
+
+		expect(settled.read).toEqual([STALE]);
 		expect(settled.at).toBeLessThan(WAIT_MS);
 	});
 });

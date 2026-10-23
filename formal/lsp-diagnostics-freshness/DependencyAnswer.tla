@@ -30,10 +30,12 @@
 (*                                                                         *)
 (* Not modelled: a publish computed before the server read a.ts's own      *)
 (* change (that is DiagnosticsFreshness's #3484 shape: the server here     *)
-(* publishes only after reading it); versioned publishes and the two       *)
-(* unstored exits of the slot (superseded, config-failure refusal: pinned  *)
-(* by tests/clients/lsp/pending-receipt-wait-4782.test.ts); seed-first-push*)
-(* strategies; threaded or undrained phases (recorded `undrained`).        *)
+(* publishes only after reading it); versioned publishes and the three     *)
+(* unstored exits of the slot (superseded, config-failure refusal, a clear *)
+(* that cancels it); seed-first-push strategies, whose store cancels the   *)
+(* slot (#4785 F1), so a receipt in the slot is always the later one; all  *)
+(* pinned by tests/clients/lsp/pending-receipt-wait-4782.test.ts; threaded *)
+(* or undrained phases (recorded `undrained`).                             *)
 (***************************************************************************)
 EXTENDS Integers, Sequences
 
