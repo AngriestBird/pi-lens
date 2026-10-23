@@ -21,6 +21,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LSPClientState } from "../../../clients/lsp/client.js";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { createMockState } from "./mock-client-state.js";
 
 const h = vi.hoisted(() => ({
@@ -104,6 +105,10 @@ async function realClient() {
 		get diagnosticsVersion() {
 			return state.diagnosticsVersion;
 		},
+		// The per-path publication stamp: the touch's primary evidence signal
+		// (`readPathVersion`), read through the production accessor.
+		getDiagnosticsVersionForPath: (p: string) =>
+			real.diagnosticsVersionForPath(state, normalizeMapKey(p)),
 		getDiagnostics: (p: string) => state.pushDiagnostics.get(p) ?? [],
 		getAllDiagnostics: () => state.pushDiagnostics,
 		getDiagnosticBinding: () => undefined,
