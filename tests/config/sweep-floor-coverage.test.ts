@@ -161,6 +161,9 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 	"tests/clients/installer/install-lock.test.ts":
 		"lock behavior cases; it lists one lock directory and asserts an empty " +
 		"degradation ledger, not a production population sweep",
+	"tests/clients/installer/opengrep-pack-refresh-4765.test.ts":
+		"refresh behavior cases; it lists the rule-pack cache directory once to assert no " +
+		"candidate file outlives a refresh, not a production population sweep",
 	"tests/clients/instance-reaper-prune-concurrency.test.ts":
 		"concurrency cases, not a production population sweep",
 	"tests/clients/instance-reaper-backstop.test.ts":

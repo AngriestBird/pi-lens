@@ -325,14 +325,6 @@ const timingSensitiveInclude = [
 // silently goes stale.
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
-	// #4765: real Opengrep children. The first launches `OpengrepServer.spawn`
-	// against a PATH stub that only stays alive; the second is the opt-in live
-	// twin over the real binary (rules compile ~1 s, no network), skipped when
-	// none is installed. Neither contains a launchLSP/getServerById marker, so
-	// the census cannot derive them (its known marker gap); membership is by
-	// hand.
-	"tests/clients/opengrep-rule-pack-4765.test.ts",
-	"tests/clients/lsp/opengrep-offline-findings-4765.integration.test.ts",
 	// #1712/#4485: the cascade's live twin over a real classic TypeScript
 	// server (opt-in, PI_LENS_INTEGRATION=1); three cascades each wait on
 	// the wrapper's tsserver answers.
@@ -368,6 +360,11 @@ const lspSpawnHeavyInclude = [
 	// (`window/showMessage`) and then publish; waits on real handshakes and
 	// debounce windows, the same #1022/#2332 contention class as its siblings.
 	"tests/clients/lsp/opengrep-offline-config-failure.test.ts",
+	// #4765: the live twin over the real Opengrep binary with the network cut
+	// (skipped, with a named reason, when none is installed). It has no
+	// launchLSP/getServerById marker, so the census cannot derive it (its known
+	// marker gap); membership is by hand.
+	"tests/clients/lsp/opengrep-offline-findings-4765.integration.test.ts",
 	// #4248: the unknown-trust project-local binary witness resolves a real
 	// PATH entry through launchLSP; keep that child-spawn boundary phased here.
 	"tests/clients/lsp/service-project-trust.test.ts",
@@ -396,6 +393,9 @@ const lspSpawnHeavyInclude = [
 	// #4534: the read-guard-off recovery witness drives the real LSP service
 	// on the shared fake-server child to observe the recovered bytes arrive.
 	"tests/clients/opaque-mutation-scan.test.ts",
+	// #4765: `OpengrepServer.spawn` cases launch a real PATH stub that only stays
+	// alive; no launchLSP/getServerById marker, so membership is by hand.
+	"tests/clients/opengrep-rule-pack-4765.test.ts",
 	// #3961: the `--lsp` cold-path witness spawns the real bin, which spawns
 	// real LSP children (deno `lsp`, opengrep `lsp`, typos-lsp, ast-grep `lsp`)
 	// for the file. The indirect spawn is invisible to this lane's marker census

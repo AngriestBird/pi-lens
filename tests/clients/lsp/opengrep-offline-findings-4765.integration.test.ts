@@ -70,6 +70,7 @@ import {
 	setProjectTrustState,
 } from "../../../clients/project-trust.js";
 import { withEnv } from "../../support/with-env.js";
+import { waitFor } from "../interleaving-kit.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const EXE = process.platform === "win32" ? "opengrep.exe" : "opengrep";
@@ -152,7 +153,7 @@ let server: http.Server | undefined;
 const cleanups: Array<() => Promise<void>> = [];
 
 beforeEach(() => {
-	work = fs.mkdtempSync(path.join(os.tmpdir(), "opengrep-live-4765-"));
+	work = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-opengrep-live-4765-"));
 	fs.rmSync(path.join(HOME, "rules"), { recursive: true, force: true });
 	fs.rmSync(path.join(HOME, "tools"), { recursive: true, force: true });
 	resetDegradationLedger();
@@ -316,15 +317,15 @@ describe.skipIf(SKIP_REASON !== undefined)(
 
 			// No pack, no repo file: the fallback is `auto`, and the network is cut.
 			expect(configuration).toEqual(["auto"]);
-			await vi.waitFor(
+			const recorded = await waitFor(
 				() =>
-					expect(
-						getDegradationSummary().find(
-							(g) => g.kind === "lsp-server-config-load-failed",
-						),
-					).toBeDefined(),
-				{ timeout: 60_000, interval: 250 },
+					getDegradationSummary().find(
+						(g) => g.kind === "lsp-server-config-load-failed",
+					),
+				(group) => group !== undefined,
+				{ timeoutMs: 60_000, intervalMs: 250 },
 			);
+			expect(recorded?.kind).toBe("lsp-server-config-load-failed");
 			expect(client.getDiagnostics(file)).toEqual([]);
 		}, 120_000);
 	},

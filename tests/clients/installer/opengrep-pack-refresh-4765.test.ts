@@ -27,6 +27,7 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { waitFor } from "../interleaving-kit.js";
 import { withEnv } from "../../support/with-env.js";
 import { acquireManagedInstallGate } from "../../../clients/installer/index.js";
 
@@ -314,7 +315,7 @@ describe.skipIf(process.platform === "win32")(
 			// tool unavailable for the session.
 			setShim("hold");
 			const refresh = refreshOpengrepRulePack(NOW);
-			await vi.waitFor(() => expect(shimCalls()).toBe(1));
+			await waitFor(shimCalls, (calls) => calls === 1);
 
 			const probe = await acquireManagedInstallGate("test: unrelated install");
 			expect(probe.ok, probe.reason).toBe(true);
@@ -332,7 +333,7 @@ describe.skipIf(process.platform === "win32")(
 			setShim("hold");
 			const first = refreshOpengrepRulePack(NOW);
 			const second = refreshOpengrepRulePack(NOW);
-			await vi.waitFor(() => expect(shimCalls()).toBe(2));
+			await waitFor(shimCalls, (calls) => calls === 2);
 			const validated = fs
 				.readFileSync(SHIM_LOG, "utf-8")
 				.trim()
