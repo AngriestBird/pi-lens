@@ -1,3 +1,4 @@
+// real-home: read-only PATH probe for the maintainer's managed knip (`~/.pi-lens/tools/node_modules/.bin`); the pinned home has no managed tools tree, and the scenario skips where neither that nor a PATH knip exists.
 /**
  * The turn-simulation harness's seed scenarios — #1635 item 1.
  *
@@ -28,10 +29,10 @@
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { KnipClient } from "../../clients/knip-client.js";
+import { REAL_HOME } from "../support/vitest-setup.js";
 import {
 	defineTurnScenario,
 	runTurnScenario,
@@ -91,17 +92,13 @@ const gitleaksStaleReplay = defineTurnScenario({
  * `KnipClient.analyze`, the layer the stub removed.
  *
  * The availability probe mirrors `tests/clients/knip-cache-consumer-staleness.ts`'s:
- * the suite redirects `PI_LENS_HOME` to a per-worker temp dir, so the managed
- * install has to be found through the real home directory and put on PATH.
+ * the suite redirects `PI_LENS_HOME`, `HOME` and the XDG directories to
+ * per-worker temp dirs (#4789), so the managed install has to be found through
+ * `REAL_HOME` (a named opt-out, `tests/support/real-home-readers.ts`) and put on
+ * PATH.
  */
 const managedKnipBinDir = (() => {
-	const dir = path.join(
-		os.homedir(),
-		".pi-lens",
-		"tools",
-		"node_modules",
-		".bin",
-	);
+	const dir = path.join(REAL_HOME, ".pi-lens", "tools", "node_modules", ".bin");
 	return fs.existsSync(dir) ? dir : null;
 })();
 

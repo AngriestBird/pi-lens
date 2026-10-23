@@ -1,10 +1,11 @@
+// real-home: read-only PATH probe for the maintainer's managed knip (`~/.pi-lens/tools/node_modules/.bin`); the pinned home has no managed tools tree, and the suite skips where neither that nor a PATH knip exists.
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import * as os from "node:os";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { KnipClient } from "../../clients/knip-client.js";
+import { REAL_HOME } from "../support/vitest-setup.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 // End-to-end proof for #1630 against the real knip binary. knip's glob cache
@@ -30,17 +31,13 @@ const probeKnip = (env?: NodeJS.ProcessEnv): boolean => {
 	}
 };
 
-// The suite redirects PI_LENS_HOME to a per-worker temp dir, so the client's
-// managed-tool lookup cannot see a real knip install. Find that install through
-// the real home dir and put its bin dir on PATH for the duration of the test.
+// The suite redirects PI_LENS_HOME, HOME and the XDG directories to per-worker
+// temp dirs (#4789), so the client's managed-tool lookup cannot see a real knip
+// install. Find that install through `REAL_HOME`, a named opt-out in
+// `tests/support/real-home-readers.ts`, and put its bin dir on PATH for the
+// duration of the test.
 const managedKnipBinDir = (() => {
-	const dir = path.join(
-		os.homedir(),
-		".pi-lens",
-		"tools",
-		"node_modules",
-		".bin",
-	);
+	const dir = path.join(REAL_HOME, ".pi-lens", "tools", "node_modules", ".bin");
 	return fs.existsSync(dir) ? dir : null;
 })();
 
