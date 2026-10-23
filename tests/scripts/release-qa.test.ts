@@ -41,7 +41,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { copyFixtureGitHelper } from "../support/fixture-git-copy.js";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -413,6 +413,7 @@ describe("release-QA RPC capture carries the extension log (#4316)", () => {
 		"const mode = process.env.FAKE_PI_MODE;",
 		"const log = (message) =>",
 		'\tfs.appendFileSync(path.join(home, "extension.log"), JSON.stringify({ ts: new Date().toISOString(), level: "debug", subsystem: "lsp", message }) + "\\n");',
+		'if (mode === "immediate") log("LSP warm resolved");',
 		'process.stdin.setEncoding("utf8");',
 		'let buf = "";',
 		'process.stdin.on("data", (chunk) => {',
@@ -421,16 +422,24 @@ describe("release-QA RPC capture carries the extension log (#4316)", () => {
 		'\tbuf = "";',
 		'\tprocess.stdout.write(JSON.stringify({ type: "response", command: "get_commands", data: { commands: [] } }) + "\\n");',
 		'\tif (mode === "unreadable") fs.mkdirSync(path.join(home, "extension.log"));',
-		'\tif (mode !== "silent" && mode !== "unreadable") setTimeout(() => log("LSP warm resolved"), 150);',
+		'\tif (mode === "healthy" || mode === "late-failure") setTimeout(() => log("LSP warm resolved"), 150);',
 		'\tif (mode === "late-failure") setTimeout(() => log("formatter warm failed: late"), 450);',
 		"});",
 		"process.stdin.resume();",
 		"",
 	].join("\n");
 
+	let toIsoSpy: { mockRestore(): void } | undefined;
+
 	async function capture(
 		mode: string,
-		options: { prior?: string; timeoutMs?: number; warmWaitMs?: number } = {},
+		options: {
+			prior?: string;
+			timeoutMs?: number;
+			warmWaitMs?: number;
+			// Hold the parent's first clock read until the child has logged.
+			stampAfterChildLogs?: boolean;
+		} = {},
 	) {
 		const dir = fs.mkdtempSync(
 			path.join(REPO_ROOT, ".probe-home", "release-qa-warm-capture-"),
@@ -443,6 +452,33 @@ describe("release-QA RPC capture carries the extension log (#4316)", () => {
 			const piBin = path.join(dir, "fake-pi.mjs");
 			fs.writeFileSync(piBin, FAKE_PI);
 			fs.chmodSync(piBin, 0o755);
+			if (options.stampAfterChildLogs) {
+				// Models a parent that is slow to stamp: its first clock read waits
+				// (up to 1.5 s) for the child's record, then reads a later time. A
+				// stamp taken before the spawn finds no child and reads at once.
+				const realIso = Date.prototype.toISOString;
+				let held = false;
+				toIsoSpy = vi
+					.spyOn(Date.prototype, "toISOString")
+					.mockImplementation(function (this: Date) {
+						if (held) return realIso.call(this);
+						held = true;
+						const log = path.join(home, "extension.log");
+						const deadline = Date.now() + 1500;
+						while (!fs.existsSync(log) && Date.now() < deadline) {
+							// busy-wait: the stamp must stay synchronous
+						}
+						const recordedAt = fs.existsSync(log)
+							? Date.parse(
+									JSON.parse(fs.readFileSync(log, "utf8").split("\n")[0]).ts,
+								)
+							: 0;
+						while (Date.now() <= recordedAt) {
+							// the stamp must be strictly later than the record
+						}
+						return realIso.call(new Date());
+					});
+			}
 			return await captureGetCommands({
 				piBin,
 				cwd: dir,
@@ -451,9 +487,18 @@ describe("release-QA RPC capture carries the extension log (#4316)", () => {
 				warmWaitMs: options.warmWaitMs ?? 900,
 			});
 		} finally {
+			toIsoSpy?.mockRestore();
 			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
 		}
 	}
+
+	// Recurrence (review F9): the session start was stamped after the spawn, so
+	// a child that logged its record first had it filtered out as "older than
+	// the session" and a healthy candidate went red.
+	it("counts a record the child logs before the parent would have stamped", async () => {
+		const result = await capture("immediate", { stampAfterChildLogs: true });
+		expect(classifyLspWarmLog(result.extensionLog ?? "").status).toBe("pass");
+	}, 20_000);
 
 	// Recurrence: dropping the wait or the extensionLog field leaves the row
 	// permanently red (review F2 mutation `awaitWarm: true -> false`), with every

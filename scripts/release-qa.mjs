@@ -2098,6 +2098,9 @@ export function captureGetCommands({
 	warmWaitMs = WARM_LOG_WAIT_MS,
 }) {
 	return new Promise((resolve) => {
+		// The session boundary is fixed before the child exists, so a record the
+		// child logs the moment it starts is never older than the stamp (#4802 F9).
+		const sinceIso = new Date().toISOString();
 		let pi;
 		try {
 			pi = startRpcSession(piBin, {
@@ -2109,7 +2112,6 @@ export function captureGetCommands({
 			resolve({ ok: false, reason: `spawn failed: ${err?.message || err}` });
 			return;
 		}
-		const sinceIso = new Date().toISOString();
 		let settled = false;
 		const finish = (value) => {
 			if (settled) return;
