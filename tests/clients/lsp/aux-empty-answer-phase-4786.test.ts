@@ -132,6 +132,21 @@ describe("#4786 an auxiliary's empty within its finding's phase", () => {
 		});
 	});
 
+	it("stores repeated empties with no finding and records no refusal", async () => {
+		// Only a finding stands for its phase: an empty that stamped it would
+		// record a refusal "after a finding" that never existed.
+		const { state, publish, rulesRefreshed } = arm("opengrep", "auxiliary");
+		rulesRefreshed();
+		await handleNotifyOpen(state, FILE, "a", "python", false, true);
+		publish({ uri: URI, diagnostics: [] });
+		vi.advanceTimersByTime(SETTLE_MS);
+		publish({ uri: URI, diagnostics: [] });
+		vi.advanceTimersByTime(SETTLE_MS);
+		expect(stored(state)).toEqual([]);
+		expect(state.pushDiagnostics.has(KEY)).toBe(true);
+		expect(refusals()).toBeUndefined();
+	});
+
 	it("stores the empty after a rules refresh (row 4: new rules may clear)", async () => {
 		const { state, publish, rulesRefreshed } = arm("opengrep", "auxiliary");
 		rulesRefreshed();
