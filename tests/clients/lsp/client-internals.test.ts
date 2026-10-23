@@ -3330,6 +3330,7 @@ describe("applyDynamicCapabilities", () => {
 				rename: false,
 				willRenameFiles: false,
 				didRenameFiles: false,
+				didCreateFiles: false,
 				implementation: false,
 				callHierarchy: false,
 			},

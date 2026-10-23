@@ -160,6 +160,7 @@ function sendApplyEdit(spec) {
 }
 
 const openDocuments = new Map();
+const didCreateUris = new Set();
 
 // #2824: deterministic pull/push wire controls for the LSP wait-hardening
 // matrix. These are environment-configured because the fixture is a separate
@@ -660,6 +661,13 @@ function handle(raw) {
 				`language ${data.params.textDocument.uri} ${data.params.textDocument.languageId}`,
 			);
 		}
+		// #4787: the URIs of each didCreateFiles notification, one line per
+		// notification, so a test counts batches and orders them against didOpen.
+		if (data.method === "workspace/didCreateFiles") {
+			trace(
+				`created ${(data.params?.files ?? []).map((file) => file.uri).join(" ")}`,
+			);
+		}
 		// #4320 r3: which watched-files changes reached this server.
 		if (data.method === "workspace/didChangeWatchedFiles") {
 			for (const change of data.params?.changes ?? []) {
@@ -694,6 +702,8 @@ function handle(raw) {
 			clientCapabilities?.workspace?.fileOperations?.willRename === true;
 		const clientSupportsDidRename =
 			clientCapabilities?.workspace?.fileOperations?.didRename === true;
+		const clientSupportsDidCreate =
+			clientCapabilities?.workspace?.fileOperations?.didCreate === true;
 		const renameFilter = (globEnv, globDefault) => ({
 			scheme: "file",
 			pattern: {
@@ -715,7 +725,21 @@ function handle(raw) {
 						  !clientSupportsCodeActionResolve
 						? {}
 						: { resolveProvider: true };
-		const workspaceFileOperations =
+		// #4787: merged into the rename operations below, so a case that sets
+		// FAKE_LSP_DID_CREATE and FAKE_LSP_WILL_RENAME keeps both.
+		const didCreateFileOperations =
+			process.env.FAKE_LSP_DID_CREATE === "true" && clientSupportsDidCreate
+				? {
+						didCreate: {
+							filters: renameFilters(
+								"DID_CREATE",
+								"FAKE_LSP_DID_CREATE_GLOB",
+								"**/*",
+							),
+						},
+					}
+				: undefined;
+		const renameFileOperations =
 			process.env.FAKE_LSP_WILL_RENAME === "true"
 				? {
 						willRename: clientSupportsWillRename
@@ -747,6 +771,10 @@ function handle(raw) {
 						: process.env.FAKE_LSP_WILL_RENAME === "malformed"
 							? { willRename: "yes" }
 							: undefined;
+		const workspaceFileOperations =
+			didCreateFileOperations || renameFileOperations
+				? { ...didCreateFileOperations, ...renameFileOperations }
+				: undefined;
 		send({
 			jsonrpc: "2.0",
 			id: data.id,
@@ -929,6 +957,24 @@ function handle(raw) {
 		return;
 	}
 	if (data.method === "textDocument/didOpen") {
+		if (process.env.FAKE_LSP_DID_CREATE_REQUIRED === "1") {
+			const uri = data.params?.textDocument?.uri;
+			send({
+				jsonrpc: "2.0",
+				method: "textDocument/publishDiagnostics",
+				params: {
+					uri,
+					diagnostics: didCreateUris.has(uri)
+						? [{
+								severity: 1,
+								code: "P4787",
+								message: "finding after didCreate",
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+							}]
+						: [],
+				},
+			});
+		}
 		openDocuments.set(
 			data.params?.textDocument?.uri,
 			data.params?.textDocument?.text ?? "",
@@ -1089,6 +1135,10 @@ function handle(raw) {
 				params: { changes: data.params?.changes ?? [] },
 			});
 		}
+		return;
+	}
+	if (data.method === "workspace/didCreateFiles") {
+		for (const file of data.params?.files ?? []) didCreateUris.add(file.uri);
 		return;
 	}
 	if (data.method === "textDocument/publishDiagnostics") return;

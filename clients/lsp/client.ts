@@ -253,6 +253,8 @@ export interface LSPOperationSupport {
 	willRenameFiles: boolean;
 	/** #1971: `workspace.fileOperations.didRename` registration options at initialize. */
 	didRenameFiles: boolean;
+	/** #4787: `workspace.fileOperations.didCreate` registration options at initialize. */
+	didCreateFiles: boolean;
 	implementation: boolean;
 	callHierarchy: boolean;
 }
@@ -511,7 +513,7 @@ export interface LSPClientInfo {
 	getOperationSupport(): LSPOperationSupport;
 	/** File-operation registrations rejected during initialize parsing. */
 	getMalformedFileOperationRegistrations(): ReadonlySet<
-		"willRename" | "didRename"
+		"didCreate" | "willRename" | "didRename"
 	>;
 	/** Commands the server advertised for workspace/executeCommand (the allowlist) */
 	getAdvertisedCommands(): string[];
@@ -813,6 +815,7 @@ export const CLIENT_CAPABILITIES = {
 			dynamicRegistration: false,
 			willRename: true,
 			didRename: true,
+			didCreate: true,
 		},
 	},
 	textDocument: {
@@ -1340,11 +1343,14 @@ export interface LSPClientState {
 	 *  the server registered WHICH paths it cares about for willRename/didRename.
 	 *  Sends outside these filters are suppressed at this boundary. */
 	fileOperationFilters?: {
+		didCreate?: LSPFileOperationFilter[];
 		willRename?: LSPFileOperationFilter[];
 		didRename?: LSPFileOperationFilter[];
 	};
 	/** Static initialize-time distinction for capability-skip telemetry. */
-	fileOperationMalformedRegistrations?: Set<"willRename" | "didRename">;
+	fileOperationMalformedRegistrations?: Set<
+		"didCreate" | "willRename" | "didRename"
+	>;
 	/** Top-level keys of the raw ServerCapabilities from initialize (sorted) —
 	 *  captured once; the full advertised surface for diagnostics/documentation. */
 	rawCapabilityKeys?: string[];
@@ -4804,23 +4810,40 @@ function watchedTypeForExisting(
 		: FILE_CREATED;
 }
 
-function handleAnnounceCreated(
+async function handleAnnounceCreated(
 	state: LSPClientState,
 	entries: ReadonlyArray<{ filePath: string; stat: BirthStat }>,
-): void {
+): Promise<void> {
 	if (!isClientAlive(state)) return;
+	const didCreateUris: string[] = [];
 	for (const { filePath, stat: info } of entries) {
 		const normalizedPath = normalizeMapKey(filePath);
 		if (watchedTypeForExisting(state, normalizedPath, info) !== FILE_CREATED) {
 			continue;
 		}
-		enqueueWatchedChange(
-			state,
-			normalizedPath,
+		const uri =
 			state.openDocumentUris?.get(normalizedPath) ??
-				pathToFileURL(filePath).href,
-			FILE_CREATED,
-		);
+			pathToFileURL(filePath).href;
+		enqueueWatchedChange(state, normalizedPath, uri, FILE_CREATED);
+		// The filters come from the predicate that derives
+		// operationSupport.didCreateFiles (isFileOperationRegistrationOptions),
+		// so a match implies the capability, as for didRenameFiles.
+		if (
+			await fileOperationFiltersMatch(
+				state.fileOperationFilters?.didCreate,
+				uri,
+				uri,
+				filePath,
+				filePath,
+			)
+		) {
+			didCreateUris.push(uri);
+		}
+	}
+	if (didCreateUris.length > 0 && isClientAlive(state)) {
+		await safeSendNotification(state.connection, "workspace/didCreateFiles", {
+			files: didCreateUris.map((uri) => ({ uri })),
+		});
 	}
 	state.watchQueue.flushIfCreated();
 }
@@ -5119,12 +5142,28 @@ async function handleNotifyOpenOnce(
 		// hears Created.
 		let watchedType = FILE_CREATED;
 		let onDisk = false;
+		let info: BirthStat | undefined;
 		try {
-			const info = await stat(filePath);
+			info = await stat(filePath);
 			onDisk = true;
 			watchedType = watchedTypeForExisting(state, normalizedPath, info);
 		} catch {
 			// absent: Created
+		}
+		if (
+			info &&
+			watchedType === FILE_CREATED &&
+			(await fileOperationFiltersMatch(
+				state.fileOperationFilters?.didCreate,
+				uri,
+				uri,
+				filePath,
+				filePath,
+			))
+		) {
+			await safeSendNotification(state.connection, "workspace/didCreateFiles", {
+				files: [{ uri }],
+			});
 		}
 		// #271: enqueue instead of sending now — the per-client queue coalesces a
 		// turn's file opens into a single notification, so push-diagnostics servers
@@ -6966,10 +7005,10 @@ export async function createLSPClient(options: {
 		? workspace.fileOperations
 		: undefined;
 	const malformedFileOperationRegistrations = new Set<
-		"willRename" | "didRename"
+		"didCreate" | "willRename" | "didRename"
 	>();
 	if (isCapabilityRecord(fileOperations)) {
-		for (const operation of ["willRename", "didRename"] as const) {
+		for (const operation of ["didCreate", "willRename", "didRename"] as const) {
 			if (
 				fileOperations[operation] !== undefined &&
 				parseFileOperationFilters(fileOperations[operation]) === undefined
@@ -6982,6 +7021,7 @@ export async function createLSPClient(options: {
 		malformedFileOperationRegistrations;
 	if (isCapabilityRecord(fileOperations)) {
 		state.fileOperationFilters = {
+			didCreate: parseFileOperationFilters(fileOperations.didCreate),
 			willRename: parseFileOperationFilters(fileOperations.willRename),
 			didRename: parseFileOperationFilters(fileOperations.didRename),
 		};
@@ -7081,7 +7121,15 @@ export async function createLSPClient(options: {
 				if (isClientAlive(state)) state.watchQueue.flush();
 			},
 			announceCreated(entries) {
-				handleAnnounceCreated(state, entries);
+				// Detached from the touch: a send that throws a non-stream error
+				// is counted with the touch's own announcement failures.
+				handleAnnounceCreated(state, entries).catch((cause: unknown) => {
+					incrementDegradationCount({
+						kind: "lsp-sibling-announcement",
+						subject: `${state.serverId}:workspace/didCreateFiles`,
+						reason: `didCreateFiles failed: ${String(cause)}`,
+					});
+				});
 			},
 		},
 
@@ -7891,6 +7939,9 @@ function detectOperationSupport(initResult: unknown): LSPOperationSupport {
 		didRenameFiles:
 			isCapabilityRecord(fileOperations) &&
 			isFileOperationRegistrationOptions(fileOperations.didRename),
+		didCreateFiles:
+			isCapabilityRecord(fileOperations) &&
+			isFileOperationRegistrationOptions(fileOperations.didCreate),
 		implementation: hasProvider("implementationProvider"),
 		callHierarchy: hasProvider("callHierarchyProvider"),
 	};
