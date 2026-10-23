@@ -1229,7 +1229,7 @@ file-scoped worklist and receives no project-wide scanner output.
   Opengrep's open-documents scan publishes `[]` for files it did not target, so
   that empty is no scan; a new send or a rules refresh clears as before, and a
   versioned or language-server publication keeps last write wins
-  (`lsp-auxiliary-empty-after-finding`, #4786).
+  (`lsp-auxiliary-empty-after-finding`).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records
