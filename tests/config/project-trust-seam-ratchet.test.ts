@@ -46,6 +46,8 @@ const ADMITTED_DATA: Record<string, string> = {
 		"the PR smoke path filter list names the source file as a repo path",
 	'tests/config/glossary-synonym-sweep.test.ts: "clients/project-trust.ts": 1,':
 		"a per-file glossary baseline count keyed by repo path",
+	'tests/scripts/astgrep-self-scan.test.ts: "clients/project-trust.js",':
+		"a fixture's list of compiled modules it links into a scratch tree (#4530): a repo path, never a mock specifier",
 	'tests/config/project-trust-seam-ratchet.test.ts: module: "clients/project-trust.js",':
 		"this ratchet's own SEAM_MODULES row names the module it scans for",
 	'tests/config/project-trust-seam-ratchet.test.ts: "clients/project-trust.js": 1,':

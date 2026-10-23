@@ -194,7 +194,21 @@ describe("#1892 witness: pi turn_end → context, scanner freshness", () => {
 			...freshnessRows().map((row) => row.replaceAll(tmpDir, "<PROJECT>")),
 			"",
 			"=== degradation ledger ===",
-			...getDegradationSummary().map((row) => row.kind),
+			...getDegradationSummary()
+				// #4530: npm and npx put the checkout's own `node_modules/.bin` on
+				// the runner's PATH, and under untrusted trust the spawn seam drops
+				// that entry with one record. That row describes how vitest was
+				// launched, not this flow, so the golden leaves it out.
+				.filter(
+					(row) =>
+						!(
+							row.kind === "trust-refusal" &&
+							row.latestReasons.every((entry) =>
+								entry.subject.startsWith("project-path-entry:"),
+							)
+						),
+				)
+				.map((row) => row.kind),
 			"",
 		].join("\n");
 

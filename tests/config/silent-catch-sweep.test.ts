@@ -664,10 +664,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :63, :176
 	"clients/installer/index.ts": {
-		silent: 60,
-		identities: "b2e5789ab5826d04",
+		silent: 57,
+		identities: "c856f1adb6cf7d52",
 		reason: PRE_RULE,
-	}, // :155, :192, :197, :207, :218, :231, :288, :2163, :2470, :2557, :2576, :2710, :2722, :2748, :3083, :3123, :3158, :3170, :3292, :3315, :3337, :3507, :3603, :3671, :3699, :3788, :3866, :3874, :3989, :4549, :4602, :4793, :4833, :5306, :5341, :5494, :5511, :5536, :5567, :5570, :5576, :5592, :5629, :5632, :5717, :5804, :5905, :5912, :6104, :6127, :6185, :6195, :6199, :6232, :6296, :6332, :6369, :6487, :6646, :6716
+	}, // :164, :201, :206, :216, :227, :240, :297, :2172, :2479, :2578, :2597, :2732, :2744, :2770, :3105, :3145, :3180, :3192, :3314, :3337, :3359, :3529, :3625, :3693, :3721, :3861, :3869, :4536, :4589, :4780, :4820, :5293, :5328, :5481, :5498, :5523, :5554, :5557, :5563, :5579, :5616, :5619, :5704, :5791, :5892, :5899, :6091, :6114, :6172, :6182, :6186, :6266, :6302, :6339, :6457, :6616, :6686
 	"clients/installer/managed-tool-refresh.ts": {
 		silent: 4,
 		identities: "dbbc0961e686ccc4",
@@ -804,10 +804,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :65
 	"clients/lsp/launch.ts": {
-		silent: 11,
-		identities: "af7b6d53949cd956",
+		silent: 9,
+		identities: "eca31a5fa3dd4517",
 		reason: PRE_RULE,
-	}, // :96, :194, :293, :388, :442, :700, :706, :941, :1166, :1177, :1188
+	}, // :105, :295, :406, :753, :759, :1012, :1237, :1248, :1259
 	"clients/lsp/lombok.ts": {
 		silent: 6,
 		identities: "a076d98b1826881f",
@@ -874,10 +874,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :77, :387
 	"clients/metrics-history.ts": {
-		silent: 2,
-		identities: "b02d9c45b1a0e889",
+		silent: 1,
+		identities: "27637aebe860adac",
 		reason: PRE_RULE,
-	}, // :95, :119
+	}, // :112
 	"clients/module-report-lsp.ts": {
 		silent: 3,
 		identities: "2482911206cf896e",
@@ -1377,9 +1377,12 @@ const BASELINE: Readonly<Record<string, Admission>> = {
  * the every-path rule (#4603 review F1) reclassified 20 conditional records and
  * 7 conditional rethrows as `silent`, and reading `.then(ok, onRejected)` made
  * 25 more silent sites visible, so the merged population is 1,188 (1,143 under
- * the old rule on the same tree). It moves only downward from here.
+ * the old rule on the same tree). #4530 routed the installer's raw starts,
+ * the launcher's PATH walk and metrics-history's git probe through the spawn
+ * seam, and the merged tree's population is 1,175. It moves only downward
+ * from here.
  */
-const PINNED_TOTAL = 1188;
+const PINNED_TOTAL = 1175;
 
 interface Census {
 	byFile: Map<string, CatchSite[]>;

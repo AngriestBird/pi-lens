@@ -155,6 +155,8 @@ const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"#2042/#3091: the real child is `/bin/sh` launched through `launchLSP` purely to obtain a pid whose `/proc` PPid is this process — there is no language server, no handshake and no diagnostics wait to starve; each leader is killed in the test's cleanup (the #3096 eviction cases hold about 257 live children for about a second) and the assertions read which signal `killProcessTree` issued and the eviction record. It is already phased in the serialized wall-clock-budget lane, which the flake-shape admission gate requires, and a file cannot sit in both lanes without running twice (same shape as the two entries above).",
 	"tests/clients/instance-reaper-pid-reuse.test.ts":
 		"#3539: the one `launchLSP` call starts `/bin/sh -c sleep 30` to read the owner tag out of its /proc environ; no language server, no handshake and no diagnostics wait. The file is phased in the serialized wall-clock-budget lane, which the flake-shape admission gate requires, and a file cannot sit in both lanes.",
+	"tests/clients/session-repository-trust-4530.test.ts":
+		"#4530: each `launchLSP` call starts a planted `/bin/sh` stand-in that writes a marker file and exits, or is refused before any spawn; no language server, no handshake and no diagnostics wait. The file is phased in the serialized wall-clock-budget lane, which the flake-shape admission gate requires, and a file cannot sit in both lanes.",
 	"tests/clients/lsp/initialize-timeout-backstop.test.ts":
 		"POSIX-only real-child initialize-timeout backstop; waits on a 50ms timeout firing then sleeps past kill escalation — deterministic and short",
 	"tests/clients/lsp/lean-real-smoke.test.ts":

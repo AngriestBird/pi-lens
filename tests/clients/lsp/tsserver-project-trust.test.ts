@@ -823,6 +823,40 @@ describe.skipIf(process.platform === "win32")(
 			expect(tsserverPathOf(spawned)).toBe(tree.tsserver);
 		});
 
+		// #4776 review F3: the notice was hidden by ANY trust refusal, so a
+		// project scripts dir dropped from the search path (no compiler in it,
+		// none anywhere) left the user with no word on why TypeScript is off.
+		it("names the missing compiler when the only trust refusal is unrelated to TypeScript (unknown trust)", async () => {
+			const tree = buildPathTscTree("unrelated-refusal");
+			const scripts = path.join(tree.project, "scripts");
+			fs.mkdirSync(scripts);
+			fs.writeFileSync(path.join(scripts, "build"), "#!/bin/sh\n");
+			fs.chmodSync(path.join(scripts, "build"), 0o755);
+			process.chdir(tree.project);
+			process.env.PATH = `${scripts}${path.delimiter}${path.join(os.tmpdir(), "pi-lens-no-such-bin")}`;
+			const { setProjectTrustState } =
+				await import("../../../clients/project-trust.js");
+			setProjectTrustState("unknown");
+			const ledger = await import("../../../clients/degradation-ledger.js");
+			const { TypeScriptServer } =
+				await import("../../../clients/lsp/server.js");
+
+			const spawned = await TypeScriptServer.spawn(tree.project, {
+				allowInstall: false,
+			});
+
+			expect(spawned).toBeUndefined();
+			expect(
+				ledger
+					.getDegradationSummary()
+					.find((group) => group.kind === "trust-refusal")
+					?.latestReasons.map((entry) => entry.subject),
+			).toEqual([`project-path-entry:${fs.realpathSync(scripts)}`]);
+			expect(warnMessages()).toContainEqual(
+				expect.stringMatching(/no absolute TypeScript compiler/),
+			);
+		});
+
 		it("still treats a bare tsc that resolves into the project as project code (unknown trust)", async () => {
 			const tree = buildPathTscTree("project-bin");
 			// A PATH entry inside the project tree must keep its project provenance
@@ -873,8 +907,14 @@ describe.skipIf(process.platform === "win32")(
 			// One notice per generation (#4414 F1): the genuine trust refusal is not
 			// followed by the "no compiler resolved" notice, which would blame
 			// resolution for a compiler pi found and refused.
-			expect(warnMessages()).toEqual([
-				"project-local LSP binary refused: mark the project trusted in pi or upgrade pi",
+			// #4530: the project's PATH entry is dropped from the lookup's search
+			// path before any answer exists, so the trust notice names that. The
+			// notice is once per ENTRY, and the host PATH can carry its own entry
+			// that resolves inside this project (husky's relative
+			// `node_modules/.bin` against the project cwd), so the kinds are
+			// compared, not the count.
+			expect([...new Set(warnMessages())]).toEqual([
+				"search-path entry inside the project ignored: mark the project trusted in pi or upgrade pi",
 			]);
 		});
 	},

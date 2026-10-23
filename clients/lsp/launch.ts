@@ -22,6 +22,11 @@ import { getGlobalPiLensLogDir } from "../probe-home-state.js";
 import { isFullyQualified } from "../path-utils.js";
 import { findGlobalBinary, isProjectLocalBinPath } from "../package-manager.js";
 import {
+	isSessionRepositoryPath,
+	isUntrustedProjectPath,
+	recordProjectCommandRefusal,
+} from "../session-repository.js";
+import {
 	getDegradationLedgerGeneration,
 	recordDegradationOnce,
 } from "../degradation-ledger.js";
@@ -33,9 +38,13 @@ import {
 	classifySpawnFailure,
 	holdOwnChildPid,
 	isOwnLiveChild,
+	mergeWindowsEnvironment,
+	resolveSearchPathCommand,
 	resolveWindowsCommandForEnvironment,
 	SpawnFailureError,
+	safeSpawn,
 	statIsFile,
+	trustScopedEnvironment,
 } from "../safe-spawn.js";
 import { getRubyVersionDirNamesAsync } from "./ruby-drive-dirs.js";
 
@@ -170,31 +179,24 @@ function resolvePathValue(env: NodeJS.ProcessEnv): string {
 }
 
 /**
- * Run an `execFileSync` probe with the #2095 stderr guard applied, returning
- * `""` on any failure. Exported as a small test seam: production always calls
- * it with the fixed `powershell.exe` command/args below, but a test can pass
- * a command guaranteed to fail with real stderr output (no real Windows or
+ * Run a probe with the #2095 stderr guard applied, returning `""` on any
+ * failure. Exported as a small test seam: production always calls it with the
+ * fixed `powershell.exe` command/args below, but a test can pass a command
+ * guaranteed to fail with real stderr output (no real Windows or
  * powershell.exe required) to prove the guard is actually reached and not
  * vacuous.
+ *
+ * #4530: the probe starts through the spawn seam. A raw `execFileSync` of the
+ * bare `powershell.exe` was a lookup Windows answers from the cwd FIRST, so a
+ * project's own `powershell.exe` ran before any PATH entry; the seam resolves
+ * PATH only and judges the result against project trust. The seam also pipes
+ * stderr (#2095 sibling: an inherited stderr printed powershell's raw
+ * diagnostics into the pi TUI) and bounds the run.
  */
 export function runStderrGuardedProbe(command: string, args: string[]): string {
-	try {
-		const { execFileSync } =
-			require("node:child_process") as typeof import("node:child_process");
-		const out = execFileSync(command, args, {
-			timeout: 3000,
-			encoding: "utf8",
-			// #2095 sibling: execFileSync inherits stderr to the parent by
-			// default (only stdout is captured into `out`), so a failed
-			// powershell.exe launch would print raw diagnostics into the pi
-			// TUI even though the surrounding catch already returns "" (read as
-			// "unknown" PATH by every caller). Pipe stderr instead of inheriting it.
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		return out.trim();
-	} catch {
-		return "";
-	}
+	const result = safeSpawn(command, args, { timeout: 3000 });
+	if (result.error || result.status !== 0) return "";
+	return result.stdout.trim();
 }
 
 /** Read live system+user PATH from Windows registry (bypasses stale process.env.PATH). */
@@ -444,23 +446,12 @@ function findBinaryOnPath(
 	if (isWindows) {
 		return resolveWindowsCommandForEnvironment(command, cwd, env)?.resolvedPath;
 	}
-	for (const entry of (env.PATH ?? "").split(path.delimiter)) {
-		// `path.resolve` covers both kernel rules: an absolute entry is kept and a
-		// relative one is resolved against the spawn cwd. An EMPTY entry never
-		// reaches this scan — `resolvePathValue`'s `combinePathValuesForPlatform`
-		// drops empty entries upstream (the kernel would read one as the cwd), so
-		// the scan and the child see the same list (#4532 round 4, LOW-1).
-		const dir = path.resolve(cwd, entry);
-		const candidate = path.join(dir, command);
-		try {
-			if (!fs.statSync(candidate).isFile()) continue;
-			fs.accessSync(candidate, fs.constants.X_OK);
-			return candidate;
-		} catch {
-			// Not in this entry: the kernel would move to the next one too.
-		}
-	}
-	return undefined;
+	// The kernel's rule, shared with the spawn seam's lookup judgment (#4530):
+	// a relative entry is joined to the cwd as text, so `link/..` reaches the
+	// filesystem unfolded, as it reaches the kernel. An EMPTY entry never
+	// reaches this scan: `resolvePathValue`'s `combinePathValuesForPlatform`
+	// drops empty entries upstream (#4532 round 4, LOW-1).
+	return resolveSearchPathCommand(command, env.PATH, cwd);
 }
 
 // #4299 R2-F1: every launcher in one service spawn inherits its file's
@@ -620,6 +611,11 @@ function recordUnresolvedTypeScriptCompiler(
 	});
 	if (unknownProjectLocalNoticeGeneration === generation) return;
 	unknownProjectLocalNoticeGeneration = generation;
+	// #4530: a lookup that refused the project's own compiler (a project PATH
+	// entry dropped, a resolved answer refused) already told the user, in this
+	// session, that trust is the cause; a resolution notice after it would
+	// blame resolution for a compiler pi found and refused (#4414 F1).
+	if (trust !== "trusted" && sessionRepositoryHoldsCompiler(cwd)) return;
 	logExtension({
 		subsystem: "lsp-registry",
 		level: "warn",
@@ -627,6 +623,18 @@ function recordUnresolvedTypeScriptCompiler(
 			"TypeScript language server not started: no absolute TypeScript compiler (tsserver.js) could be resolved; install typescript in the project or let pi-lens install it",
 		metadata: { field: "typescript-compiler" },
 	});
+}
+
+/**
+ * Whether the bare `tsc` lookup, through the search path before trust scoping,
+ * answers with the session repository's bytes: the refusal that explains a
+ * missing compiler. Any other trust refusal (a project scripts dir dropped
+ * from the search path) says nothing about TypeScript, so it never hides the
+ * notice (#4776 review F3).
+ */
+function sessionRepositoryHoldsCompiler(cwd: string): boolean {
+	const found = findBinaryOnPath("tsc", process.env, cwd);
+	return found !== undefined && isSessionRepositoryPath(found);
 }
 
 /**
@@ -640,6 +648,42 @@ export function isProjectLocalLspBinary(
 	cwd: string,
 ): boolean {
 	return isProjectLocalBinPath(resolvedCommand, cwd);
+}
+
+/**
+ * #4530: refuse a bare launch whose answer is the session repository's bytes
+ * while pi has not trusted the project, with the typed `trust-refused` failure
+ * the resolver skips past to its next candidate (#4515).
+ *
+ * Two answers can be: the file the PATH scan or global-bin lookup resolved
+ * (a global entry holding a link into the project, judged by its real
+ * target), and, on Windows, the command left unresolved. Windows starts an
+ * unresolved bare command through `cmd.exe`, which searches the child's cwd
+ * BEFORE PATH: when the scoped PATH answered nothing, the only file that
+ * search can find is the cwd's own, so an owned cwd refuses the start.
+ */
+function refuseProjectLookup(
+	command: string,
+	spawnCommand: string,
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+): void {
+	const unresolved = spawnCommand === command;
+	if (unresolved && !isWindows) return;
+	const owned = unresolved
+		? resolveWindowsCommandForEnvironment(
+				command,
+				cwd,
+				mergeWindowsEnvironment(env, { PATH: cwd }),
+			)?.resolvedPath
+		: spawnCommand;
+	if (owned === undefined || !isUntrustedProjectPath(owned)) return;
+	recordProjectCommandRefusal(owned);
+	throw new SpawnFailureError(
+		"trust-refused",
+		`LSP lookup refused: ${command} resolved inside the project and project trust is ${getProjectTrustState()}`,
+		new Error(`project trust is ${getProjectTrustState()}`),
+	);
 }
 
 /**
@@ -846,11 +890,16 @@ export async function launchLSP(
 	// host's inherited PI_LENS_OWNER may name a dead foreign owner, and an
 	// untagged server is spared where a wrongly tagged one is reaped.
 	const ownerTag = await ownerTagForChildren({ timeoutMs: OWNER_TAG_READ_MS });
-	const env: NodeJS.ProcessEnv = {
-		...mergedEnv,
-		PATH: augmentedPath,
-		...(isWindows ? { Path: augmentedPath } : {}),
-	};
+	// #4530: the child's search path, and the scan below that reads it, lose
+	// the session repository's own directories until pi trusts the project.
+	const env: NodeJS.ProcessEnv = trustScopedEnvironment(
+		{
+			...mergedEnv,
+			PATH: augmentedPath,
+			...(isWindows ? { Path: augmentedPath } : {}),
+		},
+		cwd,
+	);
 	if (ownerTag === undefined) delete env[OWNER_TAG_ENV];
 	else env[OWNER_TAG_ENV] = ownerTag;
 
@@ -920,6 +969,12 @@ export async function launchLSP(
 			cwd,
 		});
 	}
+
+	// #4530: a bare command is a lookup, and a lookup never answers with the
+	// session repository's bytes until pi trusts the project. The scoped PATH
+	// already holds no project entry, so what is left is a global entry or
+	// global bin dir holding a link into the project: judged by the target.
+	if (isBareCommand) refuseProjectLookup(command, spawnCommand, cwd, env);
 
 	// Pre-validate .cmd shims only after trust has admitted the candidate: if the
 	// underlying script is missing the shim will exit with code 1 after a 500ms

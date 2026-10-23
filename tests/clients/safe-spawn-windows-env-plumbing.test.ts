@@ -72,6 +72,8 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 const { safeSpawnAsync, safeSpawn, resetSafeSpawnWindowsCommandCache } =
 	await import("../../clients/safe-spawn.js");
+const { resetProjectTrust, setProjectTrustState } =
+	await import("../../clients/project-trust.js");
 
 function markFilesAsPresent(...files: string[]): void {
 	const present = new Set(files);
@@ -85,6 +87,10 @@ describe("Windows resolution honors the CALLER's env, not just ambient process.e
 	const realPlatform = process.platform;
 
 	beforeEach(() => {
+		// #4530: this host's path judgment reads the Windows-shaped PATH below as a
+		// relative directory under the session cwd, so the session's trust is
+		// adopted; the Windows trust cells run on the Windows lane.
+		setProjectTrustState("trusted");
 		resetSafeSpawnWindowsCommandCache();
 		statSyncMock.mockReset();
 		spawnMock.mockReset();
@@ -95,6 +101,7 @@ describe("Windows resolution honors the CALLER's env, not just ambient process.e
 	});
 
 	afterEach(() => {
+		resetProjectTrust();
 		Object.defineProperty(process, "platform", {
 			value: realPlatform,
 			configurable: true,

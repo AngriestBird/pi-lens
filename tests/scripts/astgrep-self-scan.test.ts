@@ -29,6 +29,14 @@ import {
 	runSelfScan,
 	selfScanRuleIds,
 } from "../../scripts/lib/astgrep-self-scan.mjs";
+import { setProjectTrustState } from "../../clients/project-trust.js";
+
+// #4530: the ast-grep CLI under test is this checkout's own devDependency, found
+// through the test runner's `node_modules/.bin` PATH entry. That entry is the
+// session repository's own bytes, which a bare lookup refuses until pi trusts
+// the project. This file tests the tool, not trust, so it adopts trust the way
+// the maintenance hosts do; the trust rule has its own suite.
+setProjectTrustState("trusted");
 
 const WRAPPER_PATH = path.join(
 	repoRoot(),
@@ -503,7 +511,14 @@ describe("self-scan argv and tracked filter (#3886 r3)", () => {
 		// The helper resolves the maintenance policy relative to its own module, so
 		// the policy file is copied with it (#4552 R2).
 		copyFixtureGitHelper(root);
-		for (const rel of ["clients/safe-spawn.js", "clients/string-utils.js"]) {
+		// The wrapper adopts project trust itself (#4530), so the trust module
+		// it imports is linked too; Node resolves each link to its real path, so
+		// the wrapper and the spawn seam share one trust state.
+		for (const rel of [
+			"clients/project-trust.js",
+			"clients/safe-spawn.js",
+			"clients/string-utils.js",
+		]) {
 			fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
 			fs.symlinkSync(path.join(repoRoot(), rel), path.join(root, rel));
 		}

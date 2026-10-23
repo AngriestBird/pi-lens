@@ -152,11 +152,10 @@ const EXPECTED_FILES = 79;
 // `which`/`where` — the bare-command probe resolved its own binary through the
 // path and cwd it was asked to judge, so a project-supplied `which` ran. It is
 // an in-process PATH scan now, and 134 was the direct-spawn population it left.
-// 134 -> 135 (#4765): `validateOpengrepPack` runs the installed `opengrep`
+// 133 -> 134 (#4765): `validateOpengrepPack` runs the installed `opengrep`
 // `scan --validate --config <candidate>` before the cached registry pack is
-// swapped in, through this seam. (#4776 also moves this pin; whichever of the
-// two lands second re-pins, so this value is not pre-adjusted for it.)
-const EXPECTED_DIRECT_SITES = 135;
+// swapped in, through this seam. (#4776 landed first and moved the base to 133.)
+const EXPECTED_DIRECT_SITES = 134;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it
@@ -247,8 +246,8 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"forwards a caller-supplied SpawnOptions object unchanged; its process-snapshot caller supplies no cwd and its argv does not resolve project configuration",
 	],
 	[
-		"clients/lsp/launch.ts#runStderrGuardedProbe:eedfa033",
-		"execFileSync runs a stderr probe and does not resolve project configuration",
+		"clients/lsp/launch.ts#runStderrGuardedProbe:efa508b2",
+		"safeSpawn runs a stderr-guarded probe (the Windows registry PATH read) and does not resolve project configuration",
 	],
 	// #4532 removed `clients/lsp/launch.ts#findBinaryOnPath:90f3c9a8` ("runs a
 	// PATH lookup and does not resolve project configuration"): round 2 passed
@@ -272,8 +271,8 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"forwards the caller's SafeSpawnOptions object unchanged before adding safe-spawn defaults; the sole test-runner caller supplies no cwd",
 	],
 	[
-		"clients/metrics-history.ts#getCurrentCommit:021d92f7~df24802d",
-		"execSync runs Git with cwd = spawnDir, an existence walk from path.resolve(startDir) (startDir = path.dirname(filePath)) up to the first directory that exists, not a walk to the repository root; the site passes that cwd, and hasCwd=false here is resolveLocalInitializer failing closed on the reassigned let; this metrics probe does not resolve project configuration from the dispatch cwd",
+		"clients/metrics-history.ts#getCurrentCommit:b46d4221~df24802d",
+		"safeSpawn runs Git with cwd = spawnDir, an existence walk from path.resolve(startDir) (startDir = path.dirname(filePath)) up to the first directory that exists, not a walk to the repository root; the site passes that cwd, and hasCwd=false here is resolveLocalInitializer failing closed on the reassigned let; this metrics probe does not resolve project configuration from the dispatch cwd",
 	],
 	[
 		"clients/instance-reaper.ts#killPidTree:18e7d7ac",
@@ -308,10 +307,6 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"`<execPath> <verificationArgs>` verification that an installed managed binary runs at all",
 	],
 	[
-		"clients/installer/index.ts#getPythonUserBaseCandidates:3fead921",
-		"`python -m site --user-base` — a Python installation query, unrelated to any project",
-	],
-	[
 		"clients/installer/index.ts#installGitHubTool:13e31114~5ede8ca9",
 		"`tar xf <archive> -C <tmpDir>` extraction inside the global pi-lens bin directory (GITHUB_BIN_DIR): the name carries no `cwd`, and the target is not a project",
 	],
@@ -322,10 +317,6 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	[
 		"clients/installer/index.ts#installGitHubTool:bd7b7ee6~5ede8ca9",
 		"`unzip -q -o <archive> -d <tmpDir>` extraction inside the global pi-lens bin directory",
-	],
-	[
-		"clients/installer/index.ts#installPipTool:3042a73f",
-		"`python -m site --user-base` after a pip install, to find where the binary landed",
 	],
 	[
 		"clients/installer/index.ts#installGemTool:94a5faab",
@@ -360,8 +351,8 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"forks the review worker with `process.execPath`; the project it must analyse is passed explicitly as the `--cwd=<dir>` argv flag, so the child's own directory is not the channel",
 	],
 	[
-		"clients/package-manager.ts#probeGlobalBinDirs:bf156997",
-		"`npm config get prefix` / `pnpm bin -g` / `yarn global bin` — global install-location queries",
+		"clients/package-manager.ts#probeGlobalBinDirs:4e67f697",
+		"`npm config get prefix` / `pnpm bin -g` / `yarn global bin` — global install-location queries; under untrusted pi trust they run from HOME (#4530) so a project `.npmrc` cannot redirect them",
 	],
 	[
 		"clients/safe-spawn.ts#safeSpawnAsync.killTree:77f62fd4",
@@ -438,7 +429,7 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 ];
 const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	[
-		"clients/safe-spawn.ts#safeSpawn:ad6fe3ed~119c1ce6",
+		"clients/safe-spawn.ts#safeSpawn:ad6fe3ed~49fcf1a1",
 		"the synchronous safe-spawn path derives its cwd from its own compatibility options, not the dispatch resolveToolCwd seam",
 	],
 	[
@@ -622,8 +613,12 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"cwd is runScan's own `cwd` parameter; `govulncheck -mode=source ./...` is relative to it by design",
 	],
 	[
-		"clients/installer/index.ts#runCommand:bed06f4a~dbf27697",
+		"clients/installer/index.ts#runCommand:bb1c961f~dbf27697",
 		"cwd is runCommand's own `cwd` parameter; its three call sites in this file are the checked ones",
+	],
+	[
+		"clients/installer/index.ts#probeUserBase:46b6fb79~eef5e504",
+		"`python -m site --user-base`, a Python installation query unrelated to any project, runs from HOME on purpose (#4530): `-m` puts the cwd on sys.path, so a session cwd would let a project's own `site.py` answer",
 	],
 	[
 		"clients/installer/index.ts#installArchiveTool:fb1fa312~a938e107",
@@ -718,7 +713,7 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"analysePipeline forwards its language `cwd` into runAutofix and separately passes the authoritative session root for adopted-writer admission (#4309)",
 	],
 	[
-		"clients/safe-spawn.ts#safeSpawnAsync:f7eca8ca~b4dc9aa5",
+		"clients/safe-spawn.ts#safeSpawnAsync:f7eca8ca~dd6a6e98",
 		"this IS the spawn seam: `spawnCwd` is the cwd its own caller passed in options, so the origin rule applies to the callers, not here",
 	],
 	[
