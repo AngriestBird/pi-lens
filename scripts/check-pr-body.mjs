@@ -246,13 +246,22 @@ function bodyHeadings(body) {
  * that `#N` as a candidate with no decision. The body ends at the first
  * top-level HTML comment after the last heading the template names; every
  * bot marks its block with one, so no bot is named here and an unknown bot
- * is cut too (fail closed). A comment the author wrote before a later
- * template heading stays in the body, where the section readers blank it. An
- * author's own comment after the last template heading also ends the text,
- * and so does a bot block with an author section behind it; both can only
- * refuse. Every section reader gets the cut body from the two entries,
- * `lintPullRequestEvent` and `lintLocalPrBody`; the close-keyword gate keeps
- * the full body, because GitHub closes an issue a bot's block names.
+ * is cut too. A comment the author wrote before a later template heading
+ * stays in the body, where the section readers blank it.
+ *
+ * The direction is NOT fail closed for text the cut drops. The rule cannot
+ * tell an author's own top-level comment after the last template heading from
+ * a bot marker, so everything behind such a comment is dropped: an author's
+ * later undecided `#N` line in `## Fold check` is not read, and the check
+ * passes where the full body would refuse (accepted p3 residual, live 0 in
+ * the last 200 bodies). A bot block with an author section behind it ends the
+ * text at the block the same way.
+ *
+ * Only a SECTION reader reads the cut text. A reader that owns a GitHub
+ * semantic reads `fullBody`, because GitHub acts on the whole body: the
+ * closing keywords (`closedIssues`, `resolveBugClosing`, `lintCloseKeywords`,
+ * `lintCloseKeywordPlacement`, and the `Closes #N` that `lintFoldCheck`
+ * requires of a `folded` candidate) all see the text a bot block precedes.
  */
 function authorText(body = "") {
 	const source = String(body ?? "");
@@ -3611,7 +3620,7 @@ const FOLD_CHECK_MESSAGE =
  * this lint owns the form, so a raw `gh pr create` cannot skip the record. The
  * missing and empty section cases stay owned by `lintPrBody`.
  */
-export function lintFoldCheck(body = "") {
+export function lintFoldCheck(body = "", fullBody = body) {
 	const section = sectionContent(body, "fold check");
 	if (!section) return [];
 	// An empty section is `lintPrBody`'s to report. Content that survives only
@@ -3621,7 +3630,7 @@ export function lintFoldCheck(body = "") {
 	const content = section.visible.trim();
 	// A `folded` candidate must be closed by this body (#4717 F5), so the
 	// verdict is judged against the body's own close keywords.
-	const closes = closedIssues(body);
+	const closes = closedIssues(fullBody);
 	return sectionVerdict("fold check", content, { closes })
 		? []
 		: [FOLD_CHECK_MESSAGE];
@@ -4431,18 +4440,21 @@ export async function lintPullRequestEvent(
 		throw new Error("Pull request event and GITHUB_REPOSITORY are required");
 	const live = await resolveLivePrBody(pullRequest, fetchImpl);
 	const { normalized } = live;
-	const body = authorText(live.body);
+	// Section readers get the cut text; the close-keyword and bug-label readers
+	// keep `fullBody`, because GitHub closes what the whole body names (#4778).
+	const fullBody = live.body;
+	const body = authorText(fullBody);
 	const requireTestAssessment =
 		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
 	// #4288: a bug-closing PR owes a detection retrospective. The label read is
 	// best-effort; an unreadable label warns and skips the requirement.
 	let bugClosing = null;
 	try {
-		bugClosing = await resolveBugClosing(body, fetchImpl);
+		bugClosing = await resolveBugClosing(fullBody, fetchImpl);
 	} catch {
 		bugClosing = null;
 	}
-	if (bugClosing === null && closedIssues(body).length > 0)
+	if (bugClosing === null && closedIssues(fullBody).length > 0)
 		console.warn(
 			'::warning::PR body check could not read the closed issue label(s), so the "## Detection" section is not required (#4288).',
 		);
@@ -4470,7 +4482,7 @@ export async function lintPullRequestEvent(
 		result.valid = false;
 		result.errors.push(...classSweep);
 	}
-	const foldCheck = lintFoldCheck(body);
+	const foldCheck = lintFoldCheck(body, fullBody);
 	if (foldCheck.length) {
 		result.valid = false;
 		result.errors.push(...foldCheck);
@@ -4669,12 +4681,14 @@ function missingBaseRef(cwd, git = gitExecFileSync) {
 }
 
 export function lintLocalPrBody(
-	body,
+	fullBody,
 	cwd = process.cwd(),
 	git = gitExecFileSync,
 	options = {},
 ) {
-	body = authorText(body);
+	// The same split as CI's entry: section readers get the cut text, the
+	// close-keyword and bug-label readers keep `fullBody` (#4778).
+	const body = authorText(fullBody);
 	let diff = "";
 	// #4585: a local preflight must judge the same range as CI. An unavailable
 	// diff cannot classify the diff-keyed rows, so it fails closed; the rest of
@@ -4694,9 +4708,9 @@ export function lintLocalPrBody(
 	if (bugClosing === undefined)
 		bugClosing =
 			typeof options.resolveBugClosing === "function"
-				? options.resolveBugClosing(body)
+				? options.resolveBugClosing(fullBody)
 				: null;
-	if (bugClosing === null && closedIssues(body).length > 0)
+	if (bugClosing === null && closedIssues(fullBody).length > 0)
 		console.warn(
 			'::warning::PR body check could not read the closed issue label (gh missing, unauthenticated, or failed), so the "## Detection" requirement check was skipped (#4288).',
 		);
@@ -4732,7 +4746,7 @@ export function lintLocalPrBody(
 		result.valid = false;
 		result.errors.push(...classSweep);
 	}
-	const foldCheck = lintFoldCheck(body);
+	const foldCheck = lintFoldCheck(body, fullBody);
 	if (foldCheck.length) {
 		result.valid = false;
 		result.errors.push(...foldCheck);
@@ -4749,12 +4763,12 @@ export function lintLocalPrBody(
 	const workflowEvidence = lintWorkflowRunEvidence(body, { diff, cwd });
 	result.errors.push(...workflowEvidence);
 	if (workflowEvidence.length) result.valid = false;
-	const closeSyntax = lintCloseKeywords(body);
+	const closeSyntax = lintCloseKeywords(fullBody);
 	if (!closeSyntax.valid) {
 		result.valid = false;
 		result.errors.push(...closeKeywordErrors(closeSyntax));
 	}
-	const placement = lintCloseKeywordPlacement(options.title ?? "", body);
+	const placement = lintCloseKeywordPlacement(options.title ?? "", fullBody);
 	if (!placement.valid) {
 		result.valid = false;
 		result.errors.push(
