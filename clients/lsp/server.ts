@@ -2021,14 +2021,14 @@ export function NearestRoot(
 		inFlight.set(dirKey, promise);
 		try {
 			const result = await promise;
-			if (result !== undefined) {
-				// A record stamped inside the file system's timestamp tick before the
-				// walk cannot show a later same-tick change (#4756), so that answer is
-				// returned but not memoized, and the entry it replaces goes with it.
-				if (probedDirs.some((r) => dirMtimeIsRacy(r.mtimeMs, walkedAt)))
-					cache.delete(dirKey);
-				else cache.set(dirKey, { root: result, probedDirs, walkedAt });
-			}
+			// A record stamped inside the file system's timestamp tick before the
+			// walk cannot show a later same-tick change (#4756): the answer is
+			// returned, not memoized.
+			if (
+				result !== undefined &&
+				!probedDirs.some((r) => dirMtimeIsRacy(r.mtimeMs, walkedAt))
+			)
+				cache.set(dirKey, { root: result, probedDirs, walkedAt });
 			return result;
 		} finally {
 			inFlight.delete(dirKey);
