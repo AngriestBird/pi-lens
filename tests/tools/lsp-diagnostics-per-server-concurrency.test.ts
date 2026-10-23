@@ -26,9 +26,6 @@ import { removeTempDirSync } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 const mocked = vi.hoisted(() => ({ service: null as unknown }));
-const { getServersForFileWithConfig } = vi.hoisted(() => ({
-	getServersForFileWithConfig: vi.fn(),
-}));
 
 // Real `groupFilesByPrimaryServer`/`runPerServerGroups` — only the service the
 // singleton hands out is a double (lifecycle seam). Using the real scheduling
@@ -38,10 +35,8 @@ const { getServersForFileWithConfig } = vi.hoisted(() => ({
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
 import { clearWidgetState } from "../../clients/widget-state.js";
 import { installLspService } from "../support/lsp-service-seam.js";
-import { _setServersForFileForTests } from "../../clients/lsp/config.js";
 
 beforeEach(() => {
-	_setServersForFileForTests(getServersForFileWithConfig);
 	clearWidgetState();
 });
 afterEach(() => {
@@ -65,11 +60,6 @@ describe("lsp_diagnostics batch — per-server serialization (#631)", () => {
 		tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-lsp-diag-pergroup-"),
 		);
-		getServersForFileWithConfig.mockReset();
-		getServersForFileWithConfig.mockImplementation((fp: string) => {
-			const id = serverIdForFile(fp);
-			return id === "none" ? [] : [{ id }];
-		});
 
 		live = new Map();
 		maxPerServer = new Map();

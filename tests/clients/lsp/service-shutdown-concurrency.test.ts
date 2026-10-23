@@ -1,7 +1,6 @@
 /** Regression coverage for #851: service teardown must not serialize clients. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
 
 vi.mock("../../../clients/lsp/client.js", () => ({
@@ -19,10 +18,6 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 describe("LSPService shutdown concurrency (#851)", () => {
 	beforeEach(async () => {
 		vi.resetModules();
-		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
-			getServersForFileWithConfig,
-		);
-		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 	});
 
