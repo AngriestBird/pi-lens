@@ -2018,6 +2018,16 @@ export type DegradationKind =
 	 */
 	| "unclassified-mutating-tool"
 	/**
+	 * #4645: the warm incumbent abandoned its inferred-project membership probe
+	 * so the reply could still land before the request's deadline. The reply
+	 * carries the server's raw rows without the verdict, so the attached reader
+	 * renders them at their raw severity (the pre-#4645 answer for that edit)
+	 * while warm attach survives. Subject is the cause: `probe-timeout` (the
+	 * probe ran out its window) or `no-time-left` (the touch left none). Once per
+	 * session per cause.
+	 */
+	| "warm-attach-membership-probe-abandoned"
+	/**
 	 * #3389: an accepted socket on the warm diagnostics server emitted `error`.
 	 * A `net.Socket` with no `error` listener RETHROWS, so before this kind
 	 * existed the event was an uncaught exception in the pi host: every

@@ -189,6 +189,7 @@ import {
 	buildScopeKey,
 	createWorkspaceDiagnosticsCacheContext,
 } from "./workspace-diagnostics-cache.js";
+import { demoteInferredProjectDiagnostics } from "./inferred-project.js";
 import { attemptTsserverSyncDiagnostics } from "./tsserver-sync.js";
 import { isWarmAttached, tryWarmAttachedDiagnostics } from "../warm-attach.js";
 import { getSuccessfulLspSpawnDurationMs } from "./spawn-history.js";
@@ -9099,7 +9100,26 @@ export class LSPService {
 				// the incumbent branch already returns the wrapper.
 				const touchResult = attached?.available
 					? {
-							diags: attached.response.diagnostics,
+							// #4645: the incumbent's membership answer, applied on receipt
+							// through the owner's rule. This sweep records its rows into
+							// the workspace cache, and an attached process has no live
+							// tsserver to re-ask on a replay, so the verdict stays in the
+							// rows: the form the batch cache stores (`replayable()`). The
+							// environment rule still runs at render, against the install
+							// state of that render.
+							diags:
+								attached.response.projectIdentity === undefined
+									? attached.response.diagnostics
+									: await demoteInferredProjectDiagnostics(
+											attached.response.diagnostics,
+											{
+												filePath,
+												cwd,
+												identityCache: new Map([
+													[filePath, attached.response.projectIdentity],
+												]),
+											},
+										),
 							// #1470: the incumbent's coverage gap crosses the socket as an
 							// explicit DTO field, so carry it onto the wrapper the sweep
 							// reads. Dropping it here would let a partially covered

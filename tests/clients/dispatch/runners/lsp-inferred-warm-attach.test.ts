@@ -1,12 +1,20 @@
 /**
- * #1645 review F2: under warm attach the per-edit runner must NOT probe project
- * membership.
+ * #1645 review F2: the per-edit runner must NOT probe project membership under
+ * warm attach.
  *
  * Warm attach means diagnostics came from an already-running remote session over
  * IPC, with no local client for this file. Probing there forces a language-server
  * spawn to answer a render-path question, and the answer belongs to the freshly
  * spawned server rather than the warm session that produced the diagnostics.
  * Both make the probe worse than useless.
+ *
+ * #4645 split the probe across the pair: the INCUMBENT owns the live client, so
+ * it asks tsserver and sends the answer beside the server's raw rows
+ * (`tests/clients/warm-attach-confirmation.test.ts` pins the producer). This
+ * reader passes no `service` and seeds the one demotion pipeline with that
+ * answer, so it renders what a local read of the same rows renders: the
+ * environment rule first, then membership, and a quick-fix request for every
+ * raw severity-1 row.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -31,6 +39,7 @@ vi.mock("../../../../clients/warm-attach.js", () => ({
 
 import lspRunner from "../../../../clients/dispatch/runners/lsp.js";
 import { ENVIRONMENT_GAP_MARKER } from "../../../../clients/lsp/environment-gap.js";
+import { INFERRED_PROJECT_MARKER } from "../../../../clients/lsp/inferred-project.js";
 import { installLspService } from "../../../support/lsp-service-seam.js";
 
 const INFERRED_BODY = { configFileName: "/dev/null/inferredProject1*" };
@@ -75,7 +84,7 @@ const ENVIRONMENT_GAP_ROWS = [
 	serverId: "typescript",
 }));
 
-describe("LSP dispatch runner — warm attach skips the membership probe (#1645 F2)", () => {
+describe("LSP dispatch runner — warm attach reader (#1645 F2, #4645)", () => {
 	let cwd: string;
 
 	beforeEach(() => {
@@ -120,7 +129,7 @@ describe("LSP dispatch runner — warm attach skips the membership probe (#1645 
 			pi: { getFlag: () => undefined },
 		} as never);
 
-		// The finding still renders (unchanged pre-#1640 authority on this path)…
+		// The finding still renders at the authority the incumbent sent…
 		expect(result.diagnostics.length).toBeGreaterThan(0);
 		// …but not one byte of probe traffic was spent to decide that.
 		const service = mocked.service as ReturnType<typeof makeService>;
@@ -164,5 +173,127 @@ describe("LSP dispatch runner — warm attach skips the membership probe (#1645 
 		// …and the membership probe is still skipped on this path.
 		const service = mocked.service as ReturnType<typeof makeService>;
 		expect(service.executeReadOnlyCommandOnLiveClient).not.toHaveBeenCalled();
+	});
+
+	// #4645: the reader renders the incumbent's answer exactly as a local read
+	// with a live tsserver would. F4 recurrence: membership applied before the
+	// environment rule turned an ambient-gap row's install advice into a
+	// tsconfig glob. F2 recurrence: rows demoted before they crossed the socket
+	// lost their quick fix, because this reader asks only for severity-1 rows.
+	describe("the incumbent's membership answer", () => {
+		const inferredRow = {
+			severity: 1,
+			message: "Type 'number' is not assignable to type 'string'.",
+			range: {
+				start: { line: 3, character: 2 },
+				end: { line: 3, character: 9 },
+			},
+			source: "typescript",
+			code: 2322,
+		};
+		const inferredIdentity = {
+			projectKind: "inferred",
+			association: "associated",
+		};
+		let file: string;
+
+		beforeEach(() => {
+			file = path.join(cwd, "orphan.ts");
+			fs.writeFileSync(file, "export const x: string = 1;\n");
+		});
+
+		async function run() {
+			return lspRunner.run({
+				filePath: file,
+				cwd,
+				fileRole: "source",
+				pi: { getFlag: () => undefined },
+			} as never);
+		}
+
+		it("renders an inferred-project error as the labelled warning a local read gives", async () => {
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [inferredRow],
+					projectIdentity: inferredIdentity,
+				},
+			});
+
+			const result = await run();
+
+			expect(result.semantic).toBe("warning");
+			expect(result.diagnostics[0]?.message).toContain(INFERRED_PROJECT_MARKER);
+			// The answer came over the socket: not one byte of probe traffic here.
+			const service = mocked.service as ReturnType<typeof makeService>;
+			expect(service.executeReadOnlyCommandOnLiveClient).not.toHaveBeenCalled();
+		});
+
+		it("keeps a blocker when no answer arrives (an incumbent built before #4645)", async () => {
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: { diagnostics: [inferredRow] },
+			});
+
+			const result = await run();
+
+			expect(result.semantic).toBe("blocking");
+			expect(result.diagnostics[0]?.message).not.toContain(
+				INFERRED_PROJECT_MARKER,
+			);
+		});
+
+		it("gives an ambient-gap row in an inferred project the environment verdict first", async () => {
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [ENVIRONMENT_GAP_ROWS[2]],
+					projectIdentity: inferredIdentity,
+				},
+			});
+
+			const result = await run();
+
+			expect(result.semantic).toBe("warning");
+			expect(result.diagnostics[0]?.message).toContain(ENVIRONMENT_GAP_MARKER);
+			expect(result.diagnostics[0]?.message).not.toContain(
+				INFERRED_PROJECT_MARKER,
+			);
+		});
+
+		it("requests a code action for the row the answer demotes and attaches the suggestion", async () => {
+			const warningRow = {
+				...inferredRow,
+				severity: 2,
+				code: 6133,
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 4 },
+				},
+			};
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [warningRow, inferredRow],
+					projectIdentity: inferredIdentity,
+				},
+			});
+			mocked.attachedCodeActions.mockResolvedValue({
+				available: true,
+				response: {
+					actions: [[{ title: "Change type to string", kind: "quickfix" }]],
+				},
+			});
+
+			const result = await run();
+
+			// Only the error is asked about; the plain warning is not.
+			expect(mocked.attachedCodeActions.mock.calls[0]?.[2]).toEqual([
+				{ start: inferredRow.range.start, end: inferredRow.range.end },
+			]);
+			const demoted = result.diagnostics.find((d) => d.line === 4);
+			expect(demoted?.semantic).toBe("warning");
+			expect(demoted?.fixSuggestion).toContain("Change type to string");
+		});
 	});
 });
