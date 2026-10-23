@@ -458,11 +458,16 @@ describe.skipIf(!POSIX)("bare lookups under untrusted pi trust (#4530)", () => {
 		// The refused `gofmt` sends the detection to its `go env GOROOT`
 		// fallback. That `go` holds the detection open until the cell has
 		// granted trust, so the selection is written after the grant.
+		// `sleep` by absolute path: the stub PATH holds only the stand-ins and
+		// `which`, and a missing `sleep` would let the loop finish at once.
 		const started = path.join(layout.root, "go-started");
 		const gate = path.join(layout.root, "go-gate");
+		const sleepBin = ["/bin/sleep", "/usr/bin/sleep"].find((p) =>
+			fs.existsSync(p),
+		);
 		stub.plantOnPath(
 			"go",
-			`printf x > '${started}'; i=0; while [ ! -f '${gate}' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; exit 1`,
+			`printf x > '${started}'; i=0; while [ ! -f '${gate}' ] && [ $i -lt 80 ]; do '${sleepBin}' 0.05; i=$((i+1)); done; exit 1`,
 		);
 		const file = path.join(layout.main, "main.go");
 
