@@ -9,6 +9,16 @@ import {
 	useTrackedTempDirs,
 } from "../test-utils.js";
 
+/**
+ * The Windows registry PATH read starts `powershell.exe` through the spawn
+ * seam's `spawnSync` (#4530; it was a raw `execFileSync`). An empty answer
+ * keeps the launch on the process PATH, as the `execFileSync` double's empty
+ * string did before.
+ */
+function emptyRegistryRead() {
+	return { status: 0, stdout: "", stderr: "" };
+}
+
 // These launch tests use fake timers and don't exercise Windows Ruby drive-root
 // discovery. Stub the #1137 drive-root readers so `buildAugmentedPath`'s async
 // `fs.promises.readdir("C:\\")` (real threadpool I/O, not fake-timer driven)
@@ -52,6 +62,7 @@ describe("lsp launch", () => {
 			const spawnMock = vi.fn(() => new MockChildProcess(2468));
 
 			vi.doMock("node:child_process", () => ({
+				spawnSync: vi.fn(emptyRegistryRead),
 				execFileSync: vi.fn(() => ""),
 				spawn: spawnMock,
 			}));
@@ -78,6 +89,7 @@ describe("lsp launch", () => {
 		fs.writeFileSync(command, "");
 		const spawnMock = vi.fn(() => new MockChildProcess(2468));
 		vi.doMock("node:child_process", () => ({
+			spawnSync: vi.fn(emptyRegistryRead),
 			execFileSync: vi.fn(() => ""),
 			spawn: spawnMock,
 		}));
@@ -118,6 +130,7 @@ describe("lsp launch", () => {
 		);
 
 		vi.doMock("node:child_process", () => ({
+			spawnSync: vi.fn(emptyRegistryRead),
 			execFileSync: vi.fn(() => ""),
 			spawn: vi.fn(() => new MockChildProcess(8642)),
 		}));
@@ -134,9 +147,14 @@ describe("lsp launch", () => {
 		// resolver off `file-utils.ts` onto the cycle-free `probe-home-state.ts`
 		// leaf, so this doubles THAT module; doubling file-utils.js alone leaves
 		// launch.ts writing to the real (vitest-pinned) log root.
-		vi.doMock("../../../clients/probe-home-state.js", () => ({
-			getGlobalPiLensLogDir: () => tempDir,
-		}));
+		vi.doMock(
+			"../../../clients/probe-home-state.js",
+			async (importOriginal) => ({
+				// #4530: the data-dir resolver (`machineStateDir`) stays real.
+				...(await importOriginal()),
+				getGlobalPiLensLogDir: () => tempDir,
+			}),
+		);
 
 		try {
 			const { launchLSP } = await import("../../../clients/lsp/launch.js");
@@ -155,6 +173,14 @@ describe("lsp launch", () => {
 			expect(log).not.toContain(token);
 			expect(log).toContain("[REDACTED:github-token]");
 		} finally {
+			// #4530: the spawn seam's one-per-session notice and ledger record for
+			// a dropped search-path entry (the checkout's own `node_modules/.bin`
+			// on a test runner's PATH) are async appends to extension.log and
+			// latency.log under the doubled log dir; drain every writer before
+			// the dir is removed, or a late append recreates it.
+			const { flushAllNdjsonWriters } =
+				await import("../../../clients/ndjson-logger.js");
+			await flushAllNdjsonWriters();
 			vi.doUnmock("../../../clients/env-utils.js");
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
@@ -184,6 +210,7 @@ describe("lsp launch", () => {
 
 			vi.doMock("node:child_process", () => {
 				return {
+					spawnSync: vi.fn(emptyRegistryRead),
 					execFileSync: vi.fn(() => ""),
 					spawn: vi.fn(() => {
 						const proc = new MockChildProcess(4321);
@@ -224,6 +251,7 @@ describe("lsp launch", () => {
 			fs.writeFileSync(resolvedBinary, "");
 			vi.doMock("node:child_process", () => {
 				return {
+					spawnSync: vi.fn(emptyRegistryRead),
 					execFileSync: vi.fn((command: string, args: string[]) => {
 						if (command === "where" && args[0] === "taplo") {
 							return `${resolvedBinary}\r\n`;
@@ -317,6 +345,7 @@ describe("lsp launch", () => {
 			});
 			vi.doMock("node:child_process", () => {
 				return {
+					spawnSync: vi.fn(emptyRegistryRead),
 					execFileSync: vi.fn(() => ""),
 					spawn: spawnSpy,
 				};
@@ -344,6 +373,7 @@ describe("lsp launch", () => {
 			let spawnedCommand: string | undefined;
 			vi.doMock("node:child_process", () => {
 				return {
+					spawnSync: vi.fn(emptyRegistryRead),
 					execFileSync: vi.fn(() => ""),
 					spawn: vi.fn((command: string) => {
 						spawnedCommand = command;
@@ -383,6 +413,7 @@ describe("lsp launch", () => {
 			let spawnedArgs: string[] | undefined;
 			vi.doMock("node:child_process", () => {
 				return {
+					spawnSync: vi.fn(emptyRegistryRead),
 					execFileSync: vi.fn(() => ""),
 					spawn: vi.fn((command: string, args: string[]) => {
 						spawnedCommand = command;

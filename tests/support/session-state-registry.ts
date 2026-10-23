@@ -617,6 +617,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 				ns.cooldownRecordedForRetryAtMs.set("pi-lens-probe-cmd", Date.now());
 				ns.detectionCache.set("/pi-lens-probe-cwd", {
 					signature: "session-state-registry-probe",
+					trustGeneration: 0,
 					entries: new Map(),
 				});
 				ns.formatterSignatureFlights.set("/pi-lens-probe-cwd", {

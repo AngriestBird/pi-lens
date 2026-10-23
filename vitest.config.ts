@@ -648,6 +648,9 @@ export const wallClockBudgetInclude = [
 	"tests/clients/safe-spawn-resource-usage.test.ts",
 	"tests/clients/safe-spawn-timeout-teardown.test.ts",
 	"tests/clients/safe-spawn-windows-command.test.ts",
+	// #4530: planted executables write marker files through the real spawn
+	// seam, PATH lookup and package-manager query (flake-shape admission).
+	"tests/clients/session-repository-trust-4530.test.ts",
 	// #3403: real scratch-tree rotation performs cold-disk filesystem work;
 	// measured p95 is 3.63s under six workers and eight CPU hogs, so the 10s
 	// assertion/budget leaves bounded CI scheduling headroom.

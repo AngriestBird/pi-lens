@@ -47,7 +47,6 @@
  * - GitHub releases (platform-specific binaries → ~/.pi-lens/bin/)
  */
 
-import { spawn } from "node:child_process";
 import {
 	existsSync,
 	readFileSync,
@@ -67,8 +66,13 @@ import { logExtension } from "../extension-log.js";
 import { isFullyQualified } from "../path-utils.js";
 import {
 	assertInstallAllowed,
+	getProjectTrustGeneration,
 	projectTrustDenialReason,
 } from "../project-trust.js";
+import {
+	isUntrustedProjectPath,
+	recordProjectCommandRefusal,
+} from "../session-repository.js";
 
 const _installerRequire = createRequire(import.meta.url);
 
@@ -102,19 +106,24 @@ import {
 } from "../package-manager.js";
 import {
 	resetSafeSpawnWindowsCommandCache,
+	type SpawnResult,
 	safeSpawnAsync,
 } from "../safe-spawn.js";
-import {
-	type BoundedOutputSink,
-	createBoundedOutputSink,
-	DEFAULT_MAX_OUTPUT_BYTES,
-} from "../spawn-output-cap.js";
 import { probeToolAsync } from "../tool-probe.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import { resolveGitHubToken } from "../zizmor-config.js";
 
 // Global installation directory for pi-lens tools
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
+
+/**
+ * #4530: bounds for the probes that moved onto the spawn seam. Both were raw
+ * `spawn` calls with no timeout: an interpreter whose `site` import stalls
+ * parked the installer's promise forever. 5 s matches the other interpreter
+ * probes; 120 s matches the install budget a cold, large archive needs.
+ */
+const USER_BASE_PROBE_TIMEOUT_MS = 5_000;
+const ARCHIVE_COMMAND_TIMEOUT_MS = 120_000;
 const INSTALL_LOCK_PATH = path.join(TOOLS_DIR, ".install.lock");
 const INSTALL_LOCK_GENERATIONS = `${INSTALL_LOCK_PATH}s`;
 const activeInstallLocks = new Set<InstallLockHold>();
@@ -2547,13 +2556,25 @@ export async function isCommandAvailable(
 	for (const dir of dirs) {
 		if (!dir) continue;
 		for (const name of names) {
-			const candidate = path.join(dir, name);
+			// #4530: joined as text on POSIX, as the kernel joins it, so a
+			// `link/..` entry is read where the spawn would find it; Win32
+			// folds `..` lexically itself.
+			const candidate = isWindows
+				? path.join(dir, name)
+				: `${dir}${path.sep}${name}`;
 			try {
 				const stat = statSync(candidate);
 				// isFile() returns false for broken symlinks (target missing)
-				if (stat.isFile() && stat.size > 0) {
-					return true;
+				if (!stat.isFile() || stat.size === 0) continue;
+				// #4530: a candidate that is the session repository's bytes (a
+				// project PATH entry, a relative one, or a global link into the
+				// project) is no answer until pi trusts the project: the installer
+				// would otherwise report a project binary as an installed tool.
+				if (isUntrustedProjectPath(candidate)) {
+					recordProjectCommandRefusal(candidate);
+					continue;
 				}
+				return true;
 			} catch {
 				// ENOENT or permission denied — skip this candidate
 			}
@@ -2569,7 +2590,13 @@ export async function isCommandAvailable(
  * probe that is guaranteed to fail with a full spawn round-trip.
  */
 export async function isSpawnableCommand(command: string): Promise<boolean> {
-	if (/[\\/]/.test(command)) {
+	// The platform's separators (#4776): on POSIX a backslash is a name
+	// character, so such a name is a search-path lookup, not a file to stat.
+	const namesPath =
+		installerPlatform() === "win32"
+			? /[\\/]/.test(command)
+			: command.includes("/");
+	if (namesPath) {
 		try {
 			const stat = statSync(command);
 			return stat.isFile() && stat.size > 0;
@@ -2577,7 +2604,8 @@ export async function isSpawnableCommand(command: string): Promise<boolean> {
 			return false;
 		}
 	}
-	const memoKey = `${command}:${hashSync(process.env.PATH || "")}`;
+	// #4530: the walk's answer depends on project trust as well as PATH.
+	const memoKey = `${getProjectTrustGeneration()}:${command}:${hashSync(process.env.PATH || "")}`;
 	if (pathWalkMemo.has(memoKey)) return pathWalkMemo.get(memoKey) ?? false;
 	const isSpawnable = await isCommandAvailable(command);
 	pathWalkMemo.set(memoKey, isSpawnable);
@@ -3589,6 +3617,12 @@ async function findNpmGlobalToolPath(
 		for (const candidate of candidates) {
 			try {
 				await fs.access(candidate);
+				// #4530 (#4776): a global bin dir can hold a link into the
+				// project, and the verification below starts the candidate.
+				if (isUntrustedProjectPath(candidate)) {
+					recordProjectCommandRefusal(candidate);
+					continue;
+				}
 				if (
 					await verifyToolBinary(
 						candidate,
@@ -3685,6 +3719,12 @@ async function findPipUserToolPath(
 			for (const candidate of candidates) {
 				try {
 					await fs.access(candidate);
+					// #4530 (#4776): the Python user base is an interpreter's
+					// answer, and its scripts dir can link into the project.
+					if (isUntrustedProjectPath(candidate)) {
+						recordProjectCommandRefusal(candidate);
+						continue;
+					}
 					if (
 						await verifyToolBinary(
 							candidate,
@@ -3707,41 +3747,39 @@ async function findPipUserToolPath(
 }
 
 /**
- * The verdict of one `<interpreter> -m site --user-base` probe (#3383).
+ * The verdict of one `<interpreter> -m site --user-base` probe (#3383): the
+ * trimmed path on a clean exit, else empty. A TRUNCATED probe resolves EMPTY
+ * rather than trimming a prefix, because the prefix of a path is a different
+ * path: `addBinToPath` would put a plausible-looking wrong directory on PATH.
+ * Empty is the value a missing interpreter resolves too, and every caller
+ * handles it. The spawn seam bounds the output and records the cap trip.
  *
- * Both probes accumulate through {@link createBoundedOutputSink} instead of
- * `stdout += data`: the concatenation ran inside a `data` handler, where V8's
- * `RangeError: Invalid string length` is an uncaught exception rather than this
- * promise's value, and nothing bounded an interpreter that decides to write
- * forever. A TRUNCATED probe resolves EMPTY rather than trimming a prefix,
- * because the prefix of a path is a different path: `addBinToPath` would put a
- * plausible-looking wrong directory on PATH. Empty is the value both probes
- * already resolve when an interpreter is missing, and every caller handles it.
- *
- * Exported for `tests/clients/off-seam-output-bounds.test.ts`: both `data`
- * handlers that feed it sit inside module-private probe loops that only a real
- * `python3` on PATH can drive, so this is the seam the bound is pinned at.
+ * Exported for `tests/clients/off-seam-output-bounds.test.ts`.
  */
 export function userBaseProbeResult(
-	command: string,
-	code: number | null,
-	stdout: BoundedOutputSink,
+	result: Pick<SpawnResult, "status" | "error" | "stdout" | "outputTruncated">,
 ): string {
-	if (stdout.truncated) {
-		recordDegradationOnce({
-			kind: "spawn-output-cap-truncated",
-			subject: `user-base-probe:${command}`,
-			reason: `\`${command} -m site --user-base\` reached the ${DEFAULT_MAX_OUTPUT_BYTES}-byte default cap after ${stdout.observedBytes} bytes; the probed user base is unusable`,
-			metadata: {
-				capBytes: DEFAULT_MAX_OUTPUT_BYTES,
-				capSource: "default",
-				observedBytes: stdout.observedBytes,
-				killed: false,
-			},
-		});
-		return "";
-	}
-	return code === 0 ? stdout.text.trim() : "";
+	if (result.outputTruncated || result.error || result.status !== 0) return "";
+	return result.stdout.trim();
+}
+
+/**
+ * Ask `command` where Python keeps user installs (#4530). It starts through the
+ * spawn seam, so a bare interpreter name is a lookup judged against project
+ * trust like every other; the raw `spawn` this replaces (with `shell: true` on
+ * Windows, which searches the cwd first) skipped that judgment and had no
+ * timeout. It runs from HOME: `-m` puts the cwd on `sys.path`, so a project's
+ * own `site.py` would answer from the session cwd.
+ */
+async function probeUserBase(command: string): Promise<string> {
+	return userBaseProbeResult(
+		await safeSpawnAsync(command, ["-m", "site", "--user-base"], {
+			timeout: USER_BASE_PROBE_TIMEOUT_MS,
+			cwd: os.homedir(),
+			ignoreAmbientSignal: true,
+			lifetimeCoupled: true,
+		}),
+	);
 }
 
 async function getPythonUserBaseCandidates(): Promise<string[]> {
@@ -3773,32 +3811,7 @@ async function getPythonUserBaseCandidates(): Promise<string[]> {
 				];
 
 	for (const probe of probes) {
-		const userBase = await new Promise<string>((resolve) => {
-			const isWin = process.platform === "win32";
-			// Bake args into command string when shell:true on Windows to avoid DEP0190.
-			const spawnCmd = isWin
-				? [probe.command, ...probe.args].join(" ")
-				: probe.command;
-			let proc: ReturnType<typeof spawn>;
-			try {
-				proc = spawn(spawnCmd, isWin ? [] : probe.args, {
-					stdio: ["ignore", "pipe", "pipe"],
-					shell: isWin,
-				});
-			} catch {
-				// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the
-				// pidusage bug class, #533) — best-effort probe, resolve empty.
-				resolve("");
-				return;
-			}
-
-			const stdout = createBoundedOutputSink();
-			proc.stdout?.on("data", (data: Buffer | string) => stdout.append(data));
-			proc.on("exit", (code) =>
-				resolve(userBaseProbeResult(probe.command, code, stdout)),
-			);
-			proc.on("error", () => resolve(""));
-		});
+		const userBase = await probeUserBase(probe.command);
 		add(userBase);
 	}
 
@@ -3971,30 +3984,22 @@ async function httpsGet(
 }
 
 /**
- * Run a shell command and return true on exit code 0.
+ * Run an archive utility and return true on exit code 0. #4530: through the
+ * spawn seam, so the bare utility name is a lookup judged against project
+ * trust, and the run is bounded; the raw `spawn` this replaces had neither.
  */
-function runCommand(
+async function runCommand(
 	command: string,
 	args: string[],
 	cwd: string,
 ): Promise<boolean> {
-	return new Promise((resolve) => {
-		let proc: ReturnType<typeof spawn>;
-		try {
-			proc = spawn(command, args, {
-				cwd,
-				stdio: "ignore",
-				shell: process.platform === "win32",
-			});
-		} catch {
-			// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the pidusage
-			// bug class, #533) — resolve false rather than reject/crash.
-			resolve(false);
-			return;
-		}
-		proc.on("exit", (code) => resolve(code === 0));
-		proc.on("error", () => resolve(false));
+	const result = await safeSpawnAsync(command, args, {
+		cwd,
+		timeout: ARCHIVE_COMMAND_TIMEOUT_MS,
+		ignoreAmbientSignal: true,
+		lifetimeCoupled: true,
 	});
+	return !result.error && result.status === 0;
 }
 
 /**
@@ -6222,24 +6227,7 @@ async function installPipTool(
 			const result = await run(candidate.command, args);
 			const error = (result.error?.message ?? result.stderr).trim();
 			if (result.status === 0) {
-				const base = await new Promise<string>((resolve) => {
-					let probe: ReturnType<typeof spawn>;
-					try {
-						probe = spawn(candidate.command, ["-m", "site", "--user-base"], {
-							stdio: ["ignore", "pipe", "pipe"],
-							shell: isWindows,
-						});
-					} catch {
-						resolve("");
-						return;
-					}
-					const stdout = createBoundedOutputSink();
-					probe.stdout?.on("data", (data) => stdout.append(data));
-					probe.on("exit", (code) =>
-						resolve(userBaseProbeResult(candidate.command, code, stdout)),
-					);
-					probe.on("error", () => resolve(""));
-				});
+				const base = await probeUserBase(candidate.command);
 				const binaryPath = base
 					? await addBinToPath(pipScriptsDir(base, installerPlatform()))
 					: undefined;

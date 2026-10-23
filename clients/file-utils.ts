@@ -45,6 +45,7 @@ import {
 	isEphemeralCheckoutRoot,
 } from "./ephemeral-root.js";
 import { getProcessSingleton } from "./process-singletons.js";
+import { machineStateDir } from "./probe-home-state.js";
 
 /**
  * Return the directory where pi-lens stores project-specific data
@@ -663,9 +664,7 @@ export function displayProjectDataPath(
  * session" argument as the tools above.
  */
 export function getGlobalPiLensDir(): string {
-	const override = process.env.PI_LENS_HOME?.trim();
-	if (override) return path.resolve(override);
-	return path.join(os.homedir(), ".pi-lens");
+	return machineStateDir();
 }
 
 /**
