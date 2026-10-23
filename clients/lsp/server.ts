@@ -480,11 +480,12 @@ async function findGitBoundary(
 	const visited: string[] = [];
 	let found: string | undefined;
 	while (true) {
-		if (memo?.has(current)) {
-			found = memo.get(current);
+		const key = normalizeMapKey(current);
+		if (memo?.has(key)) {
+			found = memo.get(key);
 			break;
 		}
-		visited.push(current);
+		visited.push(key);
 		if (await markerExists(current, ".git")) {
 			found = current;
 			break;
