@@ -15,7 +15,7 @@ respawned server reports every finding it reported before eviction; the
 content-bound coverage check the auxiliary freeze depends on. A server that
 cannot demonstrate it is never proposed for eviction on perf grounds alone.
 
-_Last generated: 2026-10-21 on linux; 49 registry servers: 32 eligible, 0 vetoed, 3 inconclusive, 14 unavailable (0 not reached: budget)._
+_Last generated: 2026-10-23 on linux; 49 registry servers: 33 eligible, 0 vetoed, 2 inconclusive, 14 unavailable (0 not reached: budget)._
 
 ## Per-server rows
 
@@ -48,7 +48,7 @@ step log only, because it flaps.
 | docker | primary | transparent | eligible | · | ok | preserved |
 | docker-official | primary | unmeasured | eligible | · | ok | preserved |
 | elixir | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
-| expert | primary | unmeasured | inconclusive | no-baseline | n/a | unproven |
+| expert | primary | unmeasured | eligible | · | ok | preserved |
 | fish | primary | transparent | eligible | · | ok | preserved |
 | fsharp | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
 | gleam | primary | unmeasured | eligible | · | ok | preserved |
@@ -94,6 +94,7 @@ nothing.
 - **ast-grep** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **cue** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **docker-official** [proposal] declared unmeasured but eviction and respawn preserved its findings
+- **expert** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **gleam** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **kotlin** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **lua** [proposal] declared unmeasured but eviction and respawn preserved its findings

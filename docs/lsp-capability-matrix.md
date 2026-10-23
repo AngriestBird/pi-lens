@@ -322,5 +322,5 @@ date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
 counts (#3989). Regenerated every run; never a measurement.
 
 ```json
-{"idle-eviction":{"docker-official":{"nights":[{"day":"2026-10-21","rssMb":64,"coldMs":811}]},"kotlin":{"nights":[{"day":"2026-10-21","rssMb":292,"coldMs":2130}]},"powershell":{"nights":[{"day":"2026-10-21","rssMb":166,"coldMs":2718}]},"rust":{"nights":[{"day":"2026-10-21","rssMb":598,"coldMs":2343}]},"svelte":{"nights":[{"day":"2026-10-21","rssMb":232,"coldMs":2383}]},"zizmor":{"nights":[{"day":"2026-10-21","rssMb":57,"coldMs":1613}]}}}
+{"idle-eviction":{"docker-official":{"nights":[{"day":"2026-10-23","rssMb":62,"coldMs":883}]},"kotlin":{"nights":[{"day":"2026-10-23","rssMb":294,"coldMs":2818}]},"powershell":{"nights":[{"day":"2026-10-23","rssMb":155,"coldMs":2288}]},"rust":{"nights":[{"day":"2026-10-23","rssMb":596,"coldMs":2986}]},"svelte":{"nights":[{"day":"2026-10-23","rssMb":231,"coldMs":2707}]},"zizmor":{"nights":[{"day":"2026-10-23","rssMb":55,"coldMs":1661}]}}}
 ```
