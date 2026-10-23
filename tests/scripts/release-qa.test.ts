@@ -85,6 +85,7 @@ import {
 	CODEMODE_POLL_SCRIPT,
 	buildCodemodeScenario,
 	classifyCodemodeNested,
+	classifyLspWarmLog,
 	locatePiAiIndex,
 	parsePiVersion,
 	planCodemodeRow,
@@ -299,6 +300,24 @@ describe("release-QA matrix and probe map are one list (#2606)", () => {
 		const { rows } = parseBaselineRows(baselineText());
 		const documented = rows.map((r) => r.id).sort();
 		expect(implementedRowIds()).toEqual(documented);
+	});
+});
+
+describe("release-QA session-start LSP warm witness (#4316)", () => {
+	it("requires a resolved warm record and rejects any warm failure", () => {
+		expect(
+			classifyLspWarmLog('{"subsystem":"lsp","message":"LSP warm resolved"}\n'),
+		).toEqual({ status: "pass", detail: "LSP warm resolved" });
+		expect(
+			classifyLspWarmLog(
+				'{"subsystem":"lsp","message":"LSP warm resolved"}\n' +
+					'{"subsystem":"lsp","message":"LSP warm failed: missing module"}\n',
+			),
+		).toEqual({ status: "fail", detail: "LSP warm failed: missing module" });
+		expect(classifyLspWarmLog("{}\n")).toEqual({
+			status: "fail",
+			detail: "no LSP warm resolved record",
+		});
 	});
 });
 

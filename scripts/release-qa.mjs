@@ -1928,6 +1928,35 @@ export function scratchEnv(scratchRoot, extra = {}) {
 }
 
 /**
+ * Classify the extension-log witness emitted by the RPC session-start warm.
+ * A success record is required; any warm failure wins over it so a later
+ * recovery cannot hide the failed session-start attempt (#4316).
+ */
+export function classifyLspWarmLog(text) {
+	const records = String(text ?? "")
+		.split("\n")
+		.filter(Boolean)
+		.flatMap((line) => {
+			try {
+				const record = JSON.parse(line);
+				return typeof record?.message === "string" ? [record] : [];
+			} catch {
+				return [];
+			}
+		});
+	const failure = records.find((record) =>
+		/LSP warm failed/i.test(record.message),
+	);
+	if (failure) return { status: "fail", detail: failure.message };
+	const resolved = records.find(
+		(record) => record.message === "LSP warm resolved",
+	);
+	return resolved
+		? { status: "pass", detail: resolved.message }
+		: { status: "fail", detail: "no LSP warm resolved record" };
+}
+
+/**
  * Every environment variable `scratchEnv` pins inside the scratch root, and
  * the writer each one steers. Exported so the hermeticity canary enumerates
  * the same list the runner does instead of re-typing it — a second copy is
@@ -2057,12 +2086,19 @@ function captureGetCommands({ piBin, cwd, env, timeoutMs = RPC_TIMEOUT_MS }) {
 		);
 		pi.onMessage((message) => {
 			if (message.type === "response" && message.command === "get_commands") {
-				finish({
-					ok: true,
-					commands: message.data?.commands ?? [],
-					extensionErrors: pi.extensionErrors,
-					raw: message,
-				});
+				setTimeout(() => {
+					const extensionLogPath = path.join(env.PI_LENS_HOME, "extension.log");
+					const extensionLog = fs.existsSync(extensionLogPath)
+						? fs.readFileSync(extensionLogPath, "utf8")
+						: "";
+					finish({
+						ok: true,
+						commands: message.data?.commands ?? [],
+						extensionErrors: pi.extensionErrors,
+						extensionLog,
+						raw: message,
+					});
+				}, 500);
 			}
 		});
 		pi.child.on("error", (err) =>
@@ -2291,6 +2327,19 @@ const ROW_PROBES = {
 					2,
 				),
 			},
+		};
+	},
+
+	"lsp-warm-resolved": async (ctx) => {
+		const capture = ctx.rpc;
+		if (!capture?.ok) {
+			return { status: "fail", detail: capture?.reason ?? "no RPC capture" };
+		}
+		const verdict = classifyLspWarmLog(capture.extensionLog);
+		return {
+			...verdict,
+			shows: verdict.detail,
+			witness: { ext: "ndjson", content: capture.extensionLog },
 		};
 	},
 

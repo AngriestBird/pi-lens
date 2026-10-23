@@ -345,6 +345,7 @@ export function scratchEnv(
 	scratchRoot: string,
 	extra?: Record<string, string>,
 ): NodeJS.ProcessEnv;
+export function classifyLspWarmLog(text: string): ProbeReport;
 
 /** Every variable `scratchEnv` pins inside the scratch root. */
 export const PINNED_ENV_KEYS: readonly string[];

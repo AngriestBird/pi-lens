@@ -2479,13 +2479,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 				}
 				const sessionStartMonotonicAt = performance.now();
 				warmDispatchAtSessionStart();
-				void warmLspService().catch((err) =>
-					logExtension({
-						subsystem: "lsp",
-						level: "warn",
-						message: `LSP warm failed: ${err}`,
-					}),
-				);
+				void warmLspService()
+					.then(() =>
+						logExtension({
+							subsystem: "lsp",
+							level: "debug",
+							message: "LSP warm resolved",
+						}),
+					)
+					.catch((err) =>
+						logExtension({
+							subsystem: "lsp",
+							level: "warn",
+							message: `LSP warm failed: ${err}`,
+						}),
+					);
 				void warmFormatters().catch((err) =>
 					logExtension({
 						subsystem: "format",
