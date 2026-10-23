@@ -130,11 +130,11 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		);
 	}
 
-	async function runBatch(paths: string[]) {
+	async function runBatch(paths: string[], waitMs = 50) {
 		const tool = createLspDiagnosticsTool();
 		return tool.execute(
 			"diag-cache-test",
-			{ paths, severity: "all", concurrency: 8, waitMs: 50 },
+			{ paths, severity: "all", concurrency: 8, waitMs },
 			new AbortController().signal,
 			null,
 			{ cwd: tmpDir },
@@ -694,7 +694,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			probe.mockResolvedValue(replay);
 			reconcileScanDiagnostics.mockClear();
 			touchFile.mockClear();
-			await runBatch([file]);
+			await runBatch([file], 15_000);
 			// A replay, never a second touch.
 			expect(touchFile).not.toHaveBeenCalled();
 			return { fresh, replayed: semanticsFor(file) };
@@ -833,6 +833,10 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		let priorHome: string | undefined;
 		let incumbent: net.Server;
 		let probe: ReturnType<typeof vi.fn>;
+		// Set while the in-process incumbent serves a request: only it has a live
+		// tsserver to ask, so only its probe is answered.
+		let incumbentServing = false;
+		let incumbentProbes = 0;
 
 		function writtenFor(
 			file: string,
@@ -898,9 +902,11 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 					"data",
 					createWarmIpcLineReader(
 						(line) => {
-							void _serveWarmRequestForTests(JSON.parse(line)).then((reply) =>
-								socket.end(`${JSON.stringify(reply)}\n`),
-							);
+							incumbentServing = true;
+							void _serveWarmRequestForTests(JSON.parse(line)).then((reply) => {
+								incumbentServing = false;
+								socket.end(`${JSON.stringify(reply)}\n`);
+							});
 						},
 						{ label: "test-incumbent", onOverflow: () => socket.end() },
 					),
@@ -923,18 +929,25 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 
 		/**
 		 * One attached serve, an install landing from outside, one replay. The
-		 * double serves both processes' calls, so it answers the probe once (the
-		 * incumbent's) and then reports what an attached process always finds:
-		 * no live client. A reader that probed for itself would see that answer.
+		 * double serves both processes' calls, so it answers the probe only while
+		 * the incumbent serves, and otherwise reports what an attached process
+		 * always finds: no live client. A reader that probed for itself would see
+		 * that answer. The budget is the production default (15 s) because the
+		 * file's 50 ms leaves the incumbent no time before its send reserve, and
+		 * then no answer is asked or carried.
 		 */
 		async function serveInstallReplay(file: string, incumbentAnswer: unknown) {
-			probe
-				.mockResolvedValueOnce(incumbentAnswer)
-				.mockResolvedValue({ executed: false, reason: "no live client" });
-			await runBatch([file]);
+			incumbentProbes = 0;
+			probe.mockImplementation(async () => {
+				if (!incumbentServing)
+					return { executed: false, reason: "no live client" };
+				incumbentProbes += 1;
+				return incumbentAnswer;
+			});
+			await runBatch([file], 15_000);
 			expect(isWarmAttached()).toBe(true);
 			expect(touchFile).toHaveBeenCalledTimes(1);
-			const probeCallsOnServe = probe.mock.calls.length;
+			const probeCallsOnServe = incumbentProbes;
 			const fresh = writtenFor(file)[0];
 			fs.mkdirSync(path.join(tmpDir, "node_modules", "other"), {
 				recursive: true,
@@ -959,8 +972,8 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			expect(fresh?.message).toContain(ENVIRONMENT_GAP_MARKER);
 			expect(replayed).toMatchObject({ semantic: "blocking" });
 			expect(replayed?.message).not.toContain(ENVIRONMENT_GAP_MARKER);
-			// Only the incumbent asked: the reader's own probe would have found no
-			// live client, so the verdicts above came from the carried answer.
+			// The incumbent asked once; a reader's own probe finds no live client,
+			// so the verdicts above came from the carried answer.
 			expect(probeCallsOnServe).toBe(1);
 		});
 
