@@ -52,7 +52,10 @@ import { admittedLookupAnswer } from "./session-repository.js";
 import { establishToolAgreement } from "./tool-agreement.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { probeToolAsync } from "./tool-probe.js";
-import { assertInstallAllowed } from "./project-trust.js";
+import {
+	assertInstallAllowed,
+	getProjectTrustGeneration,
+} from "./project-trust.js";
 import { tryLazyInstallForFormatter } from "./dispatch/runners/utils/lazy-installer.js";
 import { getToolPath } from "./installer/index.js";
 import { getIsolatedNpxSpawnOptions } from "./tool-probe.js";
@@ -1815,11 +1818,17 @@ const FILENAME_FORMATTER_BASENAMES = new Set(
 	ALL_FORMATTERS.flatMap((f) => f.filenames ?? []),
 );
 
-// Cache for detection results - stores array of enabled formatter names per cwd+ext
-const detectionCache = new BoundedLruCache<
-	string,
-	{ signature: string; entries: Map<string, string[]> }
->(32);
+// Cache for detection results - stores array of enabled formatter names per cwd+ext.
+// #4530 (#4776): a selection answers for the pi trust answer of the lookup that
+// created it, because a lookup into the project is refused only while trust is
+// not `trusted`. An object stamped with an older trust generation is dropped at
+// the next read, including entries a detection still in flight writes into it.
+type FormatterDetectionEntry = {
+	signature: string;
+	trustGeneration: number;
+	entries: Map<string, string[]>;
+};
+const detectionCache = new BoundedLruCache<string, FormatterDetectionEntry>(32);
 // The signature is immutable for a cache generation. This memo is separate
 // from detectionCache because a cwd can have several extension entries, and a
 // warm lookup must not repeat the ancestor walk or stat matched configs.
@@ -1974,7 +1983,12 @@ export async function getFormattersForFile(
 	// polling while still reacting immediately to pi-authored create/remove/
 	// change events. External editor changes remain a documented session-boundary
 	// limitation, like other write-result-owned freshness seams.
+	const trustGeneration = getProjectTrustGeneration();
 	let cached = detectionCache.get(normalizedCwd);
+	if (cached && cached.trustGeneration !== trustGeneration) {
+		detectionCache.delete(normalizedCwd);
+		cached = undefined;
+	}
 	if (cached?.entries.has(cacheKey)) {
 		const enabledNames = cached.entries.get(cacheKey);
 		const selectedFormatterName =
@@ -2012,7 +2026,11 @@ export async function getFormattersForFile(
 		// the earlier entry.
 		cached = detectionCache.get(normalizedCwd);
 		if (!cached) {
-			cached = { signature: configSignature, entries: new Map() };
+			cached = {
+				signature: configSignature,
+				trustGeneration,
+				entries: new Map(),
+			};
 			detectionCache.set(normalizedCwd, cached);
 		}
 	}
@@ -2238,10 +2256,7 @@ export function _getFormatterResetStateForTests(): {
 	>;
 	whichTransientCommands: Set<string>;
 	cooldownRecordedForRetryAtMs: Map<string, number>;
-	detectionCache: BoundedLruCache<
-		string,
-		{ signature: string; entries: Map<string, string[]> }
-	>;
+	detectionCache: BoundedLruCache<string, FormatterDetectionEntry>;
 	formatterSignatureFlights: BoundedLruCache<
 		string,
 		{ promise: Promise<string> }

@@ -1,4 +1,5 @@
 // flake-shape: real-process-spawn — each cell plants an executable that writes a marker file and asks the real spawn seam, PATH lookup and package-manager query to start it; whether the kernel ran the project's bytes is only observable from a real child.
+// flake-shape: ungoverned-wait-for — the late-write cell holds a real formatter detection open inside a child `go` until the cell has changed trust, and the only sign the child started is the file it writes, so vi.waitFor joins that file.
 /**
  * #4530: a bare lookup never runs the session repository's bytes while pi has
  * not trusted the project.
@@ -22,7 +23,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -30,6 +31,7 @@ import {
 import { createAvailabilityLatch } from "../../clients/dispatch/runners/utils/availability-policy.js";
 import {
 	clearFormatterCache,
+	getFormattersForFile,
 	gofmtFormatter,
 } from "../../clients/formatters.js";
 import { GovulncheckClient } from "../../clients/govulncheck-client.js";
@@ -415,6 +417,66 @@ describe.skipIf(!POSIX)("bare lookups under untrusted pi trust (#4530)", () => {
 			"-w",
 			file,
 		]);
+	});
+
+	// #4776 review H1: the per-directory formatter selection short-circuits the
+	// trust-aware `which` latch, so an empty selection made while the link was
+	// refused outlived the trust grant.
+	it("A5/A11: a formatter selection made under untrusted trust is re-made after a trust grant", async () => {
+		const target = plant(
+			path.join(layout.main, "tools"),
+			path.join(layout.root, "unused"),
+			"gofmt",
+		);
+		const global = path.join(layout.outside, "global-bin");
+		fs.mkdirSync(global);
+		fs.symlinkSync(target, path.join(global, "gofmt"));
+		cleanups.push(
+			withEnv({ PATH: `${process.env.PATH}${path.delimiter}${global}` }),
+		);
+		const file = path.join(layout.main, "main.go");
+
+		expect(await getFormattersForFile(file, layout.main)).toEqual([]);
+		setProjectTrustState("trusted");
+		expect(
+			(await getFormattersForFile(file, layout.main)).map((f) => f.name),
+		).toEqual(["gofmt"]);
+	});
+
+	it("A5/A11: a selection a detection writes after a trust grant answers for the old trust", async () => {
+		const target = plant(
+			path.join(layout.main, "tools"),
+			path.join(layout.root, "unused"),
+			"gofmt",
+		);
+		const global = path.join(layout.outside, "global-bin");
+		fs.mkdirSync(global);
+		fs.symlinkSync(target, path.join(global, "gofmt"));
+		cleanups.push(
+			withEnv({ PATH: `${process.env.PATH}${path.delimiter}${global}` }),
+		);
+		// The refused `gofmt` sends the detection to its `go env GOROOT`
+		// fallback. That `go` holds the detection open until the cell has
+		// granted trust, so the selection is written after the grant.
+		const started = path.join(layout.root, "go-started");
+		const gate = path.join(layout.root, "go-gate");
+		stub.plantOnPath(
+			"go",
+			`printf x > '${started}'; i=0; while [ ! -f '${gate}' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; exit 1`,
+		);
+		const file = path.join(layout.main, "main.go");
+
+		const inFlight = getFormattersForFile(file, layout.main);
+		await vi.waitFor(() => expect(fs.existsSync(started)).toBe(true), {
+			timeout: 5000,
+			interval: 20,
+		});
+		setProjectTrustState("trusted");
+		fs.writeFileSync(gate, "");
+		expect(await inFlight).toEqual([]);
+		expect(
+			(await getFormattersForFile(file, layout.main)).map((f) => f.name),
+		).toEqual(["gofmt"]);
 	});
 
 	it("A9: the installer does not report a project binary as an installed tool", async () => {

@@ -1232,6 +1232,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the restart's spawn-gate window is between real server processes: one server's shutdown, the cache clock, and a restart that ends after the bounded tool_call hook returns expose no awaitable, so vi.waitFor joins them",
 	},
+	// 2026-10-23 (#4776 review H1): a formatter selection written after a trust
+	// change is observable only while a real detection is held open in its
+	// child process, and the child's start is visible only as the file it
+	// writes.
+	"ungoverned-wait-for:clients/session-repository-trust-4530.test.ts": {
+		detector: "ungoverned-wait-for",
+		reason:
+			"the late-write cell holds a real formatter detection open in a child `go` until trust changes; the child's start exposes no awaitable, only the file it writes",
+	},
 	"ungoverned-wait-for:clients/word-index-lifecycle.test.ts": {
 		detector: "ungoverned-wait-for",
 		reason:
