@@ -6,6 +6,8 @@ import type { LSPClientInfo } from "../../../clients/lsp/client.js";
 import { LSPService } from "../../../clients/lsp/index.js";
 import {
 	type LSPServerInfo,
+	LSP_SERVERS,
+	PHPServer,
 	PythonJediServer,
 	PythonServer,
 	TypeScriptServer,
@@ -26,7 +28,7 @@ import {
 	registerSessionRoot,
 	shouldInitializeSessionRoot,
 } from "../../../clients/lsp/session-roots.js";
-import { removeTempDirSync } from "../test-utils.js";
+import { removeTempDirSync, setupTestEnvironment } from "../test-utils.js";
 
 process.env.PI_LENS_TEST_MODE = "1";
 
@@ -85,6 +87,83 @@ function markerServer(id: string): LSPServerInfo {
 		spawn: async () => undefined,
 	};
 }
+
+// #4728: a marker-less PHP project used one workspace per source directory.
+// Exercise every real server root so the same fallback cannot drift by language.
+describe("LSP project-root fallback (#4728)", () => {
+	it("shares a PHP root across directories without composer.json", async () => {
+		const env = setupTestEnvironment("pi-lens-4728-php-");
+		try {
+			const files = [
+				"entry.php",
+				"plugins/gobcore/includes/a.php",
+				"plugins/gobcore/main.php",
+				"themes/gobportal/parts/b.php",
+			].map((relative) => path.join(env.tmpDir, relative));
+			for (const file of files) {
+				fs.mkdirSync(path.dirname(file), { recursive: true });
+				fs.writeFileSync(file, "<?php echo 1;\n");
+			}
+			expect(
+				await Promise.all(files.map((file) => PHPServer.root(file))),
+			).toEqual(files.map(() => env.tmpDir));
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("uses the nearest generic project marker", async () => {
+		const env = setupTestEnvironment("pi-lens-4728-nearest-");
+		try {
+			const nested = path.join(env.tmpDir, "packages", "plugin");
+			const file = path.join(nested, "src", "a.php");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(path.join(nested, "package.json"), "{}\n");
+			fs.writeFileSync(file, "<?php echo 1;\n");
+			await expect(PHPServer.root(file)).resolves.toBe(nested);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("coalesces every built-in server at the Git project or explicitly declines", async () => {
+		const env = setupTestEnvironment("pi-lens-4728-registry-");
+		try {
+			const declined = new Set<string>();
+			for (const server of LSP_SERVERS) {
+				for (const directory of ["src", "lib/nested", "scripts"]) {
+					const extension = server.extensions[0]!;
+					const name = extension.startsWith(".")
+						? `probe${extension}`
+						: extension;
+					const file = path.join(env.tmpDir, directory, name);
+					fs.mkdirSync(path.dirname(file), { recursive: true });
+					fs.writeFileSync(file, "");
+					const root = await server.root(file);
+					if (root === undefined) declined.add(server.id);
+					else expect(root, `${server.id}: ${directory}`).toBe(env.tmpDir);
+				}
+			}
+			// These servers deliberately require their own project/config markers;
+			// unlike RootWithFallback and FileDirRoot users, they reject loose files.
+			expect([...declined].sort()).toEqual([
+				"clojure",
+				"csharp",
+				"deno",
+				"fsharp",
+				"haskell",
+				"lua",
+				"nix",
+				"ocaml",
+				"omnisharp",
+				"rust",
+				"swift",
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
 
 describe("LSP per-server nested-root coalescing (#1373)", () => {
 	it("attaches a nested marker directory to an existing ancestor client", async () => {

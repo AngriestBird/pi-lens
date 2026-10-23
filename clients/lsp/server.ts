@@ -490,9 +490,9 @@ async function isExcludedLspRoot(dir: string): Promise<boolean> {
 
 async function nearestNonExcludedFallbackRoot(
 	candidate: string,
+	stopDir?: string,
 ): Promise<string> {
-	if (!(await isExcludedLspRoot(candidate))) return path.resolve(candidate);
-	let current = path.dirname(path.resolve(candidate));
+	let current = path.resolve(candidate);
 	const fsRoot = path.parse(current).root;
 	let nearestAllowed: string | undefined;
 	while (true) {
@@ -502,7 +502,8 @@ async function nearestNonExcludedFallbackRoot(
 				if (await markerExists(current, marker)) return current;
 			}
 		}
-		if (current === fsRoot) break;
+		if (current === fsRoot || normalizeEphemeralMapKey(current) === stopDir)
+			break;
 		current = path.dirname(current);
 	}
 	// No project marker was available. Keep the file attached to a stable,
@@ -1719,7 +1720,10 @@ export function PriorityRoot(
 
 export const FileDirRoot: RootFunction = async (file: string) => {
 	const candidate = path.resolve(path.dirname(file));
-	return nearestNonExcludedFallbackRoot(candidate);
+	return nearestNonExcludedFallbackRoot(
+		candidate,
+		piAgentExtensionsRootKey(file),
+	);
 };
 
 /**
