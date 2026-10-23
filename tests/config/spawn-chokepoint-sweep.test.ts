@@ -39,7 +39,7 @@
 
 import * as path from "node:path";
 import type { SgNode } from "@ast-grep/napi";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { parseNodes } from "../support/ast-census.js";
 import {
 	assertNonEmptyScan,
@@ -387,23 +387,40 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 	};
 	for (const node of nodes) {
 		const kind = String(node.kind());
-		if (kind !== "identifier" && kind !== "shorthand_property_identifier")
-			continue;
 		const name = node.text();
-		if (bindingNodes.has(nodeId(node))) continue;
-		if (name === WRAPPER_CALLEE) {
-			const parentKind = String(node.parent()?.kind());
+		// #4776 verify V1: the wrapper is admitted in the same few forms as the
+		// module binding (its declaration, an unaliased import or export, a
+		// plain call); an alias or a member read (`u.spawnCollectStdoutResult`)
+		// hides its starts, so it is reported.
+		// Name-bearing nodes only: a specifier node spells the same text as the
+		// identifier inside it.
+		const namesNode =
+			kind === "identifier" ||
+			kind === "shorthand_property_identifier" ||
+			kind === "property_identifier";
+		if (namesNode && name === WRAPPER_CALLEE) {
+			const parent = node.parent();
+			const parentKind = String(parent?.kind());
 			if (kind === "identifier" && isCallee(node)) add(WRAPPER_CALLEE, node);
 			else if (
-				![
-					"function_declaration",
-					"import_specifier",
-					"export_specifier",
-				].includes(parentKind)
+				kind === "identifier" &&
+				parentKind === "function_declaration" &&
+				same(parent?.field("name"), node)
 			)
-				refuse(node, `${WRAPPER_CALLEE} is used other than by a call`);
+				continue;
+			else if (
+				kind === "identifier" &&
+				(parentKind === "import_specifier" ||
+					parentKind === "export_specifier") &&
+				!parent?.field("alias")
+			)
+				continue;
+			else refuse(node, `${WRAPPER_CALLEE} is used other than by a call`);
 			continue;
 		}
+		if (kind !== "identifier" && kind !== "shorthand_property_identifier")
+			continue;
+		if (bindingNodes.has(nodeId(node))) continue;
 		if (members.has(name)) {
 			if (kind === "identifier" && isCallee(node)) add(name, node);
 			else
@@ -455,14 +472,14 @@ function runtimeFiles(): string[] {
 	return files.sort();
 }
 
-function census(files: readonly string[]): {
+async function census(files: readonly string[]): Promise<{
 	counts: Map<string, number>;
 	details: Map<string, string>;
 	unclassified: string[];
 	scanned: number;
 	sources: Map<string, string>;
 	unbound: Map<string, number>;
-} {
+}> {
 	const counts = new Map<string, number>();
 	const unbound = new Map<string, number>();
 	const details = new Map<string, string>();
@@ -474,6 +491,9 @@ function census(files: readonly string[]): {
 		const relative = path.relative(REPO_ROOT, file).split(path.sep).join("/");
 		sources.set(relative, source);
 		const result = scanProcessStarts(relative, source);
+		// AGENTS shape 81 (#4776 verify V3): a parsed tree is freed only when
+		// the event loop turns, so the census turns it once per file.
+		await new Promise<void>((resolve) => setImmediate(resolve));
 		unclassified.push(...result.unclassified);
 		if (result.unboundMentions > 0)
 			unbound.set(relative, result.unboundMentions);
@@ -487,7 +507,10 @@ function census(files: readonly string[]): {
 }
 
 describe("spawn chokepoint sweep (#4530)", () => {
-	const live = census(runtimeFiles());
+	let live: Awaited<ReturnType<typeof census>>;
+	beforeAll(async () => {
+		live = await census(runtimeFiles());
+	});
 
 	it("routes every runtime process start, or admits it with a reason", () => {
 		assertNonEmptyScan("spawn chokepoint sweep", live.scanned, 300);
@@ -719,6 +742,37 @@ describe("spawn chokepoint sweep (#4530)", () => {
 				const result = scan(lines);
 				expect(result.unclassified, name).toContain(report);
 			}
+		});
+
+		// #4776 verify V1: both forms reached the collector with no site and
+		// no report.
+		it("refuses the collector under an aliased import", () => {
+			const result = scan([
+				'import { spawnCollectStdoutResult as collect } from "./child-unref.js";',
+				'collect("ps", []);',
+			]);
+			expect(result.unclassified).toEqual([
+				"clients/planted.ts:1: spawnCollectStdoutResult is used other than by a call",
+			]);
+		});
+
+		it("refuses the collector as a namespace member call", () => {
+			const result = scan([
+				'import * as unref from "./child-unref.js";',
+				'unref.spawnCollectStdoutResult("ps", []);',
+			]);
+			expect(result.unclassified).toEqual([
+				"clients/planted.ts:2: spawnCollectStdoutResult is used other than by a call",
+			]);
+		});
+
+		it("follows a plain call of the collector", () => {
+			const result = scan([
+				'import { spawnCollectStdoutResult } from "./child-unref.js";',
+				'spawnCollectStdoutResult("ps", []);',
+			]);
+			expect([...result.sites]).toEqual([["spawnCollectStdoutResult", [2]]]);
+			expect(result.unclassified).toEqual([]);
 		});
 
 		it("reads import-shaped text in a string or template as prose", () => {
