@@ -661,6 +661,14 @@ describe.skipIf(!POSIX)("package-manager global lookups (#4530)", () => {
 	// lookup judgment.
 	it("I8/A3: the LSP's $GOPATH/bin candidate that links into the project is refused", async () => {
 		const marker = path.join(layout.root, "project-ran");
+		// An absent entry resolved nothing, so it earns no refusal row: a row
+		// would report a project binary the session does not have.
+		cleanups.push(withEnv({ GOPATH: path.join(layout.main, "gopath") }));
+		expect(
+			await GoServer.spawn(layout.main, { allowInstall: false }),
+		).toBeUndefined();
+		expect(trustRefusals()).toEqual([]);
+
 		const target = plant(path.join(layout.main, "tools"), marker, "gopls");
 		const gopath = path.join(layout.outside, "gopath");
 		fs.mkdirSync(path.join(gopath, "bin"), { recursive: true });
