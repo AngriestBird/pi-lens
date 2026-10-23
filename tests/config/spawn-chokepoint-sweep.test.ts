@@ -218,6 +218,15 @@ function literalModuleName(node: SgNode): string | undefined {
  * A bound name must then be used only as a call (`spawn(`, `cp.spawn(`).
  */
 function scanProcessStarts(file: string, source: string): ScanResult {
+	// A cheap text narrowing, never the decision: a literal that names the
+	// module contains its name, and a wrapper call contains the wrapper's. A
+	// file with neither binds nothing, and skipping its parse keeps the census
+	// to the few files that can (parsing every runtime file held a native tree
+	// per file and peaked over the 2 GB worker budget in CI). Stated bound: a
+	// module name built at run time or spelled with escapes is not a literal
+	// this reader sees.
+	if (!source.includes("child_process") && !source.includes(WRAPPER_CALLEE))
+		return { sites: new Map(), unclassified: [], unboundMentions: 0 };
 	const nodes = parseNodes(source.replace(/\r\n/g, "\n"));
 	const kidsOf = new Map<string, SgNode[]>();
 	for (const node of nodes) {
