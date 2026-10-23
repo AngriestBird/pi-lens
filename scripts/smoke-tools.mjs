@@ -10,7 +10,7 @@
  * opt-in / nightly, never a per-PR gate.
  *
  *   Step 1 (default):  each target tool SPAWNS and EXITS CLEANLY
- *                      (no timeout/exception/server_error).
+ *                      (no runner fault).
  *   Step 2 (--step2):  additionally, the tool PRODUCES A PARSEABLE DIAGNOSTIC
  *                      on the fixture's known defect. This is the assertion a
  *                      runner parser written from documentation fails (#1937):
@@ -1775,8 +1775,6 @@ const AUX_RETRY_SETTLE_MS =
 		1500) + 250;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const INFRA_FAILURES = new Set(["timeout", "exception", "server_error"]);
-
 function parseArgs(argv) {
 	const langs = [];
 	let step2 = false;
@@ -2348,10 +2346,10 @@ export function classify(outcome) {
 	}
 	const { status, failureKind, failureMessage, diagnostics } = outcome.result;
 	const diags = diagnostics.length;
-	if (status === "failed" && INFRA_FAILURES.has(failureKind)) {
+	if (status === "failed" && failureKind !== "blocking_diagnostics") {
 		return {
 			state: "fail",
-			detail: `${failureKind}${failureMessage ? `: ${failureMessage}` : ""}`,
+			detail: `${failureKind ?? "unknown"}${failureMessage ? `: ${failureMessage}` : ""}`,
 			diags,
 		};
 	}
