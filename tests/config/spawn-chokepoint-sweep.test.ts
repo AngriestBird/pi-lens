@@ -19,14 +19,17 @@
  * ## Fail closed (defect shape 69)
  *
  * The population is derived from the `child_process` module binding itself,
- * never from a list of spellings: named imports (aliased or not), namespace and
- * default imports, and `require` (destructured, renamed or whole). Then every
- * reference to a bound name must be a CALL (`spawn(`, `cp.spawn(`). A bound name
- * used any other way (`const run = spawn`, passed as an argument, a property
- * read off the namespace) is reported as unclassified, and so is a module
- * specifier no recognised statement binds (a dynamic `import()`), unless it is
- * type-only. Comments and strings are blanked before any of this is read, so a
- * comment cannot add or hide a start.
+ * read off the parsed source (`@ast-grep/napi`, through the AST census seam),
+ * never from a list of spellings. Every literal that names the module must sit
+ * in an ADMITTED binding form (see `scanProcessStarts`); any other form that
+ * names it (a string-named specifier, a re-export, a require inside an
+ * expression, a dynamic `import()`) is reported. Then every reference to a
+ * bound name must be a CALL (`spawn(`, `cp.spawn(`). A bound name used any
+ * other way (`const run = spawn`, passed as an argument, a property read off
+ * the namespace) is reported as unclassified. Comments are not code and a
+ * string's text is not a binding, so neither can add or hide a start (#4776
+ * review H2: the text reader this replaced missed a string-named specifier and
+ * a require inside template text, the second round of missed spellings).
  *
  * Each admission pins its site count, compared to the live count in both
  * directions, and names evidence the file's CODE must still carry (comments
@@ -35,7 +38,9 @@
  */
 
 import * as path from "node:path";
+import type { SgNode } from "@ast-grep/napi";
 import { describe, expect, it } from "vitest";
+import { parseNodes } from "../support/ast-census.js";
 import {
 	assertNonEmptyScan,
 	auditRegistry,
@@ -43,7 +48,6 @@ import {
 	readWalkedFiles,
 	stripSource,
 } from "../support/sweep-kit.js";
-import { escapeRegExp } from "../../clients/string-utils.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
 
@@ -145,178 +149,281 @@ const UNBOUND_MENTIONS: Readonly<
 	},
 };
 
-const SPECIFIER = /["'](?:node:)?child_process["']/g;
-const IDENT = "[A-Za-z_$][\\w$]*";
+const MODULE_NAMES: ReadonlySet<string> = new Set([
+	"child_process",
+	"node:child_process",
+]);
 
 interface ScanResult {
 	/** `callee` (the local name, or `namespace.member`) → 1-based lines. */
 	sites: Map<string, number[]>;
 	/** References this reader could not place, with a line. */
 	unclassified: string[];
-	/** Specifier mentions no recognised statement binds. */
+	/** Module mentions no admitted form places. */
 	unboundMentions: number;
 }
 
-function lineAt(text: string, index: number): number {
-	return text.slice(0, index).split("\n").length;
+/**
+ * A node's identity within one parse: its byte range and kind (a parent and
+ * its only child can share a range, never a kind).
+ */
+function nodeId(node: SgNode): string {
+	const { start, end } = node.range();
+	return `${start.index}:${end.index}:${String(node.kind())}`;
 }
 
-/** `text` with `[start, end)` blanked, keeping line breaks. */
-function blankRange(text: string, start: number, end: number): string {
-	return (
-		text.slice(0, start) +
-		text.slice(start, end).replace(/[^\n]/g, " ") +
-		text.slice(end)
-	);
+function lineOf(node: SgNode): number {
+	return node.range().start.line + 1;
+}
+
+/** Punctuation and comments: the only children a recognised form may carry besides its parts. */
+const INERT_KINDS: ReadonlySet<string> = new Set([
+	"{",
+	"}",
+	",",
+	"(",
+	")",
+	"comment",
+]);
+
+/**
+ * The module name a literal spells, when the WHOLE literal is one: a string,
+ * or a template with no substitution. Text inside a longer string or template
+ * is prose, never a mention, and a substitution's code is parsed as code.
+ */
+function literalModuleName(node: SgNode): string | undefined {
+	const kind = String(node.kind());
+	if (kind !== "string" && kind !== "template_string") return undefined;
+	const text = node.text();
+	if (kind === "template_string" && text.includes("${")) return undefined;
+	const value = text.slice(1, -1);
+	return MODULE_NAMES.has(value) ? value : undefined;
 }
 
 /**
  * Process starts in one source file. `file` is repo-relative and only used in
  * the reported text, so the planted cases below drive this directly.
+ *
+ * #4776 review H2 (the second round that found a spelling the text reader
+ * missed): the source is parsed, and the reader ADMITS a short list of binding
+ * forms. Every other node that names the module is reported, so a spelling
+ * nobody planned for fails closed:
+ *
+ * - `import` with a default, namespace or named clause whose specifiers are
+ *   identifiers (`spawn`, `spawn as x`, `default as cp`, `type X`), a
+ *   side-effect `import`, and `import type`;
+ * - `const <name | { member, member: local }> = require(<module>)`;
+ * - `typeof import(<module>)`, which starts nothing.
+ *
+ * A bound name must then be used only as a call (`spawn(`, `cp.spawn(`).
  */
 function scanProcessStarts(file: string, source: string): ScanResult {
-	const raw = source.replace(/\r\n/g, "\n");
-	// Specifiers are strings: read them with comments blanked, strings kept.
-	const withStrings = stripSource(raw, { strings: "keep" });
-	// Name references are code: read them with strings blanked too.
-	let code = stripSource(raw);
+	const nodes = parseNodes(source.replace(/\r\n/g, "\n"));
+	const kidsOf = new Map<string, SgNode[]>();
+	for (const node of nodes) {
+		const parent = node.parent();
+		if (!parent) continue;
+		const id = nodeId(parent);
+		const kids = kidsOf.get(id) ?? [];
+		kids.push(node);
+		kidsOf.set(id, kids);
+	}
+	const kids = (node: SgNode): SgNode[] => kidsOf.get(nodeId(node)) ?? [];
+	const same = (a: SgNode | null | undefined, b: SgNode): boolean =>
+		a !== null && a !== undefined && nodeId(a) === nodeId(b);
+
 	const members = new Set<string>();
 	const namespaces = new Set<string>();
+	const bindingNodes = new Set<string>();
 	const unclassified: string[] = [];
-	const boundSpecifiers = new Set<number>();
-	const claim = (statement: RegExpMatchArray): void => {
-		const at = statement.index ?? 0;
-		for (const spec of statement[0].matchAll(SPECIFIER))
-			boundSpecifiers.add(at + (spec.index ?? 0));
-		code = blankRange(code, at, at + statement[0].length);
+	let unboundMentions = 0;
+	const refuse = (node: SgNode, what: string): void => {
+		unclassified.push(`${file}:${lineOf(node)}: ${what}`);
+	};
+	const bind = (target: Set<string>, local: SgNode): void => {
+		target.add(local.text());
+		bindingNodes.add(nodeId(local));
+	};
+	const bindMember = (imported: string, local: SgNode): void => {
+		if ((PROCESS_MEMBERS as readonly string[]).includes(imported))
+			bind(members, local);
+		else bindingNodes.add(nodeId(local));
 	};
 
-	for (const statement of withStrings.matchAll(
-		/import\s+(type\s+)?([^;]*?)\s+from\s+["'](?:node:)?child_process["']/g,
-	)) {
-		claim(statement);
-		if (statement[1]) continue;
-		const clause = statement[2] ?? "";
-		const named = /\{([\s\S]*?)\}/.exec(clause);
-		if (named) {
-			for (const entry of (named[1] ?? "").split(",")) {
-				const cleaned = entry.trim();
-				if (!cleaned || /^type\s/.test(cleaned)) continue;
-				const [imported = "", local] = cleaned.split(/\s+as\s+/);
-				const name = (local ?? imported).trim();
-				if (imported.trim() === "default") namespaces.add(name);
-				else if (
-					(PROCESS_MEMBERS as readonly string[]).includes(imported.trim())
-				)
-					members.add(name);
-			}
-		}
-		const namespace = new RegExp(`\\*\\s+as\\s+(${IDENT})`).exec(clause);
-		if (namespace?.[1]) namespaces.add(namespace[1]);
-		const defaultImport = new RegExp(`^\\s*(${IDENT})\\s*(?:,|$)`).exec(clause);
-		if (defaultImport?.[1]) namespaces.add(defaultImport[1]);
-	}
-
-	for (const statement of withStrings.matchAll(
-		/(?:const|let|var)\s+([^=;]+?)=\s*require\(\s*["'](?:node:)?child_process["']\s*\)/g,
-	)) {
-		claim(statement);
-		const target = (statement[1] ?? "").trim();
-		const destructured = /^\{([\s\S]*)\}$/.exec(target);
-		if (destructured) {
-			// Known-good entries only, `name` or `name: local` (#4776 review): a
-			// rest element or a nested pattern binds the module under a name this
-			// reader would never follow, so it is reported. (A default's `=` never
-			// reaches here: the statement pattern stops at it, and the specifier
-			// is reported as unbound.)
-			const entryForm = new RegExp(`^(${IDENT})(?:\\s*:\\s*(${IDENT}))?$`);
-			for (const entry of (destructured[1] ?? "").split(",")) {
-				const cleaned = entry.trim();
-				if (!cleaned) continue;
-				const form = entryForm.exec(cleaned);
-				if (!form) {
-					unclassified.push(
-						`${file}:${lineAt(raw, statement.index ?? 0)}: a require of child_process destructured to an entry this reader cannot follow`,
-					);
-					continue;
+	/** An `import … from <module>`: true when every part is a known form. */
+	const readImport = (statement: SgNode): boolean => {
+		const parts = kids(statement);
+		if (parts.some((part) => String(part.kind()) === "type")) return true;
+		const clause = parts.find(
+			(part) => String(part.kind()) === "import_clause",
+		);
+		if (!clause) return true; // a side-effect import binds nothing
+		for (const part of kids(clause)) {
+			const kind = String(part.kind());
+			if (kind === "identifier") bind(namespaces, part);
+			else if (kind === "namespace_import") {
+				const local = kids(part).find(
+					(child) => String(child.kind()) === "identifier",
+				);
+				if (!local) return false;
+				bind(namespaces, local);
+			} else if (kind === "named_imports") {
+				for (const entry of kids(part)) {
+					const entryKind = String(entry.kind());
+					if (INERT_KINDS.has(entryKind)) continue;
+					if (entryKind !== "import_specifier") return false;
+					if (kids(entry).some((k) => String(k.kind()) === "type")) continue;
+					const name = entry.field("name");
+					const alias = entry.field("alias");
+					if (String(name?.kind()) !== "identifier" || !name) return false;
+					if (alias && String(alias.kind()) !== "identifier") return false;
+					const local = alias ?? name;
+					if (name.text() === "default") bind(namespaces, local);
+					else bindMember(name.text(), local);
 				}
-				const [, imported = "", local] = form;
-				if ((PROCESS_MEMBERS as readonly string[]).includes(imported))
-					members.add(local ?? imported);
+			} else if (!INERT_KINDS.has(kind)) return false;
+		}
+		return true;
+	};
+
+	/** `const <pattern> = require(<module>)`: true when the pattern is a known form. */
+	const readRequire = (call: SgNode): boolean => {
+		const declarator = call.parent();
+		if (String(declarator?.kind()) !== "variable_declarator" || !declarator)
+			return false;
+		if (!same(declarator.field("value"), call)) return false;
+		const target = declarator.field("name");
+		if (!target) return false;
+		if (String(target.kind()) === "identifier") {
+			bind(namespaces, target);
+			return true;
+		}
+		if (String(target.kind()) !== "object_pattern") return false;
+		for (const entry of kids(target)) {
+			const kind = String(entry.kind());
+			if (INERT_KINDS.has(kind)) continue;
+			if (kind === "shorthand_property_identifier_pattern") {
+				bindMember(entry.text(), entry);
+				continue;
 			}
+			if (kind !== "pair_pattern") return false;
+			const key = entry.field("key");
+			const value = entry.field("value");
+			if (String(key?.kind()) !== "property_identifier" || !key) return false;
+			if (String(value?.kind()) !== "identifier" || !value) return false;
+			bindMember(key.text(), value);
+		}
+		return true;
+	};
+
+	for (const node of nodes) {
+		if (literalModuleName(node) === undefined) continue;
+		const parent = node.parent();
+		const parentKind = String(parent?.kind());
+		if (parent && parentKind === "import_statement") {
+			if (!same(parent.field("source"), node) || !readImport(parent))
+				refuse(
+					parent,
+					"an import of child_process with a binding this reader cannot follow",
+				);
 			continue;
 		}
-		if (new RegExp(`^${IDENT}$`).test(target)) namespaces.add(target);
-		else
-			unclassified.push(
-				`${file}:${lineAt(raw, statement.index ?? 0)}: a require of child_process bound to a pattern this reader cannot follow`,
+		const call = parent?.parent();
+		const isSoleArgument =
+			parent !== null &&
+			parentKind === "arguments" &&
+			kids(parent).every(
+				(kid) => same(kid, node) || INERT_KINDS.has(String(kid.kind())),
 			);
+		if (call && isSoleArgument && String(call.kind()) === "call_expression") {
+			const callee = call.field("function");
+			const calleeKind = String(callee?.kind());
+			if (calleeKind === "identifier" && callee?.text() === "require") {
+				if (!readRequire(call))
+					refuse(
+						call,
+						"a require of child_process bound to a pattern this reader cannot follow",
+					);
+				continue;
+			}
+			if (
+				calleeKind === "import" &&
+				String(call.parent()?.kind()) === "type_query"
+			)
+				continue; // `typeof import(…)` starts nothing
+		}
+		unboundMentions += 1;
 	}
-
-	// `typeof import("node:child_process")` starts nothing.
-	for (const statement of withStrings.matchAll(
-		/typeof\s+import\(\s*["'](?:node:)?child_process["']\s*\)/g,
-	))
-		claim(statement);
-
-	const unbound = [...withStrings.matchAll(SPECIFIER)].filter(
-		(spec) => !boundSpecifiers.has(spec.index ?? 0),
-	);
-	const admittedUnbound = UNBOUND_MENTIONS[file]?.mentions;
-	for (const spec of admittedUnbound === unbound.length ? [] : unbound) {
-		unclassified.push(
-			`${file}:${lineAt(raw, spec.index ?? 0)}: an unplaceable child_process reference: bind the module (import, namespace import, or require) so the scan can follow it`,
-		);
+	const unbound = unboundMentions;
+	if (UNBOUND_MENTIONS[file]?.mentions !== unbound) {
+		for (let index = 0; index < unbound; index += 1) {
+			unclassified.push(
+				`${file}: an unplaceable child_process reference: bind the module (import, namespace import, or require) so the scan can follow it`,
+			);
+		}
 	}
 
 	const sites = new Map<string, number[]>();
-	const add = (callee: string, line: number): void => {
+	const add = (callee: string, node: SgNode): void => {
 		const lines = sites.get(callee) ?? [];
-		lines.push(line);
+		lines.push(lineOf(node));
 		sites.set(callee, lines);
 	};
-	const references = (name: string): IterableIterator<RegExpMatchArray> =>
-		code.matchAll(
-			new RegExp(`(?<![\\w$.])${escapeRegExp(name)}(?![\\w$])`, "g"),
+	const isCallee = (node: SgNode): boolean => {
+		const parent = node.parent();
+		return (
+			String(parent?.kind()) === "call_expression" &&
+			same(parent?.field("function"), node)
 		);
-
-	for (const name of members) {
-		for (const ref of references(name)) {
-			const at = ref.index ?? 0;
-			const after = code.slice(at + name.length);
-			if (/^\s*\(/.test(after)) add(name, lineAt(raw, at));
-			else
-				unclassified.push(
-					`${file}:${lineAt(raw, at)}: ${name} (a child_process start) is used other than by a call; an alias or a passed reference hides its starts`,
-				);
+	};
+	for (const node of nodes) {
+		const kind = String(node.kind());
+		if (kind !== "identifier" && kind !== "shorthand_property_identifier")
+			continue;
+		const name = node.text();
+		if (bindingNodes.has(nodeId(node))) continue;
+		if (name === WRAPPER_CALLEE) {
+			const parentKind = String(node.parent()?.kind());
+			if (kind === "identifier" && isCallee(node)) add(WRAPPER_CALLEE, node);
+			else if (
+				![
+					"function_declaration",
+					"import_specifier",
+					"export_specifier",
+				].includes(parentKind)
+			)
+				refuse(node, `${WRAPPER_CALLEE} is used other than by a call`);
+			continue;
 		}
-	}
-	const memberCall = new RegExp(
-		`^\\s*\\.\\s*(${PROCESS_MEMBERS.join("|")})\\s*\\(`,
-	);
-	for (const name of namespaces) {
-		for (const ref of references(name)) {
-			const at = ref.index ?? 0;
-			const call = memberCall.exec(code.slice(at + name.length));
-			if (call?.[1]) add(`${name}.${call[1]}`, lineAt(raw, at));
+		if (members.has(name)) {
+			if (kind === "identifier" && isCallee(node)) add(name, node);
 			else
-				unclassified.push(
-					`${file}:${lineAt(raw, at)}: ${name} (the child_process module) is used other than by a start call`,
+				refuse(
+					node,
+					`${name} (a child_process start) is used other than by a call; an alias or a passed reference hides its starts`,
 				);
+			continue;
 		}
-	}
-	for (const ref of references(WRAPPER_CALLEE)) {
-		const at = ref.index ?? 0;
-		const before = code.slice(Math.max(0, at - 20), at);
-		const after = code.slice(at + WRAPPER_CALLEE.length);
-		if (/function\s+$/.test(before)) continue; // its own declaration
-		if (/^\s*\(/.test(after)) add(WRAPPER_CALLEE, lineAt(raw, at));
-		else if (!/(?:import|export)\s*\{[^}]*$/.test(code.slice(0, at)))
-			unclassified.push(
-				`${file}:${lineAt(raw, at)}: ${WRAPPER_CALLEE} is used other than by a call`,
+		if (!namespaces.has(name)) continue;
+		const access = node.parent();
+		const property = access?.field("property");
+		if (
+			kind === "identifier" &&
+			access &&
+			String(access.kind()) === "member_expression" &&
+			same(access.field("object"), node) &&
+			property &&
+			(PROCESS_MEMBERS as readonly string[]).includes(property.text()) &&
+			isCallee(access)
+		)
+			add(`${name}.${property.text()}`, node);
+		else
+			refuse(
+				node,
+				`${name} (the child_process module) is used other than by a start call`,
 			);
 	}
-	return { sites, unclassified, unboundMentions: unbound.length };
+	return { sites, unclassified, unboundMentions: unbound };
 }
 
 /**
@@ -551,9 +658,68 @@ describe("spawn chokepoint sweep (#4530)", () => {
 					"cp.spawn(process.execPath, []);",
 				]);
 				expect(result.unclassified, binding).toEqual([
-					"clients/planted.ts:1: a require of child_process destructured to an entry this reader cannot follow",
+					"clients/planted.ts:1: a require of child_process bound to a pattern this reader cannot follow",
 				]);
 			}
+		});
+
+		// #4776 review H2: the text reader claimed each of these forms (or blanked
+		// the code inside it) and registered nothing, so the start below it was
+		// neither a site nor a report. The parsed reader admits only its known
+		// binding forms, so each is refused.
+		it("refuses every other form that names the module", () => {
+			const cases: Array<[string, string[], string]> = [
+				[
+					"string-named import specifier",
+					[
+						'import { "spawn" as nodeSpawn } from "node:child_process";',
+						"nodeSpawn(process.execPath, []);",
+					],
+					"clients/planted.ts:1: an import of child_process with a binding this reader cannot follow",
+				],
+				[
+					"require inside template text",
+					[
+						'const shown = `${require("node:child_process").spawn(process.execPath, [])}`;',
+					],
+					"clients/planted.ts:1: a require of child_process bound to a pattern this reader cannot follow",
+				],
+				[
+					"import-shaped template text around a real require",
+					[
+						'const shown = `import ${require("node:child_process").spawn(process.execPath, [])} from "node:child_process"`;',
+					],
+					"clients/planted.ts:1: a require of child_process bound to a pattern this reader cannot follow",
+				],
+				[
+					"destructured require with a default",
+					[requireLine("{ spawn = fallback }"), "spawn(process.execPath, []);"],
+					"clients/planted.ts:1: a require of child_process bound to a pattern this reader cannot follow",
+				],
+				[
+					"re-export",
+					['export { spawn } from "node:child_process";'],
+					"clients/planted.ts: an unplaceable child_process reference: bind the module (import, namespace import, or require) so the scan can follow it",
+				],
+				[
+					"shorthand property passing a bound start",
+					['import { spawn } from "node:child_process";', "launch({ spawn });"],
+					"clients/planted.ts:2: spawn (a child_process start) is used other than by a call; an alias or a passed reference hides its starts",
+				],
+			];
+			for (const [name, lines, report] of cases) {
+				const result = scan(lines);
+				expect(result.unclassified, name).toContain(report);
+			}
+		});
+
+		it("reads import-shaped text in a string or template as prose", () => {
+			const result = scan([
+				'const doc = `import { spawn } from "node:child_process"; spawn("a")`;',
+				'const note = \'require("node:child_process").spawn("a")\';',
+			]);
+			expect([...result.sites]).toEqual([]);
+			expect(result.unclassified).toEqual([]);
 		});
 
 		it("reports a dynamic import it cannot bind", () => {
