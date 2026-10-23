@@ -48,9 +48,11 @@ vi.unmock("../../../clients/installer/index.js");
 const HOME = vi.hoisted(() => {
 	const nodeOs = require("node:os") as typeof import("node:os");
 	const nodePath = require("node:path") as typeof import("node:path");
-	const nodeFs = require("node:fs") as typeof import("node:fs");
-	const dir = nodeFs.mkdtempSync(
-		nodePath.join(nodeOs.tmpdir(), "pi-lens-4765-live-"),
+	// Only the path: the directory is created by the first case that runs, so a
+	// file whose cases are all skipped (no opengrep binary) leaks nothing.
+	const dir = nodePath.join(
+		nodeOs.tmpdir(),
+		`pi-lens-4765-live-${process.pid}-${Math.random().toString(36).slice(2, 8)}`,
 	);
 	vi.stubEnv("PI_LENS_HOME", dir);
 	return dir;
@@ -153,6 +155,7 @@ let server: http.Server | undefined;
 const cleanups: Array<() => Promise<void>> = [];
 
 beforeEach(() => {
+	fs.mkdirSync(HOME, { recursive: true });
 	work = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-opengrep-live-4765-"));
 	fs.rmSync(path.join(HOME, "rules"), { recursive: true, force: true });
 	fs.rmSync(path.join(HOME, "tools"), { recursive: true, force: true });
