@@ -630,7 +630,7 @@ process.env.PI_LENS_TMP_HYGIENE_FIXTURE_HOME = fixtureHomeRootIn(
 // `REAL_HOME` is the opt-out: the maintainer's real home as the passwd entry
 // names it (`os.userInfo()` does not read `HOME`), captured BEFORE the pin. A
 // test that reads it on purpose is a row in `tests/support/real-home-readers.ts`
-// with a header reason, and `tests/clients/worker-home-pin-hermeticity.test.ts`
+// with a header reason, and `tests/config/real-home-reader-registry.test.ts`
 // fails any other file that spells it, or `userInfo`.
 export const REAL_HOME: string = (() => {
 	try {

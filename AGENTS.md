@@ -801,8 +801,10 @@ file-scoped worklist and receives no project-wide scanner output.
     Screen: which directory does the process I run resolve from, and is every
     variable that names it pinned? Enforcer:
     `tests/clients/worker-home-pin-hermeticity.test.ts` (a real child reports
-    its HOME and XDG directories; a file that reads the real home through
-    `REAL_HOME` or `userInfo` needs a row in `tests/support/real-home-readers.ts`)
+    its HOME and XDG directories),
+    `tests/config/real-home-reader-registry.test.ts` (a file that reads the
+    real home through `REAL_HOME` or `userInfo` needs a row in
+    `tests/support/real-home-readers.ts`)
     and `tests/clients/installer/managed-bin-symlink-escape-4789.test.ts`
     (a pinned `PI_LENS_HOME` whose `bin` links out is refused). Instances and
     dates: `HISTORY.md`.

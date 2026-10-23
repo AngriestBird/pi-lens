@@ -7,7 +7,7 @@
  * `os.userInfo()`, which does not read HOME). Each such file is a row here,
  * with the reason it cannot use the pinned home, and carries the same
  * `// real-home: <reason>` header at the top of the file. The scan in
- * `tests/clients/worker-home-pin-hermeticity.test.ts` fails a file that spells
+ * `tests/config/real-home-reader-registry.test.ts` fails a file that spells
  * either and has no row, and a row whose file no longer does.
  *
  * Reading is the only admission: a row never lets a test WRITE through the
