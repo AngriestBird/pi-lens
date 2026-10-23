@@ -69,6 +69,9 @@ const SHIM_LOG = path.join(TEST_HOME, "shim.log");
 const SHIM_MODE = path.join(TEST_HOME, "shim.mode");
 const SHIM_SEEN = path.join(TEST_HOME, "shim.seen");
 const SHIM_RELEASE = path.join(TEST_HOME, "shim.release");
+// Test-only delay hook: when this file exists the shim sleeps for the seconds it
+// holds at the point where the race is forced. See installOpengrepShim.
+const SHIM_DELAY = path.join(TEST_HOME, "shim.delay");
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = 1_800_000_000_000;
 
@@ -146,8 +149,14 @@ function installOpengrepShim(): void {
 		shim,
 		[
 			"#!/bin/sh",
-			`echo "$@" >> "${SHIM_LOG}"`,
+			// The mode is latched before the log line, so a logged call means the mode
+			// is fixed: a test that flips the mode after the log line cannot flip it
+			// (log line written before mode latch let setShim flip a parked loser, #4796).
 			`mode=$(cat "${SHIM_MODE}" 2>/dev/null || echo ok)`,
+			`[ -f "${SHIM_DELAY}" ] && sleep "$(cat "${SHIM_DELAY}")"`,
+			// The call line carries the latched mode, so a log line written before the
+			// latch has no `latched=<mode>` value to show.
+			`echo "$@" "latched=$mode" >> "${SHIM_LOG}"`,
 			`cat "${CACHED}" > "${SHIM_SEEN}" 2>/dev/null`,
 			`[ "$mode" = fail ] && { echo "invalid rule" >&2; exit 5; }`,
 			// `hold` parks the validate until the test releases it, so the test can
@@ -210,6 +219,7 @@ beforeEach(() => {
 	fs.rmSync(SHIM_MODE, { force: true });
 	fs.rmSync(SHIM_SEEN, { force: true });
 	fs.rmSync(SHIM_RELEASE, { force: true });
+	fs.rmSync(SHIM_DELAY, { force: true });
 	installOpengrepShim();
 	mode = "ok";
 	body = packOf(150, "v1");
@@ -362,9 +372,19 @@ describe.skipIf(process.platform === "win32")(
 			// `{checkedAt, version}` with `{failed: true}`, erasing the version and
 			// demoting the tool to the one-day retry. `writeRefreshStamp` now decides
 			// under the durable-store lock, against the bytes a sibling wrote.
+			// Force the window: the shim parks 0.3 s after latching its mode, so the
+			// loser's validate stays parked while the test flips the mode below
+			// (a log-before-latch shim would read `ok` here instead, #4796).
+			fs.writeFileSync(SHIM_DELAY, "0.3");
 			setShim("holdfail");
 			const loser = refreshOpengrepRulePack(NOW);
 			await waitFor(shimCalls, (calls) => calls === 1);
+			// Deterministic pin (#4796): the logged call must carry the mode the shim
+			// latched, whatever the timing of the flip below. A log-before-latch shim
+			// logs `latched=` with no value and reds here.
+			expect(
+				fs.readFileSync(SHIM_LOG, "utf-8").trim().split("\n")[0],
+			).toContain("latched=holdfail");
 
 			setShim("ok");
 			body = packOf(155, "v2");
