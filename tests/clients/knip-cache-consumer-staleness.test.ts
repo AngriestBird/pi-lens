@@ -46,7 +46,13 @@ const probeKnip = (env?: NodeJS.ProcessEnv): boolean => {
 // duration of the test.
 const managedKnipBinDir = (() => {
 	const dir = path.join(REAL_HOME, ".pi-lens", "tools", "node_modules", ".bin");
-	return fs.existsSync(dir) ? dir : null;
+	// The directory alone is not the tool: a partial managed tree with a `.bin`
+	// and no `knip` shim must skip the case, not run it and red (#4794 review F9).
+	const shim = path.join(
+		dir,
+		process.platform === "win32" ? "knip.cmd" : "knip",
+	);
+	return fs.existsSync(shim) ? dir : null;
 })();
 
 const knipAvailable = probeKnip() || managedKnipBinDir !== null;

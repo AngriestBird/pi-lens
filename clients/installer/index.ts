@@ -5633,6 +5633,13 @@ async function installArchiveTool(
 			return undefined;
 		}
 
+		// The managed bin directory is created and checked BEFORE the swap
+		// (#4789): the guard throws for a pinned home whose `bin` links out, and a
+		// refusal after the swap would already have replaced the installed tree
+		// while the failure log says "keeping installed version". A throw from the
+		// shim write below still lands after the swap and reports the same words.
+		await fs.mkdir(GITHUB_BIN_DIR, { recursive: true });
+		assertManagedBinDirInsidePinnedHome(tool.id);
 		await swapExtractedDir(tool.id, tmpExtractDir, extractDir);
 
 		// The launcher path inside `extractDir` — stable across every install and
@@ -5644,8 +5651,6 @@ async function installArchiveTool(
 		// Thin shim in the managed bin so discovery (findGitHubToolPath) resolves
 		// it like any other managed tool. `call`/`exec` preserves the real
 		// launcher's own %~dp0/$0 so it still finds its sibling lib/.
-		await fs.mkdir(GITHUB_BIN_DIR, { recursive: true });
-		assertManagedBinDirInsidePinnedHome(tool.id);
 		const launcherName = isWindows ? `${binaryName}.bat` : binaryName;
 		const shimPath = path.join(GITHUB_BIN_DIR, launcherName);
 		if (isWindows) {
