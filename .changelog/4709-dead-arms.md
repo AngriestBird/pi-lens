@@ -3,4 +3,4 @@ section: Changed
 audience: internal
 ---
 
-- **Drop seven LSP server arms no assertion reads.** Seven LSP test files armed a fake server list through `_setServersForFileForTests` that no assertion observed; the arms and their fakes are removed, and the two files whose arm stops a real server spawn keep it (#4709).
+- **Drop five redundant LSP server arms (#4709).** Seven test files were reviewed. Five no longer need the injected server list, because the real registry answers what the fake did. Two keep it, because without it a real server would spawn.
