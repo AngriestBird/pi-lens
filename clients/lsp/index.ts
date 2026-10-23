@@ -7960,7 +7960,8 @@ export class LSPService {
 		}
 		const openDocuments = activeClients
 			.filter(({ client }) => client.isDocumentOpen(oldFilePath))
-			.map(({ serverId, client }) => ({
+			.map(({ clientKey, serverId, client }) => ({
+				clientKey,
 				serverId,
 				client,
 				oldUri: client.getDocumentUri(oldFilePath),
@@ -8115,7 +8116,7 @@ export class LSPService {
 		const renameDescription = `Renamed ${relOld} → ${relNew}`;
 
 		await Promise.all(
-			activeClients.map(async ({ serverId, client }) => {
+			activeClients.map(async ({ clientKey, serverId, client }) => {
 				// #1971 review: didRename has its own registration. A server that
 				// never asked for didRenameFiles notifications must not receive
 				// them — same chokepoint discipline as the willRename preflight.
@@ -8131,8 +8132,10 @@ export class LSPService {
 					});
 					return;
 				}
+				// #3734 r3: this client's own open document; another root of the
+				// same server holds its own spelling, or none.
 				const opened = openDocuments.find(
-					(entry) => entry.serverId === serverId,
+					(entry) => entry.clientKey === clientKey,
 				);
 				// #1621: bounded for the same reason as the didClose notify above —
 				// rename propagation is best-effort advice to servers, not a
