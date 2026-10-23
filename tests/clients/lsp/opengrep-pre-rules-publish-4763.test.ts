@@ -36,6 +36,7 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 
 import {
 	handleNotifyOpen,
+	MAX_TRACKED_SERVER_MESSAGES,
 	publicationCountsForPath,
 	setupIncomingHandlers,
 	type LSPClientState,
@@ -488,6 +489,133 @@ describe("#4764 x #4763 an auxiliary's publish acceptance table", () => {
 		arm.publish({ uri: uri(FILE), diagnostics: [] });
 		settle();
 
+		expect(arm.state.pushDiagnostics.get(KEY)).toEqual([]);
+	});
+});
+
+/**
+ * #4764 review round 1: a config failure that lands AFTER answers were stored
+ * or while one sits in its debounce. Each row drives the production handler:
+ * the stored state is built by real publishes, then the error message lands,
+ * then the timers run.
+ *
+ * Recurrences these rows name:
+ * - language rows: the retraction ran for every role, so a language server's
+ *   stored clean answers were deleted by a message that never gates it
+ *   (Greptile P1, "Language answers disappear").
+ * - "pending non-empty": the retraction cancelled the debounce timer of a
+ *   newer finding, which was then lost (Greptile P1 / CodeRabbit).
+ * - "pending empty": a retraction that skipped paths with a pending answer
+ *   would leave the stored rule-less empty in place, because the pending empty
+ *   is refused at store time and never replaces it.
+ */
+describe("#4764 a late config failure versus stored and pending answers", () => {
+	const FATAL =
+		"Fatal error: Failed to download config from https://semgrep.dev/c/p/default: Unix_error: Connection refused connect";
+	const settle = () => vi.advanceTimersByTime(OPENGREP_DEBOUNCE_MS * 2);
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		logLatency.mockClear();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** [role, pending publish when the failure lands, stored length after (undefined = absent), counted] */
+	const rows: Array<
+		[
+			"auxiliary" | "language",
+			"none" | "empty" | "non-empty",
+			number | undefined,
+			number,
+		]
+	> = [
+		["auxiliary", "none", undefined, 1],
+		["auxiliary", "non-empty", 1, 2],
+		["auxiliary", "empty", undefined, 2],
+		["language", "none", 0, 1],
+		["language", "non-empty", 1, 2],
+	];
+
+	it.each(rows)(
+		"%s server, stored empty, pending %s: stored=%s counted=%s",
+		(role, pending, stored, published) => {
+			const arm = armHandler(
+				role === "auxiliary" ? "opengrep" : "fake-language",
+				role,
+			);
+			arm.state.documentVersions.set(KEY, 9);
+			// Rules loaded, so the auxiliary's empty is a stored answer (#4763
+			// holds it otherwise).
+			if (role === "auxiliary") arm.rulesRefreshed();
+			arm.publish({ uri: uri(FILE), diagnostics: [] });
+			settle();
+			expect(arm.state.pushDiagnostics.get(KEY)).toEqual([]);
+			if (pending !== "none") {
+				arm.publish({
+					uri: uri(FILE),
+					diagnostics: pending === "non-empty" ? [FINDING] : [],
+				});
+			}
+			arm.showMessage(1, FATAL);
+			settle();
+
+			expect(arm.state.pushDiagnostics.get(KEY)?.length).toBe(stored);
+			expect(publicationCountsForPath(arm.state, KEY).published).toBe(
+				published,
+			);
+		},
+	);
+
+	it("refresh and error cycles keep the message map within its reserved slot", () => {
+		// Recurrence (Greptile P2, "Recovery bypasses the message cap"): the
+		// first-failure admission keyed on the failure state, which a refresh
+		// clears, so each refresh/error cycle added one more distinct text past
+		// the cap and one more detailed record.
+		const arm = armHandler("opengrep", "auxiliary");
+		for (let cycle = 0; cycle < 12; cycle += 1) {
+			arm.showMessage(1, `${FATAL} (attempt ${cycle})`);
+			arm.rulesRefreshed();
+		}
+
+		expect(arm.state.serverMessages?.size).toBe(
+			MAX_TRACKED_SERVER_MESSAGES + 1,
+		);
+	});
+
+	it("a distinct failure past the cap after a refresh still refuses the next empty", () => {
+		// Recurrence: a cap fix that latched the admission once per session would
+		// leave the state unset for a later distinct failure text, and that
+		// server's empties would read clean again. The state is not a record, so
+		// the cap never decides it.
+		const arm = armHandler("opengrep", "auxiliary");
+		arm.state.documentVersions.set(KEY, 9);
+		for (let index = 0; index < MAX_TRACKED_SERVER_MESSAGES; index += 1) {
+			arm.showMessage(3, `indexing folder ${index}`);
+		}
+		arm.showMessage(1, FATAL);
+		arm.rulesRefreshed();
+		arm.showMessage(1, `${FATAL} (retry)`);
+		arm.publish({ uri: uri(FILE), diagnostics: [] });
+		settle();
+
+		expect(arm.state.configLoadFailure?.message).toContain("(retry)");
+		expect(arm.state.pushDiagnostics.has(KEY)).toBe(false);
+	});
+
+	it("an informational message carrying the fatal text does not gate", () => {
+		// Acceptance item 1 says an ERROR-level message: a log or info line that
+		// quotes the same words (a server echoing an earlier attempt) must not
+		// blind a scanner whose rules loaded.
+		const arm = armHandler("opengrep", "auxiliary");
+		arm.state.documentVersions.set(KEY, 9);
+		arm.rulesRefreshed();
+		arm.showMessage(3, FATAL);
+		arm.publish({ uri: uri(FILE), diagnostics: [] });
+		settle();
+
+		expect(arm.state.configLoadFailure).toBeUndefined();
 		expect(arm.state.pushDiagnostics.get(KEY)).toEqual([]);
 	});
 });

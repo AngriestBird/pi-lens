@@ -78,7 +78,7 @@ import {
 import { exceedsLspSyncLimits } from "./content-limits.js";
 import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
-import type { LspServerRole } from "./server-traits.js";
+import { isAuxiliary, type LspServerRole } from "./server-traits.js";
 import {
 	FILE_CHANGED,
 	FILE_CREATED,
@@ -1271,17 +1271,20 @@ export interface LSPClientState {
 	 * when it runs offline with `--config auto`. An auxiliary in that state
 	 * never evaluated the bytes it reports on, so its EMPTY publications are the
 	 * absence of a scan and must not be read as a clean one
-	 * ({@link configFailureBlocksEmptyPublish}). Cleared by the server's own
-	 * `semgrep/rulesRefreshed` (its rules then loaded). Per client session: a respawned
-	 * server re-reports it, and the ledger record stays once per distinct
-	 * message for the whole session.
+	 * ({@link configFailureBlocksEmptyPublish}). Set only for an auxiliary
+	 * ({@link noteServerShowMessage} asks `isAuxiliary`, the one role
+	 * decision), so a reader never re-checks the role. Cleared by the server's
+	 * own `semgrep/rulesRefreshed` (its rules then loaded). Per client session:
+	 * a respawned server re-reports it, and the ledger record stays once per
+	 * distinct message for the whole session.
 	 */
 	configLoadFailure?: { message: string; atMs: number };
 	/**
 	 * #4764: distinct `window/showMessage` texts this client has recorded, with
 	 * their occurrence counts. The bound that keeps a chatty server from
 	 * flooding `latency.log`: past {@link MAX_TRACKED_SERVER_MESSAGES} distinct
-	 * texts only the overflow count grows.
+	 * texts only the overflow count grows, except for one slot that only a
+	 * config failure may take, so the map never holds more than MAX + 1.
 	 */
 	serverMessages?: Map<string, number>;
 	/**
@@ -2627,7 +2630,7 @@ export const MAX_TRACKED_SERVER_MESSAGES = 8;
  */
 export function isConfigLoadFailureMessage(message: string): boolean {
 	return (
-		/\b(?:fail(?:ed|s|ure)?|unable|could not|error)\b/i.test(message) &&
+		/\b(?:fail|failed|fails|failure|unable|could not|error)\b/i.test(message) &&
 		/\b(?:download|load|fetch|resolve|read|parse)\b/i.test(message) &&
 		/\b(?:config|configuration|rules?|ruleset)\b/i.test(message)
 	);
@@ -2639,12 +2642,15 @@ export function isConfigLoadFailureMessage(message: string): boolean {
  * - One ledger entry per distinct message per SESSION (the identity carries a
  *   digest of the text), counted when the same text repeats.
  * - At most {@link MAX_TRACKED_SERVER_MESSAGES} distinct texts are tracked per
- *   client; past that, only one overflow counter grows.
+ *   client, plus one slot only a config failure may take, so the first one is
+ *   always recorded; past that, only one overflow counter grows.
  * - An ERROR-level message reporting a failed config/rule load marks an
  *   AUXILIARY client's {@link LSPClientState.configLoadFailure}: from then on
  *   its empty publications are not evidence of a clean scan
  *   ({@link configFailureBlocksEmptyPublish}), and any empty answer already
- *   stored is retracted, because it came from the same rule-less server.
+ *   stored is retracted, because it came from the same rule-less server. The
+ *   state is not a record, so the cap never decides it: a distinct failure
+ *   after a refresh gates again even when its text is only counted.
  *   A language-role server is recorded but never gated: its config message can
  *   name one optional feature while its analysis still answers, and blinding
  *   it would turn every clean file into a permanent unconfirmed one.
@@ -2659,13 +2665,23 @@ export function noteServerShowMessage(
 	const type = typeof params?.type === "number" ? params.type : 4;
 	const digest = hashDiagnosticContent(raw).slice(0, 12);
 	const isConfigFailure = type === 1 && isConfigLoadFailureMessage(raw);
+	let retractedPaths = 0;
+	if (
+		isConfigFailure &&
+		state.configLoadFailure === undefined &&
+		isAuxiliary({ role: state.serverRole })
+	) {
+		state.configLoadFailure = { message: text, atMs: Date.now() };
+		retractedPaths = retractUnscannedEmptyPublications(state);
+	}
 	const messages = (state.serverMessages ??= new Map<string, number>());
 	const known = messages.has(digest);
-	// The FIRST config failure of a client session is always admitted: it is the
-	// fact that stops this server's scans reading clean, and dropping it because
-	// the same server narrated eight earlier lines would keep the defect alive.
-	const mustAdmit = isConfigFailure && state.configLoadFailure === undefined;
-	if (!known && messages.size >= MAX_TRACKED_SERVER_MESSAGES && !mustAdmit) {
+	// One slot past the cap is reserved for a config failure: the first one names
+	// why this server's scans stopped reading clean, and a server that narrated
+	// eight earlier lines must not push it out. Only a config failure may take
+	// the slot, so no refresh/error loop grows the map past MAX + 1.
+	const cap = MAX_TRACKED_SERVER_MESSAGES + (isConfigFailure ? 1 : 0);
+	if (!known && messages.size >= cap) {
 		incrementDegradationCount({
 			kind: "lsp-server-message",
 			subject: `${state.serverId}:showMessage-cap`,
@@ -2674,11 +2690,6 @@ export function noteServerShowMessage(
 		return;
 	}
 	messages.set(digest, (messages.get(digest) ?? 0) + 1);
-	let retractedPaths = 0;
-	if (mustAdmit) {
-		state.configLoadFailure = { message: text, atMs: Date.now() };
-		retractedPaths = retractUnscannedEmptyPublications(state);
-	}
 	emitBounded(
 		"lsp_server_message",
 		`${state.serverId}:message:${digest}`,
@@ -2713,7 +2724,6 @@ function configFailureBlocksEmptyPublish(
 	state: LSPClientState,
 	filePath: string,
 ): boolean {
-	if (state.serverRole !== "auxiliary") return false;
 	const failure = state.configLoadFailure;
 	if (failure === undefined) return false;
 	// A refused publication still answers the send it was owed (#3482), as a
@@ -2745,9 +2755,14 @@ function configFailureBlocksEmptyPublish(
  * #4764: the empty answers this client stored BEFORE it reported its config
  * failure came from the same rule-less server, so they are retracted rather
  * than left to read as a clean scan. Only EMPTY publications are retracted: a
- * non-empty answer is a real finding, and clearing it would lose evidence. A
- * publication still inside its debounce window is decided at store time by
- * {@link configFailureBlocksEmptyPublish}, so no pending answer is touched.
+ * non-empty answer is a real finding, and clearing it would lose evidence.
+ *
+ * Only the STORED answer is dropped: its cache entry, stamp, version and
+ * binding. A publication still inside its debounce window is left to the
+ * store-time gate in {@link configFailureBlocksEmptyPublish}: a pending finding
+ * is stored, a pending empty is refused and counted. `clearDiagnosticsForPath`
+ * is not used here because it cancels that pending timer, and a newer finding
+ * would be lost with it.
  */
 function retractUnscannedEmptyPublications(state: LSPClientState): number {
 	let retracted = 0;
@@ -2756,7 +2771,11 @@ function retractUnscannedEmptyPublications(state: LSPClientState): number {
 		if (diags.length === 0) emptyStoredPaths.push(normalizedPath);
 	}
 	for (const normalizedPath of emptyStoredPaths) {
-		clearDiagnosticsForPath(state, normalizedPath);
+		state.pushDiagnostics.delete(normalizedPath);
+		state.pushDiagnosticTimestamps.delete(normalizedPath);
+		state.diagnosticDocVersions.delete(normalizedPath);
+		state.diagnosticBindings.delete(normalizedPath);
+		state.diagnosticsVersionsByPath.delete(normalizedPath);
 		retracted += 1;
 		emitBounded(
 			"lsp_publish_dropped_server_config_failed",
