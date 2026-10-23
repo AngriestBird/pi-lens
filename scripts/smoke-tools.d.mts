@@ -57,6 +57,9 @@ export interface LspFixture {
 	/** Why this gate-eligible fixture cannot opt in (#3217). Mutually exclusive
 	 *  with `lspGate`; the reason is asserted, not just the key's presence. */
 	lspGateExempt?: string;
+	/** #3405: a server that publishes only after its project is active. A gated
+	 *  fixture whose cold call finds nothing is polled to this deadline. */
+	lspGateReadiness?: { deadlineMs: number; intervalMs: number };
 	expectDiagnosticCode?: string;
 	/** The one fixture the nightly `lens_diagnostics mode=full` row drives
 	 *  (#2780), mirroring `lspGate`. */

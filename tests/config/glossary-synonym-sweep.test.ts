@@ -1116,6 +1116,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// validation replace the wrapper-relative guess. No path-key owner changes.
 		// 124 -> 125 (#4414): the Windows npm-global layout adds one `path.join` to
 		// `typescriptDirsForTsc`, the list of package dirs beside a resolved `tsc`.
+		// 125 -> 127 (#4760): `declinesLooseFileRoot` compared the loose file's
+		// own directory to the home ceiling (`path.resolve`/`path.dirname`).
+		// 127 -> 125 (#4769 round 2): it now takes the resolved root and compares
+		// real paths through `realpathOrResolve`, so both uses are gone.
 		"clients/lsp/server.ts": 125,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
@@ -1376,8 +1380,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// remedy each name the `turn-end-findings` row, the durable cache row the
 		// glossary keeps `record` for. 53 -> 65 (#4738): the partition reads, the
 		// carried-blocker shape check and the gate's owner check name the same
-		// `turn-end-findings` row.
-		"clients/git-guard.ts": 65,
+		// `turn-end-findings` row. 65 -> 67 (#4750): the top partition's write
+		// stamp and its shape check read the same row.
+		"clients/git-guard.ts": 67,
 		"clients/govulncheck-client.ts": 4,
 		"clients/inline-blocker-dispositions.ts": 4,
 		// #3654: the unified bridge's own `record()` API (RFC §3) — a method

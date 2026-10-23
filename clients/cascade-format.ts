@@ -193,7 +193,7 @@ export function buildResolvedFoundCascadeRun(
 			policyRoot: cwd,
 			filePath,
 		});
-	// One bounded record per RUN, never one per finding (AGENTS.md "bounded
+	// One bounded record per RUN, never one per finding (docs/engineering-principles.md "Every new failure path gets bounded
 	// observability"). This is a PUSH surface: silence after a mark is the mark
 	// working, not a clean verdict, so the count is recorded here rather than
 	// re-announced to the agent on every reconcile. `durationMs` covers the

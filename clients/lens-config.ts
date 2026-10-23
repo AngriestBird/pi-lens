@@ -13,6 +13,7 @@ import {
 	getLensFlagSpec,
 	GLOBAL_NON_FLAG_CONFIG_SECTIONS,
 	LENS_FLAGS,
+	PROJECT_NON_FLAG_CONFIG_SECTIONS,
 	readFlagConfigValue,
 	readLazyToolsSetting,
 } from "./lens-flag-registry.js";
@@ -502,7 +503,9 @@ export function loadPiLensGlobalConfig(
 		for (const key of Object.keys(raw)) {
 			if (!knownGlobalConfigKeys.has(key)) {
 				warnInvalid(
-					`unknown key "${key}" is not a recognized pi-lens setting (check for a typo); ignored`,
+					PROJECT_NON_FLAG_CONFIG_SECTIONS.includes(key)
+						? `"${key}" is a project-scoped pi-lens setting; set it in <project>/.pi-lens.json, not in the global config; ignored`
+						: `unknown key "${key}" is not a recognized pi-lens setting (check for a typo); ignored`,
 				);
 			}
 		}

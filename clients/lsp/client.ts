@@ -1259,6 +1259,16 @@ export interface LSPClientState {
 	 */
 	emptyFirstPublishHoldSpent: boolean;
 	/**
+	 * #4763: this client's server has sent `semgrep/rulesRefreshed`, so its rules
+	 * are loaded and an empty publish is an answer again. Set once, by that
+	 * notification, and read only for a server marked
+	 * `emptyUntilRulesRefreshed`; a respawn is a new client and starts unset.
+	 */
+	rulesRefreshed?: boolean;
+	/** #4763: empty publishes held since the last `lsp_rules_refreshed` row,
+	 *  which reports it and resets it. */
+	heldEmptyPublishes?: number;
+	/**
 	 * #3484: paths with a diagnostics fence outstanding. Each entry is its own
 	 * object, so an older fence's reply cannot lift a newer one, and counts the
 	 * version-less publishes it dropped. Every entry is removed by its reply,
@@ -2049,8 +2059,14 @@ export function rebaselineForRulesRefresh(state: LSPClientState): void {
 		phase: "lsp_rules_refreshed",
 		filePath: state.root,
 		durationMs: 0,
-		metadata: { serverId: state.serverId, rebaselinedPaths: counts.size },
+		metadata: {
+			serverId: state.serverId,
+			rebaselinedPaths: counts.size,
+			heldEmptyPublishes: state.heldEmptyPublishes ?? 0,
+		},
 	});
+	// Per refresh, not per session: a later refresh reports its own holds.
+	state.heldEmptyPublishes = 0;
 }
 
 /** #3482: expected and counted publications for a path. `sent` is the open
@@ -2801,6 +2817,33 @@ export function setupIncomingHandlers(
 				return currentVersion !== undefined && docVersion < currentVersion;
 			};
 
+			// #4763: HOLD an empty publish that precedes `semgrep/rulesRefreshed`.
+			// Opengrep scans a just-opened document before its rules load
+			// ("Rules not loaded yet, not scanning anything"), publishes `[]` for it,
+			// and republishes the real result after the notification. That `[]`
+			// answers nothing: cached, stamped or emitted, it ended the touch as
+			// "answered" and the findings arrived after the wait (0 of 86 aux waits
+			// carried findings). Held means dropped unstored, as a fence-dropped
+			// publish is; it still counts toward #3482's backlog (the send was
+			// answered, the rules were not there), so `rebaselineForRulesRefresh`
+			// takes it back and the republish restores it. A server whose rules load
+			// before the first publish never reaches this branch, and a non-empty
+			// publish is a scan result, so neither is held. The server's own
+			// notification is the only release; the existing per-server budget stays
+			// the only bound (a server that never loads its rules waits that budget
+			// and reports `silent`, which is the truth, not a clean file).
+			if (
+				strategy.emptyUntilRulesRefreshed &&
+				!state.rulesRefreshed &&
+				newDiags.length === 0 &&
+				!state.pushDiagnostics.has(normalizedPath) &&
+				!state.pendingDiagnostics.has(normalizedPath)
+			) {
+				state.heldEmptyPublishes = (state.heldEmptyPublishes ?? 0) + 1;
+				countPublication(state, normalizedPath);
+				return;
+			}
+
 			// #3310: HOLD the empty first publish of an asynchronously-indexing
 			// server. Measured (docs/lsp-capability-matrix.md's `first-publish`
 			// column): intelephense answers `didOpen` with `[]` while its
@@ -2854,7 +2897,7 @@ export function setupIncomingHandlers(
 						emptyFirstPublish: strategy.emptyFirstPublish,
 						// `pubVersion`, the `[lsp-pub]` trace's own field name for the
 						// publish's LSP document version — not a lifecycle identity, and
-						// not the retired glossary spelling (AGENTS.md "generation").
+						// not the retired glossary spelling (AGENTS.md "session, turn or generation lifecycle").
 						pubVersion: docVersion ?? "push-unversioned",
 					},
 				});
@@ -3070,9 +3113,10 @@ export function setupIncomingHandlers(
 		},
 	);
 	state.connection.onRequest("window/workDoneProgress/create", async () => {});
-	state.connection.onNotification("semgrep/rulesRefreshed", () =>
-		rebaselineForRulesRefresh(state),
-	);
+	state.connection.onNotification("semgrep/rulesRefreshed", () => {
+		state.rulesRefreshed = true;
+		rebaselineForRulesRefresh(state);
+	});
 	// #1669: a server can send `workspace/diagnostic/refresh` (typically after a
 	// project-wide config change) to say every pull result it has already
 	// reported may be stale. Left unhandled, vscode-jsonrpc replies
@@ -6345,6 +6389,7 @@ export async function createLSPClient(options: {
 		openDocuments: new Set(),
 		// #3310: one-shot, per client session.
 		emptyFirstPublishHoldSpent: false,
+		rulesRefreshed: false,
 		diagnosticFences: new Map(),
 		closedDocuments: new Set(),
 		openDocumentUris: new Map(),

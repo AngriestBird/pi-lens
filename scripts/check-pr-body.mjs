@@ -4125,7 +4125,7 @@ export function lintPrBody(body = "", options = {}) {
 		errors.push(`PR body is missing a Summary section. See ${TEMPLATE_PATH}.`);
 	}
 
-	// Value discipline (AGENTS.md "Test assessment and removal"): a PR that
+	// Value discipline (HISTORY.md "Test assessment and removal (value discipline)"): a PR that
 	// touches tests/ must say, per touched file, what it uniquely pins and
 	// what became redundant. Conditional because docs/production-only PRs owe
 	// nothing here.

@@ -1,6 +1,10 @@
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
-import type { CacheInspection, CacheManager } from "./cache-manager.js";
+import {
+	DEFAULT_MAX_AGE_MS,
+	type CacheInspection,
+	type CacheManager,
+} from "./cache-manager.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import { isOutsideProjectRoot, toProjectRelativePath } from "./path-utils.js";
@@ -50,6 +54,8 @@ export interface TurnEndFindingsCache {
 	 * shape released before #4738) is one owner's.
 	 */
 	carriedBlockers?: BlockerPartition[] | undefined;
+	/** When `sessionId` wrote the top-level sections (#4750, `BlockerPartition`). */
+	blockerWrittenAt?: number | undefined;
 }
 
 /** One session's blocker sections in the record, with their owner (#4738). */
@@ -57,6 +63,17 @@ export interface BlockerPartition {
 	sessionId: string;
 	blockerContent: string;
 	blockingFiles: string[];
+	/**
+	 * Epoch ms (#4750), written by two writers: the owner, when it writes these
+	 * sections; and, for a partition a writer before #4750 wrote (no stamp), the
+	 * first turn end of another session that carries it
+	 * (`carriedTurnEndBlockers`' `?? now`, persisted by the composer's write or
+	 * by the settled turn end's, #4762 r3), so such a record's window starts at
+	 * that first carry. Text no file owns expires by it: the record's own
+	 * timestamp moves with every writer's write, so it cannot tell how old one
+	 * owner's text is.
+	 */
+	blockerWrittenAt?: number | undefined;
 }
 
 type GuardDecision = {
@@ -1012,6 +1029,7 @@ function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
 			typeof record.affectedFilesTruncated === "boolean") &&
 		(record.blockingFiles === undefined ||
 			Array.isArray(record.blockingFiles)) &&
+		wellFormedStamp(record.blockerWrittenAt) &&
 		carriesWellFormedBlockers(record)
 	);
 }
@@ -1040,10 +1058,20 @@ function carriesWellFormedBlockers(
 			typeof partition.blockerContent === "string" &&
 			partition.blockerContent.length > 0 &&
 			Array.isArray(partition.blockingFiles) &&
-			partition.blockingFiles.every((file) => typeof file === "string");
+			partition.blockingFiles.every((file) => typeof file === "string") &&
+			wellFormedStamp(partition.blockerWrittenAt);
 		if (ok) owners.add(partition.sessionId);
 		return ok;
 	});
+}
+
+/**
+ * A partition's write stamp (#4750): absent (a released writer's record) or an
+ * epoch-ms number. Any other value is not a record, so the gate refuses it
+ * rather than read an age it cannot compute as never expiring.
+ */
+function wellFormedStamp(stamp: unknown): boolean {
+	return stamp === undefined || Number.isFinite(stamp);
 }
 
 /** A stored record's fields as read, before any of them is trusted. */
@@ -1132,6 +1160,7 @@ function recordPartitions(record: TurnEndFindingsCache): BlockerPartition[] {
 					sessionId: record.sessionId,
 					blockerContent: record.blockerContent,
 					blockingFiles: record.blockingFiles ?? [],
+					blockerWrittenAt: record.blockerWrittenAt,
 				},
 			]
 		: [];
@@ -1151,6 +1180,7 @@ export function blockerPartitionFields(
 	blockerContent: string | undefined;
 	blockingFiles: string[] | undefined;
 	carriedBlockers: BlockerPartition[] | undefined;
+	blockerWrittenAt: number | undefined;
 } {
 	const [top, ...carried] = partitions;
 	return {
@@ -1158,6 +1188,7 @@ export function blockerPartitionFields(
 		blockerContent: top?.blockerContent,
 		blockingFiles: top?.blockingFiles,
 		carriedBlockers: carried.length > 0 ? carried : undefined,
+		blockerWrittenAt: top?.blockerWrittenAt,
 	};
 }
 
@@ -1212,6 +1243,7 @@ function trimPartition(
 					? keptSections.map((section) => section.lines.join("\n")).join("\n\n")
 					: partition.blockerContent,
 			blockingFiles,
+			blockerWrittenAt: partition.blockerWrittenAt,
 		},
 		dropped,
 	};
@@ -1235,6 +1267,40 @@ function logSectionsDropped(
 }
 
 /**
+ * What a turn-end rewrite leaves out of the other sessions' partitions: a
+ * section whose file is gone, and text no file owns once it expired (#4750).
+ */
+export interface CarriedDrops {
+	gone: boolean;
+	noFile: boolean;
+}
+
+/**
+ * The `sections_dropped` rows for `dropped`, one per basis. The write that
+ * leaves the sections out calls it, never the read that found them (#4750:
+ * the read logged them, so a turn end that wrote nothing still logged drops).
+ */
+export function logCarriedDrops(cwd: string, dropped: CarriedDrops): void {
+	if (dropped.noFile) logSectionsDropped(cwd, "turn_end", "no_file");
+	if (dropped.gone) logSectionsDropped(cwd, "turn_end", "file_gone");
+}
+
+/**
+ * True once `partition`'s owner wrote it longer ago than the gate trusts the
+ * record (#4750). A partition with no stamp (a writer before #4750) has no age
+ * yet, so it is not past the window: the carry stamps it with the time it
+ * first read it, the turn end writes that stamp, and the window runs from
+ * there.
+ */
+function pastFreshnessWindow(
+	partition: BlockerPartition,
+	now: number,
+): boolean {
+	const writtenAt = partition.blockerWrittenAt;
+	return writtenAt !== undefined && now - writtenAt > DEFAULT_MAX_AGE_MS;
+}
+
+/**
  * The other sessions' blocker sections a turn-end rewrite carries (#4738).
  *
  * The composer's write is this session's whole evidence, so it replaces this
@@ -1242,12 +1308,17 @@ function logSectionsDropped(
  * until its file is re-checked whole and clean (`syncGitGuardRecord`) or is
  * gone (the gate's `affected_files_resolved` rule). Text of another session's
  * that names no file (a project lane's report: trivy, knip, secrets, cascade)
- * has no file to re-check; the turn end that re-runs those lanes replaces it,
- * which is the rule every session's composer applied before #4738.
+ * has no file to re-check, and this session's lanes may not have re-run (a
+ * lane that is unavailable, or a report of the other session's own edits), so
+ * it stays with its owner, whole, until the owner's next turn end replaces it
+ * or the gate's freshness window has passed since the owner wrote it (#4750).
+ * Before #4750 every turn end replaced it, so the gate allowed a commit
+ * nothing had re-checked.
  *
  * @returns the stored value, read whatever its age (#4725: the composer read
  * it through the freshness window, so a day-old record was invisible to it and
- * its write replaced the record whole), and the partitions to carry.
+ * its write replaced the record whole), the partitions to carry, and what the
+ * write leaves out, for `logCarriedDrops` once it has written.
  */
 export function readTurnEndGuardRecord(
 	cacheManager: CacheManager,
@@ -1256,23 +1327,45 @@ export function readTurnEndGuardRecord(
 ): {
 	stored: Partial<TurnEndFindingsCache> | undefined;
 	carried: BlockerPartition[];
+	dropped: CarriedDrops;
 } {
 	const stored = storedRecord(cacheManager, cwd)?.fields;
-	return { stored, carried: carriedTurnEndBlockers(stored, runtime, cwd) };
+	// The composer writes on every path that reads, so a stamp this read gave
+	// a released partition reaches the record with that write.
+	const { carried, dropped } = carriedTurnEndBlockers(stored, runtime, cwd);
+	return { stored, carried, dropped };
 }
 
 function carriedTurnEndBlockers(
 	stored: StoredRecord | undefined,
 	runtime: RuntimeCoordinator,
 	cwd: string,
-): BlockerPartition[] {
-	if (!isTurnEndFindingsCache(stored)) return [];
+): { carried: BlockerPartition[]; dropped: CarriedDrops; stamped: boolean } {
+	const dropped: CarriedDrops = { gone: false, noFile: false };
+	if (!isTurnEndFindingsCache(stored))
+		return { carried: [], dropped, stamped: false };
 	const me = runtime.telemetrySessionId;
+	const now = Date.now();
 	const carried: BlockerPartition[] = [];
-	let gone = false;
-	let unattributed = false;
+	// A released partition carried whole gets its first stamp here.
+	let stamped = false;
 	for (const partition of recordPartitions(stored)) {
 		if (partition.sessionId === me) continue;
+		if (
+			!blockingProvenance(
+				partition.blockerContent,
+				partition.blockingFiles,
+				cwd,
+			) &&
+			!pastFreshnessWindow(partition, now)
+		) {
+			if (partition.blockerWrittenAt === undefined) stamped = true;
+			carried.push({
+				...partition,
+				blockerWrittenAt: partition.blockerWrittenAt ?? now,
+			});
+			continue;
+		}
 		const split = splitBlockerSections(
 			partition.blockerContent,
 			partition.blockingFiles.filter(
@@ -1280,11 +1373,11 @@ function carriedTurnEndBlockers(
 			),
 			cwd,
 		);
-		if (split.unowned) unattributed = true;
+		if (split.unowned) dropped.noFile = true;
 		const live = split.sections.filter(
 			(section) => !sectionFileGone(section, cwd),
 		);
-		if (live.length < split.sections.length) gone = true;
+		if (live.length < split.sections.length) dropped.gone = true;
 		if (live.length === 0) continue;
 		carried.push({
 			sessionId: partition.sessionId,
@@ -1293,11 +1386,10 @@ function carriedTurnEndBlockers(
 					? partition.blockerContent
 					: live.map((section) => section.lines.join("\n")).join("\n\n"),
 			blockingFiles: partition.blockingFiles,
+			blockerWrittenAt: partition.blockerWrittenAt,
 		});
 	}
-	if (unattributed) logSectionsDropped(cwd, "turn_end", "no_file");
-	if (gone) logSectionsDropped(cwd, "turn_end", "file_gone");
-	return carried;
+	return { carried, dropped, stamped };
 }
 
 /**
@@ -1336,7 +1428,13 @@ function makesNoClaim(fields: StoredRecord | undefined): boolean {
 function logRecordRetired(
 	cwd: string,
 	by: "turn_end" | "write",
-	basis: "own_session" | "no_blocker" | "no_claim" | "rechecked" | "file_gone",
+	basis:
+		| "own_session"
+		| "no_blocker"
+		| "no_claim"
+		| "rechecked"
+		| "file_gone"
+		| "no_file",
 ): void {
 	logLatency({
 		type: "phase",
@@ -1394,8 +1492,9 @@ export function retireSettledGitGuardRecord(
 /**
  * The settled turn end's share of a record it does not own whole (#4738):
  * this session's own blocker sections leave (its runtime holds no blocker),
- * every other session's stay but for a section whose file is gone, and the
- * record is deleted only when none is left.
+ * every other session's stay as the composer carries them (a section whose
+ * file is gone leaves, and so does text no file owns once it expired, #4750),
+ * and the record is deleted only when none is left.
  *
  * @returns true when the record was deleted.
  */
@@ -1410,32 +1509,41 @@ function retireOwnPartition(
 	// A record this session owns whole: the rule above decided it.
 	if (stored.sessionId === me && stored.carriedBlockers === undefined)
 		return false;
-	let ownDropped = false;
-	let goneDropped = 0;
-	const kept: BlockerPartition[] = [];
-	for (const partition of recordPartitions(stored)) {
-		if (partition.sessionId === me) {
-			ownDropped = true;
-			continue;
+	const ownDropped = recordPartitions(stored).some(
+		(partition) => partition.sessionId === me,
+	);
+	const {
+		carried: kept,
+		dropped,
+		stamped,
+	} = carriedTurnEndBlockers(stored, runtime, cwd);
+	if (!ownDropped && !dropped.gone && !dropped.noFile) {
+		// #4762 r3: nothing dropped, so the partitions kept are the stored ones
+		// in their order. A released one just got its first stamp, and only a
+		// write keeps it: unwritten, every read-only turn end would restart its
+		// window and the report would never expire.
+		if (stamped) {
+			const fields = blockerPartitionFields(kept);
+			writeGitGuardRecord(cacheManager, runtime, cwd, {
+				...stored,
+				carriedBlockers: fields.carriedBlockers,
+				blockerWrittenAt: fields.blockerWrittenAt,
+			});
 		}
-		const trimmed = trimPartition(partition, cwd, new Set(), (section) =>
-			sectionFileGone(section, cwd),
-		);
-		goneDropped += trimmed.dropped;
-		if (trimmed.kept) kept.push(trimmed.kept);
+		return false;
 	}
-	if (!ownDropped && goneDropped === 0) return false;
 	const testFailures = stored.testFailures === true;
-	// Nothing is left only when every other session's section went with its
-	// file: a record shared with another session holds at least one of theirs.
+	// Nothing is left only when every other session's section left with its
+	// file or expired: a record shared with another session holds at least one
+	// of theirs.
 	if (kept.length === 0 && !testFailures) {
 		cacheManager.clearCache("turn-end-findings", cwd);
 		runtime.clearGitGuardCacheUnknown();
-		logRecordRetired(cwd, "turn_end", "file_gone");
+		logRecordRetired(cwd, "turn_end", dropped.noFile ? "no_file" : "file_gone");
 		return true;
 	}
 	if (ownDropped) logSectionsDropped(cwd, "turn_end", "own_session");
-	if (goneDropped > 0) logSectionsDropped(cwd, "turn_end", "file_gone");
+	logCarriedDrops(cwd, dropped);
 	const fields = blockerPartitionFields(kept);
 	const owner = fields.owner ?? stored.sessionId;
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
@@ -1449,6 +1557,7 @@ function retireOwnPartition(
 		blockerContent: fields.blockerContent,
 		blockingFiles: fields.blockingFiles,
 		carriedBlockers: fields.carriedBlockers,
+		blockerWrittenAt: fields.blockerWrittenAt,
 		hasBlockers: kept.length > 0 || testFailures,
 		sessionId: owner,
 		// Nothing new to deliver: the sections kept were already in the record.
@@ -1598,7 +1707,9 @@ function shownLatchFile(filePath: string, cwd: string): string {
  * a record: a clean dispatch of a named file drops that file's sections, a
  * passing run retires its test failures, and a settled turn end retires a
  * record that makes no claim. A record whose blockers name no file has no
- * such action, and the text says what replaces it instead of inventing one.
+ * such action, and the text says what replaces it instead of inventing one:
+ * its writer's next turn end, or, for another session's, the end of the
+ * freshness window since that session wrote it (#4750).
  */
 function unconfirmedRecordRemedy(
 	stored: StoredValue | undefined,
@@ -1667,9 +1778,15 @@ function unconfirmedRecordRemedy(
 		parts.push(
 			"The record makes no blocker claim pi-lens can check, so no re-check of one file clears it; a turn that ends with no blocker clears it.",
 		);
-	} else if (!record || parsed.some((owned) => owned === undefined)) {
+	} else if (!record) {
 		parts.push(
 			"The record holds blockers pi-lens cannot attribute to a file, so no re-check of one file clears them; this session's next turn-end findings replace it.",
+		);
+	} else if (parsed.some((owned) => owned === undefined)) {
+		// #4750: a turn end carries another session's text no file owns until
+		// that session replaces it or it expires (`carriedTurnEndBlockers`).
+		parts.push(
+			`The record holds blockers pi-lens cannot attribute to a file, so no re-check of one file clears them; the session that wrote them replaces them at its next turn end, and once ${DEFAULT_MAX_AGE_MS / 60_000} minutes pass without that session rewriting them, a turn end of any session drops them.`,
 		);
 	}
 	if (testRemedy) parts.push(testRemedy);
@@ -1901,7 +2018,8 @@ export function syncGitGuardRecord(
 	// This session's own new evidence replaces its own partition and leads the
 	// record (#4733 r5 F21: the writer of new sections owns the record); a write
 	// with none keeps the stored order, so the stored owner stays while its
-	// sections survive (#4733 r1 F1).
+	// sections survive (#4733 r1 F1). The partition holds file sections only, so
+	// it bears no write stamp: only text no file owns expires by one (#4750).
 	const partitions =
 		entries.length > 0
 			? [
@@ -1975,6 +2093,7 @@ export function syncGitGuardRecord(
 		blockerContent,
 		blockingFiles: fields.blockingFiles ?? [],
 		carriedBlockers: fields.carriedBlockers,
+		blockerWrittenAt: fields.blockerWrittenAt,
 		hasBlockers,
 		affectedFiles,
 		sessionId: owner,
@@ -2021,6 +2140,7 @@ export function mergeGitGuardTestFailure(
 		blockingFiles: existing?.blockingFiles ?? [],
 		// #4738: other sessions' sections ride along with their owners.
 		carriedBlockers: existing?.carriedBlockers,
+		blockerWrittenAt: existing?.blockerWrittenAt,
 		testFailureContent: content,
 		testFailureFiles: testFailureFiles,
 		hasBlockers: true,

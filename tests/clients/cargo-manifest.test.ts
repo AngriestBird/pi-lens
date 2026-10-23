@@ -277,7 +277,7 @@ describe("no hand-rolled [workspace]-table regex outside cargo-manifest.ts (#249
 	 *   M3: no regex at all — `content.includes("[workspace]")`, a bare
 	 *       substring test. True for a COMMENTED-OUT `# [workspace]` heading
 	 *       too, which is exactly why `workspace-modules.ts`'s pre-#2473
-	 *       `detectWorkspaceType` reading this way was a defect (AGENTS.md,
+	 *       `detectWorkspaceType` reading this way was a defect (HISTORY.md,
 	 *       "the one Cargo.toml reader" entry) — and the original detector
 	 *       missed this spelling too, having no backslashes at all.
 	 *

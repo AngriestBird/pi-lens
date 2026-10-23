@@ -127,7 +127,7 @@ export function piMockAdmission(testPath: unknown): string | undefined {
 		"receives, or how pi orders a session goes through tier 1 " +
 		"(tests/support/pi-runner.ts, a real ExtensionRunner) or tier 2 " +
 		"(tests/support/pi-session.ts, a real AgentSession); AGENTS.md " +
-		"'Testing' says which. A genuine process-boundary subject, internal " +
+		"'Test requirements' says which. A genuine process-boundary subject, internal " +
 		"seam or unproducible payload (#4632 acceptance 7) is added to " +
 		"PI_MOCK_IMPORTERS in tests/support/pi-mock-importers.ts, with its class.";
 	if (typeof testPath !== "string" || testPath === "") {

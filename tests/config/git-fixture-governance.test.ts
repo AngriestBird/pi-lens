@@ -306,7 +306,7 @@ function isGitSpawnSite(callee: string, argsText: string): boolean {
  * (`rev-parse HEAD` into a variable) and reaches the spawn as `${sha}` with
  * no hex literal anywhere, so it is untouched -- that is the discriminator.
  *
- * Detector policy, per needle (AGENTS.md "Detectors match code, not prose"):
+ * Detector policy, per needle (docs/engineering-principles.md "Detectors match code, not prose"):
  * comments BLANKED, string contents KEPT, at BOTH scanning points (the file
  * admission gate and the argument vector). The evidence is itself a string
  * literal -- a commit-ish reaches a spawn only as a quoted argument -- so the

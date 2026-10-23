@@ -155,7 +155,7 @@ describe("machine-global writers route through PI_LENS_HOME, never the real home
 //      spawns such a child never touches the registry itself and is outside
 //      this walk's population — `tests/clients/instance-registry-race.test.ts`).
 //
-// Both scans run over comment-and-string-blanked text (AGENTS.md "Detectors
+// Both scans run over comment-and-string-blanked text (docs/engineering-principles.md "Detectors
 // match code, not prose") — this docblock's own mentions of every symbol
 // above must never be read as a hit.
 

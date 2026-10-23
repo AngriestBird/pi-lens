@@ -727,7 +727,13 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 				(entry: { serverId: string }) => entry.serverId === "typos",
 			);
 		expect(demoted).toEqual(
-			expect.objectContaining({ outcome: "demoted", elapsedMs: 0 }),
+			// #4763: the demoted row carries the count too (0: it published nothing
+			// for this touch).
+			expect.objectContaining({
+				outcome: "demoted",
+				elapsedMs: 0,
+				publishedCount: 0,
+			}),
 		);
 		expect(auxiliaryClient.waitForDiagnostics).toHaveBeenCalledTimes(5);
 		expect(drainPendingAuxiliaryCoverage()).toEqual(
@@ -3457,5 +3463,142 @@ describe("#2914 — non-demoted aux rows stay binding-only", () => {
 		expect(result?.unconfirmedServerIds).toBeUndefined();
 		// The pin: the row itself stays binding-only.
 		expect(outcomes?.[0]?.publishedThisContent).toBe(false);
+	});
+});
+
+describe("#4763 — published-diagnostic count on lsp_aux_wait_outcome", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		logLatency.mockReset();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	type CountRow = {
+		serverId: string;
+		outcome: string;
+		publishedCount?: number;
+	};
+	const countRows = (): CountRow[] =>
+		logLatency.mock.calls
+			.map(([entry]) => entry)
+			.filter((entry) => entry.phase === "lsp_aux_wait_outcome")
+			.flatMap((entry) => (entry.metadata?.outcomes ?? []) as CountRow[]);
+
+	/** One `clientScope: "all"` touch over a 100 ms primary and the given opengrep client. */
+	async function touchAll(auxClient: ReturnType<typeof makeClient>) {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep"
+					? auxClient
+					: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+		const touch = service.touchFile(FILE, "count-probe", {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+		await touch;
+	}
+
+	it("records how many diagnostics an auxiliary published on the aggregate path", async () => {
+		await touchAll(
+			makeClient(900, [makeDiagnostic("one"), makeDiagnostic("two")], {
+				serverId: "opengrep",
+			}),
+		);
+
+		expect(countRows()).toEqual([
+			expect.objectContaining({
+				serverId: "opengrep",
+				outcome: "answered",
+				publishedCount: 2,
+			}),
+		]);
+	});
+
+	it("records 0 for an auxiliary that answered clean, and 0 for one that never spoke", async () => {
+		// Recurrence: "answered with nothing" and "never answered" are both an
+		// empty result downstream; the row is what tells a field query apart
+		// (`outcome` names which, `publishedCount` how much).
+		await touchAll(
+			makeClient(900, [], { serverId: "opengrep", publishesWhenClean: true }),
+		);
+		await touchAll(makeClient(900, [], { serverId: "opengrep" }));
+
+		expect(countRows()).toEqual([
+			expect.objectContaining({ outcome: "answered", publishedCount: 0 }),
+			expect.objectContaining({ outcome: "silent", publishedCount: 0 }),
+		]);
+	});
+
+	it("does not count a cache entry the auxiliary never published for this touch", async () => {
+		// Recurrence: reading the cache without the publication evidence would
+		// report an earlier revision's findings as this touch's publication. The
+		// double settles without a stamp (it published nothing for this touch)
+		// while its cache still holds two findings.
+		const stale = {
+			...makeClient(900, [], { serverId: "opengrep" }),
+			getDiagnostics: vi.fn(() => [makeDiagnostic("a"), makeDiagnostic("b")]),
+		};
+		await touchAll(stale);
+
+		expect(countRows()).toEqual([
+			expect.objectContaining({ outcome: "silent", publishedCount: 0 }),
+		]);
+	});
+
+	it("records the count on the with-auxiliary grace path too", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(
+				makeClient(800, [makeDiagnostic("primary error")], {
+					serverId: "ts-primary",
+				}),
+			)
+			.mockResolvedValueOnce(
+				makeClient(900, [makeDiagnostic("aux finding")], {
+					serverId: "opengrep",
+				}),
+			);
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "grace-count", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2000);
+		await touch;
+
+		const row = logLatency.mock.calls
+			.map(([entry]) => entry)
+			.find((entry) => entry.phase === "lsp_aux_wait_outcome");
+		expect(row?.metadata?.waitShape).toBe("aux_grace");
+		expect(countRows()).toEqual([
+			expect.objectContaining({
+				outcome: "answered",
+				publishedCount: 1,
+			}),
+		]);
 	});
 });
