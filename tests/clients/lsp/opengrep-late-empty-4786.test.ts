@@ -106,7 +106,7 @@ describe("a late empty opengrep publication (#4786)", () => {
 			expect(settled.codes).toEqual(["P3310"]);
 			expect(settled.refused?.count).toBe(1);
 			expect(settled.refused?.latestReasons[0]?.subject).toMatch(
-				/^opengrep:empty-after-finding:.*probe-\d+\.py:1:1$/,
+				/^opengrep:empty-after-finding:.*probe-\d+\.py$/,
 			);
 		}, 15_000);
 	}

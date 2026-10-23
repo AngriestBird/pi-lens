@@ -13,20 +13,28 @@
  *   state table);
  * - a language server and a versioned publication keep last write wins, or
  *   the rule leaks past its population;
- * - the refusal is counted once per occurrence and recorded once per path and
- *   phase, or a refused empty is silent or floods the sink.
+ * - the refusal is counted once per occurrence and recorded once per path, or
+ *   a refused empty is silent or grows the ledger by one key per edit (#4790
+ *   review F2, AGENTS.md shape 46);
+ * - the phase never moves back: a didSave that fails to leave gives its rescan
+ *   expectation back (`giveBackSaveRescan`), and a phase built on that balance
+ *   stored a same-phase empty, a false clean (#4790 review F1).
  */
 import { EventEmitter } from "node:events";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+	_getDegradationLedgerStateForTests,
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 import { getRecentLoggedPhases } from "../../../clients/latency-logger.js";
 import {
+	closeDocument,
+	handleNotifyChange,
 	handleNotifyOpen,
+	handleNotifySave,
 	publicationCountsForPath,
 	setupIncomingHandlers,
 	type LSPClientState,
@@ -117,7 +125,7 @@ describe("#4786 an auxiliary's empty within its finding's phase", () => {
 		expect(group?.count).toBe(2);
 		expect(group?.latestReasons).toEqual([
 			{
-				subject: `opengrep:empty-after-finding:${KEY}:1:1`,
+				subject: `opengrep:empty-after-finding:${KEY}`,
 				reason:
 					"empty publish dropped: a finding from the same rules generation and send stands (count: 2)",
 			},
@@ -128,8 +136,78 @@ describe("#4786 an auxiliary's empty within its finding's phase", () => {
 		expect(rows).toHaveLength(1);
 		expect(rows[0]?.metadata).toMatchObject({
 			serverId: "opengrep",
-			phase: "1:1",
+			phase: "1:0",
 		});
+	});
+
+	it("keeps one ledger tally per path while the file keeps its finding across edits", async () => {
+		// #4790 review F2: the ledger key carried the phase, so every edit of a
+		// file that keeps its finding added one tally key for the session.
+		const { state, publish, rulesRefreshed } = arm("opengrep", "auxiliary");
+		rulesRefreshed();
+		await handleNotifyOpen(state, FILE, "v0", "python", false, true);
+		const before = _getDegradationLedgerStateForTests().tallies;
+		const EDITS = 6;
+		for (let edit = 1; edit <= EDITS; edit += 1) {
+			publish({ uri: URI, diagnostics: [FINDING] });
+			publish({ uri: URI, diagnostics: [] });
+			vi.advanceTimersByTime(SETTLE_MS);
+			await handleNotifyOpen(state, FILE, `v${edit}`, "python", true, true);
+		}
+		expect(stored(state)).toEqual(["subprocess-shell-true"]);
+		expect(refusals()?.count).toBe(EDITS);
+		expect(_getDegradationLedgerStateForTests().tallies - before).toBe(1);
+	});
+
+	it("refuses the empty after a didSave that failed to leave (the phase never moves back)", async () => {
+		// #4790 review F1, the reviewer's probe: the save raises the rescan
+		// expectation, a finding lands inside the send, the send fails and the
+		// expectation is given back. The scan's reset empty must still be refused.
+		const { state, publish, rulesRefreshed } = arm("opengrep", "auxiliary");
+		state.saveOptions = { includeText: false };
+		rulesRefreshed();
+		await handleNotifyOpen(state, FILE, "a", "python", false, true);
+		publish({ uri: URI, diagnostics: [FINDING] });
+		vi.advanceTimersByTime(SETTLE_MS);
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: unknown) => {
+				if (method === "textDocument/didSave") {
+					publish({ uri: URI, diagnostics: [FINDING] });
+					throw new Error("stream write failed");
+				}
+			},
+		);
+		await handleNotifySave(state, FILE);
+		vi.advanceTimersByTime(SETTLE_MS);
+		publish({ uri: URI, diagnostics: [] });
+		vi.advanceTimersByTime(SETTLE_MS);
+		expect(stored(state)).toEqual(["subprocess-shell-true"]);
+		expect(refusals()?.count).toBe(1);
+	});
+
+	it("stores the empty for a document reopened at version 0 after a close", async () => {
+		// A didChange for a closed document reopens it at version 0 without
+		// clearing its diagnostics (the not-open fallback). A stamp kept from the
+		// closed lifetime's version 0 would then match the new send's phase and
+		// refuse the empty answering the new bytes. The document must exist on
+		// disk to reopen (`closedAndGone`), so it is this test file, never written.
+		const DOC = fileURLToPath(import.meta.url);
+		const DOC_KEY = normalizeMapKey(DOC);
+		const DOC_URI = pathToFileURL(DOC).href;
+		const { state, publish, rulesRefreshed } = arm("opengrep", "auxiliary");
+		rulesRefreshed();
+		await handleNotifyOpen(state, DOC, "a", "python", false, true);
+		publish({ uri: DOC_URI, diagnostics: [FINDING] });
+		vi.advanceTimersByTime(SETTLE_MS);
+		expect((state.pushDiagnostics.get(DOC_KEY) ?? []).length).toBe(1);
+
+		await closeDocument(state, DOC);
+		await handleNotifyChange(state, DOC, "b");
+		expect(state.documentVersions.get(DOC_KEY)).toBe(0);
+		publish({ uri: DOC_URI, diagnostics: [] });
+		vi.advanceTimersByTime(SETTLE_MS);
+		expect(state.pushDiagnostics.get(DOC_KEY)).toEqual([]);
+		expect(refusals()).toBeUndefined();
 	});
 
 	it("stores repeated empties with no finding and records no refusal", async () => {

@@ -1309,8 +1309,8 @@ export interface LSPClientState {
 	 * publication an auxiliary sent that went on to the store. Within that phase
 	 * an unversioned empty publication is refused
 	 * ({@link auxiliaryEmptyIsNotEvidence}). Dropped with the path's diagnostics
-	 * in {@link clearDiagnosticsForPath}, so it holds at most the paths the
-	 * diagnostics store holds.
+	 * in {@link clearDiagnosticsForPath} and at didClose, so it holds at most
+	 * the paths the diagnostics store holds.
 	 */
 	nonEmptyAnswerPhases?: Map<string, string>;
 	/** #4763: empty publishes held since the last `lsp_rules_refreshed` row,
@@ -2728,12 +2728,18 @@ export function noteServerShowMessage(
 
 /**
  * #4786: the phase an answer for `filePath` belongs to: the server's rules
- * generation (`semgrep/rulesRefreshed` count) and the client's own send count
- * for the path (`publicationCountsForPath(...).sent`, which spans a resync's
- * close and reopen). Both only grow, so a phase never recurs.
+ * generation (`semgrep/rulesRefreshed` count) and the document version of the
+ * client's last send of the path (-1 while it has none). Neither moves back
+ * while a stamp for the path exists: the generation only grows, and the
+ * version only grows within one open lifetime (a resync's close and reopen
+ * carries it forward, #1095). A lifetime ends at didClose, which drops the
+ * stamp, and a fresh open clears it (`clearDiagnosticsForPath`), so the
+ * version's restart at 0 never meets an old stamp. Not
+ * `publicationCountsForPath(...).sent`: its save-rescan term is a balance
+ * that `giveBackSaveRescan` decrements (#4790 review F1).
  */
 function answerPhase(state: LSPClientState, filePath: string): string {
-	return `${state.rulesGeneration ?? 0}:${publicationCountsForPath(state, filePath).sent}`;
+	return `${state.rulesGeneration ?? 0}:${state.documentVersions.get(filePath) ?? -1}`;
 }
 
 /**
@@ -2771,7 +2777,10 @@ function auxiliaryEmptyIsNotEvidence(
 		countPublication(state, filePath);
 		emitBounded(
 			"lsp_publish_dropped_empty_after_finding",
-			`${state.serverId}:empty-after-finding:${filePath}:${phase}`,
+			// Keyed per server and path, never per phase: a phase moves with every
+			// edit, so a phase key would add one tally per edit for the session
+			// (#4790 review F2, shape 46). The phase rides as a field.
+			`${state.serverId}:empty-after-finding:${filePath}`,
 			{
 				filePath,
 				durationMs: 0,
@@ -5512,6 +5521,10 @@ async function closeDocumentOnce(
 		publicationCountsForPath(state, normalizedPath).sent,
 	);
 	state.documentVersions.delete(normalizedPath);
+	// #4786: the version restarts at 0 on the next open, and the not-open
+	// didChange fallback reopens without a clear, so a stamp from this lifetime
+	// must not survive it ({@link answerPhase}).
+	state.nonEmptyAnswerPhases?.delete(normalizedPath);
 	state.sentReadStamps.delete(normalizedPath);
 	state.documentOpenedAt.delete(normalizedPath);
 	state.diagnosticPublicationCounts.delete(normalizedPath);
