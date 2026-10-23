@@ -1288,6 +1288,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the cold build's completion exposes no awaitable, so the adoption witness joins the snapshot it publishes with vi.waitFor",
 	},
+	// 2026-10-23 (#4316): the session-start LSP warm is a floating promise
+	// inside the loaded extension copy, so its record is joinable only by
+	// polling the log the copy writes.
+	"ungoverned-wait-for:index-4316-lsp-warm-record.test.ts": {
+		detector: "ungoverned-wait-for",
+		reason:
+			"the session-start LSP warm is a fire-and-forget promise inside the loaded extension copy and exposes no awaitable, so vi.waitFor joins the record it writes",
+	},
 	"ungoverned-wait-for:tools/symbol-search.test.ts": {
 		detector: "ungoverned-wait-for",
 		reason:

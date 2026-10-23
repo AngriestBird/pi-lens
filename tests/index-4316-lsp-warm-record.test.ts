@@ -1,3 +1,4 @@
+// flake-shape: ungoverned-wait-for — the session-start LSP warm is a fire-and-forget promise inside the loaded extension copy and exposes no awaitable, so vi.waitFor joins the record it writes.
 /**
  * The session-start LSP warm reports its outcome once per session (#4316).
  *

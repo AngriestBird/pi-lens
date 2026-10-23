@@ -714,6 +714,10 @@ export const wallClockBudgetInclude = [
 	// and pi's own `bash` tool, so the child shells and git processes ride along
 	// in the serialized lane too.
 	"tests/index-2050-worktree-bash-dispatch-witness.test.ts",
+	// #4316: the session-start LSP warm is fire-and-forget inside the loaded
+	// extension copy, so the witness joins its log record with vi.waitFor
+	// (flake-shape admission).
+	"tests/index-4316-lsp-warm-record.test.ts",
 	// #4504: a real linked worktree (`git worktree add`) and the real
 	// tool_call/tool_result seams that key the opaque prescan (flake-shape
 	// admission); the git children ride along in the serialized lane.
