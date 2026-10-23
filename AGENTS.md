@@ -1013,6 +1013,24 @@ file-scoped worklist and receives no project-wide scanner output.
 - `safeSpawnAsync` is the subprocess seam. It carries ambient abort behavior,
   process-tree cleanup, output caps, typed failure kinds, and bounded timeouts.
   Installs pass `ignoreAmbientSignal: true` and remain trust-gated.
+  It is also the lookup chokepoint. Under pi trust other than
+  `trusted`, every child's search path loses the session repository's own
+  directories, and a bare command that still resolves into them is refused
+  with a typed `trust-refused` result. "Session repository" is one rule in
+  `clients/session-repository.ts`, never a caller-threaded root: the kernel-real
+  path lies under `process.cwd()`, under a project-local bin dir of its
+  ancestors below HOME, or in a checkout sharing its git commondir; the data
+  dir never counts and a session at or above HOME owns nothing. Lookups that
+  start a path rather than a name (`which` answers, global bin dirs, the
+  installer's PATH walk, the LSP launcher) ask `isUntrustedProjectPath` or
+  `admittedLookupAnswer` for the same judgment, and every refusal writes one
+  `trust-refusal` row per target. A raw `node:child_process` start in the
+  runtime trees is a hole by construction:
+  `tests/config/spawn-chokepoint-sweep.test.ts` derives them from the module
+  binding and requires each to be routed, or admitted with a reason, evidence
+  and a pinned site count. Extend the seam; never add a per-caller guard. A
+  non-pi maintenance host that starts the checkout's own tools adopts trust at
+  its entry, as the MCP entry points do.
 - Under pi, project trust is consumed through `isProjectTrusted`; pi-lens never
   registers the host's trust-answer handler. `compileLspRegistry` is the one admission
   seam for LSP executable fields: global config and built-ins remain allowed,

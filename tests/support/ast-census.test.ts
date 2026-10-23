@@ -83,6 +83,7 @@ const CONSUMERS = [
 	"tests/config/bounded-container-guard.test.ts",
 	"tests/config/bounded-eviction-idiom-sweep.test.ts",
 	"tests/config/runner-group-id-census.test.ts",
+	"tests/config/spawn-chokepoint-sweep.test.ts",
 	"tests/support/eviction-programs.ts",
 	"tests/support/silent-catch-scan.ts",
 	"tests/support/worker-message-scan.ts",

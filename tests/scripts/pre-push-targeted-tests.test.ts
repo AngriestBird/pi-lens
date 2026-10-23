@@ -1725,6 +1725,11 @@ describe("pre-push ast-grep self-scan (#3886)", () => {
 			path.join(repoRoot, "clients/safe-spawn.js"),
 			path.join(root, "clients/safe-spawn.js"),
 		);
+		// The scan wrapper adopts project trust itself (#4530).
+		fs.symlinkSync(
+			path.join(repoRoot, "clients/project-trust.js"),
+			path.join(root, "clients/project-trust.js"),
+		);
 		fs.symlinkSync(
 			path.join(repoRoot, "clients/string-utils.js"),
 			path.join(root, "clients/string-utils.js"),

@@ -7,6 +7,14 @@ import { getProjectDataDir } from "../../clients/file-utils.js";
 import { KnipClient } from "../../clients/knip-client.js";
 import { REAL_HOME } from "../support/vitest-setup.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import { setProjectTrustState } from "../../clients/project-trust.js";
+
+// #4530: the knip CLI under test is this checkout's own devDependency, found
+// through the test runner's `node_modules/.bin` PATH entry. That entry is the
+// session repository's own bytes, which a bare lookup refuses until pi trusts
+// the project. This file tests the tool, not trust, so it adopts trust the way
+// the maintenance hosts do; the trust rule has its own suite.
+setProjectTrustState("trusted");
 
 // End-to-end proof for #1630 against the real knip binary. knip's glob cache
 // only revalidates directories that contributed a matched path, so a consumer
