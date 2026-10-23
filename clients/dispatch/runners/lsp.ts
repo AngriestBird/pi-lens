@@ -230,9 +230,10 @@ const lspRunner: RunnerDefinition = {
 			usedWarmAttach = attached?.available === true;
 			if (attached?.available) {
 				incumbentDemotedRows = new Set(
-					(attached.response.demotedBlockingIndexes ?? []).map(
-						(index) => attached.response.diagnostics[index],
-					),
+					(attached.response.demotedBlockingIndexes ?? []).flatMap((index) => {
+						const row = attached.response.diagnostics[index];
+						return row === undefined ? [] : [row];
+					}),
 				);
 			}
 			// #1179 (shape-5 structural fix): both branches normalize to the
