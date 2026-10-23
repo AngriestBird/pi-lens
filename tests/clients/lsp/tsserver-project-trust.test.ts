@@ -23,7 +23,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
-import { _setServersForFileForTests } from "../../../clients/lsp/config.js";
 
 const requireFixture = createRequire(import.meta.url);
 
@@ -31,7 +30,6 @@ const launchLSPMock = vi.hoisted(() => vi.fn());
 const ensureToolMock = vi.hoisted(() => vi.fn());
 const getToolEnvironmentMock = vi.hoisted(() => vi.fn(async () => ({})));
 const logExtensionMock = vi.hoisted(() => vi.fn());
-const getServersForFileWithConfigMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../clients/lsp/launch.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../../clients/lsp/launch.js")>()),
@@ -144,12 +142,10 @@ function tsserverPathOf(
 }
 
 beforeEach(() => {
-	_setServersForFileForTests(getServersForFileWithConfigMock);
 	launchLSPMock.mockReset();
 	ensureToolMock.mockReset();
 	getToolEnvironmentMock.mockClear();
 	logExtensionMock.mockClear();
-	getServersForFileWithConfigMock.mockReset();
 	// Model the classic wrapper's fork: execute the admitted path pi-lens put on
 	// the launch environment. The installed 5.3.0 wrapper actually resolves its
 	// child from `initialization.tsserver.path`; `tsserverPathOf` asserts that
@@ -423,7 +419,6 @@ describe("tinymist project-code trust census (#4296)", () => {
 		setProjectTrustState("unknown");
 		const ledger = await import("../../../clients/degradation-ledger.js");
 		ledger.resetDegradationLedger();
-		getServersForFileWithConfigMock.mockReturnValue([TinymistServer]);
 		const spawnSpy = vi.spyOn(TinymistServer, "spawn");
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();

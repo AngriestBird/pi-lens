@@ -112,6 +112,7 @@ async function runSweep(limit: string | undefined) {
 describe("#1714 — real-stream proof against a server with an intake ceiling", () => {
 	beforeEach(async () => {
 		vi.resetModules();
+		// KEEP (#4709): unarmed, the real registry spawns ast-grep, opengrep, typos and deno; the arm carries only this file's wedge fake.
 		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
 			getServersForFileWithConfig,
 		);
