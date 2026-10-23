@@ -4,14 +4,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _setServersForFileForTests } from "../../../clients/lsp/config.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
-
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
 
 vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
@@ -68,6 +64,7 @@ function fakeClient(waitMs: number, diags: ReturnType<typeof diag>[]) {
 
 describe("getDiagnostics — mode-aware grace (1B)", () => {
 	beforeEach(() => {
+		_setServersForFileForTests(getServersForFileWithConfig);
 		vi.useFakeTimers();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();

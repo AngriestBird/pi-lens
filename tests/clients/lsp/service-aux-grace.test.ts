@@ -31,17 +31,11 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 	logLatency,
 }));
 
-// importActual spread: the #2776 test loads the REAL tools/lens-diagnostics.js,
-// whose config.js import surface grows over time — a closed factory breaks on
-// every added export (resolveLspCwdForFile, #2777). The bare spread is also
-// the spelling the #2281 detector recognizes as pass-through, so this mock
-// needs no baseline admission. The overrides below stay explicit.
-vi.mock("../../../clients/lsp/config.js", async (importActual) => ({
-	...(await importActual()),
-	getServersForFileWithConfig,
-	primaryServerId: vi.fn(() => "ts-primary"),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
+// Server selection is injected through the config module's own setter
+// (`_setServersForFileForTests`), not a module mock: the #2776 test loads the
+// REAL tools/lens-diagnostics.js, whose config.js import surface grows over
+// time, and `primaryServerId` / `resolveLspCwdForFile` derive from the
+// injected list like production (#4709).
 
 vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
@@ -501,9 +495,12 @@ async function exerciseDemotedCoverageCell({
 }
 
 describe("R8 — aux grace: touchFile with-auxiliary path", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
@@ -1871,9 +1868,12 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 });
 
 describe("R8 — aux grace: getDiagnostics with-auxiliary path (#1458 S2 extend)", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
@@ -2108,9 +2108,12 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
  * to budget and published an empty set is covered, and its touch stays clean.
  */
 describe("#1470 — cut-off auxiliary honesty", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
@@ -2583,9 +2586,12 @@ describe("#1470 — cut-off auxiliary honesty", () => {
  * all.
  */
 describe('#1533 — silent auxiliary honesty on clientScope "all"', () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
@@ -3179,9 +3185,12 @@ describe('#1533 — silent auxiliary honesty on clientScope "all"', () => {
  * ordering: the mark it would race has not been written yet.
  */
 describe("R8 — aux grace: ast-grep napi/aux-grace mark ordering (#2324 R2-A)", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
@@ -3346,9 +3355,12 @@ describe("R8 — aux grace: ast-grep napi/aux-grace mark ordering (#2324 R2-A)",
  * stamp union flips its `publishedThisContent` to true and reds its test.
  */
 describe("#2914 — non-demoted aux rows stay binding-only", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();

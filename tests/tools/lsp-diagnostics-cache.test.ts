@@ -29,12 +29,6 @@ const mocked = vi.hoisted(() => ({ service: null as unknown }));
 const { getServersForFileWithConfig } = vi.hoisted(() => ({
 	getServersForFileWithConfig: vi.fn(),
 }));
-vi.mock("../../clients/lsp/config.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/lsp/config.js")>()),
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-	primaryServerId: (fp: string) => getServersForFileWithConfig(fp)[0]?.id,
-}));
 
 const { reconcileScanDiagnostics } = vi.hoisted(() => ({
 	// Production returns a boolean (accepted / rejected by the ordering
@@ -48,6 +42,7 @@ vi.mock("../../clients/widget-state.js", () => ({
 
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
 import { installLspService } from "../support/lsp-service-seam.js";
+import { _setServersForFileForTests } from "../../clients/lsp/config.js";
 
 function serverIdForFile(file: string): string {
 	return file.endsWith(".ts") ? "typescript" : "none";
@@ -58,6 +53,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 	let touchFile: ReturnType<typeof vi.fn>;
 
 	beforeEach(() => {
+		_setServersForFileForTests(getServersForFileWithConfig);
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-diag-cache-"));
 		// Legacy per-project data dir marker: with no PILENS_DATA_DIR override this
 		// makes `getProjectDataDir` resolve the cache INSIDE tmpDir (cleaned up by
@@ -70,7 +66,9 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		getServersForFileWithConfig.mockReset();
 		getServersForFileWithConfig.mockImplementation((fp: string) => {
 			const id = serverIdForFile(fp);
-			return id === "none" ? [] : [{ id }];
+			// `root` is what production servers carry: the injected list now reaches
+			// `resolveLspCwdForFile` too, which the old module mock never did.
+			return id === "none" ? [] : [{ id, root: async () => tmpDir }];
 		});
 
 		touchFile = vi.fn().mockResolvedValue({ diags: [] });

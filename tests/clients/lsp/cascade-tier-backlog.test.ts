@@ -25,10 +25,6 @@ const registerQuietWindowTask = vi.fn();
 // then read a different spy than the code under test called.
 const logCascade = vi.fn();
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-}));
-
 vi.mock("../../../clients/quiet-window.js", () => ({
 	registerQuietWindowTask,
 }));
@@ -59,6 +55,9 @@ let ledger: Ledger;
 
 beforeEach(async () => {
 	vi.resetModules();
+	(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+		getServersForFileWithConfig,
+	);
 	getServersForFileWithConfig.mockReset();
 	registerQuietWindowTask.mockReset();
 	logCascade.mockClear();

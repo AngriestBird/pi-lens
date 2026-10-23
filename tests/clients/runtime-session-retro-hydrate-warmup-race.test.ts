@@ -78,13 +78,9 @@ vi.mock("../../clients/project-snapshot.js", async (importOriginal) => {
 	};
 });
 
-vi.mock("../../clients/lsp/config.js", () => ({
-	loadLSPConfig: vi.fn().mockResolvedValue({}),
-	initLSPConfig: vi.fn().mockResolvedValue(undefined),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 import { handleSessionStart } from "../../clients/runtime-session.js";
+import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import { pinFixtureHome } from "./test-utils.js";
 
 // Session start and the warmup queue project-snapshot body writes that can
 // recreate a fixture root after its `env.cleanup()`; the drain lets them land.
@@ -166,6 +162,9 @@ describe("#1785 review round F1 — retroactive hydration survives a warmup save
 	let prevWarmup: boolean | undefined;
 
 	beforeEach(async () => {
+		// The real config loader walks up from the session cwd to HOME (#4709);
+		// a pinned fixture HOME keeps that read off the maintainer's home.
+		pinFixtureHome("runtime-session-retro-hydrate-warmup-race");
 		await installLspServiceDouble();
 		prevArgv = process.argv;
 		prevStartupMode = process.env.PI_LENS_STARTUP_MODE;
@@ -190,6 +189,7 @@ describe("#1785 review round F1 — retroactive hydration survives a warmup save
 	});
 
 	afterEach(() => {
+		resetLSPConfigStateForTests();
 		process.argv = prevArgv;
 		if (prevStartupMode === undefined) delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = prevStartupMode;

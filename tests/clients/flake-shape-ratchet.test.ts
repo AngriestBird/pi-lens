@@ -291,14 +291,6 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the post-write lane must receive a controlled server answer; the service is seeded from the shared double and only getLSPService is replaced",
 		},
-	// 2026-10-16 (#4493 r2): the auxiliary half of the default stack. A
-	// project lsp.json cannot declare an auxiliary (role is reserved and
-	// inert), so the catalog lookup adds one; the servers stay real children.
-	"in-process-mock:clients/head-move-resync-4493.test.ts::clients/lsp/config": {
-		detector: "in-process-mock",
-		reason:
-			"a project lsp.json cannot declare an auxiliary server, so the catalog lookup adds the auxiliary fake; every server is still a real child process",
-	},
 	// 2026-10-16 (#4476): the same fake auxiliary, seen from the role lookup
 	// the registry's dependency restart asks; getServerById knows only the
 	// built-in catalog, so the auxiliary added above answers there too.

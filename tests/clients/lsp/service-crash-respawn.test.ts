@@ -26,17 +26,13 @@ import { LSPService } from "../../../clients/lsp/index.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 import { createMockState } from "./mock-client-state.js";
+import { _setServersForFileForTests } from "../../../clients/lsp/config.js";
 
 const { getServersForFileWithConfig, createLSPClient } = vi.hoisted(() => ({
 	getServersForFileWithConfig: vi.fn(),
 	createLSPClient: vi.fn(),
 }));
 
-vi.mock("../../../clients/lsp/config.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../../clients/lsp/config.js")>()),
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
 vi.mock("../../../clients/lsp/client.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../../clients/lsp/client.js")>()),
 	createLSPClient,
@@ -195,6 +191,7 @@ describe("#3501 — a touch-debounce entry does not outlive its client", () => {
 	let tmp: string;
 	let filePath: string;
 	beforeEach(() => {
+		_setServersForFileForTests(getServersForFileWithConfig);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-crash-respawn-"));
