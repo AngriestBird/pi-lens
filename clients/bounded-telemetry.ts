@@ -118,6 +118,13 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	 */
 	"lsp_publish_dropped_server_config_failed",
 	/**
+	 * #4786: an unversioned empty publication from an auxiliary refused because
+	 * it landed in the same phase (rules generation, send) as the path's stored
+	 * or pending finding. Rising edge per (server, file, phase); the ledger counts
+	 * every occurrence under `lsp-auxiliary-empty-after-finding`.
+	 */
+	"lsp_publish_dropped_empty_after_finding",
+	/**
 	 * #2044: failed-first test state was retired after a confirmed missing path,
 	 * retained because the filesystem verdict was indeterminate, or evicted at
 	 * the state cap. Foreign-checkout failures, including aliases, are rejected

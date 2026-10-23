@@ -258,7 +258,8 @@ describe("#4763 opengrep's empty publish before semgrep/rulesRefreshed", () => {
 		second.publish({ uri: uri(FILE), diagnostics: [] });
 		vi.advanceTimersByTime(OPENGREP_DEBOUNCE_MS * 2);
 
-		expect(second.state.rulesRefreshed).not.toBe(true);
+		expect(first.state.rulesGeneration).toBe(1);
+		expect(second.state.rulesGeneration ?? 0).toBe(0);
 		expect(second.state.pushDiagnostics.has(KEY)).toBe(false);
 	});
 
@@ -391,16 +392,25 @@ describe("#4764 x #4763 an auxiliary's publish acceptance table", () => {
 		vi.useRealTimers();
 	});
 
-	/** [state, kind, stored diagnostics (undefined = absent), emitted, published] */
+	/**
+	 * [state, kind, stored diagnostics (undefined = absent), emitted, published].
+	 * A "clearing empty" answers a NEW send after the stored finding (a fix
+	 * landing). A "same-send empty" lands in the finding's own phase, one rules
+	 * generation and one send, so #4786 refuses it in every state: opengrep's
+	 * open-documents scan clears files it did not target that way.
+	 */
 	const cells: Array<[string, string, number | undefined, number, number]> = [
 		["A", "empty", undefined, 0, 1],
 		["A", "clearing empty", 0, 2, 2],
+		["A", "same-send empty", 1, 1, 2],
 		["A", "non-empty", 1, 1, 1],
 		["B", "empty", 0, 1, 1],
 		["B", "clearing empty", 0, 2, 2],
+		["B", "same-send empty", 1, 1, 2],
 		["B", "non-empty", 1, 1, 1],
 		["C", "empty", undefined, 0, 1],
 		["C", "clearing empty", 1, 1, 2],
+		["C", "same-send empty", 1, 1, 2],
 		["C", "non-empty", 1, 1, 1],
 	];
 
@@ -411,13 +421,15 @@ describe("#4764 x #4763 an auxiliary's publish acceptance table", () => {
 			const { state, publish, emitted } = arm;
 			// Sends the path expects, so the cap on counted publications is not hit.
 			state.documentVersions.set(KEY, 9);
-			if (kind === "clearing empty") {
+			if (kind === "clearing empty" || kind === "same-send empty") {
 				// The finding is stored under the state the cell starts in (a
 				// pre-failure or pre-refresh scan), then the state is entered.
 				if (stateName === "B") states.B(arm);
 				publish({ uri: uri(FILE), diagnostics: [FINDING] });
 				settle();
 				if (stateName === "C") states.C(arm);
+				// The next send of the path, as a resync records it.
+				if (kind === "clearing empty") state.documentVersions.set(KEY, 10);
 			} else {
 				states[stateName](arm);
 			}

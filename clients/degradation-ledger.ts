@@ -708,6 +708,15 @@ export type DegradationKind =
 	| "log-sink-truncate-refused"
 	| "log-sink-write-failure"
 	| "lsp-adopted-root-evicted"
+	/**
+	 * #4786: an auxiliary's unversioned EMPTY publication refused because the
+	 * path's stored or pending finding came from the same phase: one rules
+	 * generation (`semgrep/rulesRefreshed` count) and one client send. Opengrep's
+	 * open-documents scan publishes `[]` for every file it ever scanned and did
+	 * not target, which read as a clean file. Subject
+	 * `<serverId>:empty-after-finding:<file>:<phase>`.
+	 */
+	| "lsp-auxiliary-empty-after-finding"
 	| "lsp-breaker"
 	| "lsp-capability-skip"
 	/**

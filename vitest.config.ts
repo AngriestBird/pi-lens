@@ -355,6 +355,10 @@ const lspSpawnHeavyInclude = [
 	"tests/clients/lsp/did-save-notification.test.ts",
 	"tests/clients/lsp/fake-lsp-server-parent-watchdog.test.ts",
 	"tests/clients/lsp/integration.test.ts",
+	// #4786: a real `createLSPClient` over stdio fake-server children that publish
+	// a finding then an unversioned empty; waits on real handshakes and debounce
+	// windows, the same #1022/#2332 contention class as its siblings.
+	"tests/clients/lsp/opengrep-late-empty-4786.test.ts",
 	// #4764: the production LSPService touch and a real `createLSPClient` over
 	// stdio fake-server children that report a failed rule download
 	// (`window/showMessage`) and then publish; waits on real handshakes and
