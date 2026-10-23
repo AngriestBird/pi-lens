@@ -3,4 +3,4 @@ section: Fixed
 audience: user
 ---
 
-- **Keep inferred-project diagnostics non-blocking under warm attach (closes #4645).** The incumbent labels and demotes TypeScript errors for files outside every tsconfig project before returning them to attached clients, through the same demotion pipeline a local session uses, and keeps their quick fixes. An attached session sees the change once the longest-lived process has restarted on this version.
+- **Keep inferred-project diagnostics non-blocking under warm attach (closes #4645).** An attached session now labels and demotes TypeScript errors for files outside every tsconfig project, as a local session does. The longest-lived process sends the server's own diagnostics together with its answer about project membership. The attached session then runs the usual demotion on both and keeps the quick fixes. When the membership answer is late, the reply still arrives in time but carries no answer, and the error stays blocking. The change applies once both the attached session and the longest-lived process run this version. With an older process on either side, the error still blocks as before.

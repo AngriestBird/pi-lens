@@ -33,7 +33,6 @@ import {
 import type { WarmDiagnosticsResponse } from "../../clients/mcp/ipc.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { ENVIRONMENT_GAP_MARKER } from "../../clients/lsp/environment-gap.js";
-import { INFERRED_PROJECT_MARKER } from "../../clients/lsp/inferred-project.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const touchFile = vi.fn();
@@ -188,9 +187,12 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 		expect(result.unconfirmedServerIds).toEqual(["opengrep"]);
 	});
 
-	// #4645: only the incumbent owns the client that can answer membership;
-	// attached readers must receive its demotion without starting another fleet.
-	describe("inferred-project authority", () => {
+	// #4645: only the incumbent owns the client that can answer membership, so
+	// it asks and sends the answer beside the server's RAW rows. The reader runs
+	// the one demotion pipeline with it (pinned in
+	// `tests/clients/dispatch/runners/lsp-inferred-warm-attach.test.ts` and
+	// `tests/tools/lsp-diagnostics-cache.test.ts`).
+	describe("inferred-project membership answer", () => {
 		const file = "C:/repo/orphan.ts";
 		const diagnostic = {
 			severity: 1,
@@ -217,16 +219,15 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 			});
 		});
 
-		it("serializes inferred-project errors as labelled warnings", async () => {
+		it("carries the inferred-project answer beside the raw rows", async () => {
 			projectInfo.mockResolvedValue(inferred);
 
 			const result = JSON.parse(
 				JSON.stringify(await serve(file)),
 			) as WarmDiagnosticsResponse;
 
-			expect(result.diagnostics).toHaveLength(1);
-			expect(result.diagnostics[0].severity).toBe(2);
-			expect(result.diagnostics[0].message).toContain(INFERRED_PROJECT_MARKER);
+			expect(result.diagnostics).toEqual([diagnostic]);
+			expect(result.projectIdentity?.projectKind).toBe("inferred");
 			expect(result.confirmation).toBe("confirmed");
 			expect(result.fresh).toBe(true);
 			expect(projectInfo).toHaveBeenCalledExactlyOnceWith(
@@ -236,108 +237,7 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 			);
 		});
 
-		it("preserves configured-project errors", async () => {
-			projectInfo.mockResolvedValue({
-				executed: true,
-				result: {
-					success: true,
-					body: { configFileName: "C:/repo/tsconfig.json" },
-				},
-			});
-
-			expect((await serve(file)).diagnostics).toEqual([diagnostic]);
-		});
-
-		it("preserves errors when membership is unavailable", async () => {
-			expect((await serve(file)).diagnostics).toEqual([diagnostic]);
-		});
-
-		it("does not probe membership for clean diagnostics", async () => {
-			touchFile.mockResolvedValue({ diags: [], confirmation: "confirmed" });
-
-			expect((await serve(file)).diagnostics).toEqual([]);
-			expect(projectInfo).not.toHaveBeenCalled();
-		});
-
-		// #4645 F1 recurrence: the membership probe used to be awaited with no bound
-		// but its own 2.5 s leaf timeout, so a slow probe made `servedAt` pass
-		// `deadlineAt`. The reply then read `fresh: false`, the client classified it
-		// `stale-answer`, and `promoteToLocal` ended warm attach for the session.
-		// The probe now shares the request's deadline and the raw rows go out.
-		it("never lets a slow membership probe push the reply past the request deadline", async () => {
-			await serve(file); // load the lazy service modules before the clock is faked
-			vi.useFakeTimers();
-			const deadlineAt = Date.now() + 1_000;
-			projectInfo.mockImplementation(
-				() => new Promise((resolve) => setTimeout(resolve, 4_000, inferred)),
-			);
-
-			const { _serveWarmRequestForTests } =
-				await import("../../clients/warm-attach.js");
-			const pending = _serveWarmRequestForTests(request(file, deadlineAt));
-			await vi.advanceTimersByTimeAsync(5_000);
-			const served = await pending;
-			const result = served.result as WarmDiagnosticsResponse;
-
-			expect(result.fresh).toBe(true);
-			expect(result.servedAt).toBeLessThanOrEqual(deadlineAt);
-			// No verdict inside the budget: the pre-#4645 answer, never a guess.
-			expect(result.diagnostics).toEqual([diagnostic]);
-			expect("demotedBlockingIndexes" in result).toBe(false);
-		});
-
-		// #4645 F4 recurrence: the incumbent called the inner membership step, so a
-		// severity-1 ambient-gap row was consumed by the inferred-project rule and
-		// told the operator to add a tsconfig glob, where the local path (the one
-		// pipeline, `demoteLanguageServerRows`) says to install dependencies.
-		it("gives an ambient-gap row the environment verdict the local path gives", async () => {
-			const dir = fs.realpathSync(
-				fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-warm-gap-")),
-			);
-			try {
-				const gapFile = path.join(dir, "orphan.ts");
-				touchFile.mockResolvedValue({
-					diags: [
-						{
-							...diagnostic,
-							message: "Cannot find name 'setTimeout'.",
-							code: 2304,
-						},
-					],
-					confirmation: "confirmed",
-				});
-				projectInfo.mockResolvedValue(inferred);
-
-				const [row] = (await serve(gapFile, undefined, dir)).diagnostics;
-
-				expect(row.severity).toBe(2);
-				expect(row.message).toContain(ENVIRONMENT_GAP_MARKER);
-				expect(row.message).not.toContain(INFERRED_PROJECT_MARKER);
-			} finally {
-				removeTempDirSync(dir);
-			}
-		});
-
-		// #4645 F2 recurrence: a demoted row crossed the socket at severity 2, and
-		// the attached runner selects code-action rows by severity 1, so the warm
-		// session lost the quick fix the local path keeps. The field names the rows.
-		it("names the rows it demoted from severity 1 as an enumerable field", async () => {
-			const warning = { ...diagnostic, severity: 2, code: 6133 };
-			touchFile.mockResolvedValue({
-				diags: [warning, diagnostic],
-				confirmation: "confirmed",
-			});
-			projectInfo.mockResolvedValue(inferred);
-
-			const result = JSON.parse(
-				JSON.stringify(await serve(file)),
-			) as WarmDiagnosticsResponse;
-
-			expect(result.diagnostics.map((d) => d.severity)).toEqual([2, 2]);
-			expect(result.demotedBlockingIndexes).toEqual([1]);
-		});
-
-		it("omits the field when nothing was demoted (mixed-build safe)", async () => {
+		it("carries a configured-project answer and leaves the rows raw", async () => {
 			projectInfo.mockResolvedValue({
 				executed: true,
 				result: {
@@ -348,10 +248,187 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 
 			const result = await serve(file);
 
-			expect("demotedBlockingIndexes" in result).toBe(false);
+			expect(result.diagnostics).toEqual([diagnostic]);
+			expect(result.projectIdentity?.projectKind).toBe("configured");
+		});
+
+		it("omits the answer when membership is unavailable (mixed-build safe)", async () => {
+			const result = await serve(file);
+
+			expect(result.diagnostics).toEqual([diagnostic]);
 			expect(JSON.parse(JSON.stringify(result))).not.toHaveProperty(
-				"demotedBlockingIndexes",
+				"projectIdentity",
 			);
+		});
+
+		it("does not probe membership for clean diagnostics", async () => {
+			touchFile.mockResolvedValue({ diags: [], confirmation: "confirmed" });
+
+			const result = await serve(file);
+
+			expect(result.diagnostics).toEqual([]);
+			expect(projectInfo).not.toHaveBeenCalled();
+			expect("projectIdentity" in result).toBe(false);
+		});
+
+		// #4645 F5 recurrence: the incumbent used to send rows it had run the
+		// environment rule over, and an attached batch cache then stored that
+		// install-state verdict as a real warning. After `npm ci` the replay could
+		// not undo it. The rule depends on install state no cache key carries, so
+		// the wire keeps the server's own row and the reader runs the rule.
+		it("never rewrites an ambient-gap row, even in an inferred project", async () => {
+			const dir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-warm-gap-")),
+			);
+			try {
+				const gapRow = {
+					...diagnostic,
+					message: "Cannot find name 'setTimeout'.",
+					code: 2304,
+				};
+				touchFile.mockResolvedValue({
+					diags: [gapRow],
+					confirmation: "confirmed",
+				});
+				projectInfo.mockResolvedValue(inferred);
+
+				const result = await serve(path.join(dir, "orphan.ts"), undefined, dir);
+
+				expect(result.diagnostics).toEqual([gapRow]);
+				expect(result.diagnostics[0]?.message).not.toContain(
+					ENVIRONMENT_GAP_MARKER,
+				);
+				expect(result.projectIdentity?.projectKind).toBe("inferred");
+			} finally {
+				removeTempDirSync(dir);
+			}
+		});
+
+		// #4645 F1/F7 recurrence: a probe allowed to run to the request's deadline
+		// made the reply late by timer slack, the client read it as
+		// `stale-answer` (or its own timer won), and `promoteToLocal` ended warm
+		// attach for the session, with nothing recording why. The probe now stops
+		// short of the deadline by the send reserve. This fake probe settles AT
+		// the deadline, so a probe bounded by the deadline itself still answers.
+		it("abandons a probe that settles only at the deadline, answers fresh and records it", async () => {
+			await serve(file); // load the lazy service modules before the clock is faked
+			const ledger = await import("../../clients/degradation-ledger.js");
+			ledger.resetDegradationLedger();
+			vi.useFakeTimers();
+			const deadlineAt = Date.now() + 1_000;
+			projectInfo.mockImplementation(
+				() =>
+					new Promise((resolve) =>
+						setTimeout(resolve, deadlineAt - Date.now(), inferred),
+					),
+			);
+
+			const { _serveWarmRequestForTests } =
+				await import("../../clients/warm-attach.js");
+			const pending = _serveWarmRequestForTests(request(file, deadlineAt));
+			await vi.advanceTimersByTimeAsync(2_000);
+			const result = (await pending).result as WarmDiagnosticsResponse;
+
+			expect(result.fresh).toBe(true);
+			expect(result.servedAt).toBeLessThan(deadlineAt);
+			expect(result.diagnostics).toEqual([diagnostic]);
+			expect("projectIdentity" in result).toBe(false);
+			const abandoned = ledger
+				.getDegradationSummary()
+				.find(
+					(group) => group.kind === "warm-attach-membership-probe-abandoned",
+				);
+			expect(abandoned?.latestReasons.map((row) => row.subject)).toEqual([
+				"probe-timeout",
+			]);
+		});
+
+		// #4645 F1, end to end: the fake-clock case above lands every timer on its
+		// due instant, the one value where a reply AT the deadline still reads
+		// fresh, so it cannot see the client's own timer racing the reply. This
+		// drives the real `startServer` wiring, a real socket and the real client
+		// (`requestWarmDiagnostics`, whose timer is armed for the same deadline).
+		// The probe never settles until the case ends. Before the reserve, every
+		// reply landed at the deadline and read `timeout` or `stale-answer`, which
+		// `tryWarmAttachedDiagnostics` answers with a permanent `promoteToLocal`.
+		it("answers a slow probe in time through the real socket and client timer", async () => {
+			const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-warm-e2e-"));
+			const cwd = path.join(home, "ws");
+			fs.mkdirSync(cwd);
+			vi.stubEnv("PI_LENS_HOME", home);
+			vi.stubEnv("PI_LENS_WARM_ATTACH", "1");
+			const pendingProbes: Array<(answer: typeof inferred) => void> = [];
+			projectInfo.mockImplementation(
+				() =>
+					new Promise((resolve) => {
+						pendingProbes.push(resolve);
+					}),
+			);
+			const warm = await import("../../clients/warm-attach.js");
+			const ipc = await import("../../clients/mcp/ipc.js");
+			try {
+				await warm.configureWarmAttach(cwd);
+				const replies = [];
+				for (let run = 0; run < 3; run++) {
+					replies.push(
+						await ipc.requestWarmDiagnostics(
+							cwd,
+							process.pid,
+							path.join(cwd, "orphan.ts"),
+							CONTENT,
+							300,
+						),
+					);
+				}
+				for (const reply of replies) {
+					expect(reply.available).toBe(true);
+					if (!reply.available) continue;
+					expect(reply.response.diagnostics).toEqual([diagnostic]);
+					expect("projectIdentity" in reply.response).toBe(false);
+				}
+			} finally {
+				for (const release of pendingProbes) release(inferred);
+				warm._resetWarmAttachForTests();
+				vi.unstubAllEnvs();
+				removeTempDirSync(home);
+			}
+		});
+
+		it("sends no probe when the touch left no time before the send reserve", async () => {
+			await serve(file); // load the lazy service modules before the clock is faked
+			projectInfo.mockClear();
+			const ledger = await import("../../clients/degradation-ledger.js");
+			ledger.resetDegradationLedger();
+			vi.useFakeTimers();
+			const deadlineAt = Date.now() + 1_000;
+			projectInfo.mockResolvedValue(inferred);
+			touchFile.mockImplementation(
+				() =>
+					new Promise((resolve) =>
+						setTimeout(resolve, deadlineAt - Date.now() - 10, {
+							diags: [diagnostic],
+							confirmation: "confirmed",
+						}),
+					),
+			);
+
+			const { _serveWarmRequestForTests } =
+				await import("../../clients/warm-attach.js");
+			const pending = _serveWarmRequestForTests(request(file, deadlineAt));
+			await vi.advanceTimersByTimeAsync(2_000);
+			const result = (await pending).result as WarmDiagnosticsResponse;
+
+			expect(projectInfo).not.toHaveBeenCalled();
+			expect(result.fresh).toBe(true);
+			expect(result.diagnostics).toEqual([diagnostic]);
+			const abandoned = ledger
+				.getDegradationSummary()
+				.find(
+					(group) => group.kind === "warm-attach-membership-probe-abandoned",
+				);
+			expect(abandoned?.latestReasons.map((row) => row.subject)).toEqual([
+				"no-time-left",
+			]);
 		});
 	});
 

@@ -40,6 +40,7 @@ import type {
 import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
 import { demoteLanguageServerRows } from "../../lsp/inferred-project.js";
+import type { TsserverProjectIdentity } from "../../lsp/tsserver-sync.js";
 import {
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
@@ -194,11 +195,9 @@ const lspRunner: RunnerDefinition = {
 		let unconfirmedServerIds: readonly string[] = [];
 		let deferredServerIds: readonly string[] = [];
 		let usedWarmAttach = false;
-		// #4645: rows the warm incumbent lowered from severity 1 before they
-		// crossed the socket; they still earn a quick-fix request below.
-		let incumbentDemotedRows: ReadonlySet<
-			import("../../lsp/client.js").LSPDiagnostic
-		> = new Set();
+		// #4645: the warm incumbent's answer to the membership probe this runner
+		// may not send itself; it stands in for that probe below.
+		let incumbentProjectIdentity: TsserverProjectIdentity | undefined;
 		let failureReason = "";
 		// #3481: when the synced bytes were read, for the notify queue's order.
 		const readStamp = performance.now();
@@ -229,12 +228,7 @@ const lspRunner: RunnerDefinition = {
 			);
 			usedWarmAttach = attached?.available === true;
 			if (attached?.available) {
-				incumbentDemotedRows = new Set(
-					(attached.response.demotedBlockingIndexes ?? []).flatMap((index) => {
-						const row = attached.response.diagnostics[index];
-						return row === undefined ? [] : [row];
-					}),
-				);
+				incumbentProjectIdentity = attached.response.projectIdentity;
 			}
 			// #1179 (shape-5 structural fix): both branches normalize to the
 			// `touchFile` wrapper shape. The warm-attach IPC branch resolves a plain
@@ -465,13 +459,13 @@ const lspRunner: RunnerDefinition = {
 		// comment below), and the answer it spawned for would be the NEW server's
 		// project resolution, not the warm session's. A meaningless answer bought
 		// with a process is worse than no answer.
-		// #4645: the membership verdict is made where the answer lives instead.
-		// The incumbent owns the live client, so it runs `demoteLanguageServerRows`
-		// before the rows cross the socket and an attached read arrives already
-		// demoted. This reader therefore still passes no `service`: re-probing
-		// here would spawn, and the rows it holds are already at their final
-		// authority. Against an incumbent built before #4645 the rows arrive
-		// un-demoted and render as they did before #1640 (the mixed-build gap).
+		// #4645: the probe is asked where the answer lives instead. The incumbent
+		// owns the live client, sends its `projectIdentity` beside the server's
+		// raw rows, and this reader seeds the pipeline's identity memo with it, so
+		// the one pipeline runs here exactly as on a local read: the environment
+		// rule first, then membership. This reader still passes no `service`.
+		// Against an incumbent built before #4645 no answer arrives and the rows
+		// render as they did before #1640 (the mixed-build gap).
 		// #4532: the environment-gap rule rides the same pipeline and is NOT
 		// gated on warm attach: it asks one filesystem question about the file's
 		// own directory, needs nothing from the remote session, and left behind
@@ -483,6 +477,9 @@ const lspRunner: RunnerDefinition = {
 				filePath: diagnosticPath,
 				cwd: ctx.cwd,
 				...(!usedWarmAttach && { service: lspService }),
+				...(incumbentProjectIdentity !== undefined && {
+					identityCache: new Map([[diagnosticPath, incumbentProjectIdentity]]),
+				}),
 			})
 		).rows;
 		const fixSuggestionByIndex = new Map<number, string>();
@@ -492,7 +489,7 @@ const lspRunner: RunnerDefinition = {
 		// whether tsserver can offer a fix. Indexes align 1:1 with `validLspDiags`.
 		const blockingDiagIndexes = rawValidLspDiags
 			.map((d, idx) => ({ d, idx }))
-			.filter(({ d }) => d.severity === 1 || incumbentDemotedRows.has(d))
+			.filter(({ d }) => d.severity === 1)
 			.slice(0, WARM_CODE_ACTION_LOOKUP_LIMIT);
 
 		if (usedWarmAttach) {

@@ -2704,11 +2704,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/tool-definition.ts": 1,
 	"clients/tree-sitter-shared.ts": 1,
 	"clients/trivy-client.ts": 2,
-	// #4645: 9 -> 10. The incumbent awaits the demotion pipeline (membership
-	// through the existing non-spawning read-only probe channel). The await sits
-	// under `withinRemaining(…, req.deadlineAt)`, so it cannot outlive the
-	// request's own deadline; that helper is deadline-only (no hook signal exists
-	// in this socket server to hand `bounded`), so the await counts here.
+	// #4645: 9 -> 10. The incumbent awaits its own membership probe (the
+	// existing non-spawning read-only probe channel) and sends the answer beside
+	// the raw rows. The probe runs under `withinRemaining(…, req.deadlineAt -
+	// WARM_REPLY_SEND_RESERVE_MS)`, so it settles before the reply's send
+	// reserve; that helper is deadline-only (no hook signal exists in this
+	// socket server to hand `bounded`), so the await counts here.
 	"clients/warm-attach.ts": 10,
 	// 3 -> 4 (#3612): the widget store's restore awaits `dropStaleFiles` for a
 	// sidecar source, the reconciliation index.ts's rehydrate block awaited.

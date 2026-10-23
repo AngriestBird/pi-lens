@@ -155,6 +155,49 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		expect(entry?.sizeBytes).toBe(fs.statSync(file).size);
 	});
 
+	// #4645: the incumbent sends the server's raw rows and its own answer to the
+	// membership probe this process cannot send. The sweep records its rows
+	// into the workspace cache, and a later replay in this attached process has
+	// no live tsserver to re-ask, so the verdict is applied on receipt and kept
+	// in the entry; without it the replay re-cements an inferred-project file as
+	// blocking (the #1645 F3 contract). The environment rule stays a render-time
+	// rule, so nothing here bakes it.
+	it("keeps the incumbent's membership verdict in the swept rows and their cache entry (#4645)", async () => {
+		fs.mkdirSync(path.join(tmp, ".pi-lens"));
+		const file = path.join(tmp, "orphan.ts");
+		fs.writeFileSync(file, "export const x: string = 1;\n");
+		tryWarmAttachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: {
+				diagnostics: [
+					{
+						...diagnostic("Type 'number' is not assignable to type 'string'."),
+						source: "typescript",
+						code: 2322,
+						serverId: "typescript",
+					},
+				],
+				projectIdentity: { projectKind: "inferred", association: "associated" },
+			},
+		});
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { INFERRED_PROJECT_MARKER } =
+			await import("../../../clients/lsp/inferred-project.js");
+		const [result] = await new LSPService().runWorkspaceDiagnostics(tmp, {
+			files: [file],
+		});
+
+		expect(result?.diagnostics[0]?.severity).toBe(2);
+		expect(result?.diagnostics[0]?.message).toContain(INFERRED_PROJECT_MARKER);
+		const { cacheKeyFor, loadWorkspaceDiagnosticsCache } =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+		const entry =
+			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(file)];
+		expect(entry?.diagnostics[0]?.severity).toBe(2);
+		expect(entry?.diagnostics[0]?.message).toContain(INFERRED_PROJECT_MARKER);
+	});
+
 	it("promotes after an IPC failure and completes that file and the remainder locally", async () => {
 		const files = ["a.ts", "b.ts", "c.ts"].map((name) => path.join(tmp, name));
 		for (const file of files) fs.writeFileSync(file, "const x = 1;\n");

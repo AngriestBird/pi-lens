@@ -23,6 +23,7 @@ import { writeFileAtomic } from "../atomic-write.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
 import { DEFAULT_MAX_OUTPUT_BYTES } from "../spawn-output-cap.js";
 import type { LSPCodeAction, LSPDiagnostic } from "../lsp/client.js";
+import type { TsserverProjectIdentity } from "../lsp/tsserver-sync.js";
 import type { McpAnalyzeResult } from "./analyze.js";
 
 export const WARM_DIAGNOSTICS_SCHEMA_VERSION = 1;
@@ -254,14 +255,16 @@ export interface WarmDiagnosticsResponse {
 	 */
 	unconfirmedServerIds?: string[];
 	/**
-	 * #4645: indexes into `diagnostics` of the rows that were severity 1 when the
-	 * incumbent's touch returned them and that its demotion pipeline then lowered
-	 * (inferred project, environment gap). The reader asks the incumbent for a
-	 * quick fix for exactly the severity-1 rows, and a demoted row no longer says
-	 * so. Optional: an incumbent built before this omits it, and the reader falls
-	 * back to severity 1 alone.
+	 * #4645: the incumbent's own tsserver answer to "which project owns this
+	 * file", asked only when a row could be demoted by it. `diagnostics` stay the
+	 * server's raw rows: the reader runs the one demotion pipeline itself with
+	 * this answer standing in for the probe it cannot send without spawning, so
+	 * its rendered rows and the form its cache stores are a local read's. Absent
+	 * when nothing was asked, the probe did not answer, or the probe did not
+	 * settle before the reply's send reserve; an incumbent built before this
+	 * omits it, and an older reader ignores it and renders the raw rows.
 	 */
-	demotedBlockingIndexes?: number[];
+	projectIdentity?: TsserverProjectIdentity;
 }
 
 export interface WarmCodeActionRange {

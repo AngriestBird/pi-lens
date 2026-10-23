@@ -8,8 +8,14 @@ import {
 import { realIsPidAlive } from "./instance-reaper.js";
 import { withinRemaining } from "./deadline-utils.js";
 import { logLatency } from "./latency-logger.js";
+import type { LSPDiagnostic } from "./lsp/client.js";
 import { touchCoverageGap } from "./lsp/diagnostic-binding.js";
-import { demoteLanguageServerRows } from "./lsp/inferred-project.js";
+import { hasInferredProjectCandidates } from "./lsp/inferred-project.js";
+import {
+	fetchTsserverProjectIdentity,
+	type TsserverProjectIdentity,
+	type TsserverSyncCapableService,
+} from "./lsp/tsserver-sync.js";
 import { loadLspService } from "./lsp-lazy.js";
 import {
 	contentHash,
@@ -71,6 +77,55 @@ export function selectWarmAttachIncumbent(
 	isPidAlive: (pid: number) => boolean = realIsPidAlive,
 ): InstanceEntry | undefined {
 	return selectLivePeerInstances(entries, cwd, now, isPidAlive)[0];
+}
+
+/**
+ * #4645: how long before the request's deadline the incumbent stops waiting on
+ * the membership probe. The client arms its own timer for that same deadline
+ * and refuses a reply served after it, so a probe allowed to run to the
+ * deadline made the reply late by timer slack alone, and the client then
+ * dropped warm attach for the rest of the session. A chosen margin, not a
+ * measurement: it covers the reply's write and one event-loop turn on each
+ * side. It is taken from the probe only, never from the touch.
+ */
+const WARM_REPLY_SEND_RESERVE_MS = 100;
+
+/**
+ * The incumbent's membership probe, bounded by `probeDeadlineAt`. Asked only
+ * when the answer could change a row (`hasInferredProjectCandidates`, the
+ * owner's own precondition). A probe that cannot settle in time is abandoned:
+ * the reply goes out without the verdict, the pre-#4645 answer, and one record
+ * per session per cause says an attached read got no membership verdict.
+ */
+function askProjectMembership(
+	raw: LSPDiagnostic[],
+	file: string,
+	service: TsserverSyncCapableService,
+	probeDeadlineAt: number,
+): Promise<TsserverProjectIdentity | undefined> {
+	if (!hasInferredProjectCandidates(raw, file))
+		return Promise.resolve(undefined);
+	const abandoned = (cause: "probe-timeout" | "no-time-left"): undefined => {
+		recordDegradationOnce({
+			kind: "warm-attach-membership-probe-abandoned",
+			subject: cause,
+			reason:
+				"the membership probe did not settle before the warm reply's send reserve, so the reply carried no inferred-project verdict and the attached reader rendered the server's raw severity",
+			metadata: { file, reserveMs: WARM_REPLY_SEND_RESERVE_MS },
+		});
+		return undefined;
+	};
+	if (probeDeadlineAt <= Date.now()) {
+		return Promise.resolve(abandoned("no-time-left"));
+	}
+	return withinRemaining(
+		fetchTsserverProjectIdentity(service, file).then((identity) => ({
+			identity,
+		})),
+		probeDeadlineAt,
+	).then((settled) =>
+		settled === undefined ? abandoned("probe-timeout") : settled.identity,
+	);
 }
 
 async function serveRequest(
@@ -139,30 +194,19 @@ async function serveRequest(
 		maxDiagnosticsWaitMs: Math.max(1, req.deadlineAt - Date.now()),
 		source: "warm-attach-incumbent",
 	});
-	// #4645: demote on the process that owns the fleet and the filesystem, through
-	// the ONE pipeline (`demoteLanguageServerRows`: environment-gap rule, then the
-	// membership probe), so an attached read gets the verdict a local one would.
-	// The probe shares the request's own deadline: a late reply is `fresh: false`,
-	// which the client classifies `stale-answer` and answers with a permanent
-	// `promoteToLocal`, so one slow probe would end warm attach for the session.
-	// Past the deadline the raw rows go out (the pre-#4645 answer) and the
-	// reader's own environment-gap rule still runs on them.
+	// #4645: the membership verdict needs this process's live tsserver, so it
+	// is asked here, and the answer crosses the socket beside the server's raw
+	// rows. The reader runs the one demotion pipeline with it (environment rule
+	// first, then membership), so the rows it renders and the form its cache
+	// stores are what a local read gives; demoting here would bake the
+	// environment verdict, which depends on install state no cache entry keys
+	// on, into what an attached batch cache replays.
 	const raw = touched?.diags ?? [];
-	const diagnostics =
-		(
-			await withinRemaining(
-				demoteLanguageServerRows(raw, {
-					filePath: req.file,
-					cwd: req.cwd,
-					service,
-				}),
-				req.deadlineAt,
-			)
-		)?.rows ?? raw;
-	// The reader still wants a quick fix for a row that arrives demoted: it
-	// selects code-action rows by severity 1, which the wire no longer carries.
-	const demotedBlockingIndexes = raw.flatMap((row, index) =>
-		row.severity === 1 && diagnostics[index]?.severity !== 1 ? [index] : [],
+	const projectIdentity = await askProjectMembership(
+		raw,
+		req.file,
+		service,
+		req.deadlineAt - WARM_REPLY_SEND_RESERVE_MS,
 	);
 	const servedAt = Date.now();
 	// #1470: the coverage gap is read through the shared helper, never re-derived
@@ -189,11 +233,10 @@ async function serveRequest(
 			// serialization boundary: the diagnostics array crosses the IPC socket
 			// and `inconclusive` is re-surfaced below as an EXPLICIT enumerable DTO
 			// field (no side-channel survives `JSON.stringify`).
-			diagnostics,
-			// #4645: which wire rows were severity 1 before the demotion above, as
-			// an EXPLICIT enumerable field. An incumbent built before this omits
-			// it, and the reader then keeps its severity-1-only selection.
-			...(demotedBlockingIndexes.length > 0 ? { demotedBlockingIndexes } : {}),
+			diagnostics: raw,
+			// #4645: an EXPLICIT enumerable field, omitted when unknown, so an older
+			// reader parses the same bytes an older incumbent sends.
+			...(projectIdentity !== undefined ? { projectIdentity } : {}),
 			contentHash: req.contentHash,
 			servedAt,
 			fresh: servedAt <= req.deadlineAt && touched !== undefined,

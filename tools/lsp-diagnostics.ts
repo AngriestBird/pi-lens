@@ -71,7 +71,10 @@ import {
 	type TouchFileResult,
 } from "../clients/lsp/diagnostic-binding.js";
 import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
-import { attemptTsserverSyncDiagnostics } from "../clients/lsp/tsserver-sync.js";
+import {
+	attemptTsserverSyncDiagnostics,
+	type TsserverProjectIdentity,
+} from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { demoteLanguageServerRows } from "../clients/lsp/inferred-project.js";
 import { normalizeMapKey, resolveHostToolPath } from "../clients/path-utils.js";
@@ -805,6 +808,12 @@ type DiagnosticsCollectionResult = {
 	 * getDiagnostics fallback) → treated as "unknown" (no demotion).
 	 */
 	binding?: DiagnosticBinding;
+	/**
+	 * #4645: the warm incumbent's membership answer for this file. This process
+	 * has no live client to ask, so the demotion pipeline takes it in place of
+	 * its own probe; absent on every local read and from an older incumbent.
+	 */
+	projectIdentity?: TsserverProjectIdentity;
 };
 
 async function collectDiagnosticsForFile(
@@ -913,6 +922,9 @@ async function collectDiagnosticsForFile(
 					unconfirmedServerIds: attached.response.unconfirmedServerIds ?? [],
 					diagnosticsUnsupportedServerIds: [],
 					content,
+					...(attached.response.projectIdentity !== undefined && {
+						projectIdentity: attached.response.projectIdentity,
+					}),
 				};
 			}
 		}
@@ -1629,6 +1641,7 @@ async function collectFileDiagnosticResult(
 		primaryUnavailable,
 		primaryUnavailableCause,
 		noClientAnswered,
+		projectIdentity,
 	} = await collectDiagnosticsForFile(
 		file,
 		lspService,
@@ -1705,6 +1718,10 @@ async function collectFileDiagnosticResult(
 		filePath: file,
 		cwd,
 		service: lspService,
+		// #4645: the warm incumbent's answer stands in for this process's probe.
+		...(projectIdentity !== undefined && {
+			identityCache: new Map([[file, projectIdentity]]),
+		}),
 	});
 	const shownRows = demotion.rows;
 	effectiveRawDiags = shownRows;
@@ -1855,6 +1872,7 @@ async function runFileDiagnostics(
 		tooLargeReason,
 		skipReason,
 		primaryUnavailable,
+		projectIdentity,
 	} = await collectDiagnosticsForFile(
 		absPath,
 		lspService,
@@ -1946,6 +1964,9 @@ async function runFileDiagnostics(
 			filePath: absPath,
 			cwd,
 			service: lspService,
+			...(projectIdentity !== undefined && {
+				identityCache: new Map([[absPath, projectIdentity]]),
+			}),
 		})
 	).rows;
 	// #3088: one filter for the output, the counts and the footer reconcile.
