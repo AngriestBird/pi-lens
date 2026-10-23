@@ -167,6 +167,9 @@ describe("#4786 an auxiliary's empty within its finding's phase", () => {
 				true,
 			);
 			expect(publicationCountsForPath(state, KEY).sent).toBe(2);
+			// The stamp holds only paths the diagnostics store holds: a clearing
+			// resync drops it with the cache (shape 46, an unbounded per-path map).
+			expect(state.nonEmptyAnswerPhases?.has(KEY)).toBe(preserveDiagnostics);
 			publish({ uri: URI, diagnostics: [] });
 			vi.advanceTimersByTime(SETTLE_MS);
 			expect(stored(state)).toEqual([]);

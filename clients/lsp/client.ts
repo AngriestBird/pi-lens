@@ -2761,18 +2761,13 @@ function auxiliaryEmptyIsNotEvidence(
 ): boolean {
 	const failure = state.configLoadFailure;
 	if (failure === undefined) {
-		if (docVersion !== undefined || !isAuxiliary({ role: state.serverRole }))
-			return false;
+		if (docVersion !== undefined) return false;
+		// Only an auxiliary is stamped, and a stamp leaves with the path's
+		// diagnostics (`clearDiagnosticsForPath`). Every later receipt in its
+		// phase is non-empty or refused here, so a matching stamp means the
+		// stored or pending answer is that phase's finding.
 		const phase = answerPhase(state, filePath);
 		if (state.nonEmptyAnswerPhases?.get(filePath) !== phase) return false;
-		// The stamp is written when a non-empty receipt goes on to the store, and
-		// any receipt after it in this phase is either non-empty or refused here,
-		// so a pending receipt is that finding; a stored one must be non-empty.
-		if (
-			!state.pendingDiagnostics.has(filePath) &&
-			!state.pushDiagnostics.get(filePath)?.length
-		)
-			return false;
 		countPublication(state, filePath);
 		emitBounded(
 			"lsp_publish_dropped_empty_after_finding",
