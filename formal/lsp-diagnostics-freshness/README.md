@@ -250,3 +250,66 @@ Only one content change is sent, and publishes are bounded at 3.
 The dispatch touch is only skipped when its `clientScope` key matches the
 `lsp_sync` touch (`"primary"`). With auxiliaries it is `"with-auxiliary"`,
 so it notifies and takes the baseline path. That path violates the same way.
+
+## Dependency answer (#4782)
+
+`DependencyAnswer.tla` covers which push answer the dispatch takes for a
+dependent `a.ts` after one bash command rewrote `a.ts` and the `z.ts` it
+imports:
+- the primary phase (`resyncHeldPrimaries`, `clients/lsp/index.ts`) sends
+  `a.ts`'s change (its clear empties the cache and the pending receipt),
+  then `z.ts`'s, then the drain request, on one ordered stream;
+- the server publishes `a.ts`'s check against the `z.ts` it holds (ghost
+  `zv`): the pre-`z.ts` answer STOPs, the later one is clean;
+- the handler keeps one pending receipt per path in its quiet-window slot
+  (`pendingDiagnostics`) and stores it when the slot's timer fires;
+- the waiter is the skipped dispatch touch (no baseline). It starts after
+  the drain reply.
+
+`PendingGuard` is the fix: neither the early return nor the quiet-window
+settle takes the cache while the slot holds a later receipt. `Republish`
+is a server property: having read `z.ts`'s change, the server publishes
+`a.ts`'s re-check before it reads its next message (the fake checker does).
+
+Invariants:
+- `NewestAtSettle`: when the wait settles, no later receipt is pending.
+- `NoPhantomFinding`: a settled read of `a.ts` was computed against `z.ts`'s
+  new bytes.
+
+| Config | Expect | Verdict | Distinct states | s |
+|---|---|---|---|---|
+| `DependencyFix` | pass | pass | 266 | 0 |
+| `DependencyPreFix` | violated NoPhantomFinding | violated NoPhantomFinding | 196 | 0 |
+| `DependencyMutSettleGuard` | violated NewestAtSettle | violated NewestAtSettle | 189 | 0 |
+| `DependencyLateRepublish` | violated NoPhantomFinding (residual) | violated NoPhantomFinding | 196 | 0 |
+
+**`DependencyPreFix`** is the measured trace:
+1. The server reads `a.ts`'s change and publishes the pre-`z.ts` STOP.
+2. It reads `z.ts`'s change, publishes the clean re-check, then reads the
+   drain request and replies.
+3. The client stores the STOP when its slot fires. The clean receipt then
+   takes the slot, and the drain reply arrives.
+4. The wait starts. The cache is non-empty, so the early return takes the
+   STOP while the clean answer is still pending.
+
+An instrumented run of `tests/clients/head-move-resync-4493.test.ts` showed
+the same order: the STOP stored, the clean receipt, the drain reply within 2 ms
+later, then the wait (`pending=true stored=1`).
+
+**`DependencyMutSettleGuard`**: with the guard on the early return only,
+the quiet window settles on a stored answer while a later one is pending.
+After a drained phase both answers postdate `z.ts`, so the rule breaks but
+the read is not a phantom. A wait that starts before the newer receipt does
+read the stale one; `tests/clients/lsp/pending-receipt-wait-4782.test.ts`
+drives that through the real handler.
+
+**`DependencyLateRepublish`** (residual): a server that answers the drain
+request before it republishes `a.ts` (an asynchronous re-check) leaves the
+pre-`z.ts` answer as the newest one. No publication names the dependency's
+version, so no client-side read can tell. The guard does not help there,
+and the model says so.
+
+Not modelled here: a publish computed before the server read `a.ts`'s own
+change (the #3484 shape above), versioned publishes, the slot's two
+unstored exits (superseded, config-failure refusal; the unit file pins
+both), seed-first-push strategies, and undrained phases.

@@ -2137,6 +2137,16 @@ export function diagnosticsVersionForPath(
 	return state.diagnosticsVersionsByPath?.get(normalizedPath) ?? 0;
 }
 
+/**
+ * #4782: emitted on `diagnosticEmitter` when a receipt leaves the quiet
+ * window WITHOUT being stored, so a diagnostics wait that deferred to it
+ * decides again (the timer's two unstored exits). A clear that cancels the
+ * timer emits nothing: it removed the stored answer too, so a waiting wait has
+ * nothing to settle on and keeps waiting (#4785 F4). Never `"diagnostics"`: nothing new was stored, and a wait
+ * that read it as a store would settle on an empty cache.
+ */
+const PENDING_RECEIPT_DROPPED = "pending-receipt-dropped";
+
 /** Exported for tests: the quiet-window timer cancel on clear/resync is the
  * headline #1412 safety property (a stale versionless publication must never
  * land after the document content changed). */
@@ -3150,6 +3160,16 @@ export function setupIncomingHandlers(
 					countPublication(state, normalizedPath);
 					return;
 				}
+				// #4785 F1: a receipt still pending here arrived before this one
+				// (a #4764 retraction keeps its timer), so it is older: cancel it
+				// as a newer receipt does, or it overwrites this answer and the
+				// wait's pending-receipt rule defers to it.
+				const olderTimer = state.pendingDiagnostics.get(normalizedPath);
+				if (olderTimer) {
+					clearTimeout(olderTimer);
+					state.pendingDiagnostics.delete(normalizedPath);
+					countPublication(state, normalizedPath);
+				}
 				state.pushDiagnostics.set(normalizedPath, newDiags);
 				state.pushDiagnosticTimestamps.set(normalizedPath, Date.now());
 				recordDocVersion();
@@ -3174,6 +3194,8 @@ export function setupIncomingHandlers(
 				state.pendingDiagnostics.delete(normalizedPath);
 				if (isSupersededPush()) {
 					countPublication(state, normalizedPath);
+					// #4782: a wait that deferred to this receipt decides again.
+					state.diagnosticEmitter.emit(PENDING_RECEIPT_DROPPED, normalizedPath);
 					return;
 				}
 				// #4764: the config failure may have landed while this publish sat in the
@@ -3184,6 +3206,7 @@ export function setupIncomingHandlers(
 					newDiags.length === 0 &&
 					configFailureBlocksEmptyPublish(state, normalizedPath)
 				) {
+					state.diagnosticEmitter.emit(PENDING_RECEIPT_DROPPED, normalizedPath);
 					return;
 				}
 				state.pushDiagnostics.set(normalizedPath, newDiags);
@@ -4554,16 +4577,47 @@ export async function clientWaitForDiagnostics(
 		}
 	}
 
-	if (
+	// #4782: a receipt still in the publish handler's quiet window
+	// (`pendingDiagnostics`) is a LATER answer than the stored one, so the
+	// stored answer settles nothing while it waits there. A bash command's
+	// dependent a.ts had an answer stored that the server computed against
+	// z.ts's old bytes; the answer computed after z.ts's change arrived right
+	// before the drain reply, still in its window, and the dispatch's read took
+	// the stored one: a phantom STOP. Waiting for the receipt costs at most
+	// one quiet window.
+	const laterReceiptPending = (): boolean =>
+		state.pendingDiagnostics.has(normalizedPath);
+	const storedAnswerSettles = (): boolean =>
 		hasFreshDiagnostics() &&
 		!isVersionStale() &&
-		getMergedDiagnosticsForPath(state, normalizedPath).length > 0
-	) {
+		getMergedDiagnosticsForPath(state, normalizedPath).length > 0;
+
+	if (storedAnswerSettles() && !laterReceiptPending()) {
 		return;
 	}
+	// #4785 F4: a wait resolves before its deadline only while an answer for
+	// the path is stored. The touch reads "no answer" only from a wait that ran
+	// to its budget (clients/lsp/index.ts), so an early resolve on a store a
+	// clear removed read as a confirmed clean.
+	const answerStored = (): boolean =>
+		hasFreshDiagnostics() &&
+		!isVersionStale() &&
+		(state.pushDiagnostics.has(normalizedPath) ||
+			state.documentPullDiagnostics.has(normalizedPath));
 
 	return new Promise<void>((resolve) => {
 		let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+		/** A settle came due while a later receipt was pending: the early
+		 * return above, or the quiet window below. */
+		let settleDeferred = storedAnswerSettles();
+
+		const finish = (): void => {
+			if (debounceTimer) clearTimeout(debounceTimer);
+			state.diagnosticEmitter.off("diagnostics", onDiagnostics);
+			state.diagnosticEmitter.off(PENDING_RECEIPT_DROPPED, onReceiptDropped);
+			clearTimeout(timeout);
+			resolve();
+		};
 
 		const onDiagnostics = (fp: string) => {
 			if (normalizeMapKey(fp) !== normalizedPath) return;
@@ -4578,19 +4632,33 @@ export async function clientWaitForDiagnostics(
 			const remaining = Math.max(0, strategy.debounceMs - timeSincePush);
 
 			debounceTimer = setTimeout(() => {
-				state.diagnosticEmitter.off("diagnostics", onDiagnostics);
-				clearTimeout(timeout);
-				resolve();
+				debounceTimer = undefined;
+				// #4782: a later receipt is pending; its store re-arms this window.
+				if (laterReceiptPending()) {
+					settleDeferred = true;
+					return;
+				}
+				// A clear inside the window removed the store this window was
+				// armed for: keep waiting for the next one, or the deadline.
+				if (!answerStored()) return;
+				finish();
 			}, remaining);
 		};
 
-		state.diagnosticEmitter.on("diagnostics", onDiagnostics);
+		// #4782: the pending receipt this wait deferred to was dropped unstored
+		// (superseded, or refused from a rule-less scanner), so the wait decides
+		// as it would have without that receipt: on the stored answer, if a clear
+		// has not removed it since (#4785 F4). A wait still inside its quiet
+		// window keeps it.
+		const onReceiptDropped = (fp: string) => {
+			if (normalizeMapKey(fp) !== normalizedPath) return;
+			if (settleDeferred && answerStored()) finish();
+		};
 
-		const timeout = setTimeout(() => {
-			if (debounceTimer) clearTimeout(debounceTimer);
-			state.diagnosticEmitter.off("diagnostics", onDiagnostics);
-			resolve();
-		}, timeoutMs);
+		state.diagnosticEmitter.on("diagnostics", onDiagnostics);
+		state.diagnosticEmitter.on(PENDING_RECEIPT_DROPPED, onReceiptDropped);
+
+		const timeout = setTimeout(finish, timeoutMs);
 	});
 }
 
