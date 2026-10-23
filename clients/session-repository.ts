@@ -41,7 +41,6 @@ import {
 	isAtOrAboveHomeDir,
 	isWithinForm,
 	normalizeEphemeralMapKey,
-	normalizeMapKey,
 	realpathOrResolve,
 	walkUpDirs,
 } from "./path-utils.js";
@@ -117,7 +116,12 @@ export function sessionRepositoryJudge(): (target: string) => boolean {
 		.filter((dir) => fs.existsSync(dir))
 		.map((dir) => pathForm(realpathOrResolve(dir)));
 	let sessionCheckout: ReturnType<typeof resolveGitCheckout> | undefined;
-	const ownerByDir = new PathKeyedMap<string | null>(normalizeMapKey);
+	// Keyed by `pathForm`, not `normalizeMapKey` (#4776 verify V2): the keys
+	// are already kernel-real, and `normalizeMapKey` folds a POSIX backslash
+	// (a name character there) into a separator, so `tools\wt` and `tools/wt`
+	// shared one memo entry and the second answered from the first. It also
+	// re-ran `realpath` on every read of a memo that exists to avoid I/O.
+	const ownerByDir = new PathKeyedMap<string | null>(pathForm);
 	return (target) => {
 		const real = realpathOrResolve(target);
 		const form = pathForm(real);
@@ -150,7 +154,13 @@ export function sessionRepositoryJudge(): (target: string) => boolean {
 			walked.push(dir);
 			if (!hasGitEntry(dir)) continue;
 			const owner = resolveGitCheckout(dir);
-			answer = owner ? pathForm(owner.commonDir) : null;
+			// The HOME ceiling holds for the owning checkout too (#4776 verify
+			// V4): HOME as a linked worktree of the session repository must not
+			// make `~/.local/bin` project bytes.
+			answer =
+				owner && !isAtOrAboveHomeDir(owner.root, home)
+					? pathForm(owner.commonDir)
+					: null;
 			break;
 		}
 		for (const dir of walked) ownerByDir.set(dir, answer);

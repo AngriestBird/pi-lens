@@ -113,14 +113,20 @@ function makeLayout(): Layout {
 	const data = path.join(root, "data");
 	for (const dir of [main, wt, outside, data])
 		fs.mkdirSync(dir, { recursive: true });
-	fs.mkdirSync(path.join(main, ".git", "worktrees", "wt"), { recursive: true });
+	fs.mkdirSync(path.join(main, ".git"));
 	fs.writeFileSync(path.join(main, ".git", "HEAD"), "ref: refs/heads/main\n");
-	const wtGitDir = path.join(main, ".git", "worktrees", "wt");
-	fs.writeFileSync(path.join(wtGitDir, "HEAD"), "ref: refs/heads/wt\n");
-	fs.writeFileSync(path.join(wtGitDir, "commondir"), "../..\n");
-	fs.writeFileSync(path.join(wtGitDir, "gitdir"), `${path.join(wt, ".git")}\n`);
-	fs.writeFileSync(path.join(wt, ".git"), `gitdir: ${wtGitDir}\n`);
+	linkWorktree(main, wt, "wt");
 	return { root, home, main, wt, outside, data };
+}
+
+/** Real git metadata making `dir` a linked worktree of `main`, named `name`. */
+function linkWorktree(main: string, dir: string, name: string): void {
+	const gitDir = path.join(main, ".git", "worktrees", name);
+	fs.mkdirSync(gitDir, { recursive: true });
+	fs.writeFileSync(path.join(gitDir, "HEAD"), `ref: refs/heads/${name}\n`);
+	fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+	fs.writeFileSync(path.join(gitDir, "gitdir"), `${path.join(dir, ".git")}\n`);
+	fs.writeFileSync(path.join(dir, ".git"), `gitdir: ${gitDir}\n`);
 }
 
 /**
@@ -626,6 +632,46 @@ describe.skipIf(!POSIX)("cells the rule leaves admitted (#4530)", () => {
 		expect(result.status).toBe(0);
 		expect(ran(marker)).toBe(true);
 		expect(trustRefusals()).toEqual([]);
+	});
+
+	// #4776 verify V4: the HOME ceiling held for the session's checkout only,
+	// so a HOME that is itself a linked worktree of the session repository made
+	// every tool dir under HOME project bytes.
+	it("I12/V4: HOME as a linked worktree of the session repository keeps HOME's tool dirs", async () => {
+		linkWorktree(layout.main, layout.home, "home");
+		const marker = path.join(layout.root, "home-tool-ran");
+		const bin = path.join(layout.home, ".local", "bin");
+		plant(bin, marker);
+
+		const result = await safeSpawnAsync(TOOL, [], {
+			env: { PATH: bin },
+			timeout: 10_000,
+		});
+
+		expect(result.status).toBe(0);
+		expect(ran(marker)).toBe(true);
+		expect(trustRefusals()).toEqual([]);
+	});
+
+	// #4776 verify V2: the judge's ownership memo folded a POSIX backslash (a
+	// name character) into a separator, so a linked worktree at `tools\wt` and
+	// an unrelated `tools/wt` shared one entry, and whichever PATH entry came
+	// second took the first one's owner.
+	it("I13/V2: a POSIX directory name holding a backslash is judged as itself, in either PATH order", () => {
+		const worktree = path.join(layout.home, "tools\\wt");
+		fs.mkdirSync(path.join(worktree, "bin"), { recursive: true });
+		linkWorktree(layout.main, worktree, "backslash");
+		const twin = path.join(layout.home, "tools", "wt");
+		fs.mkdirSync(path.join(twin, "bin"), { recursive: true });
+		const twinBin = path.join(twin, "bin");
+		const worktreeBin = path.join(worktree, "bin");
+
+		for (const entries of [
+			[twinBin, worktreeBin],
+			[worktreeBin, twinBin],
+		]) {
+			expect(trustScopedSearchPath(entries.join(path.delimiter))).toBe(twinBin);
+		}
 	});
 
 	it("I15/A2: a relative path the caller names is not searched for", async () => {
