@@ -253,6 +253,8 @@ export interface LSPOperationSupport {
 	willRenameFiles: boolean;
 	/** #1971: `workspace.fileOperations.didRename` registration options at initialize. */
 	didRenameFiles: boolean;
+	/** #4787: `workspace.fileOperations.didCreate` registration options at initialize. */
+	didCreateFiles: boolean;
 	implementation: boolean;
 	callHierarchy: boolean;
 }
@@ -813,6 +815,7 @@ export const CLIENT_CAPABILITIES = {
 			dynamicRegistration: false,
 			willRename: true,
 			didRename: true,
+			didCreate: true,
 		},
 	},
 	textDocument: {
@@ -4807,23 +4810,38 @@ function watchedTypeForExisting(
 		: FILE_CREATED;
 }
 
-function handleAnnounceCreated(
+async function handleAnnounceCreated(
 	state: LSPClientState,
 	entries: ReadonlyArray<{ filePath: string; stat: BirthStat }>,
-): void {
+): Promise<void> {
 	if (!isClientAlive(state)) return;
+	const didCreateUris: string[] = [];
 	for (const { filePath, stat: info } of entries) {
 		const normalizedPath = normalizeMapKey(filePath);
 		if (watchedTypeForExisting(state, normalizedPath, info) !== FILE_CREATED) {
 			continue;
 		}
-		enqueueWatchedChange(
-			state,
-			normalizedPath,
+		const uri =
 			state.openDocumentUris?.get(normalizedPath) ??
-				pathToFileURL(filePath).href,
-			FILE_CREATED,
-		);
+			pathToFileURL(filePath).href;
+		enqueueWatchedChange(state, normalizedPath, uri, FILE_CREATED);
+		if (
+			state.operationSupport.didCreateFiles &&
+			(await fileOperationFiltersMatch(
+				state.fileOperationFilters?.didCreate,
+				uri,
+				uri,
+				filePath,
+				filePath,
+			))
+		) {
+			didCreateUris.push(uri);
+		}
+	}
+	if (didCreateUris.length > 0 && isClientAlive(state)) {
+		await safeSendNotification(state.connection, "workspace/didCreateFiles", {
+			files: didCreateUris.map((uri) => ({ uri })),
+		});
 	}
 	state.watchQueue.flushIfCreated();
 }
@@ -5133,6 +5151,7 @@ async function handleNotifyOpenOnce(
 		if (
 			info &&
 			watchedType === FILE_CREATED &&
+			state.operationSupport.didCreateFiles &&
 			state.fileOperationFilters?.didCreate &&
 			(await fileOperationFiltersMatch(
 				state.fileOperationFilters.didCreate,
@@ -7102,7 +7121,12 @@ export async function createLSPClient(options: {
 				if (isClientAlive(state)) state.watchQueue.flush();
 			},
 			announceCreated(entries) {
-				void handleAnnounceCreated(state, entries);
+				handleAnnounceCreated(state, entries).catch((cause: unknown) => {
+					logExtension({
+						subsystem: "lsp",
+						message: `LSP didCreate announcement failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+					});
+				});
 			},
 		},
 
@@ -7912,6 +7936,9 @@ function detectOperationSupport(initResult: unknown): LSPOperationSupport {
 		didRenameFiles:
 			isCapabilityRecord(fileOperations) &&
 			isFileOperationRegistrationOptions(fileOperations.didRename),
+		didCreateFiles:
+			isCapabilityRecord(fileOperations) &&
+			isFileOperationRegistrationOptions(fileOperations.didCreate),
 		implementation: hasProvider("implementationProvider"),
 		callHierarchy: hasProvider("callHierarchyProvider"),
 	};

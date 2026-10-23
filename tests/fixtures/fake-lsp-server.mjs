@@ -695,6 +695,8 @@ function handle(raw) {
 			clientCapabilities?.workspace?.fileOperations?.willRename === true;
 		const clientSupportsDidRename =
 			clientCapabilities?.workspace?.fileOperations?.didRename === true;
+		const clientSupportsDidCreate =
+			clientCapabilities?.workspace?.fileOperations?.didCreate === true;
 		const renameFilter = (globEnv, globDefault) => ({
 			scheme: "file",
 			pattern: {
@@ -717,7 +719,7 @@ function handle(raw) {
 						? {}
 						: { resolveProvider: true };
 		const workspaceFileOperations =
-			process.env.FAKE_LSP_DID_CREATE === "true"
+			process.env.FAKE_LSP_DID_CREATE === "true" && clientSupportsDidCreate
 				? {
 						didCreate: {
 							filters: [{ scheme: "file", pattern: { glob: "**/*" } }],

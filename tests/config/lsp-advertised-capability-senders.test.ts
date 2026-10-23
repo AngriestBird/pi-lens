@@ -113,6 +113,10 @@ const DISPOSITIONS: Record<string, Disposition> = {
 		kind: "sends",
 		method: "workspace/didRenameFiles",
 	},
+	"workspace.fileOperations.didCreate": {
+		kind: "sends",
+		method: "workspace/didCreateFiles",
+	},
 
 	"textDocument.synchronization.dynamicRegistration": {
 		kind: "modifier",
