@@ -628,6 +628,8 @@ export interface MergeWorkspaceEditsResult {
 	droppedConflicts: number;
 	inputEditCount: number;
 	serverIds: string[];
+	/** The provenance side channel, keyed by the same normalized path as `edit`. */
+	sourceServerIds: ReadonlyMap<string, readonly string[]>;
 }
 
 export function mergeWorkspaceTextEditsByPriority(
@@ -639,7 +641,10 @@ export function mergeWorkspaceTextEditsByPriority(
 			| undefined;
 	}>,
 ): MergeWorkspaceEditsResult {
-	const merged = new Map<string, { uri: string; edits: LSPTextEdit[] }>();
+	const merged = new Map<
+		string,
+		{ uri: string; edits: LSPTextEdit[]; sourceServerIds: Set<string> }
+	>();
 	// Exact-duplicate dedup is a CROSS-SERVER concern only: two servers proposing
 	// the identical non-empty replace should collapse to one. Zero-width inserts
 	// are never deduplicated here — same as `validateTextEdits` on the normal
@@ -658,7 +663,11 @@ export function mergeWorkspaceTextEditsByPriority(
 		if (!entry.edit) continue;
 		for (const [uri, edits] of flattenWorkspaceTextEdits(entry.edit)) {
 			const key = pathIndexKey(uri);
-			const bucket = merged.get(key) ?? { uri, edits: [] };
+			const bucket = merged.get(key) ?? {
+				uri,
+				edits: [],
+				sourceServerIds: new Set<string>(),
+			};
 			const kept = bucket.edits;
 			for (const edit of edits) {
 				inputEditCount += 1;
@@ -674,13 +683,24 @@ export function mergeWorkspaceTextEditsByPriority(
 				}
 				if (exactKey !== undefined) seenExact.add(exactKey);
 				kept.push(edit);
+				bucket.sourceServerIds.add(entry.serverId);
 			}
 			if (kept.length > 0) merged.set(key, bucket);
 		}
 	}
 	const changes: Record<string, LSPTextEdit[]> = {};
-	for (const { uri, edits } of merged.values()) changes[uri] = edits;
-	return { edit: { changes }, droppedConflicts, inputEditCount, serverIds };
+	const sourceServerIds = new Map<string, readonly string[]>();
+	for (const [key, { uri, edits, sourceServerIds: sources }] of merged) {
+		changes[uri] = edits;
+		sourceServerIds.set(key, [...sources]);
+	}
+	return {
+		edit: { changes },
+		droppedConflicts,
+		inputEditCount,
+		serverIds,
+		sourceServerIds,
+	};
 }
 
 type TextEditOrigin =
@@ -838,8 +858,10 @@ export function captureRenameExpectedContent(
 	readTrackedSend: (
 		filePath: string,
 		cwd: string,
-	) => RenameTrackedSend | undefined,
+		sourceServerIds?: readonly string[],
+	) => RenameTrackedSend | readonly RenameTrackedSend[] | undefined,
 	target?: { filePath: string; content: string },
+	sourceServerIdsByPath?: ReadonlyMap<string, readonly string[]>,
 ): Map<string, string> {
 	const expected = new Map<string, string>();
 	let targetRealPath: string | undefined;
@@ -871,48 +893,68 @@ export function captureRenameExpectedContent(
 			expected.set(realPath, target.content);
 			continue;
 		}
-		const tracked = readTrackedSend(diskPath, cwd);
+		const trackedResult = readTrackedSend(
+			diskPath,
+			cwd,
+			sourceServerIdsByPath?.get(normalizeEphemeralMapKey(realPath)),
+		);
+		const tracked =
+			trackedResult === undefined
+				? []
+				: Array.isArray(trackedResult)
+					? trackedResult
+					: [trackedResult];
 		// #3827: a file this client first opened at or after the request, and
 		// that nobody wrote since the client started, was unopened when the
 		// server answered and held the bytes the disk holds: the first open adds
 		// none, so its stamp is skipped. The disk must still hold the first
 		// open's bytes, then the unopened rule below applies.
-		const firstOpenedAfterRequest =
-			tracked !== undefined && (tracked.openedAtMs ?? 0) >= requestedAtMs;
-		const quietSinceClientStart =
-			tracked?.clientStartedAtMs !== undefined &&
-			mtimeMs < tracked.clientStartedAtMs - RENAME_MTIME_MARGIN_MS;
-		const sent =
-			firstOpenedAfterRequest && quietSinceClientStart ? undefined : tracked;
-		if (sent !== undefined) {
-			if (
-				sent.hash !== hashDiagnosticContent(content) ||
-				(sent.changedAtMs ?? requestedAtMs) >= requestedAtMs
+		const contentHash = hashDiagnosticContent(content);
+		let hasComparableSend = false;
+		for (const trackedSend of tracked) {
+			const firstOpenedAfterRequest =
+				(trackedSend.openedAtMs ?? 0) >= requestedAtMs;
+			const quietSinceClientStart =
+				trackedSend.clientStartedAtMs !== undefined &&
+				mtimeMs < trackedSend.clientStartedAtMs - RENAME_MTIME_MARGIN_MS;
+			const sent =
+				firstOpenedAfterRequest && quietSinceClientStart
+					? undefined
+					: trackedSend;
+			if (sent !== undefined) {
+				hasComparableSend = true;
+				if (
+					sent.hash !== contentHash ||
+					(sent.changedAtMs ?? requestedAtMs) >= requestedAtMs
+				) {
+					refuseStaleWorkspaceEdit(
+						diskPath,
+						"it changed after the language server computed the rename from it",
+					);
+				}
+			} else if (
+				trackedSend.hash !== contentHash ||
+				trackedSend.openedHash !== trackedSend.hash
 			) {
+				// #3827 verify r2 F4: the exemption skips only the first open's own
+				// stamp. A disk that no longer holds the last send, or a record whose
+				// bytes changed after its first send, was written after that open
+				// although the mtime says otherwise (#3747's mtime-kept write).
 				refuseStaleWorkspaceEdit(
 					diskPath,
-					"it changed after the language server computed the rename from it",
+					"it changed after the language client first opened it, after the rename was requested",
 				);
 			}
-		} else if (
-			tracked !== undefined &&
-			(tracked.hash !== hashDiagnosticContent(content) ||
-				tracked.openedHash !== tracked.hash)
-		) {
-			// #3827 verify r2 F4: the exemption skips only the first open's own
-			// stamp. A disk that no longer holds the last send, or a record whose
-			// bytes changed after its first send, was written after that open
-			// although the mtime says otherwise (#3747's mtime-kept write).
-			refuseStaleWorkspaceEdit(
-				diskPath,
-				"it changed after the language client first opened it, after the rename was requested",
-			);
-		} else if (mtimeMs >= requestedAtMs) {
+		}
+		if (!hasComparableSend && mtimeMs >= requestedAtMs) {
 			refuseStaleWorkspaceEdit(
 				diskPath,
 				"it was written after the rename was requested and the language server has no open copy, so it may not have read these bytes",
 			);
-		} else if (mtimeMs >= requestedAtMs - RENAME_MTIME_MARGIN_MS) {
+		} else if (
+			!hasComparableSend &&
+			mtimeMs >= requestedAtMs - RENAME_MTIME_MARGIN_MS
+		) {
 			refuseStaleWorkspaceEdit(
 				diskPath,
 				`it was modified within ${RENAME_MTIME_MARGIN_MS / 1000} s of the rename request; retry`,

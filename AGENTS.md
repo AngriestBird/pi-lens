@@ -1238,10 +1238,9 @@ file-scoped worklist and receives no project-wide scanner output.
   records one `lsp-edit-stale-content` row naming the file. `renameFile` has no
   target (nothing read the old path), so an unopened file there is best effort
   by mtime, the same remainder the `rename` path carries. The evidence a file
-  is compared against is one sent-content record, the highest-priority live
-  client's for the cwd, so when two live clients hold one file the binding can
-  read a record that did not produce the edit; that topology is a live
-  remainder, not a covered case. `documentVersions` is
+  is compared against the sent-content records of every client that
+  contributed a kept edit for that file; a merged edit never falls back to a
+  different client's priority record. `documentVersions` is
   the other binding axis, for a server-initiated `workspace/applyEdit`. A new
   apply site binds the content or states why it cannot.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later

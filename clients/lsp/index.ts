@@ -2761,19 +2761,41 @@ export class LSPService {
 	}
 
 	/**
-	 * #3601: the fingerprint of the content the first live client (the file's
-	 * own servers first) last sent for `filePath`, and when a send last changed
-	 * it, or `undefined` when no live client under `cwd` tracks the document.
-	 * In-memory only: it spawns, opens and stats nothing.
+	 * #3601: the fingerprint of the content a live client last sent for
+	 * `filePath`, and when a send last changed it. With source ids, returns all
+	 * records for clients that contributed the merged edit; without them,
+	 * preserves the original first-live-client lookup. In-memory only: it
+	 * spawns, opens and stats nothing.
 	 */
 	getTrackedContent(
 		filePath: string,
 		cwd: string,
-	): RenameTrackedSend | undefined {
+	): RenameTrackedSend | undefined;
+	getTrackedContent(
+		filePath: string,
+		cwd: string,
+		sourceServerIds: readonly string[],
+	): readonly RenameTrackedSend[];
+	getTrackedContent(
+		filePath: string,
+		cwd: string,
+		sourceServerIds?: readonly string[],
+	): RenameTrackedSend | readonly RenameTrackedSend[] | undefined {
 		const priorityServerIds = getServersForFileWithConfig(filePath).map(
 			(server) => server.id,
 		);
-		for (const { client } of this.activeClientsForCwd(cwd, priorityServerIds)) {
+		const clients = this.activeClientsForCwd(cwd, priorityServerIds);
+		if (sourceServerIds !== undefined) {
+			const sourceSet = new Set(sourceServerIds);
+			const sends = clients
+				.filter(({ serverId }) => sourceSet.has(serverId))
+				.flatMap(({ client }) => {
+					const sent = client.getSentContent?.(filePath);
+					return sent === undefined ? [] : [sent];
+				});
+			return sends;
+		}
+		for (const { client } of clients) {
 			const sent = client.getSentContent?.(filePath);
 			if (sent !== undefined) return sent;
 		}
@@ -7908,8 +7930,12 @@ export class LSPService {
 					merged.edit,
 					cwd,
 					renameRequestedAtMs,
-					(filePath: string, atCwd: string) =>
-						this.getTrackedContent(filePath, atCwd),
+					(filePath: string, atCwd: string, sourceServerIds) =>
+						sourceServerIds === undefined
+							? this.getTrackedContent(filePath, atCwd)
+							: this.getTrackedContent(filePath, atCwd, sourceServerIds),
+					undefined,
+					merged.sourceServerIds,
 				),
 			});
 		} catch (err) {

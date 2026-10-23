@@ -84,6 +84,8 @@ beforeEach(() => {
 	importPath = path.join(env.tmpDir, "import.ts");
 	fs.writeFileSync(oldPath, "export const value = 1;\n");
 	fs.writeFileSync(importPath, OLD_IMPORT);
+	clientFor = () => makeRenameClient(env.tmpDir, null);
+	clientsFor = () => [{ serverId: "typescript", client: clientFor() }];
 	setHostFileMutationQueueLoader(async () => ({ withFileMutationQueue }));
 });
 
@@ -109,12 +111,18 @@ const staleRows = () =>
 /** The per-case language client double; a case replaces it before it builds
  *  the harness, so the client its rename answers from is the one it controls. */
 let clientFor = (): RenameClientDouble => makeRenameClient(env.tmpDir, null);
+let clientsFor = (): Array<{
+	serverId: string;
+	client: RenameClientDouble;
+}> => [{ serverId: "typescript", client: clientFor() }];
 
 /** A real `LSPService` rename behind the shell the tool resolves. Nothing the
  *  case starts may outlive it: `shutdown` runs before the fixture goes. */
 function makeHarness(): { realService: LSPService } {
 	const realService = new LSPService();
-	addRenameClient(realService, "typescript", env.tmpDir, clientFor());
+	for (const { serverId, client } of clientsFor()) {
+		addRenameClient(realService, serverId, env.tmpDir, client);
+	}
 	lsp.service = installLspService(
 		makeLspServiceDouble({
 			supportsLSP: vi.fn(() => true),
@@ -173,6 +181,40 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 			// A refusal is not a half-applied rename: the move never ran.
 			expect(fs.existsSync(oldPath)).toBe(true);
 			expect(fs.existsSync(newPath)).toBe(false);
+			expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
+		} finally {
+			await harness.realService.shutdown();
+		}
+	});
+
+	it("checks the client that produced a lower-priority edit", async () => {
+		const edit = importEdit(importPath);
+		const primary = makeRenameClient(env.tmpDir, null);
+		primary.getSentContent = vi.fn(() => ({
+			hash: hashDiagnosticContent(AGENT_IMPORT),
+			changedAtMs: 0,
+		}));
+		const secondary = makeRenameClient(env.tmpDir, edit);
+		secondary.getSentContent = vi.fn(() => ({
+			hash: hashDiagnosticContent(OLD_IMPORT),
+			changedAtMs: 0,
+		}));
+		secondary.willRenameFiles.mockImplementation(async () => {
+			fs.writeFileSync(importPath, AGENT_IMPORT);
+			return edit;
+		});
+		clientsFor = () => [
+			{ serverId: "typescript", client: primary },
+			{ serverId: "eslint", client: secondary },
+		];
+		const harness = makeHarness();
+
+		try {
+			const result = await runRenameFile(env.tmpDir, true);
+
+			expect(fs.readFileSync(importPath, "utf-8")).toBe(AGENT_IMPORT);
+			expect(result.isError).toBe(true);
+			expect(resultText(result)).toContain(path.basename(importPath));
 			expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
 		} finally {
 			await harness.realService.shutdown();
