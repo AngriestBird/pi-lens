@@ -661,6 +661,13 @@ function handle(raw) {
 				`language ${data.params.textDocument.uri} ${data.params.textDocument.languageId}`,
 			);
 		}
+		// #4787: the URIs of each didCreateFiles notification, one line per
+		// notification, so a test counts batches and orders them against didOpen.
+		if (data.method === "workspace/didCreateFiles") {
+			trace(
+				`created ${(data.params?.files ?? []).map((file) => file.uri).join(" ")}`,
+			);
+		}
 		// #4320 r3: which watched-files changes reached this server.
 		if (data.method === "workspace/didChangeWatchedFiles") {
 			for (const change of data.params?.changes ?? []) {
@@ -718,14 +725,22 @@ function handle(raw) {
 						  !clientSupportsCodeActionResolve
 						? {}
 						: { resolveProvider: true };
-		const workspaceFileOperations =
+		// #4787: merged into the rename operations below, so a case that sets
+		// FAKE_LSP_DID_CREATE and FAKE_LSP_WILL_RENAME keeps both.
+		const didCreateFileOperations =
 			process.env.FAKE_LSP_DID_CREATE === "true" && clientSupportsDidCreate
 				? {
 						didCreate: {
-							filters: [{ scheme: "file", pattern: { glob: "**/*" } }],
+							filters: renameFilters(
+								"DID_CREATE",
+								"FAKE_LSP_DID_CREATE_GLOB",
+								"**/*",
+							),
 						},
 					}
-				: process.env.FAKE_LSP_WILL_RENAME === "true"
+				: undefined;
+		const renameFileOperations =
+			process.env.FAKE_LSP_WILL_RENAME === "true"
 				? {
 						willRename: clientSupportsWillRename
 							? {
@@ -756,6 +771,10 @@ function handle(raw) {
 						: process.env.FAKE_LSP_WILL_RENAME === "malformed"
 							? { willRename: "yes" }
 							: undefined;
+		const workspaceFileOperations =
+			didCreateFileOperations || renameFileOperations
+				? { ...didCreateFileOperations, ...renameFileOperations }
+				: undefined;
 		send({
 			jsonrpc: "2.0",
 			id: data.id,
