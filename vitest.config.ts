@@ -364,6 +364,11 @@ const lspSpawnHeavyInclude = [
 	// (`window/showMessage`) and then publish; waits on real handshakes and
 	// debounce windows, the same #1022/#2332 contention class as its siblings.
 	"tests/clients/lsp/opengrep-offline-config-failure.test.ts",
+	// #4765: the live twin over the real Opengrep binary with the network cut
+	// (skipped, with a named reason, when none is installed). It has no
+	// launchLSP/getServerById marker, so the census cannot derive it (its known
+	// marker gap); membership is by hand.
+	"tests/clients/lsp/opengrep-offline-findings-4765.integration.test.ts",
 	// #4248: the unknown-trust project-local binary witness resolves a real
 	// PATH entry through launchLSP; keep that child-spawn boundary phased here.
 	"tests/clients/lsp/service-project-trust.test.ts",
@@ -392,6 +397,9 @@ const lspSpawnHeavyInclude = [
 	// #4534: the read-guard-off recovery witness drives the real LSP service
 	// on the shared fake-server child to observe the recovered bytes arrive.
 	"tests/clients/opaque-mutation-scan.test.ts",
+	// #4765: `OpengrepServer.spawn` cases launch a real PATH stub that only stays
+	// alive; no launchLSP/getServerById marker, so membership is by hand.
+	"tests/clients/opengrep-rule-pack-4765.test.ts",
 	// #3961: the `--lsp` cold-path witness spawns the real bin, which spawns
 	// real LSP children (deno `lsp`, opengrep `lsp`, typos-lsp, ast-grep `lsp`)
 	// for the file. The indirect spawn is invisible to this lane's marker census
@@ -632,6 +640,10 @@ export const wallClockBudgetInclude = [
 	"tests/clients/read-guard-glob-nonbacktracking.test.ts",
 	// #4638: the fix passes are measured through the real ruff binary (flake-shape admission).
 	"tests/clients/ruff-target-version-real.test.ts",
+	// #4780 R3 review: the reload-timer case asserts a negative (a cancelled timer
+	// fetched nothing), so it waits a bounded real window; serialized here like its
+	// flake-shape peers (admission header + baseline row in the same change).
+	"tests/clients/runtime-session-opengrep-refresh-timer-4780.test.ts",
 	"tests/clients/runtime-session-scan-cache.test.ts",
 	// #4126: the first-session warmup has no awaitable completion signal; keep
 	// its real deferred-notification ordering in the serialized phase.

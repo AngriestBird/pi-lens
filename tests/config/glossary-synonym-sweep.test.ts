@@ -1055,7 +1055,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/inline-blocker-dispositions.ts": 2,
 		"clients/install-diagnostics.ts": 11,
 		"clients/installer/index.ts": 108,
-		"clients/installer/managed-tool-refresh.ts": 4,
+		// 4 -> 9 (#4765): refreshOpengrepRulePack computes the candidate's
+		// scratch directory, cwd and sweep with `path.dirname`/`path.join`.
+		"clients/installer/managed-tool-refresh.ts": 9,
 		"clients/instance-reaper.ts": 4,
 		// 8 -> 9 (#3498): the own-hold skip's degradation `subject`,
 		// `path.resolve(target)`, as its sibling records in this file spell it.
@@ -1164,6 +1166,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opaque-mutation-scan.ts": 12,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
+		// New (#4765): the cached pack path and the CLI id-prefix strip.
+		"clients/opengrep-rule-pack.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
 		// `path.delimiter` and tests each entry with `path.isAbsolute`.
 		// 23 -> 16 (#4530): the bin layouts and their walk moved to
@@ -1563,7 +1567,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 42 -> 44 (#4530), and the new launch.ts row:
 		// starts that moved onto the spawn seam read SpawnResult.status.
 		"clients/installer/index.ts": 44,
-		"clients/installer/managed-tool-refresh.ts": 9,
+		// 9 -> 14 (#4765): refreshOpengrepRulePack reads the fetch `res.status`, the
+		// validate spawn's `status` (twice) and the refresh-state read's `status`
+		// discriminant: host fields, not a pi-lens status vocabulary.
+		"clients/installer/managed-tool-refresh.ts": 14,
 		"clients/instance-reaper.ts": 15,
 		"clients/jscpd-client.ts": 3,
 		"clients/knip-client.ts": 4,
@@ -1642,7 +1649,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/grammar-source.ts": 5,
 		"clients/install-diagnostics.ts": 3,
 		"clients/installer/index.ts": 60,
-		"clients/installer/managed-tool-refresh.ts": 24,
+		// 24 -> 29 (#4765): the pack refresh stamps the cached pack with a digest
+		// `version` in the refresh-state entry (the stamp's existing field) and passes
+		// `--disable-version-check` to the validate spawn: stamp/CLI vocabulary.
+		"clients/installer/managed-tool-refresh.ts": 29,
 		// #3654: the unified bridge protocol's own `version` field (RFC §3) — a
 		// protocol name that cannot be renamed.
 		"clients/io-bridge-contract.ts": 1,

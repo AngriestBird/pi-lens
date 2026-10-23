@@ -4578,8 +4578,10 @@ export const CssServer: LSPServerInfo = {
 // merges its diagnostics with the file's real language server). Running it as a
 // warm LSP server compiles the ruleset once per session instead of paying it on
 // every file (the ~8s CLI-per-file cost #111), bringing per-file scans to ~1.3s.
-// Rules load via `initializationOptions.scan.configuration` (a local rule file
-// if the repo has one, else Opengrep's login-free `auto` set).
+// Rules load via `initializationOptions.scan.configuration`: a local rule file
+// if the repo has one, else the registry pack pi-lens refreshed into its cache
+// (no download at spawn, #4765), else Opengrep's login-free `auto` set until the
+// first refresh lands.
 const OPENGREP_KINDS = [
 	"csharp",
 	"css",
@@ -4613,7 +4615,7 @@ const OPENGREP_EXTENSIONS: readonly string[] = Array.from(
 function opengrepInitialization(root: string): Record<string, unknown> {
 	// As an always-on LSP server, enablement is structural (the server is
 	// registered); resolveOpengrepConfig here only chooses WHICH rules — a local
-	// rule file if present, otherwise `auto`.
+	// rule file if present, else the refreshed pack, else `auto` (#4765).
 	const resolved = resolveOpengrepConfig(root, { enabled: true });
 	return {
 		scan: {

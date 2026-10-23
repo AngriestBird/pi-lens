@@ -945,6 +945,29 @@ function firePreinstallDefaults(
 const MANAGED_TOOL_REFRESH_DELAY_MS = 30_000;
 
 /**
+ * The pending managed-tool refresh timer of the CURRENT activation, so a
+ * `/reload` cannot leave the previous activation's timer holding its own
+ * `rulePack` decision (#4780 review). Module scope is where a session latch
+ * lives (AGENTS.md shape 17); `resetSessionScopedState` is its reset.
+ */
+let managedToolRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Cancel a refresh timer armed by a previous activation.
+ *
+ * Reload stays in one process, so without this an activation that armed the
+ * timer with `rulePack: true` and was then reloaded with Opengrep disabled still
+ * downloads the 2.5 MB registry pack and spends up to 180 s validating it for a
+ * scanner nobody runs. The cadence is persisted, so a cancelled timer costs no
+ * work: the next full-mode session arms a fresh one from its own flag.
+ */
+function cancelScheduledManagedToolRefresh(): void {
+	if (managedToolRefreshTimer === undefined) return;
+	clearTimeout(managedToolRefreshTimer);
+	managedToolRefreshTimer = undefined;
+}
+
+/**
  * Schedule the periodic managed-tool refresh (#1730) on an unref'd background
  * timer.
  *
@@ -955,16 +978,22 @@ const MANAGED_TOOL_REFRESH_DELAY_MS = 30_000;
  * `runManagedToolRefresh` against a PERSISTED per-tool stamp, so a launch loop
  * cannot escalate the weekly cadence.
  */
-function scheduleManagedToolRefresh(dbg: SessionStartDeps["dbg"]): void {
+function scheduleManagedToolRefresh(
+	dbg: SessionStartDeps["dbg"],
+	rulePack: boolean,
+): void {
 	const delayMs = Number(
 		process.env.PI_LENS_TOOL_REFRESH_DELAY_MS ?? MANAGED_TOOL_REFRESH_DELAY_MS,
 	);
 	const timer = setTimeout(
 		() => {
+			managedToolRefreshTimer = undefined;
 			void (async () => {
 				try {
 					const refresh = await import("./installer/managed-tool-refresh.js");
-					const outcome = await refresh.runManagedToolRefresh();
+					const outcome = await refresh.runManagedToolRefresh(undefined, {
+						rulePack,
+					});
 					if (outcome.skipped) {
 						dbg(`session_start tool-refresh: skipped (${outcome.skipped})`);
 						return;
@@ -983,6 +1012,7 @@ function scheduleManagedToolRefresh(dbg: SessionStartDeps["dbg"]): void {
 		Number.isFinite(delayMs) ? delayMs : MANAGED_TOOL_REFRESH_DELAY_MS,
 	);
 	timer.unref?.();
+	managedToolRefreshTimer = timer;
 }
 
 async function probePrettierInstall(
@@ -1698,8 +1728,8 @@ function scheduleStartupScansWithClients(
 	// opengrep — full-workspace security/quality findings via a single CLI scan
 	// (#584). Structurally always-on (mirrors the LSP auxiliary's own
 	// enablement — see `OpengrepClient.resolveConfig`): the local rule file or
-	// `auto` registry ruleset always runs, `resolveOpengrepConfig` only picks
-	// which. Replaces the per-file LSP sweep as the source of opengrep
+	// refreshed registry pack or `auto` ruleset always runs (#4765);
+	// `resolveOpengrepConfig` only picks which. Replaces the per-file LSP sweep as the source of opengrep
 	// findings for `lens_diagnostics mode=full` (`runWorkspaceDiagnostics` now
 	// excludes the opengrep server from its per-file "all"-scope touch —
 	// clients/lsp/index.ts `WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`); the per-edit
@@ -2138,6 +2168,11 @@ export function resetSessionScopedState(
 	// written before this instant assert findings from a session that is over,
 	// so they must revalidate before they can be served as current again.
 	resetWorkspaceDiagnosticsCacheSession(sessionStartMs);
+	// #4780 review: the managed-tool refresh timer is armed by ONE activation
+	// and, without this, outlives a `/reload` with that activation's own
+	// `rulePack` decision. Cancel it here, beside the budget reset above: the
+	// reload's own start re-arms it from the flags it just resolved.
+	cancelScheduledManagedToolRefresh();
 }
 
 /**
@@ -3248,7 +3283,7 @@ export async function handleSessionStart(
 		true;
 	if (allowBootstrapTasks) {
 		scheduleDeferredToolProbes(deps, languageProfile, startupDefaults, dbg);
-		scheduleManagedToolRefresh(dbg);
+		scheduleManagedToolRefresh(dbg, !deps.getFlag("no-opengrep"));
 	}
 
 	if (allowBootstrapTasks) {

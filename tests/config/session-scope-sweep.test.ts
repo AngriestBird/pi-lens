@@ -62,7 +62,14 @@ const CONVERSATION_MODULE_STATE: Readonly<Record<string, readonly string[]>> = {
 	"clients/read-guard.ts": [],
 	"clients/runtime-agent-end.ts": [],
 	"clients/runtime-coordinator.ts": [],
-	"clients/runtime-session.ts": [],
+	"clients/runtime-session.ts": [
+		// #4780 review: the pending managed-tool refresh TIMER HANDLE. Not a store:
+		// it holds no session data, only the one setTimeout a `/reload` must
+		// cancel, and `resetSessionScopedState` (the same function that re-arms
+		// every other session latch) clears it. A store here would have to
+		// survive a reload, which is exactly the defect.
+		"managedToolRefreshTimer",
+	],
 	"clients/runtime-tool-call.ts": [],
 	"clients/runtime-tool-result.ts": [
 		"GIT_GLOBAL_OPTIONS_WITH_VALUE",
@@ -331,7 +338,7 @@ describe("session-scope ratchet (#3609 S8)", () => {
 			scanned += live.length;
 			problems.push(...diffNames(file, live, [...pinned].sort()));
 		}
-		assertNonEmptyScan("conversation module state", scanned, 34);
+		assertNonEmptyScan("conversation module state", scanned, 35);
 		expect(problems).toEqual([]);
 	});
 

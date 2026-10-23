@@ -269,6 +269,7 @@
 		"clients/review-graph.service.test.ts": 4,
 		"clients/review-graph/checkpoint-resume.test.ts": 1,
 		"clients/review-graph/stage-sweep.test.ts": 1,
+		"clients/runtime-session-opengrep-refresh-timer-4780.test.ts": 1,
 		"clients/runtime-session-retro-hydrate-warmup-race.test.ts": 2,
 		"clients/runtime-session-sequence-read-budget.test.ts": 3,
 		"clients/runtime-session-warmup-oneshot.test.ts": 1,

@@ -167,7 +167,7 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 	{
 		name: "no-opengrep",
 		description:
-			"Disable the Opengrep security scanner (a default-on auxiliary LSP; auto-installs, uses repo rules if present else the login-free 'auto' ruleset). Also via opengrep.enabled=false in ~/.pi-lens/config.json.",
+			"Disable the Opengrep security scanner (a default-on auxiliary LSP; auto-installs, uses repo rules if present, else the registry pack pi-lens refreshes into its cache, else the login-free 'auto' ruleset). Also via opengrep.enabled=false in ~/.pi-lens/config.json.",
 		configKey: "opengrep.enabled",
 		negated: true,
 		default: false,

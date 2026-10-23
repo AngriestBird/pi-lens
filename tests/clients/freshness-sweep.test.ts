@@ -44,6 +44,8 @@ const EXEMPT: Record<string, string> = {
 		"lock staleness is a cross-process liveness check on a foreign file, not a content-freshness read; freshnessFromMtime targets in-kernel content caches",
 	"installer/index.ts":
 		"age-based maxAge expiry of a cached install probe, same TTL-not-freshness shape",
+	"installer/managed-tool-refresh.ts":
+		"age-based cutoff for stale rule-pack candidate files a killed refresh left behind (Date.now() - mtime > one hour), not freshness against a scan or record timestamp",
 	"lsp/edits.ts":
 		"the rename staleness guard's compare-and-refuse bounds (#3601, #3734): it refuses AT the request instant and inside a margin BEFORE it, while freshnessFromMtime's verdict tolerates drift after the reference and treats the tie as fresh. Migrating would widen this fail-closed write guard by 50 ms and drop the tie, so the guard keeps its own comparison; the kernel's own doc comment scopes it to caches.",
 	"lsp/lombok.ts":

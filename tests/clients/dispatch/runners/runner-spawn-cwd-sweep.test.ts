@@ -151,8 +151,11 @@ const EXPECTED_FILES = 79;
 // 135 -> 134 (#4532 round 3): `findBinaryOnPath` stopped spawning
 // `which`/`where` — the bare-command probe resolved its own binary through the
 // path and cwd it was asked to judge, so a project-supplied `which` ran. It is
-// an in-process PATH scan now, and 134 counts the direct spawns that remain.
-const EXPECTED_DIRECT_SITES = 133;
+// an in-process PATH scan now, and 134 was the direct-spawn population it left.
+// 133 -> 134 (#4765): `validateOpengrepPack` runs the installed `opengrep`
+// `scan --validate --config <candidate>` before the cached registry pack is
+// swapped in, through this seam. (#4776 landed first and moved the base to 133.)
+const EXPECTED_DIRECT_SITES = 134;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it
@@ -684,6 +687,10 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	[
 		"clients/opengrep-client.ts#OpengrepClient.runScan:6ed13398~353ea442",
 		"cwd is runScan's own `cwd` parameter, from which OpengrepClient.resolveConfig(cwd) already chose the rule config",
+	],
+	[
+		"clients/installer/managed-tool-refresh.ts#validateOpengrepPack:c4cbdb3a~1f7c40b0",
+		"not a project scan: `scan --validate --config <candidate>` only parses a downloaded rule file that lives in the pi-lens cache, so the cwd is that file's own directory (`path.dirname(candidate)`) and no project root exists in the weekly refresh (#4765)",
 	],
 	[
 		"clients/pipeline.ts#tryEslintFix:a8585677~dbf27697",

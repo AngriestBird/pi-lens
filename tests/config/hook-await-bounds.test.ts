@@ -830,7 +830,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 				"race` list.",
 			owner: "#2523 slice 2",
 		},
-	"clients/runtime-session.ts#scheduleManagedToolRefresh:214f440d~73719009": {
+	"clients/runtime-session.ts#scheduleManagedToolRefresh:2c87cafc~00391a5a": {
 		family: "hook-await",
 		site: "session_start",
 		reason:
@@ -838,7 +838,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"from session_start with no wall bound above the spawn.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-session.ts#scheduleManagedToolRefresh:2c87cafc~0a59f635": {
+	"clients/runtime-session.ts#scheduleManagedToolRefresh:8dbae112~49fd40bd": {
 		family: "hook-await",
 		site: "session_start",
 		reason:
@@ -2540,7 +2540,14 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// (USER_BASE_PROBE_TIMEOUT_MS=5000, ARCHIVE_COMMAND_TIMEOUT_MS=120000) and
 	// no longer hanging on a child that never exits.
 	"clients/installer/index.ts": 221,
-	"clients/installer/managed-tool-refresh.ts": 29,
+	// 29 -> 56 (#4765): refreshOpengrepRulePack (the background registry-pack
+	// refresh) awaits the pack download, its temp-file write, the
+	// `opengrep --validate` spawn, a stat/read/rename of the cached file and a
+	// scratch `rm`. It runs on the managed-tool refresh timer, never inline in a
+	// hook, and each network/spawn await carries its own timeout
+	// (PACK_FETCH_TIMEOUT_MS, PACK_VALIDATE_TIMEOUT_MS); none can take the hook's
+	// signal until #2523 AC4 threads it, so this records the measured increase.
+	"clients/installer/managed-tool-refresh.ts": 56,
 	// #3538/#3539 add five in each. The reaper reads start times and owner
 	// tags before its backstop decision and asks again before every signal
 	// (the identity query, its re-check, and the kill's own confirm await);
