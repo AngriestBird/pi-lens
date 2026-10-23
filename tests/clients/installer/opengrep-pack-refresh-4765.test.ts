@@ -154,7 +154,9 @@ function installOpengrepShim(): void {
 			// (log line written before mode latch let setShim flip a parked loser, #4796).
 			`mode=$(cat "${SHIM_MODE}" 2>/dev/null || echo ok)`,
 			`[ -f "${SHIM_DELAY}" ] && sleep "$(cat "${SHIM_DELAY}")"`,
-			`echo "$@" >> "${SHIM_LOG}"`,
+			// The call line carries the latched mode, so a log line written before the
+			// latch has no `latched=<mode>` value to show.
+			`echo "$@" "latched=$mode" >> "${SHIM_LOG}"`,
 			`cat "${CACHED}" > "${SHIM_SEEN}" 2>/dev/null`,
 			`[ "$mode" = fail ] && { echo "invalid rule" >&2; exit 5; }`,
 			// `hold` parks the validate until the test releases it, so the test can
@@ -377,6 +379,12 @@ describe.skipIf(process.platform === "win32")(
 			setShim("holdfail");
 			const loser = refreshOpengrepRulePack(NOW);
 			await waitFor(shimCalls, (calls) => calls === 1);
+			// Deterministic pin (#4796): the logged call must carry the mode the shim
+			// latched, whatever the timing of the flip below. A log-before-latch shim
+			// logs `latched=` with no value and reds here.
+			expect(
+				fs.readFileSync(SHIM_LOG, "utf-8").trim().split("\n")[0],
+			).toContain("latched=holdfail");
 
 			setShim("ok");
 			body = packOf(155, "v2");
