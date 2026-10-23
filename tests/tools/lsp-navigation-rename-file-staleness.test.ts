@@ -367,7 +367,7 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 	// second contributor holding no record had its stale edit applied with no
 	// refusal (`rnewme`). Both mtime branches must see it: a write stamped after
 	// the request, and one inside the margin before it (a coarse clock).
-	it.each([
+	const unboundWriteStamps = [
 		{
 			label: "stamped after the request",
 			stampMs: 5_000,
@@ -378,7 +378,8 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 			stampMs: -1_000,
 			why: "it was modified within 2 s of the rename request",
 		},
-	])(
+	];
+	it.each(unboundWriteStamps)(
 		"refuses an edit from a contributor with no send record although another contributor's record matches ($label)",
 		async ({ stampMs, why }) => {
 			const recorded = makeRenameClient(
