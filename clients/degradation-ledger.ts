@@ -1046,7 +1046,10 @@ export type DegradationKind =
 	 * server and file for the same reason every other pull kind does.
 	 */
 	| "lsp-session-root-evicted"
-	/** A sibling LSP notification failed while touching a file. */
+	/**
+	 * A sibling LSP notification failed while touching a file, or a client's
+	 * detached `workspace/didCreateFiles` announcement threw (#4787).
+	 */
 	| "lsp-sibling-announcement"
 	/**
 	 * A language-server child process CLOSED without pi-lens having asked it to

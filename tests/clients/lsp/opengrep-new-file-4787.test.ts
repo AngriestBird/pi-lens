@@ -32,6 +32,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
 import { createLSPClient } from "../../../clients/lsp/client.js";
 import { LSPService } from "../../../clients/lsp/index.js";
 import { stopLSP } from "../../../clients/lsp/launch.js";
@@ -342,5 +346,51 @@ describe("opengrep hears a file created after spawn (#4787)", () => {
 			order: ["didOpen unsaved.py"],
 			createdWatched: ["watched unsaved.py 1"],
 		});
+	}, 15_000);
+
+	// Round 4 F15: the announcement is detached from the touch, so a send that
+	// throws a non-stream error must leave a bounded record, never an
+	// unhandled rejection or one log line per failed touch.
+	it("a failed didCreateFiles send is a counted lsp-sibling-announcement degradation", async () => {
+		resetDegradationLedger();
+		await spawnServer({ FAKE_LSP_DID_CREATE: "true" });
+		client = await createLSPClient({
+			serverId: "opengrep",
+			process: proc!,
+			root: dir,
+		});
+		const connection = client.connection;
+		const send = connection.sendNotification.bind(connection);
+		connection.sendNotification = ((method: string, ...rest: unknown[]) =>
+			method === "workspace/didCreateFiles"
+				? Promise.reject(new Error("write refused"))
+				: (send as (...args: unknown[]) => Promise<void>)(
+						method,
+						...rest,
+					)) as typeof connection.sendNotification;
+		const file = write("created.py");
+		client.notify.announceCreated([
+			{ filePath: file, stat: fs.statSync(file) },
+		]);
+
+		const group = await waitFor(
+			() =>
+				getDegradationSummary().find(
+					(entry) => entry.kind === "lsp-sibling-announcement",
+				),
+			(found) => found !== undefined,
+			{ timeoutMs: 5_000 },
+		);
+		expect(group).toEqual(
+			expect.objectContaining({
+				count: 1,
+				latestReasons: [
+					{
+						subject: "opengrep:workspace/didCreateFiles",
+						reason: "didCreateFiles failed: Error: write refused (count: 1)",
+					},
+				],
+			}),
+		);
 	}, 15_000);
 });

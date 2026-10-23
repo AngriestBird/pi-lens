@@ -7121,10 +7121,13 @@ export async function createLSPClient(options: {
 				if (isClientAlive(state)) state.watchQueue.flush();
 			},
 			announceCreated(entries) {
+				// Detached from the touch: a send that throws a non-stream error
+				// is counted with the touch's own announcement failures.
 				handleAnnounceCreated(state, entries).catch((cause: unknown) => {
-					logExtension({
-						subsystem: "lsp",
-						message: `LSP didCreate announcement failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+					incrementDegradationCount({
+						kind: "lsp-sibling-announcement",
+						subject: `${state.serverId}:workspace/didCreateFiles`,
+						reason: `didCreateFiles failed: ${String(cause)}`,
 					});
 				});
 			},
