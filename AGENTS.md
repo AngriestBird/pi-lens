@@ -1222,7 +1222,14 @@ file-scoped worklist and receives no project-wide scanner output.
   touch's `lsp-scanner-coverage-gap` reason carries the failure text. It
   composes with the hold of the empty publish before the rules load (table:
   `tests/clients/lsp/opengrep-pre-rules-publish-4763.test.ts`). Proven by
-  `tests/clients/lsp/opengrep-offline-config-failure.test.ts`.
+  `tests/clients/lsp/opengrep-offline-config-failure.test.ts`. The same gate
+  (`auxiliaryEmptyIsNotEvidence`) refuses an auxiliary's UNVERSIONED empty
+  publication that lands in the phase of the path's stored or pending finding:
+  one rules generation (`semgrep/rulesRefreshed` count) and one client send.
+  Opengrep's open-documents scan publishes `[]` for files it did not target, so
+  that empty is no scan; a new send or a rules refresh clears as before, and a
+  versioned or language-server publication keeps last write wins
+  (`lsp-auxiliary-empty-after-finding`, #4786).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records
