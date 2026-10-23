@@ -18,7 +18,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 
-const getServersForFileWithConfig = vi.fn();
 const registerQuietWindowTask = vi.fn();
 // Module scope so the spy identity survives `vi.resetModules()` — a
 // factory-local `vi.fn()` is rebuilt with the module, and the assertions would
@@ -55,10 +54,6 @@ let ledger: Ledger;
 
 beforeEach(async () => {
 	vi.resetModules();
-	(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
-		getServersForFileWithConfig,
-	);
-	getServersForFileWithConfig.mockReset();
 	registerQuietWindowTask.mockReset();
 	logCascade.mockClear();
 	mod = await import("../../../clients/lsp/cascade-tier.js");

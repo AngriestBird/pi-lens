@@ -352,6 +352,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the lsp_aux_wait_outcome and lsp_rules_refreshed rows are outside the getRecentLoggedPhases ring (LAST_PHASE_EXCLUDED) and test mode skips the file sink, so a passed-through logLatency spy is the only reader of the per-touch published counts and held-publish counter (#4763)",
 		},
+	// 2026-10-23 (#4785 F4): the touch's verdict over the real wait, publish
+	// handler and clear; only the client factory, which spawns the server, is
+	// replaced by a client over a real state.
+	"in-process-mock:clients/lsp/touch-cleared-deferred-wait-4785.test.ts::clients/lsp/client":
+		{
+			detector: "in-process-mock",
+			reason:
+				"createLSPClient spawns a language-server process; the double it returns runs the real clientWaitForDiagnostics, publish handler and clearDiagnosticsForPath, and a real server cannot be made to publish twice and receive a refresh clear inside one quiet window on demand",
+		},
 	// 2026-10-20 (#4638): tool availability is resolved so the spawn seam records the
 	// real argv (cwd + config args) without probing or installing ruff; only that
 	// resolver is doubled, and resolveToolCwd, ruffConfigArgs, safe-spawn stay real.
@@ -1214,6 +1223,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a language-server client is a spawned process; the registry's lease, capacity and idle paths are driven by its liveness and busy answers",
 	},
+	// 2026-10-23 (#4785 F4): see the in-process-mock entry for this file.
+	"service-double:clients/lsp/touch-cleared-deferred-wait-4785.test.ts::LSPClientInfo":
+		{
+			detector: "service-double",
+			reason:
+				"a language-server client is a spawned process; this client's wait, store and clear are the real ones over a real state, and only the publish order and the mid-wait clear are scripted",
+		},
 	// 2026-10-15 (#4485): see the cascade entries above.
 	"service-double:clients/quiet-window-session-straddle.test.ts::LSPClientInfo":
 		{

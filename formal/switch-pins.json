@@ -993,6 +993,19 @@
 			]
 		},
 		"lsp-diagnostics-freshness": {
+			"pins": {
+				"PendingGuard": {
+					"value": "TRUE",
+					"test": "tests/clients/lsp/pending-receipt-wait-4782.test.ts",
+					"title": "does not return the stored answer at once while a later receipt is pending",
+					"also": [
+						{
+							"test": "tests/clients/lsp/pending-receipt-wait-4782.test.ts",
+							"title": "does not settle on the stored answer when a later receipt arrives inside the quiet window"
+						}
+					]
+				}
+			},
 			"notCodeChoice": [
 				{
 					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
@@ -1007,7 +1020,8 @@
 					"constants": [
 						"VersionedServer",
 						"AsyncServer",
-						"ReplyFirst"
+						"ReplyFirst",
+						"Republish"
 					]
 				},
 				{

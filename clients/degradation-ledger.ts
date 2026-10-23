@@ -708,6 +708,15 @@ export type DegradationKind =
 	| "log-sink-truncate-refused"
 	| "log-sink-write-failure"
 	| "lsp-adopted-root-evicted"
+	/**
+	 * #4786: an auxiliary's unversioned EMPTY publication refused because the
+	 * path's stored or pending finding came from the same phase: one rules
+	 * generation (`semgrep/rulesRefreshed` count) and one client send. Opengrep's
+	 * open-documents scan publishes `[]` for every file it ever scanned and did
+	 * not target, which read as a clean file. Subject
+	 * `<serverId>:empty-after-finding:<file>:<phase>`.
+	 */
+	| "lsp-auxiliary-empty-after-finding"
 	| "lsp-breaker"
 	| "lsp-capability-skip"
 	/**
@@ -2008,6 +2017,16 @@ export type DegradationKind =
 	 * dogfood summary. See `INFORMATIONAL_DEGRADATION_KINDS` below.
 	 */
 	| "unclassified-mutating-tool"
+	/**
+	 * #4645: the warm incumbent abandoned its inferred-project membership probe
+	 * so the reply could still land before the request's deadline. The reply
+	 * carries the server's raw rows without the verdict, so the attached reader
+	 * renders them at their raw severity (the pre-#4645 answer for that edit)
+	 * while warm attach survives. Subject is the cause: `probe-timeout` (the
+	 * probe ran out its window) or `no-time-left` (the touch left none). Once per
+	 * session per cause.
+	 */
+	| "warm-attach-membership-probe-abandoned"
 	/**
 	 * #3389: an accepted socket on the warm diagnostics server emitted `error`.
 	 * A `net.Socket` with no `error` listener RETHROWS, so before this kind
