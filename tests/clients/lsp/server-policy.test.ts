@@ -55,6 +55,20 @@ const dirs: string[] = [];
 const IS_WIN = process.platform === "win32";
 
 /**
+ * Stamp every directory under `root` (and `root`) in 2023, so the root memo's
+ * first walk sees records older than the racy window and stores them (#4756).
+ * Fresh fixture directories are racy by design: without this pin the first
+ * resolution is never memoized and a case named for the memo exercises only
+ * the walk, so a serve path forced to answer "fresh" would stay green.
+ */
+function pinTreeOld(root: string): void {
+	const OLD_SECONDS = 1_700_000_000;
+	for (const entry of fs.readdirSync(root, { withFileTypes: true }))
+		if (entry.isDirectory()) pinTreeOld(path.join(root, entry.name));
+	fs.utimesSync(root, OLD_SECONDS, OLD_SECONDS);
+}
+
+/**
  * Build a fake managed tools tree for the classic TypeScript fallback (#1436):
  * a project dir, a managed `node_modules/.bin` holding the wrapper and `tsc`,
  * and a TypeScript package whose version and `lib/tsserver.js` the caller
@@ -671,6 +685,7 @@ describe("lsp server policy", () => {
 		fs.writeFileSync(path.join(ws, "Package.swift"), "// tools\n");
 		fs.writeFileSync(main, "print(1)\n");
 		fs.writeFileSync(other, "print(2)\n");
+		pinTreeOld(ws);
 
 		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
 		try {
@@ -699,6 +714,8 @@ describe("lsp server policy", () => {
 		fs.writeFileSync(path.join(ws, "Package.swift"), "// tools\n");
 		fs.writeFileSync(path.join(feature, "Package.swift"), "// nested\n");
 		fs.writeFileSync(main, "print(1)\n");
+
+		pinTreeOld(ws);
 
 		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
 		try {
@@ -861,6 +878,7 @@ describe("lsp server policy", () => {
 			fs.mkdirSync(path.dirname(file), { recursive: true });
 			fs.writeFileSync(file, "");
 			materialize(ws, pattern);
+			pinTreeOld(ws);
 
 			const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
 			try {
@@ -920,6 +938,7 @@ describe("lsp server policy", () => {
 			// the marker into it later leaves the walked directory's own mtime alone.
 			const subdir = path.join(nested, ...relative.slice(0, -1));
 			fs.mkdirSync(subdir, { recursive: true });
+			pinTreeOld(ws);
 
 			const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
 			try {
