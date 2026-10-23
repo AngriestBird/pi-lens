@@ -113,6 +113,10 @@ import {
 	createGenerationSource,
 	type GenerationHandle,
 } from "../generation-guard.js";
+import {
+	isUntrustedProjectPath,
+	recordProjectCommandRefusal,
+} from "../session-repository.js";
 
 // --- Types ---
 
@@ -2494,11 +2498,25 @@ function dotnetToolCandidates(tool: string): string[] {
  * Both filename forms for a tool in a directory (`.exe` first on Windows). A
  * managed binary may carry the extension or not depending on how the toolchain
  * dropped it, so we try both.
+ *
+ * #4530 (#4776): these are toolchain dirs (`$GOPATH/bin`, `$CARGO_HOME/bin`),
+ * and the launcher starts a named file without judging it, so an entry that is
+ * the session repository's bytes is dropped here until pi trusts the project.
  */
 function binExeVariants(dir: string, tool: string): string[] {
-	return process.platform === "win32"
-		? [path.join(dir, `${tool}.exe`), path.join(dir, tool)]
-		: [path.join(dir, tool)];
+	const variants =
+		process.platform === "win32"
+			? [path.join(dir, `${tool}.exe`), path.join(dir, tool)]
+			: [path.join(dir, tool)];
+	const admitted: string[] = [];
+	for (const candidate of variants) {
+		if (existsSync(candidate) && isUntrustedProjectPath(candidate)) {
+			recordProjectCommandRefusal(candidate);
+			continue;
+		}
+		admitted.push(candidate);
+	}
+	return admitted;
 }
 
 /**

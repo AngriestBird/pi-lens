@@ -32,6 +32,7 @@ import {
 	clearFormatterCache,
 	gofmtFormatter,
 } from "../../clients/formatters.js";
+import { GovulncheckClient } from "../../clients/govulncheck-client.js";
 import {
 	getToolPath,
 	isCommandAvailable,
@@ -50,10 +51,12 @@ import {
 	_resetPackageManagerCache,
 	findGlobalBinary,
 } from "../../clients/package-manager.js";
+import { GoServer } from "../../clients/lsp/server.js";
 import {
 	resetProjectTrust,
 	setProjectTrustState,
 } from "../../clients/project-trust.js";
+import { RustClient } from "../../clients/rust-client.js";
 import {
 	findCommandAsync,
 	safeSpawnAsync,
@@ -649,6 +652,81 @@ describe.skipIf(!POSIX)("package-manager global lookups (#4530)", () => {
 		expect(await getToolPath("yamllint")).toBe(
 			path.join(userBase, "bin", "yamllint"),
 		);
+		expect(ran(marker)).toBe(true);
+	});
+
+	// #4776 round 4: the toolchain dirs the LSP, rust-clippy and govulncheck
+	// name (`$GOPATH/bin`, `~/.cargo/bin`, `$GOBIN`) are the same global-dir
+	// rung: the caller starts the file it finds by path, past the spawn seam's
+	// lookup judgment.
+	it("I8/A3: the LSP's $GOPATH/bin candidate that links into the project is refused", async () => {
+		const marker = path.join(layout.root, "project-ran");
+		const target = plant(path.join(layout.main, "tools"), marker, "gopls");
+		const gopath = path.join(layout.outside, "gopath");
+		fs.mkdirSync(path.join(gopath, "bin"), { recursive: true });
+		fs.symlinkSync(target, path.join(gopath, "bin", "gopls"));
+		cleanups.push(withEnv({ GOPATH: gopath }));
+
+		expect(
+			await GoServer.spawn(layout.main, { allowInstall: false }),
+		).toBeUndefined();
+		expect(ran(marker)).toBe(false);
+		expect(trustRefusals()).toEqual([`project-command:${target}`]);
+		// Control: trusted, the same candidate is started (the stand-in exits,
+		// so the launch itself fails after the marker is written).
+		setProjectTrustState("trusted");
+		await expect(
+			GoServer.spawn(layout.main, { allowInstall: false }),
+		).rejects.toThrow(/exited immediately/);
+		expect(ran(marker)).toBe(true);
+	});
+
+	it("I8/A3: rust-clippy's ~/.cargo/bin candidate that links into the project is refused", async () => {
+		const marker = path.join(layout.root, "project-ran");
+		const target = plant(path.join(layout.main, "tools"), marker, "cargo");
+		const cargoBin = path.join(layout.home, ".cargo", "bin");
+		fs.mkdirSync(cargoBin, { recursive: true });
+		fs.symlinkSync(target, path.join(cargoBin, "cargo"));
+		// The runner starts whatever path the client answers.
+		const runAnswer = async (): Promise<string | null> => {
+			const found = await new RustClient().findCargoPathAsync();
+			await safeSpawnAsync(found ?? "cargo", ["--version"], { timeout: 5000 });
+			return found;
+		};
+
+		expect(await runAnswer()).not.toBe(path.join(cargoBin, "cargo"));
+		expect(ran(marker)).toBe(false);
+		expect(trustRefusals()).toEqual([`project-command:${target}`]);
+		setProjectTrustState("trusted");
+		expect(await runAnswer()).toBe(path.join(cargoBin, "cargo"));
+		expect(ran(marker)).toBe(true);
+	});
+
+	it("I8/A3: govulncheck's $GOBIN candidate that links into the project is refused", async () => {
+		const marker = path.join(layout.root, "project-ran");
+		const target = plant(
+			path.join(layout.main, "tools"),
+			marker,
+			"govulncheck",
+		);
+		const gobin = path.join(layout.outside, "gobin");
+		fs.mkdirSync(gobin);
+		fs.symlinkSync(target, path.join(gobin, "govulncheck"));
+		fs.writeFileSync(
+			path.join(layout.main, "go.mod"),
+			"module example.com/m\n",
+		);
+		// A `go` whose install succeeds without writing anything: the client then
+		// walks its canonical dirs for the binary.
+		stub.plantOnPath("go");
+		cleanups.push(withEnv({ GOBIN: gobin, GOPATH: undefined }));
+
+		const refused = await new GovulncheckClient().analyze(layout.main);
+		expect(refused.summary).toBe("govulncheck not installed");
+		expect(ran(marker)).toBe(false);
+		expect(trustRefusals()).toEqual([`project-command:${target}`]);
+		setProjectTrustState("trusted");
+		await new GovulncheckClient().analyze(layout.main);
 		expect(ran(marker)).toBe(true);
 	});
 
