@@ -41,9 +41,11 @@ import {
 	isAtOrAboveHomeDir,
 	isWithinForm,
 	normalizeEphemeralMapKey,
+	normalizeMapKey,
 	realpathOrResolve,
 	walkUpDirs,
 } from "./path-utils.js";
+import { PathKeyedMap } from "./path-keyed-map.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { logExtension } from "./extension-log.js";
 import { machineStateDir } from "./probe-home-state.js";
@@ -115,7 +117,7 @@ export function sessionRepositoryJudge(): (target: string) => boolean {
 		.filter((dir) => fs.existsSync(dir))
 		.map((dir) => pathForm(realpathOrResolve(dir)));
 	let sessionCheckout: ReturnType<typeof resolveGitCheckout> | undefined;
-	const ownerByDir = new Map<string, string | null>();
+	const ownerByDir = new PathKeyedMap<string | null>(normalizeMapKey);
 	return (target) => {
 		const real = realpathOrResolve(target);
 		const form = pathForm(real);
