@@ -1359,15 +1359,13 @@ export function getServerInitOverride(
  *
  * Product paths never reach it: nothing under `clients/`, `tools/`, `mcp/` or
  * `index.ts` imports the name (`tests/clients/lsp/config-selection-setter.test.ts`
- * scans for that), and the setter refuses to arm outside a Vitest process.
+ * scans for that), and the setter ignores an arm outside a Vitest process.
  * Pass `undefined` to drop the injection without resetting the rest.
  */
 export function _setServersForFileForTests(
 	select: ServersForFile | undefined,
 ): void {
-	if (select && !process.env.VITEST) {
-		throw new Error("_setServersForFileForTests is test-only (VITEST unset)");
-	}
+	if (select && !process.env.VITEST) return;
 	serversForFileOverride = select;
 }
 

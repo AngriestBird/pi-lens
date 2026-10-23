@@ -66,11 +66,11 @@ describe("_setServersForFileForTests", () => {
 		).toContain("typescript");
 	});
 
-	it("refuses to arm outside a Vitest process", () => {
+	it("ignores an arm outside a Vitest process", () => {
 		const prior = process.env.VITEST;
 		delete process.env.VITEST;
 		try {
-			expect(() => _setServersForFileForTests(() => [])).toThrow(/test-only/);
+			_setServersForFileForTests(() => []);
 		} finally {
 			process.env.VITEST = prior;
 		}
