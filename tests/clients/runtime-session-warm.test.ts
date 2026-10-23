@@ -111,26 +111,13 @@ function makeDeps(
 	}) as any;
 }
 
-// Recurrence it prevents (#4709): the group-B suites run the REAL config loader,
-// which reads `<HOME>/.pi-lens/config.json` as the machine-global layer. The
-// suite's own `pinFixtureHome` is what keeps a maintainer's real global config
-// out; nothing observed it. This file-level hook runs BEFORE the suite's pin
-// and stands a hostile "real home" in place, so a lost pin reds every case
-// that starts a session here, and the isolation case below names it.
-beforeEach(() => {
-	const { home } = pinFixtureHome("runtime-session-warm-hostile");
-	fs.mkdirSync(path.join(home, ".pi-lens"), { recursive: true });
-	fs.writeFileSync(
-		path.join(home, ".pi-lens", "config.json"),
-		JSON.stringify({ warmFiles: ["hostile.cpp"] }),
-	);
-});
-
 describe("warmFiles session start", () => {
+	let pinnedHome: string;
+
 	beforeEach(async () => {
 		vi.clearAllMocks();
 		// The real config loader walks up from the session cwd to HOME (#4709).
-		pinFixtureHome("runtime-session-warm");
+		pinnedHome = pinFixtureHome("runtime-session-warm").home;
 
 		await installLspServiceDouble({
 			touchFile: mockTouchFile,
@@ -192,15 +179,25 @@ describe("warmFiles session start", () => {
 		}
 	}, 15_000);
 
-	it("keeps the real home's global config out of the loader (the HOME pin)", async () => {
-		const env = setupTestEnvironment("pi-lens-warm-");
+	it("stops the config walk at the pinned home, so a config above it is never read (the HOME pin)", async () => {
+		// Recurrence it prevents (#4709): the group-B suites run the REAL config
+		// loader, whose project walk is bounded by `os.homedir()`. The pin is what
+		// bounds it at a fixture home; nothing observed that, so a lost pin let
+		// the walk read whatever sits above the session cwd on the maintainer's
+		// machine. The planted config sits ABOVE the pinned home: only a walk
+		// ceilinged at that home leaves it unread.
+		const project = path.join(pinnedHome, "project");
+		fs.mkdirSync(project, { recursive: true });
+		const above = path.join(path.dirname(pinnedHome), ".pi-lens.json");
+		fs.writeFileSync(
+			above,
+			JSON.stringify({ lsp: { warmFiles: ["hostile.cpp"] } }),
+		);
 		try {
-			// The hostile home the file-level hook planted names `hostile.cpp`; the
-			// pinned fixture home has no global config, so the loader answers none.
-			const config = await loadLSPConfig(env.tmpDir);
+			const config = await loadLSPConfig(project);
 			expect(config.warmFiles ?? []).toEqual([]);
 		} finally {
-			env.cleanup();
+			fs.rmSync(above, { force: true });
 		}
 	});
 
