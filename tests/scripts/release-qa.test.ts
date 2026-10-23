@@ -66,6 +66,7 @@ import {
 	PINNED_ENV_KEYS,
 	pollToTerminal,
 	awaitWarmLog,
+	captureGetCommands,
 	removeScratchRoot,
 	rowReportShows,
 	rowProbeRequest,
@@ -334,8 +335,8 @@ describe("release-QA session-start LSP warm witness (#4316)", () => {
 	});
 
 	// Recurrence: a fixed 500 ms sleep read the log before a slow host's warm
-	// finished, turning a healthy candidate red. The reader here has no record
-	// for its first three reads.
+	// finished, turning a healthy candidate red. The reader has no record for
+	// its first three reads.
 	it("waits for the warm record instead of reading the log once", async () => {
 		let reads = 0;
 		const text = await awaitWarmLog(
@@ -343,36 +344,169 @@ describe("release-QA session-start LSP warm witness (#4316)", () => {
 				reads += 1;
 				return reads > 3 ? resolved : "";
 			},
-			{ capMs: 2000, intervalMs: 5, graceMs: 5 },
+			{ capMs: 60, intervalMs: 5 },
 		);
 		expect(classifyLspWarmLog(text).status).toBe("pass");
 		expect(reads).toBeGreaterThan(3);
 	});
 
-	// Recurrence: a failure landing after the success record (a concurrent
-	// formatter warm) must still be read, hence the grace re-read.
-	it("re-reads after the grace so a late warm failure is seen", async () => {
+	// Recurrence (review F1): a sibling warm that failed AFTER the success
+	// record passed the row, because the wait ended 500 ms after the first
+	// record. The failure here lands on the 6th read, well after the success.
+	it("keeps observing after the success record so a late warm failure is seen", async () => {
 		let reads = 0;
 		const text = await awaitWarmLog(
 			() => {
 				reads += 1;
-				return reads === 1
+				return reads < 6
 					? resolved
-					: `${resolved}{"subsystem":"format","message":"formatter warm failed: x"}\n`;
+					: `${resolved}{"subsystem":"format","message":"formatter warm failed: late"}\n`;
 			},
-			{ capMs: 2000, intervalMs: 5, graceMs: 5 },
+			{ capMs: 200, intervalMs: 5 },
 		);
 		expect(classifyLspWarmLog(text).status).toBe("fail");
 	});
 
 	it("gives up at the cap and hands the classifier an empty witness", async () => {
-		const text = await awaitWarmLog(() => "", {
-			capMs: 30,
-			intervalMs: 5,
-			graceMs: 5,
-		});
+		const text = await awaitWarmLog(() => "", { capMs: 30, intervalMs: 5 });
 		expect(classifyLspWarmLog(text).status).toBe("fail");
 	});
+
+	// Recurrence (review F4): a reused --scratch-root keeps extension.log, so a
+	// previous run's success record passed a candidate that logged nothing.
+	it("ignores records stamped before this session started", async () => {
+		const old =
+			'{"ts":"2020-01-01T00:00:00.000Z","subsystem":"lsp","message":"LSP warm resolved"}\n';
+		const mine = `{"ts":"2026-10-23T12:00:00.000Z","subsystem":"lsp","message":"LSP warm resolved"}\n`;
+		const since = "2026-10-23T11:00:00.000Z";
+		const stale = await awaitWarmLog(() => old, {
+			capMs: 20,
+			intervalMs: 5,
+			sinceIso: since,
+		});
+		expect(classifyLspWarmLog(stale).status).toBe("fail");
+		// A record with no usable ts cannot prove it is this session's: refused.
+		const undated = await awaitWarmLog(() => resolved, {
+			capMs: 20,
+			intervalMs: 5,
+			sinceIso: since,
+		});
+		expect(classifyLspWarmLog(undated).status).toBe("fail");
+		const fresh = await awaitWarmLog(() => old + mine, {
+			capMs: 20,
+			intervalMs: 5,
+			sinceIso: since,
+		});
+		expect(classifyLspWarmLog(fresh).status).toBe("pass");
+	});
+});
+
+// Review F2/F3: the row's wiring at the startRpcSession process boundary. The
+// fake pi answers get_commands, then logs its warm records 150 ms and 450 ms
+// later, the way a real session's queued writer does.
+describe("release-QA RPC capture carries the extension log (#4316)", () => {
+	const FAKE_PI = [
+		"#!/usr/bin/env node",
+		'import * as fs from "node:fs";',
+		'import * as path from "node:path";',
+		"const home = process.env.PI_LENS_HOME;",
+		"const mode = process.env.FAKE_PI_MODE;",
+		"const log = (message) =>",
+		'\tfs.appendFileSync(path.join(home, "extension.log"), JSON.stringify({ ts: new Date().toISOString(), level: "debug", subsystem: "lsp", message }) + "\\n");',
+		'process.stdin.setEncoding("utf8");',
+		'let buf = "";',
+		'process.stdin.on("data", (chunk) => {',
+		"\tbuf += chunk;",
+		'\tif (!buf.includes("get_commands")) return;',
+		'\tbuf = "";',
+		'\tprocess.stdout.write(JSON.stringify({ type: "response", command: "get_commands", data: { commands: [] } }) + "\\n");',
+		'\tif (mode === "unreadable") fs.mkdirSync(path.join(home, "extension.log"));',
+		'\tif (mode !== "silent" && mode !== "unreadable") setTimeout(() => log("LSP warm resolved"), 150);',
+		'\tif (mode === "late-failure") setTimeout(() => log("formatter warm failed: late"), 450);',
+		"});",
+		"process.stdin.resume();",
+		"",
+	].join("\n");
+
+	async function capture(mode: string, options: { prior?: string } = {}) {
+		const dir = fs.mkdtempSync(
+			path.join(REPO_ROOT, ".probe-home", "release-qa-warm-capture-"),
+		);
+		try {
+			const home = path.join(dir, "home");
+			fs.mkdirSync(home, { recursive: true });
+			if (options.prior)
+				fs.writeFileSync(path.join(home, "extension.log"), options.prior);
+			const piBin = path.join(dir, "fake-pi.mjs");
+			fs.writeFileSync(piBin, FAKE_PI);
+			fs.chmodSync(piBin, 0o755);
+			return await captureGetCommands({
+				piBin,
+				cwd: dir,
+				env: { ...process.env, PI_LENS_HOME: home, FAKE_PI_MODE: mode },
+				warmWaitMs: 900,
+			});
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+		}
+	}
+
+	// Recurrence: dropping the wait or the extensionLog field leaves the row
+	// permanently red (review F2 mutation `awaitWarm: true -> false`), with every
+	// unit case above green.
+	it("returns the record the session logs after get_commands", async () => {
+		const result = await capture("healthy");
+		expect(result.ok).toBe(true);
+		expect(classifyLspWarmLog(result.extensionLog ?? "").status).toBe("pass");
+	}, 20_000);
+
+	it("sees a sibling warm failure that lands after the success record", async () => {
+		const result = await capture("late-failure");
+		expect(classifyLspWarmLog(result.extensionLog ?? "")).toEqual({
+			status: "fail",
+			detail: "formatter warm failed: late",
+		});
+	}, 20_000);
+
+	it("does not count a previous run's record in a reused scratch home", async () => {
+		const result = await capture("silent", {
+			prior:
+				'{"ts":"2020-01-01T00:00:00.000Z","subsystem":"lsp","message":"LSP warm resolved"}\n',
+		});
+		expect(classifyLspWarmLog(result.extensionLog ?? "").status).toBe("fail");
+	}, 20_000);
+
+	// Recurrence (review F3): a throwing log read was an unhandled rejection
+	// that killed the runner; it now finishes the capture with the error.
+	it("finishes with the read error instead of rejecting", async () => {
+		const result = await capture("unreadable");
+		expect(result.ok).toBe(true);
+		expect(result.extensionLog).toBe("");
+		expect(result.logError).toMatch(/EISDIR|illegal operation/);
+	}, 20_000);
+
+	// The boot probe and the git-install capture judge no warm record.
+	it("skips the wait when the caller has no pi-lens to wait for", async () => {
+		const dir = fs.mkdtempSync(
+			path.join(REPO_ROOT, ".probe-home", "release-qa-warm-skip-"),
+		);
+		try {
+			const piBin = path.join(dir, "fake-pi.mjs");
+			fs.writeFileSync(piBin, FAKE_PI);
+			fs.chmodSync(piBin, 0o755);
+			const home = path.join(dir, "home");
+			fs.mkdirSync(home);
+			const result = await captureGetCommands({
+				piBin,
+				cwd: dir,
+				env: { ...process.env, PI_LENS_HOME: home, FAKE_PI_MODE: "healthy" },
+				awaitWarm: false,
+			});
+			expect(result).toMatchObject({ ok: true, extensionLog: "" });
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+		}
+	}, 20_000);
 });
 
 describe("release-QA tool-smoke install lane (#2663)", () => {

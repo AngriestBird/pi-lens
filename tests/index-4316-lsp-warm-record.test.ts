@@ -7,6 +7,10 @@
  * from the sink the LOADED copy's own writer queued, in a real pi
  * `AgentSession` (tier 2, `tests/support/pi-session.ts`).
  *
+ * The expected literal is the release gate's own constant, so a rename on
+ * either side reds this test instead of silently reddening a release (review
+ * F8 of #4802).
+ *
  * Recurrence this pins: 4.4.2 shipped with the warm dead (#4314) because its
  * only signal was a failure line; a success record emitted per call or per
  * turn would instead bury that signal and grow the log without bound.
@@ -14,6 +18,7 @@
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { flushAllNdjsonWriters } from "../clients/ndjson-logger.js";
+import { LSP_WARM_RESOLVED } from "../scripts/release-qa.mjs";
 import { readNdjsonRows } from "./support/ndjson-rows.js";
 import {
 	fauxText,
@@ -36,7 +41,7 @@ async function warmMessages(): Promise<string[]> {
 }
 
 describe("session-start LSP warm record (#4316)", { timeout: 30_000 }, () => {
-	it("logs one LSP warm resolved per session, not per turn, and no failure", async () => {
+	it("logs one LSP warm resolved per session start, not per turn, and no failure", async () => {
 		const handle = await startPiSession({
 			root: fixture.root,
 			cwd: path.join(fixture.root, "warm-record", "proj"),
@@ -44,10 +49,10 @@ describe("session-start LSP warm record (#4316)", { timeout: 30_000 }, () => {
 		});
 		// `processing`: the warm is a floating promise, so wait for its record.
 		await vi.waitFor(async () => {
-			expect(await warmMessages()).toContain("LSP warm resolved");
+			expect(await warmMessages()).toContain(LSP_WARM_RESOLVED);
 		});
 		for (const turn of ["a", "b", "c"]) await handle.prompt(turn);
-		expect(await warmMessages()).toEqual(["LSP warm resolved"]);
+		expect(await warmMessages()).toEqual([LSP_WARM_RESOLVED]);
 		expect(handle.errors).toEqual([]);
 	});
 });
