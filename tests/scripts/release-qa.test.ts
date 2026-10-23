@@ -428,7 +428,10 @@ describe("release-QA RPC capture carries the extension log (#4316)", () => {
 		"",
 	].join("\n");
 
-	async function capture(mode: string, options: { prior?: string } = {}) {
+	async function capture(
+		mode: string,
+		options: { prior?: string; timeoutMs?: number; warmWaitMs?: number } = {},
+	) {
 		const dir = fs.mkdtempSync(
 			path.join(REPO_ROOT, ".probe-home", "release-qa-warm-capture-"),
 		);
@@ -444,7 +447,8 @@ describe("release-QA RPC capture carries the extension log (#4316)", () => {
 				piBin,
 				cwd: dir,
 				env: { ...process.env, PI_LENS_HOME: home, FAKE_PI_MODE: mode },
-				warmWaitMs: 900,
+				timeoutMs: options.timeoutMs,
+				warmWaitMs: options.warmWaitMs ?? 900,
 			});
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
@@ -474,6 +478,18 @@ describe("release-QA RPC capture carries the extension log (#4316)", () => {
 				'{"ts":"2020-01-01T00:00:00.000Z","subsystem":"lsp","message":"LSP warm resolved"}\n',
 		});
 		expect(classifyLspWarmLog(result.extensionLog ?? "").status).toBe("fail");
+	}, 20_000);
+
+	// Recurrence (review F3): the response deadline kept running through the
+	// warm wait, so a slow registration plus the wait read as "no get_commands
+	// response". get_commands goes out at 3 s and the answer lands just after;
+	// the 3.6 s deadline would expire mid-wait if the response did not clear it.
+	it("does not let the response deadline expire during the warm wait", async () => {
+		const result = await capture("silent", {
+			timeoutMs: 3600,
+			warmWaitMs: 1500,
+		});
+		expect(result.ok).toBe(true);
 	}, 20_000);
 
 	// Recurrence (review F3): a throwing log read was an unhandled rejection
