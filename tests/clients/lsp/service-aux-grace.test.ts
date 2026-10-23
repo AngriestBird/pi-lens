@@ -1940,6 +1940,12 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
 	});
 
 	afterEach(() => {
+		// The "primary-only" case spies on `setTimeout` while fake timers are
+		// installed. Restoring the spy AFTER `useRealTimers` (as the next
+		// describe's `restoreAllMocks` did) put the stale fake `setTimeout` back
+		// on globalThis, and the real-timer #2776 case then never woke (#4709:
+		// red under shuffle seeds 202 and 424 on base too).
+		vi.restoreAllMocks();
 		vi.useRealTimers();
 	});
 

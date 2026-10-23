@@ -23,12 +23,23 @@ import {
 	assertNonEmptyScan,
 	listSourceFiles,
 	relativePosix,
+	stripSource,
 } from "../../support/sweep-kit.js";
 import { repoRoot } from "../../support/flake-shape-scan.js";
 
 afterEach(() => {
 	resetLSPConfigStateForTests();
 });
+
+const SETTER = "_setServersForFileForTests";
+
+/**
+ * A source that USES the setter. Comments are blanked (prose is no use); string
+ * literals are kept, because `mod["_set..."]` is a use the identifier scan
+ * would miss.
+ */
+const namesSetter = (source: string): boolean =>
+	stripSource(source, { strings: "keep" }).includes(SETTER);
 
 describe("_setServersForFileForTests", () => {
 	it("answers getServersForFileWithConfig and the primary lookup derived from it", () => {
@@ -103,10 +114,23 @@ describe("_setServersForFileForTests", () => {
 		].filter((file) => !defining.has(file));
 		assertNonEmptyScan("product source files", files.length, 100);
 		const naming = files
-			.filter((file) =>
-				fs.readFileSync(file, "utf8").includes("_setServersForFileForTests"),
-			)
+			.filter((file) => namesSetter(fs.readFileSync(file, "utf8")))
 			.map((file) => relativePosix(repoRoot, file));
 		expect(naming.join(",")).toBe("");
+	});
+
+	it("reads code, not prose: a comment that mentions the setter is no use of it", () => {
+		// Recurrence: a raw-text scan reds on a doc comment in `clients/` that
+		// documents the seam (greptile thread on #4779), so a harmless comment
+		// fails the suite without any product path reaching the setter.
+		expect(namesSetter(`// ${SETTER} is test-only\nexport const x = 1;`)).toBe(
+			false,
+		);
+		expect(namesSetter(`/** see ${SETTER} */\nexport const x = 1;`)).toBe(
+			false,
+		);
+		expect(namesSetter(`const f = mod["${SETTER}"];`)).toBe(true);
+		expect(namesSetter(`import { ${SETTER} } from "./config.js";`)).toBe(true);
+		expect(namesSetter(`${SETTER}(() => []);`)).toBe(true);
 	});
 });

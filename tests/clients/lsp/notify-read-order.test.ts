@@ -165,9 +165,18 @@ async function setup() {
 	return { state, wire, gates, touch, pendingQueued, recordFp, service };
 }
 
+// #4709: the setter is module state. It is armed per case at file scope and
+// dropped after each case, so no describe reads a list an earlier describe
+// armed (a shuffled run orders the describes freely).
+beforeEach(() => {
+	_setServersForFileForTests(getServersForFileWithConfig);
+});
+afterEach(() => {
+	_setServersForFileForTests(undefined);
+});
+
 describe("#3481 — the notify queue sends the latest read, not the latest enqueued", () => {
 	beforeEach(() => {
-		_setServersForFileForTests(getServersForFileWithConfig);
 		vi.useFakeTimers({ toFake: ["Date"] });
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();

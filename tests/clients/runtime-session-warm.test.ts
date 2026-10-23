@@ -5,7 +5,9 @@
  */
 
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
+import * as fs from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleSessionStart } from "../../clients/runtime-session.js";
 import {
@@ -17,7 +19,10 @@ import {
 const mockTouchFile = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
 import { isSessionRootRegistered } from "../../clients/lsp/session-roots.js";
-import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import {
+	loadLSPConfig,
+	resetLSPConfigStateForTests,
+} from "../../clients/lsp/config.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import {
 	installLspService,
@@ -106,6 +111,21 @@ function makeDeps(
 	}) as any;
 }
 
+// Recurrence it prevents (#4709): the group-B suites run the REAL config loader,
+// which reads `<HOME>/.pi-lens/config.json` as the machine-global layer. The
+// suite's own `pinFixtureHome` is what keeps a maintainer's real global config
+// out; nothing observed it. This file-level hook runs BEFORE the suite's pin
+// and stands a hostile "real home" in place, so a lost pin reds every case
+// that starts a session here, and the isolation case below names it.
+beforeEach(() => {
+	const { home } = pinFixtureHome("runtime-session-warm-hostile");
+	fs.mkdirSync(path.join(home, ".pi-lens"), { recursive: true });
+	fs.writeFileSync(
+		path.join(home, ".pi-lens", "config.json"),
+		JSON.stringify({ warmFiles: ["hostile.cpp"] }),
+	);
+});
+
 describe("warmFiles session start", () => {
 	beforeEach(async () => {
 		vi.clearAllMocks();
@@ -171,6 +191,18 @@ describe("warmFiles session start", () => {
 			restoreStartupMode();
 		}
 	}, 15_000);
+
+	it("keeps the real home's global config out of the loader (the HOME pin)", async () => {
+		const env = setupTestEnvironment("pi-lens-warm-");
+		try {
+			// The hostile home the file-level hook planted names `hostile.cpp`; the
+			// pinned fixture home has no global config, so the loader answers none.
+			const config = await loadLSPConfig(env.tmpDir);
+			expect(config.warmFiles ?? []).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
 
 	it("skips touchFile when warmFiles is empty and the project has no source files", async () => {
 		const env = setupTestEnvironment("pi-lens-warm-");

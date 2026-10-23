@@ -62,9 +62,18 @@ function fakeClient(waitMs: number, diags: ReturnType<typeof diag>[]) {
 	};
 }
 
+// #4709: the setter is module state. It is armed per case at file scope and
+// dropped after each case, so no describe reads a list an earlier describe
+// armed (a shuffled run orders the describes freely).
+beforeEach(() => {
+	_setServersForFileForTests(getServersForFileWithConfig);
+});
+afterEach(() => {
+	_setServersForFileForTests(undefined);
+});
+
 describe("getDiagnostics — mode-aware grace (1B)", () => {
 	beforeEach(() => {
-		_setServersForFileForTests(getServersForFileWithConfig);
 		vi.useFakeTimers();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
