@@ -3,4 +3,4 @@ section: Fixed
 audience: internal
 ---
 
-- Release-QA now witnesses the extension's session-start LSP warm through the installed pi RPC session.
+- Release-QA witnesses the session-start LSP warm in the installed pi RPC session, and the extension logs one `LSP warm resolved` record per session start (#4316).
