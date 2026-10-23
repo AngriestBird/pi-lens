@@ -14,10 +14,6 @@ ignore: |
   # Vendored Vale style packages (.vale.ini's own StylesPath), same
   # not-ours-to-reformat reasoning.
   .vale/styles/
-  # Pinned upstream rule pack (#4765): vendored data in upstream's formatting,
-  # rebuilt byte for byte by scripts/build-opengrep-pack.mjs --check — not ours
-  # to reformat (same reasoning as .vale/styles/).
-  vendor/opengrep-rules/
   # Runner fixtures intentionally exercise malformed/unusual YAML.
   tests/fixtures/
 

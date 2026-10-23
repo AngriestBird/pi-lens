@@ -44,10 +44,6 @@ extend-exclude = [
   # "Thi…"), so most hits here are ellipsis artifacts, not misspellings —
   # plus it inherits any real vendored typo ("insufficent") it doesn't own.
   "docs/ast-grep_rules_catalog.md",
-  # Pinned upstream rule pack (#4765): vendored data with upstream's own
-  # spellings, rebuilt byte for byte by scripts/build-opengrep-pack.mjs --check
-  # — not pi-lens's prose to correct.
-  "vendor/opengrep-rules/**",
   # Runner fixtures deliberately contain typos to exercise the
   # spellcheck/biome parsers themselves (same #1917/#1933 precedent as
   # .oxlintrc.json's tests/fixtures exclude) — the typos ARE the test data.

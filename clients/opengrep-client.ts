@@ -28,8 +28,8 @@
  * Enablement mirrors the LSP server (`opengrepInitialization` in server.ts):
  * opengrep is structurally always-on — `resolveOpengrepConfig` only chooses
  * WHICH rules run (a local `.opengrep.yml`/`.semgrep.yml` rule file if
- * present, else pi-lens's own rule pack — never the `auto` download, #4765),
- * not whether it runs at all.
+ * present, else the registry pack pi-lens refreshed into its cache, else the `auto`
+ * registry ruleset, #4765), not whether it runs at all.
  *
  * `// nosemgrep` / `# nosemgrep` suppression: unlike opengrep's LSP mode
  * (which does NOT honor it natively — that gap is exactly why
@@ -56,10 +56,7 @@ import type { AnalysedRootSignal } from "./analysed-root.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { mkdtempSync } from "node:fs";
-import {
-	type EnabledOpengrepConfig,
-	resolveOpengrepConfig,
-} from "./opengrep-config.js";
+import { resolveOpengrepConfig } from "./opengrep-config.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { stripPackRuleIdPrefix } from "./opengrep-rule-pack.js";
 import { getScratchTreeDirNames } from "./scratch-tree-policy.js";
@@ -114,7 +111,7 @@ const EMPTY_RESULT: Omit<OpengrepResult, "scannedAt"> = {
 	findings: [],
 };
 
-// opengrep loads/compiles a full rule pack (1000+ rules for the default pack) before
+// opengrep loads/compiles a full rule pack (1000+ rules for `auto`) before
 // scanning; generous budget for a large tree, matching trivy's CVE-DB-fetch
 // allowance rather than the lighter jscpd/gitleaks scans.
 const SCAN_TIMEOUT_MS = 180_000;
@@ -132,7 +129,7 @@ export class OpengrepClient extends SecurityScanClient<OpengrepResult> {
 	 * only resolves WHICH rules to run, not whether opengrep runs at all.
 	 * Exported as a static so callers can gate/log without constructing.
 	 */
-	static resolveConfig(cwd: string): EnabledOpengrepConfig {
+	static resolveConfig(cwd: string): ReturnType<typeof resolveOpengrepConfig> {
 		return resolveOpengrepConfig(cwd, { enabled: true });
 	}
 
@@ -145,7 +142,7 @@ export class OpengrepClient extends SecurityScanClient<OpengrepResult> {
 	}
 
 	/**
-	 * Scan a directory tree with opengrep's rule set (local config, else pi-lens rule pack).
+	 * Scan a directory tree with opengrep's rule set (local config, else the refreshed pack, else `auto`).
 	 * Re-entrancy safe: concurrent calls against the same root share a single
 	 * opengrep process (mirrors `GitleaksClient`/`JscpdClient`).
 	 */
@@ -169,6 +166,8 @@ export class OpengrepClient extends SecurityScanClient<OpengrepResult> {
 		const scannedAt = new Date().toISOString();
 		const bin = this.binaryPath ?? "opengrep";
 		const resolved = OpengrepClient.resolveConfig(cwd);
+		const packPath =
+			resolved.source === "pack" ? resolved.configArg : undefined;
 		const outDir = mkdtempSync(
 			path.join(scannerReportParentDir(), "pi-lens-opengrep-"),
 		);
@@ -179,7 +178,7 @@ export class OpengrepClient extends SecurityScanClient<OpengrepResult> {
 				[
 					"scan",
 					"--config",
-					resolved.configArg,
+					resolved.configArg ?? "auto",
 					"--json",
 					"--json-output",
 					reportPath,
@@ -278,18 +277,14 @@ export class OpengrepClient extends SecurityScanClient<OpengrepResult> {
 				...(report.partial && report.scanned.length === 0
 					? { reason: "partial-no-paths" as const }
 					: {}),
-				// The packs pi-lens owns are loaded from a path, so Opengrep prefixes
-				// their rule ids with it; report the registry-form id instead.
-				findings:
-					resolved.source === "pack"
-						? report.findings.map((finding) => ({
-								...finding,
-								checkId: stripPackRuleIdPrefix(
-									finding.checkId,
-									resolved.configArg,
-								),
-							}))
-						: report.findings,
+				// The cached pack is loaded from a path, so Opengrep prefixes its rule
+				// ids with it; report the registry-form id instead.
+				findings: packPath
+					? report.findings.map((finding) => ({
+							...finding,
+							checkId: stripPackRuleIdPrefix(finding.checkId, packPath),
+						}))
+					: report.findings,
 				scannedAt,
 			};
 		} catch (err) {

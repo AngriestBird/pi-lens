@@ -1048,9 +1048,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/inline-blocker-dispositions.ts": 2,
 		"clients/install-diagnostics.ts": 11,
 		"clients/installer/index.ts": 107,
-		// 4 -> 6 (#4765): refreshOpengrepRulePack computes the candidate's
-		// scratch directory and cwd with `path.dirname`/`path.join`.
-		"clients/installer/managed-tool-refresh.ts": 6,
+		// 4 -> 9 (#4765): refreshOpengrepRulePack computes the candidate's
+		// scratch directory, cwd and sweep with `path.dirname`/`path.join`.
+		"clients/installer/managed-tool-refresh.ts": 9,
 		"clients/instance-reaper.ts": 4,
 		// 8 -> 9 (#3498): the own-hold skip's degradation `subject`,
 		// `path.resolve(target)`, as its sibling records in this file spell it.
@@ -1156,10 +1156,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// which checkout owns it, and keys the admission set on the resolved root.
 		"clients/opaque-mutation-scan.ts": 12,
 		"clients/opengrep-client.ts": 8,
-		// 3 -> 4 (#4765): the default config is the rule pack's file path.
-		"clients/opengrep-config.ts": 4,
-		// New (#4765): the shipped/cached pack paths and the CLI id-prefix strip.
-		"clients/opengrep-rule-pack.ts": 7,
+		"clients/opengrep-config.ts": 3,
+		// New (#4765): the cached pack path and the CLI id-prefix strip.
+		"clients/opengrep-rule-pack.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
 		// `path.delimiter` and tests each entry with `path.isAbsolute`.
 		"clients/package-manager.ts": 23,
@@ -1550,10 +1549,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/grammar-source.ts": 2,
 		"clients/host-ports.ts": 2,
 		"clients/installer/index.ts": 42,
-		// 9 -> 13 (#4765): refreshOpengrepRulePack reads the fetch `res.status`, the
+		// 9 -> 14 (#4765): refreshOpengrepRulePack reads the fetch `res.status`, the
 		// validate spawn's `status` (twice) and the refresh-state read's `status`
 		// discriminant: host fields, not a pi-lens status vocabulary.
-		"clients/installer/managed-tool-refresh.ts": 13,
+		"clients/installer/managed-tool-refresh.ts": 14,
 		"clients/instance-reaper.ts": 15,
 		"clients/jscpd-client.ts": 3,
 		"clients/knip-client.ts": 4,

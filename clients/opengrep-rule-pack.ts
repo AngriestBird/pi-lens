@@ -3,21 +3,24 @@
  *
  * Opengrep used to start with `--config auto`, which downloads about 1074
  * registry rules on every spawn: about 8 s online, no findings at all offline.
- * pi-lens now always passes a local file, in this order (the repo's own rule
- * file wins first, in `resolveOpengrepConfig`):
+ * pi-lens now prefers a local file, in this order (the repo's own rule file wins
+ * first, in `resolveOpengrepConfig`):
  *
- *   1. the CACHED pack: the registry pack a background refresh downloaded,
- *      validated and swapped in (`refreshOpengrepRulePack` in
- *      `installer/managed-tool-refresh.ts`);
- *   2. the SHIPPED pack: `vendor/opengrep-rules/rules.yaml`, a pinned snapshot
- *      of opengrep/opengrep-rules (see its NOTICE for the licence).
+ *   1. the CACHED pack: the registry pack a background refresh downloaded on
+ *      the user's own machine, validated and swapped in
+ *      (`refreshOpengrepRulePack` in `installer/managed-tool-refresh.ts`);
+ *   2. none yet (first run, offline, install kill switch, untrusted project):
+ *      the caller falls back to `auto`, as before. pi-lens ships NO rules: the
+ *      registry's rules are under the Semgrep Rules License and the community
+ *      repo's are under Commons Clause, neither of which pi-lens redistributes
+ *      (maintainer decision 2026-10-23). The fallback is safe offline because
+ *      the server's own config-load failure is a recorded, unconfirmed scan,
+ *      never a clean one (#4764).
  *
  * Presence of the cached file IS its validity: the refresh writes it only by an
  * atomic rename of a file that parsed and passed `opengrep --validate`, and
- * leaves the previous file in place on every failure. A cached pack therefore
- * always supersedes the shipped one, which predates the registry's move to the
- * Semgrep Rules License (2024-12-13). The cached rules are the user's own copy
- * of the registry and are never redistributed.
+ * leaves the previous file in place on every failure. The cached rules are the
+ * user's own copy of the registry and are never redistributed.
  *
  * This module is a leaf (no installer, no spawn) because the config resolver and
  * the LSP spawn path both import it.
@@ -26,41 +29,25 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getGlobalPiLensDir } from "./file-utils.js";
-import { resolvePackagePath } from "./package-root.js";
-
-export type OpengrepPackSource = "cached" | "shipped";
 
 /** The registry rule set `--config auto` resolved to; fetched by the refresh. */
 export const OPENGREP_REGISTRY_PACK_URL = "https://semgrep.dev/c/auto";
-
-/** The pack that ships in the npm package. */
-export function shippedOpengrepPackPath(): string {
-	return resolvePackagePath(
-		import.meta.url,
-		"vendor",
-		"opengrep-rules",
-		"rules.yaml",
-	);
-}
 
 /** Where the refresh keeps the validated registry pack, next to nothing it deletes. */
 export function cachedOpengrepPackPath(): string {
 	return path.join(getGlobalPiLensDir(), "rules", "opengrep-registry.yaml");
 }
 
-/** The pack to pass as `--config` when the repo has no rule file. */
-export function resolveOpengrepRulePack(): {
-	path: string;
-	source: OpengrepPackSource;
-} {
+/** The refreshed pack to pass as `--config` when the repo has no rule file, if one exists. */
+export function resolveOpengrepRulePack(): string | undefined {
 	const cached = cachedOpengrepPackPath();
 	try {
-		if (fs.statSync(cached).size > 0) return { path: cached, source: "cached" };
+		if (fs.statSync(cached).size > 0) return cached;
 	} catch {
 		// none: no cached pack yet (ENOENT on a fresh or offline machine) is the
-		// normal state; the shipped pack answers.
+		// normal state; the caller falls back to `auto`.
 	}
-	return { path: shippedOpengrepPackPath(), source: "shipped" };
+	return undefined;
 }
 
 /**
@@ -69,8 +56,8 @@ export function resolveOpengrepRulePack(): {
  * `python.lang.eval` into `home.u..pi-lens.rules.python.lang.eval`; measured on
  * 1.30.0, absolute POSIX paths). The language server does not. A rule id that
  * names the install path varies per machine, so the CLI scan strips it for the
- * packs pi-lens owns and reports the registry-form id the server reports and
- * the `auto` set used to. An id without the prefix is returned unchanged.
+ * cached pack and reports the registry-form id the server reports and the
+ * `auto` set used to. An id without the prefix is returned unchanged.
  * Windows drive paths are unmeasured; a mismatch there leaves the id as
  * Opengrep wrote it.
  */

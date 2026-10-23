@@ -238,12 +238,10 @@ describe.skipIf(process.platform === "win32")(
 		it("downloads, validates and swaps in the pack through runManagedToolRefresh, and the next spawn uses it", async () => {
 			const project = path.join(TEST_HOME, "proj");
 			fs.mkdirSync(project, { recursive: true });
-			expect(resolveOpengrepConfig(project, { enabled: true }).source).toBe(
-				"pack",
+			// Before the first refresh there is no pack: `auto`, as before.
+			expect(resolveOpengrepConfig(project, { enabled: true }).configArg).toBe(
+				"auto",
 			);
-			expect(
-				resolveOpengrepConfig(project, { enabled: true }).configArg,
-			).not.toBe(CACHED);
 
 			await runManagedToolRefresh(NOW);
 
@@ -292,7 +290,7 @@ describe.skipIf(process.platform === "win32")(
 			// client with YAML. The CLI loaded the JSON-in-.yaml cache but the
 			// language server read zero rules from it and published empty
 			// diagnostics (measured 2026-10-23), so a JSON cache would silently
-			// supersede the working shipped pack with no findings.
+			// turn every scan into a silent clean one.
 			mode = "gzip-json";
 			expect(await refreshOpengrepRulePack(NOW)).toBe("refreshed");
 			expect(fs.readFileSync(CACHED, "utf-8")).toBe(body);
@@ -443,7 +441,7 @@ describe.skipIf(process.platform === "win32")(
 			});
 		});
 
-		it("offline (connection refused) with no pack yet leaves the shipped pack in charge", async () => {
+		it("offline (connection refused) with no pack yet leaves `auto` in charge", async () => {
 			const dead = http.createServer();
 			await new Promise<void>((resolve) =>
 				dead.listen(0, "127.0.0.1", () => resolve()),
@@ -463,9 +461,9 @@ describe.skipIf(process.platform === "win32")(
 			expect(packDegradations()).toHaveLength(1);
 			const project = path.join(TEST_HOME, "proj");
 			fs.mkdirSync(project, { recursive: true });
-			expect(
-				resolveOpengrepConfig(project, { enabled: true }).configArg,
-			).toMatch(/vendor[\\/]opengrep-rules[\\/]rules\.yaml$/);
+			expect(resolveOpengrepConfig(project, { enabled: true }).configArg).toBe(
+				"auto",
+			);
 		});
 
 		// Recurrence: writing the download over the working pack, then validating it.

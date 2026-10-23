@@ -1099,8 +1099,8 @@ async function downloadOpengrepPack(url: string): Promise<Buffer> {
 		// accepts gzip (Node's fetch does by default) with the rule set as JSON,
 		// and one that does not with YAML (measured 2026-10-23). The CLI loads
 		// either from a `.yaml` file; the language server loads the JSON as zero
-		// rules and publishes empty diagnostics, which would let a cached pack
-		// silence the shipped one.
+		// rules and publishes empty diagnostics, which would turn a cached pack
+		// into a silent clean scan.
 		headers: { "User-Agent": "pi-lens/1.0", "Accept-Encoding": "identity" },
 	});
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1129,7 +1129,7 @@ async function downloadOpengrepPack(url: string): Promise<Buffer> {
  * Prove a downloaded pack loads in the installed Opengrep BEFORE it can replace
  * the working one: a registry rule newer than the binary understands would
  * otherwise fail the language server's init for good, and no findings is worse
- * than the pinned pack. Fails closed: any exit but 0, or a rule count it cannot
+ * than the `auto` set it replaces. Fails closed: any exit but 0, or a rule count it cannot
  * read or that is below the floor, rejects the pack.
  */
 async function validateOpengrepPack(
@@ -1209,7 +1209,7 @@ export async function refreshOpengrepRulePack(
 		if (!url) return "skipped";
 		const binary = await findManagedToolBinary("opengrep");
 		// Without the managed binary nothing can validate the pack, and a
-		// PATH-only Opengrep keeps the shipped pack rather than an unchecked one.
+		// PATH-only Opengrep keeps `auto` rather than an unchecked pack.
 		if (!binary) return "skipped";
 
 		const read = await readManagedToolRefreshState();

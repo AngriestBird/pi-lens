@@ -84,15 +84,14 @@ describe("opengrep config resolution", () => {
 		}
 	});
 
-	it("--lens-opengrep alone uses pi-lens's own rule file, never 'auto' (#4765)", () => {
+	it("--lens-opengrep alone defaults to the 'auto' ruleset (seamless)", () => {
 		const r = resolveOpengrepConfig(tmp, { enabled: true });
 		expect(r.enabled).toBe(true);
-		expect(r.source).toBe("pack");
-		expect(r.configArg).not.toBe("auto");
-		expect(fs.existsSync(r.configArg)).toBe(true);
+		expect(r.source).toBe("flag");
+		expect(r.configArg).toBe("auto");
 	});
 
-	it("--lens-opengrep prefers a discovered local rule file over the pack", () => {
+	it("--lens-opengrep prefers a discovered local rule file over 'auto'", () => {
 		const cfg = path.join(tmp, ".opengrep.yml");
 		fs.writeFileSync(cfg, "rules: []\n");
 		const r = resolveOpengrepConfig(tmp, { enabled: true });

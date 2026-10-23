@@ -241,6 +241,65 @@ const PUBLISH_SEQUENCE_FIRST_MS = Number(
 	process.env.FAKE_LSP_PUBLISH_SEQUENCE_FIRST_MS ?? "0",
 );
 
+// #4764: `window/showMessage` traffic, so a test can drive the client's own
+// handler over a real wire. `FAKE_LSP_SHOW_MESSAGES` is a JSON array of
+// `{ type, message }` (LSP `MessageType`: 1 Error, 2 Warning, 3 Info, 4 Log);
+// `FAKE_LSP_SHOW_MESSAGE` plus `FAKE_LSP_SHOW_MESSAGE_TYPE` (default 1, Error)
+// spells the single-message case. Messages are sent on `initialized` unless
+// `FAKE_LSP_SHOW_MESSAGE_AFTER_FIRST_PUBLISH=1`, which sends them right after
+// the FIRST publish of `FAKE_LSP_PUBLISH_SEQUENCE` — the order measured from
+// opengrep 1.30.0 offline (an empty publish at +10ms, then the rule-download
+// error in the same tick). `FAKE_LSP_SHOW_MESSAGE_DELAY_MS` (default 0) delays
+// that emission, so a test can choose whether the publish's debounce has
+// already stored the answer when the message arrives.
+const SHOW_MESSAGES = (() => {
+	const raw = process.env.FAKE_LSP_SHOW_MESSAGES;
+	if (raw) {
+		try {
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) {
+				return parsed
+					.filter((m) => m && typeof m.message === "string")
+					.map((m) => ({ type: Number(m.type ?? 1), message: m.message }));
+			}
+		} catch {
+			/* a malformed array falls through to the single-message knob */
+		}
+	}
+	const message = process.env.FAKE_LSP_SHOW_MESSAGE;
+	if (!message) return [];
+	return [
+		{
+			type: Number(process.env.FAKE_LSP_SHOW_MESSAGE_TYPE ?? "1"),
+			message,
+		},
+	];
+})();
+const SHOW_MESSAGES_AFTER_FIRST_PUBLISH =
+	process.env.FAKE_LSP_SHOW_MESSAGE_AFTER_FIRST_PUBLISH === "1";
+const SHOW_MESSAGE_DELAY_MS = Number(
+	process.env.FAKE_LSP_SHOW_MESSAGE_DELAY_MS ?? "0",
+);
+
+function emitShowMessages() {
+	for (const message of SHOW_MESSAGES) {
+		send({
+			jsonrpc: "2.0",
+			method: "window/showMessage",
+			params: { type: message.type, message: message.message },
+		});
+	}
+}
+
+function scheduleShowMessages() {
+	if (SHOW_MESSAGE_DELAY_MS > 0) {
+		const timer = setTimeout(emitShowMessages, SHOW_MESSAGE_DELAY_MS);
+		timer.unref?.();
+		return;
+	}
+	emitShowMessages();
+}
+
 // #4320: a server that caches a failed module lookup, as Pyrefly 1.3.2 does
 // (measured: `import new_module` keeps its missing-import after the module is
 // created, until the server hears a `Created` watched-files event; `Changed`
@@ -452,10 +511,16 @@ function publishSequenceFor(uri) {
 		};
 		if (index === 0 && PUBLISH_SEQUENCE_FIRST_MS <= 0) {
 			emit();
+			if (SHOW_MESSAGES_AFTER_FIRST_PUBLISH) scheduleShowMessages();
 			return;
 		}
 		const timer = setTimeout(
-			emit,
+			() => {
+				emit();
+				if (index === 0 && SHOW_MESSAGES_AFTER_FIRST_PUBLISH) {
+					scheduleShowMessages();
+				}
+			},
 			PUBLISH_SEQUENCE_FIRST_MS + index * PUBLISH_SEQUENCE_GAP_MS,
 		);
 		timer.unref?.();
@@ -792,6 +857,9 @@ function handle(raw) {
 
 	// Ignore notifications without id
 	if (data.method === "initialized") {
+		if (SHOW_MESSAGES.length > 0 && !SHOW_MESSAGES_AFTER_FIRST_PUBLISH) {
+			scheduleShowMessages();
+		}
 		// #1969: die mid-session with a chosen exit code and NOTHING on stderr —
 		// the exact ast-grep shape (code=1, empty stderr) whose cause used to
 		// leave no record. Silent by construction: this path writes no stderr.
