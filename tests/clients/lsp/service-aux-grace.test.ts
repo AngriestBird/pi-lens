@@ -3479,9 +3479,12 @@ describe("#2914 — non-demoted aux rows stay binding-only", () => {
 });
 
 describe("#4763 — published-diagnostic count on lsp_aux_wait_outcome", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
