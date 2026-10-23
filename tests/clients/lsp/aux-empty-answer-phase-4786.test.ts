@@ -29,7 +29,10 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
-import { getRecentLoggedPhases } from "../../../clients/latency-logger.js";
+import {
+	_setRecentPhasesForTest,
+	getRecentLoggedPhases,
+} from "../../../clients/latency-logger.js";
 import {
 	closeDocument,
 	handleNotifyChange,
@@ -99,12 +102,17 @@ describe("#4786 an auxiliary's empty within its finding's phase", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		resetDegradationLedger();
+		// The latency ring is process state that outlives a case: a refusal row
+		// an earlier case logged for the same path would count as this case's
+		// second record (#4790 r3, CI shuffle seed 424). The ledger reset above
+		// re-arms the rising edge, so each case logs its own first row.
+		_setRecentPhasesForTest([]);
 	});
 	afterEach(() => {
 		vi.useRealTimers();
 	});
 
-	it("refuses an empty in the finding's phase, counts it, and records it once per path and phase", async () => {
+	it("refuses an empty in the finding's phase, counts it, and records it once per path with the phase as a field", async () => {
 		const { state, publish, rulesRefreshed } = arm("opengrep", "auxiliary");
 		rulesRefreshed();
 		await handleNotifyOpen(state, FILE, "a", "python", false, true);
