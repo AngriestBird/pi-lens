@@ -132,6 +132,7 @@ beforeEach(async () => {
 	// a clean singleton (tests/support/lsp-service-seam.ts, step 1).
 	await installLspServiceDouble(null);
 	vi.resetModules();
+	// KEEP (#4709): unarmed, the real registry spawns jedi-language-server and probes npm/pnpm/yarn/bun on PATH; the arm stops both.
 	(await import("../../clients/lsp/config.js"))._setServersForFileForTests(
 		mocks.getServersForFileWithConfig,
 	);
