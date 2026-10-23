@@ -65,6 +65,7 @@ import {
 	parseSupplyArgs,
 	PINNED_ENV_KEYS,
 	pollToTerminal,
+	awaitWarmLog,
 	removeScratchRoot,
 	rowReportShows,
 	rowProbeRequest,
@@ -304,20 +305,73 @@ describe("release-QA matrix and probe map are one list (#2606)", () => {
 });
 
 describe("release-QA session-start LSP warm witness (#4316)", () => {
+	const resolved = '{"subsystem":"lsp","message":"LSP warm resolved"}\n';
+
+	// Recurrence: 4.4.2 shipped with the LSP warm dead (#4314) because the
+	// failure was a log line no pi-rpc row read.
 	it("requires a resolved warm record and rejects any warm failure", () => {
-		expect(
-			classifyLspWarmLog('{"subsystem":"lsp","message":"LSP warm resolved"}\n'),
-		).toEqual({ status: "pass", detail: "LSP warm resolved" });
+		expect(classifyLspWarmLog(resolved)).toEqual({
+			status: "pass",
+			detail: "LSP warm resolved",
+		});
 		expect(
 			classifyLspWarmLog(
-				'{"subsystem":"lsp","message":"LSP warm resolved"}\n' +
-					'{"subsystem":"lsp","message":"LSP warm failed: missing module"}\n',
+				`${resolved}{"subsystem":"lsp","message":"LSP warm failed: missing module"}\n`,
 			),
 		).toEqual({ status: "fail", detail: "LSP warm failed: missing module" });
-		expect(classifyLspWarmLog("{}\n")).toEqual({
+		// The issue's criterion is "any `warm failed` record": the sibling warms
+		// in index.ts log the same way.
+		expect(
+			classifyLspWarmLog(
+				`${resolved}{"subsystem":"format","message":"formatter warm failed: x"}\n`,
+			).status,
+		).toBe("fail");
+		// Fail closed: an old candidate (4.4.3) logs neither record.
+		expect(classifyLspWarmLog("{}\nnot json\n")).toEqual({
 			status: "fail",
-			detail: "no LSP warm resolved record",
+			detail: "no LSP warm resolved record (and no warm failed record)",
 		});
+	});
+
+	// Recurrence: a fixed 500 ms sleep read the log before a slow host's warm
+	// finished, turning a healthy candidate red. The reader here has no record
+	// for its first three reads.
+	it("waits for the warm record instead of reading the log once", async () => {
+		let reads = 0;
+		const text = await awaitWarmLog(
+			() => {
+				reads += 1;
+				return reads > 3 ? resolved : "";
+			},
+			{ capMs: 2000, intervalMs: 5, graceMs: 5 },
+		);
+		expect(classifyLspWarmLog(text).status).toBe("pass");
+		expect(reads).toBeGreaterThan(3);
+	});
+
+	// Recurrence: a failure landing after the success record (a concurrent
+	// formatter warm) must still be read, hence the grace re-read.
+	it("re-reads after the grace so a late warm failure is seen", async () => {
+		let reads = 0;
+		const text = await awaitWarmLog(
+			() => {
+				reads += 1;
+				return reads === 1
+					? resolved
+					: `${resolved}{"subsystem":"format","message":"formatter warm failed: x"}\n`;
+			},
+			{ capMs: 2000, intervalMs: 5, graceMs: 5 },
+		);
+		expect(classifyLspWarmLog(text).status).toBe("fail");
+	});
+
+	it("gives up at the cap and hands the classifier an empty witness", async () => {
+		const text = await awaitWarmLog(() => "", {
+			capMs: 30,
+			intervalMs: 5,
+			graceMs: 5,
+		});
+		expect(classifyLspWarmLog(text).status).toBe("fail");
 	});
 });
 

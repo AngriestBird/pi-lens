@@ -79,6 +79,7 @@ import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import { McpStdioClient } from "./lib/mcp-stdio-client.mjs";
 import { parseTable } from "./lib/md-matrix.mjs";
+import { parseNdjsonEntries } from "./lib/latency-log-phases.mjs";
 import { startRpcSession } from "./rpc-load-check.mjs";
 
 // ===========================================================================
@@ -1731,6 +1732,10 @@ const REPO_ROOT = path.resolve(
 const DEFAULT_POLL_CAP_MS = 120_000;
 const NPM_TIMEOUT_MS = 600_000;
 const RPC_TIMEOUT_MS = 60_000;
+/** The session-start warm's success record (`index.ts`), the row's positive witness (#4316). */
+const LSP_WARM_RESOLVED = "LSP warm resolved";
+/** How long the RPC capture waits for the warm to report after `get_commands`. */
+const WARM_LOG_WAIT_MS = 10_000;
 
 export function parseArgs(argv) {
 	const opts = {
@@ -1929,31 +1934,52 @@ export function scratchEnv(scratchRoot, extra = {}) {
 
 /**
  * Classify the extension-log witness emitted by the RPC session-start warm.
- * A success record is required; any warm failure wins over it so a later
- * recovery cannot hide the failed session-start attempt (#4316).
+ * A success record is required; ANY `warm failed` record (LSP, formatter or
+ * dispatch warm) wins over it so a later recovery cannot hide a failed
+ * session-start attempt (#4316). A candidate built before the success record
+ * existed (4.4.3 and older) has no positive witness and so fails closed.
  */
 export function classifyLspWarmLog(text) {
-	const records = String(text ?? "")
-		.split("\n")
-		.filter(Boolean)
-		.flatMap((line) => {
-			try {
-				const record = JSON.parse(line);
-				return typeof record?.message === "string" ? [record] : [];
-			} catch {
-				return [];
-			}
-		});
-	const failure = records.find((record) =>
-		/LSP warm failed/i.test(record.message),
+	const messages = parseNdjsonEntries(String(text ?? ""))
+		.map((record) => record.message)
+		.filter((message) => typeof message === "string");
+	const failure = messages.find((message) => /warm failed/i.test(message));
+	if (failure) return { status: "fail", detail: failure };
+	return messages.includes(LSP_WARM_RESOLVED)
+		? { status: "pass", detail: LSP_WARM_RESOLVED }
+		: {
+				status: "fail",
+				detail: `no ${LSP_WARM_RESOLVED} record (and no warm failed record)`,
+			};
+}
+
+/**
+ * Read the pinned extension log until the session-start warm reports either
+ * way, then once more after a short grace so a concurrent formatter or
+ * dispatch warm failure lands. A warm that never reports returns the log as it
+ * stands and the classifier fails it; a fixed sleep read the log before a slow
+ * host's import finished (#4316 review).
+ */
+export async function awaitWarmLog(
+	readLog,
+	{ capMs = WARM_LOG_WAIT_MS, intervalMs = 250, graceMs = 500 } = {},
+) {
+	const reported = (text) => {
+		const messages = parseNdjsonEntries(text).map((record) => record.message);
+		return messages.some(
+			(message) =>
+				typeof message === "string" &&
+				(message === LSP_WARM_RESOLVED || /warm failed/i.test(message)),
+		);
+	};
+	const polled = await pollToTerminal(
+		async () => ({ terminal: reported(readLog()), detail: "no warm record" }),
+		{ capMs, intervalMs },
 	);
-	if (failure) return { status: "fail", detail: failure.message };
-	const resolved = records.find(
-		(record) => record.message === "LSP warm resolved",
-	);
-	return resolved
-		? { status: "pass", detail: resolved.message }
-		: { status: "fail", detail: "no LSP warm resolved record" };
+	if (polled.status === "terminal") {
+		await new Promise((resolve) => setTimeout(resolve, graceMs));
+	}
+	return readLog();
 }
 
 /**
@@ -2053,7 +2079,13 @@ function setUpFixture(projectDir) {
  * uses in install-smoke's `pi-load` job — captured once and asserted on by two
  * rows rather than run twice.
  */
-function captureGetCommands({ piBin, cwd, env, timeoutMs = RPC_TIMEOUT_MS }) {
+function captureGetCommands({
+	piBin,
+	cwd,
+	env,
+	timeoutMs = RPC_TIMEOUT_MS,
+	awaitWarm = false,
+}) {
 	return new Promise((resolve) => {
 		let pi;
 		try {
@@ -2086,19 +2118,23 @@ function captureGetCommands({ piBin, cwd, env, timeoutMs = RPC_TIMEOUT_MS }) {
 		);
 		pi.onMessage((message) => {
 			if (message.type === "response" && message.command === "get_commands") {
-				setTimeout(() => {
-					const extensionLogPath = path.join(env.PI_LENS_HOME, "extension.log");
-					const extensionLog = fs.existsSync(extensionLogPath)
-						? fs.readFileSync(extensionLogPath, "utf8")
-						: "";
+				// Only the candidate's own session is held for its warm record; the
+				// boot probe and the registry probes have no pi-lens to wait for.
+				const logged = awaitWarm
+					? awaitWarmLog(() => {
+							const file = path.join(env.PI_LENS_HOME, "extension.log");
+							return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+						})
+					: Promise.resolve("");
+				void logged.then((extensionLog) =>
 					finish({
 						ok: true,
 						commands: message.data?.commands ?? [],
 						extensionErrors: pi.extensionErrors,
 						extensionLog,
 						raw: message,
-					});
-				}, 500);
+					}),
+				);
 			}
 		});
 		pi.child.on("error", (err) =>
@@ -2924,7 +2960,12 @@ async function main() {
 		});
 
 		log("driving pi --mode rpc (get_commands) with the candidate installed");
-		rpc = await captureGetCommands({ piBin: opts.pi, cwd: projectDir, env });
+		rpc = await captureGetCommands({
+			piBin: opts.pi,
+			cwd: projectDir,
+			env,
+			awaitWarm: true,
+		});
 		if (!rpc.ok) {
 			// pi answered the boot probe moments ago, so this is the candidate
 			// breaking it, not an unbootable host.

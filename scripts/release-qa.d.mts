@@ -346,6 +346,10 @@ export function scratchEnv(
 	extra?: Record<string, string>,
 ): NodeJS.ProcessEnv;
 export function classifyLspWarmLog(text: string): ProbeReport;
+export function awaitWarmLog(
+	readLog: () => string,
+	opts?: { capMs?: number; intervalMs?: number; graceMs?: number },
+): Promise<string>;
 
 /** Every variable `scratchEnv` pins inside the scratch root. */
 export const PINNED_ENV_KEYS: readonly string[];
