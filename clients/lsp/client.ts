@@ -2799,6 +2799,14 @@ function retractUnscannedEmptyPublications(state: LSPClientState): number {
 	return retracted;
 }
 
+/**
+ * #4782: emitted on `diagnosticEmitter` when a receipt leaves the quiet
+ * window WITHOUT being stored, so a diagnostics wait that deferred to it
+ * decides again. Never `"diagnostics"`: nothing new was stored, and a wait
+ * that read it as a store would settle on an empty cache.
+ */
+const PENDING_RECEIPT_DROPPED = "pending-receipt-dropped";
+
 export function setupIncomingHandlers(
 	state: LSPClientState,
 	initialization: Record<string, unknown> | undefined,
@@ -3174,6 +3182,8 @@ export function setupIncomingHandlers(
 				state.pendingDiagnostics.delete(normalizedPath);
 				if (isSupersededPush()) {
 					countPublication(state, normalizedPath);
+					// #4782: a wait that deferred to this receipt decides again.
+					state.diagnosticEmitter.emit(PENDING_RECEIPT_DROPPED, normalizedPath);
 					return;
 				}
 				// #4764: the config failure may have landed while this publish sat in the
@@ -3184,6 +3194,7 @@ export function setupIncomingHandlers(
 					newDiags.length === 0 &&
 					configFailureBlocksEmptyPublish(state, normalizedPath)
 				) {
+					state.diagnosticEmitter.emit(PENDING_RECEIPT_DROPPED, normalizedPath);
 					return;
 				}
 				state.pushDiagnostics.set(normalizedPath, newDiags);
@@ -4554,16 +4565,37 @@ export async function clientWaitForDiagnostics(
 		}
 	}
 
-	if (
+	// #4782: a receipt still in the publish handler's quiet window
+	// (`pendingDiagnostics`) is a LATER answer than the stored one, so the
+	// stored answer settles nothing while it waits there. A bash command's
+	// dependent a.ts had an answer stored that the server computed against
+	// z.ts's old bytes; the answer computed after z.ts's change arrived right
+	// before the drain reply, still in its window, and the dispatch's read took
+	// the stored one: a phantom STOP. Waiting for the receipt costs at most
+	// one quiet window.
+	const laterReceiptPending = (): boolean =>
+		state.pendingDiagnostics.has(normalizedPath);
+	const storedAnswerSettles = (): boolean =>
 		hasFreshDiagnostics() &&
 		!isVersionStale() &&
-		getMergedDiagnosticsForPath(state, normalizedPath).length > 0
-	) {
+		getMergedDiagnosticsForPath(state, normalizedPath).length > 0;
+
+	if (storedAnswerSettles() && !laterReceiptPending()) {
 		return;
 	}
 
 	return new Promise<void>((resolve) => {
 		let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+		/** The quiet window came due while a later receipt was pending. */
+		let settleDeferred = false;
+
+		const finish = (): void => {
+			if (debounceTimer) clearTimeout(debounceTimer);
+			state.diagnosticEmitter.off("diagnostics", onDiagnostics);
+			state.diagnosticEmitter.off(PENDING_RECEIPT_DROPPED, onReceiptDropped);
+			clearTimeout(timeout);
+			resolve();
+		};
 
 		const onDiagnostics = (fp: string) => {
 			if (normalizeMapKey(fp) !== normalizedPath) return;
@@ -4578,19 +4610,28 @@ export async function clientWaitForDiagnostics(
 			const remaining = Math.max(0, strategy.debounceMs - timeSincePush);
 
 			debounceTimer = setTimeout(() => {
-				state.diagnosticEmitter.off("diagnostics", onDiagnostics);
-				clearTimeout(timeout);
-				resolve();
+				debounceTimer = undefined;
+				// #4782: a later receipt is pending; its store re-arms this window.
+				if (laterReceiptPending()) {
+					settleDeferred = true;
+					return;
+				}
+				finish();
 			}, remaining);
 		};
 
-		state.diagnosticEmitter.on("diagnostics", onDiagnostics);
+		// #4782: the pending receipt this wait deferred to was dropped unstored
+		// (superseded, or refused from a rule-less scanner), so the stored answer
+		// is the latest again and decides as it did before the receipt arrived.
+		const onReceiptDropped = (fp: string) => {
+			if (normalizeMapKey(fp) !== normalizedPath || debounceTimer) return;
+			if (settleDeferred || storedAnswerSettles()) finish();
+		};
 
-		const timeout = setTimeout(() => {
-			if (debounceTimer) clearTimeout(debounceTimer);
-			state.diagnosticEmitter.off("diagnostics", onDiagnostics);
-			resolve();
-		}, timeoutMs);
+		state.diagnosticEmitter.on("diagnostics", onDiagnostics);
+		state.diagnosticEmitter.on(PENDING_RECEIPT_DROPPED, onReceiptDropped);
+
+		const timeout = setTimeout(finish, timeoutMs);
 	});
 }
 
