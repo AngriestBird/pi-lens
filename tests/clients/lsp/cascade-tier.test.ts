@@ -18,10 +18,6 @@ const registerQuietWindowTask = vi.fn();
 // different spy than the code under test called.
 const logCascade = vi.fn();
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-}));
-
 vi.mock("../../../clients/quiet-window.js", () => ({
 	registerQuietWindowTask,
 }));
@@ -67,6 +63,9 @@ describe("classifyCascadeWaitTier", () => {
 
 	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		registerQuietWindowTask.mockReset();
 		mod = await import("../../../clients/lsp/cascade-tier.js");
@@ -345,6 +344,9 @@ describe("outstanding touch registry + reconcile", () => {
 
 	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		registerQuietWindowTask.mockReset();
 		mod = await import("../../../clients/lsp/cascade-tier.js");
@@ -628,6 +630,9 @@ describe("registerCascadeTierReconcileTask", () => {
 
 	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		registerQuietWindowTask.mockReset();
 		mod = await import("../../../clients/lsp/cascade-tier.js");
@@ -842,6 +847,9 @@ describe("isTierAwareCascadeEnabled kill switch", () => {
 
 	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		delete process.env.PI_LENS_TIER_AWARE_CASCADE;
 		mod = await import("../../../clients/lsp/cascade-tier.js");
 		mod._resetTierAwareCascadeEnabledForTests();

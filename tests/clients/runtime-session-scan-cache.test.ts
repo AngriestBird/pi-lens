@@ -34,12 +34,6 @@ import { getStartupScanMaxSourceFilesDerived } from "../../clients/project-scale
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
-vi.mock("../../clients/lsp/config.js", () => ({
-	loadLSPConfig: vi.fn().mockResolvedValue({}),
-	initLSPConfig: vi.fn().mockResolvedValue(undefined),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 const resolveStartupScanContextSpy = vi.hoisted(() => vi.fn());
 const resolveStartupScanContextAsyncSpy = vi.hoisted(() => vi.fn());
 const logLatencySpy = vi.hoisted(() => vi.fn());
@@ -67,6 +61,8 @@ vi.mock("../../clients/startup-scan.js", async (importOriginal) => {
 });
 
 import { handleSessionStart } from "../../clients/runtime-session.js";
+import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import { pinFixtureHome } from "./test-utils.js";
 
 function setStartupMode(mode: "full" | "quick"): () => void {
 	const prev = process.env.PI_LENS_STARTUP_MODE;
@@ -131,6 +127,9 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 	let previousDataDir: string | undefined;
 
 	beforeEach(async () => {
+		// The real config loader walks up from the session cwd to HOME (#4709);
+		// a pinned fixture HOME keeps that read off the maintainer's home.
+		pinFixtureHome("runtime-session-scan-cache");
 		await installLspServiceDouble();
 		restoreStartupMode = setStartupMode("full");
 		previousDataDir = process.env.PILENS_DATA_DIR;
@@ -145,6 +144,7 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 	});
 
 	afterEach(() => {
+		resetLSPConfigStateForTests();
 		restoreStartupMode();
 		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 		else process.env.PILENS_DATA_DIR = previousDataDir;

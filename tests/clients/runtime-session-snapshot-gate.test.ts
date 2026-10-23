@@ -59,13 +59,9 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	return { ...actual, logLatency: logLatencySpy };
 });
 
-vi.mock("../../clients/lsp/config.js", () => ({
-	loadLSPConfig: vi.fn().mockResolvedValue({}),
-	initLSPConfig: vi.fn().mockResolvedValue(undefined),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 import { handleSessionStart } from "../../clients/runtime-session.js";
+import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import { pinFixtureHome } from "./test-utils.js";
 
 function makeDeps(ctxCwd: string, dbg: (msg: string) => void = () => {}) {
 	return withResidentBootstrap({
@@ -223,6 +219,9 @@ describe("session_start snapshot meta-gate (#947)", () => {
 	let previousDataDir: string | undefined;
 
 	beforeEach(async () => {
+		// The real config loader walks up from the session cwd to HOME (#4709);
+		// a pinned fixture HOME keeps that read off the maintainer's home.
+		pinFixtureHome("runtime-session-snapshot-gate");
 		await installLspServiceDouble();
 		prevFirst = globals.__piLensFirstSessionDone;
 		prevWarmup = globals.__piLensWarmupScheduled;
@@ -246,6 +245,7 @@ describe("session_start snapshot meta-gate (#947)", () => {
 	});
 
 	afterEach(() => {
+		resetLSPConfigStateForTests();
 		globals.__piLensFirstSessionDone = prevFirst;
 		globals.__piLensWarmupScheduled = prevWarmup;
 		if (prevStartupMode === undefined) delete process.env.PI_LENS_STARTUP_MODE;

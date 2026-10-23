@@ -23,6 +23,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
+import { _setServersForFileForTests } from "../../../clients/lsp/config.js";
 
 const requireFixture = createRequire(import.meta.url);
 
@@ -48,11 +49,6 @@ vi.mock("../../../clients/extension-log.js", async (importOriginal) => ({
 		typeof import("../../../clients/extension-log.js")
 	>()),
 	logExtension: logExtensionMock,
-}));
-vi.mock("../../../clients/lsp/config.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../../clients/lsp/config.js")>()),
-	getServersForFileWithConfig: getServersForFileWithConfigMock,
-	getServerInitOverride: () => undefined,
 }));
 
 const dirs: string[] = [];
@@ -148,6 +144,7 @@ function tsserverPathOf(
 }
 
 beforeEach(() => {
+	_setServersForFileForTests(getServersForFileWithConfigMock);
 	launchLSPMock.mockReset();
 	ensureToolMock.mockReset();
 	getToolEnvironmentMock.mockClear();
