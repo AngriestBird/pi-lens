@@ -955,7 +955,10 @@ const MANAGED_TOOL_REFRESH_DELAY_MS = 30_000;
  * `runManagedToolRefresh` against a PERSISTED per-tool stamp, so a launch loop
  * cannot escalate the weekly cadence.
  */
-function scheduleManagedToolRefresh(dbg: SessionStartDeps["dbg"]): void {
+function scheduleManagedToolRefresh(
+	dbg: SessionStartDeps["dbg"],
+	rulePack: boolean,
+): void {
 	const delayMs = Number(
 		process.env.PI_LENS_TOOL_REFRESH_DELAY_MS ?? MANAGED_TOOL_REFRESH_DELAY_MS,
 	);
@@ -964,7 +967,9 @@ function scheduleManagedToolRefresh(dbg: SessionStartDeps["dbg"]): void {
 			void (async () => {
 				try {
 					const refresh = await import("./installer/managed-tool-refresh.js");
-					const outcome = await refresh.runManagedToolRefresh();
+					const outcome = await refresh.runManagedToolRefresh(undefined, {
+						rulePack,
+					});
 					if (outcome.skipped) {
 						dbg(`session_start tool-refresh: skipped (${outcome.skipped})`);
 						return;
@@ -3248,7 +3253,7 @@ export async function handleSessionStart(
 		true;
 	if (allowBootstrapTasks) {
 		scheduleDeferredToolProbes(deps, languageProfile, startupDefaults, dbg);
-		scheduleManagedToolRefresh(dbg);
+		scheduleManagedToolRefresh(dbg, !deps.getFlag("no-opengrep"));
 	}
 
 	if (allowBootstrapTasks) {

@@ -152,7 +152,7 @@ const EXPECTED_FILES = 79;
 // `which`/`where` — the bare-command probe resolved its own binary through the
 // path and cwd it was asked to judge, so a project-supplied `which` ran. It is
 // an in-process PATH scan now, and 134 counts the direct spawns that remain.
-const EXPECTED_DIRECT_SITES = 134;
+const EXPECTED_DIRECT_SITES = 135;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it
@@ -686,8 +686,12 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"passes the realpath-canonicalized `targetDir` from the scan API's own argument",
 	],
 	[
-		"clients/opengrep-client.ts#OpengrepClient.runScan:6ed13398~353ea442",
-		"cwd is runScan's own `cwd` parameter, from which OpengrepClient.resolveConfig(cwd) already chose the rule config",
+		"clients/opengrep-client.ts#OpengrepClient.runScan:e17e0255~353ea442",
+		"cwd is runScan's own `cwd` parameter, from which OpengrepClient.resolveConfig(cwd) already chose the rule config; the config is now a rule FILE (repo file, cached pack or shipped pack), never `auto`, so the scan needs no network (#4765)",
+	],
+	[
+		"clients/installer/managed-tool-refresh.ts#validateOpengrepPack:c4cbdb3a~1f7c40b0",
+		"not a project scan: `scan --validate --config <candidate>` only parses a downloaded rule file that lives in the pi-lens cache, so the cwd is that file's own directory (`path.dirname(candidate)`) and no project root exists in the weekly refresh (#4765)",
 	],
 	[
 		"clients/pipeline.ts#tryEslintFix:a8585677~dbf27697",

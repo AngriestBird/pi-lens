@@ -62,6 +62,7 @@ import {
 	cachedOpengrepPackPath,
 	OPENGREP_REGISTRY_PACK_URL,
 } from "../opengrep-rule-pack.js";
+import { stripAnsi } from "../sanitize.js";
 import { safeSpawnAsync } from "../safe-spawn.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import {
@@ -875,6 +876,12 @@ const noopTap: RefreshTap = () => {};
  */
 export function runManagedToolRefresh(
 	now: number = Date.now(),
+	/**
+	 * `rulePack: false` leaves the Opengrep rule pack alone: the session was
+	 * started with `--no-opengrep` / `opengrep.enabled=false`, and a disabled
+	 * scanner downloads nothing (#4780 review).
+	 */
+	options: { rulePack?: boolean } = {},
 ): Promise<ManagedToolRefreshOutcome> {
 	const joined = refreshInFlight;
 	if (joined) {
@@ -899,7 +906,7 @@ export function runManagedToolRefresh(
 	// budget (a GET and one validate, not a package manager), and never throws.
 	const run = executeManagedToolRefresh(now, noopTap)
 		.then(async (outcome) => {
-			await refreshOpengrepRulePack(now);
+			if (options.rulePack !== false) await refreshOpengrepRulePack(now);
 			return outcome;
 		})
 		.finally(() => {
@@ -1144,12 +1151,37 @@ async function validateOpengrepPack(
 			spawned.stderr.trim() || spawned.failure || `exit ${spawned.status}`;
 		return `opengrep --validate failed: ${detail}`.slice(0, 240);
 	}
-	const count = /(\d+) rule\(s\)/.exec(`${spawned.stdout}\n${spawned.stderr}`);
+	// Colour codes can sit between the count and `rule(s)` (AGENTS.md shape 63).
+	const count = /(\d+) rule\(s\)/.exec(
+		stripAnsi(`${spawned.stdout}\n${spawned.stderr}`),
+	);
 	const rules = count ? Number(count[1]) : 0;
 	if (rules < PACK_MIN_RULES) {
 		return `opengrep --validate reported ${count ? rules : "no"} rules (floor ${PACK_MIN_RULES})`;
 	}
 	return undefined;
+}
+
+/** A candidate this old belongs to a refresh that died; nothing live is that slow. */
+const PACK_CANDIDATE_MAX_AGE_MS = 60 * 60 * 1000;
+
+/** Remove candidates a killed refresh left beside the cached pack. Never throws. */
+async function sweepStaleCandidates(finalPath: string): Promise<void> {
+	const dir = path.dirname(finalPath);
+	const prefix = `${path.basename(finalPath)}.candidate-`;
+	try {
+		for (const name of await fs.readdir(dir)) {
+			if (!name.startsWith(prefix)) continue;
+			const file = path.join(dir, name);
+			const { mtimeMs } = await fs.stat(file);
+			if (Date.now() - mtimeMs > PACK_CANDIDATE_MAX_AGE_MS)
+				await fs.rm(file, { force: true });
+		}
+	} catch (err) {
+		logSessionStart(
+			`managed-tool-refresh ${OPENGREP_PACK_STAMP_ID}: could not sweep stale candidates (${(err as Error).message})`,
+		);
+	}
 }
 
 /**
@@ -1198,20 +1230,36 @@ export async function refreshOpengrepRulePack(
 			return "skipped";
 		}
 
-		const gate = await acquireManagedInstallGate(
-			`managed tool refresh: ${OPENGREP_PACK_STAMP_ID}`,
-		);
-		if (!gate.ok) {
+		// The gate is the one place the kill switch, the project-trust boundary and
+		// the cross-process install lock are judged, so the pack asks it twice and
+		// holds it for neither slow phase: once to clear the preconditions
+		// (released at once), and once more to swap and stamp. The 60 s fetch and
+		// the 180 s validate touch only the pack's own files, and holding the
+		// shared install lock across them made an unrelated `ensureTool` wait out
+		// its 150 s bound (#4780 review).
+		const declined = async (
+			phase: string,
+		): Promise<OpengrepPackRefreshOutcome> => {
 			logSessionStart(
-				`managed-tool-refresh ${OPENGREP_PACK_STAMP_ID}: declined (${gate.reason ?? "unknown"}) — no stamp written, retried next session`,
+				`managed-tool-refresh ${OPENGREP_PACK_STAMP_ID}: declined (${phase}) — no stamp written, retried next session`,
 			);
 			return "declined";
-		}
+		};
+		const pre = await acquireManagedInstallGate(
+			`managed tool refresh: ${OPENGREP_PACK_STAMP_ID}`,
+		);
+		if (!pre.ok) return declined(pre.reason ?? "unknown");
+		await pre.release?.();
+
 		const finalPath = cachedOpengrepPackPath();
-		const candidate = `${finalPath}.candidate`;
+		// Its own name per refresh: a second process that starts while this one is
+		// still validating (after a suspended process lost its lock, or simply
+		// within the cadence window) never reads, replaces or deletes this file.
+		const candidate = `${finalPath}.candidate-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
 		const startedAt = Date.now();
 		try {
 			await fs.mkdir(path.dirname(finalPath), { recursive: true });
+			await sweepStaleCandidates(finalPath);
 			const bytes = await downloadOpengrepPack(url);
 			const digest = crypto.createHash("sha256").update(bytes).digest("hex");
 			let current: Buffer | undefined;
@@ -1238,11 +1286,34 @@ export async function refreshOpengrepRulePack(
 			await writeFileAtomicAsync(candidate, bytes, { bestEffort: false });
 			const rejected = await validateOpengrepPack(binary, candidate);
 			if (rejected) throw new Error(rejected);
-			await fs.rename(candidate, finalPath);
-			await writeRefreshStamp(OPENGREP_PACK_STAMP_ID, {
-				checkedAt: now,
-				version: digest.slice(0, 12),
-			});
+
+			const swap = await acquireManagedInstallGate(
+				`managed tool refresh: ${OPENGREP_PACK_STAMP_ID} (swap)`,
+			);
+			if (!swap.ok) return await declined(swap.reason ?? "unknown");
+			try {
+				// Another process may have refreshed while this one validated: its
+				// stamp moved after the one read above. Its pack is as good as this
+				// one, so keep it and drop this candidate (removed in `finally`).
+				const after = await readManagedToolRefreshState();
+				const latest =
+					after.status === "ok"
+						? after.state.tools[OPENGREP_PACK_STAMP_ID]
+						: undefined;
+				if (latest && !latest.failed && latest.checkedAt !== entry?.checkedAt) {
+					logSessionStart(
+						`managed-tool-refresh ${OPENGREP_PACK_STAMP_ID}: another process refreshed first — keeping its pack`,
+					);
+					return "skipped";
+				}
+				await fs.rename(candidate, finalPath);
+				await writeRefreshStamp(OPENGREP_PACK_STAMP_ID, {
+					checkedAt: now,
+					version: digest.slice(0, 12),
+				});
+			} finally {
+				await swap.release?.();
+			}
 			logSessionStart(
 				`managed-tool-refresh ${OPENGREP_PACK_STAMP_ID}: cached pack now ${digest.slice(0, 12)} (${bytes.byteLength} bytes, ${Date.now() - startedAt}ms)`,
 			);
@@ -1267,12 +1338,11 @@ export async function refreshOpengrepRulePack(
 			try {
 				await fs.rm(candidate, { force: true });
 			} catch (err) {
-				// The candidate is overwritten by the next refresh; say so, move on.
+				// A later refresh's sweep removes it once it is an hour old; say so.
 				logSessionStart(
 					`managed-tool-refresh ${OPENGREP_PACK_STAMP_ID}: could not remove ${candidate} (${(err as Error).message})`,
 				);
 			}
-			await gate.release?.();
 		}
 	} catch (err) {
 		recordDegradationOnce({

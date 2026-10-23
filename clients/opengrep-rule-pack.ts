@@ -10,7 +10,7 @@
  *      validated and swapped in (`refreshOpengrepRulePack` in
  *      `installer/managed-tool-refresh.ts`);
  *   2. the SHIPPED pack: `vendor/opengrep-rules/rules.yaml`, a pinned snapshot
- *      of opengrep/opengrep-rules (see its NOTICE.md for the licence).
+ *      of opengrep/opengrep-rules (see its NOTICE for the licence).
  *
  * Presence of the cached file IS its validity: the refresh writes it only by an
  * atomic rename of a file that parsed and passed `opengrep --validate`, and
@@ -26,7 +26,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getGlobalPiLensDir } from "./file-utils.js";
-import { getPackageRoot } from "./package-root.js";
+import { resolvePackagePath } from "./package-root.js";
 
 export type OpengrepPackSource = "cached" | "shipped";
 
@@ -35,8 +35,8 @@ export const OPENGREP_REGISTRY_PACK_URL = "https://semgrep.dev/c/auto";
 
 /** The pack that ships in the npm package. */
 export function shippedOpengrepPackPath(): string {
-	return path.join(
-		getPackageRoot(import.meta.url),
+	return resolvePackagePath(
+		import.meta.url,
 		"vendor",
 		"opengrep-rules",
 		"rules.yaml",

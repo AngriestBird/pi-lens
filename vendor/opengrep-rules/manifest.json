@@ -5,7 +5,7 @@
   },
   "license": "Commons Clause License Condition v1.0 + LGPL-2.1 (see LICENSE, NOTICE)",
   "ruleCount": 1020,
-  "rulesSha256": "4d7dde2fb9f73ab6edf78754a3a9b593434f068f8b5abd3fb71a8fa83cd3c4f2",
+  "rulesSha256": "37dd3e331822ec337f4b0c3d69fbbeba137e99a6b1dd8244c715bf9dc0bd7feb",
   "excluded": [
     {
       "id": "java.lang.security.audit.xss.no-direct-response-writer.no-direct-response-writer",

@@ -28,6 +28,7 @@ import {
 	vi,
 } from "vitest";
 import { withEnv } from "../../support/with-env.js";
+import { acquireManagedInstallGate } from "../../../clients/installer/index.js";
 
 vi.unmock("../../../clients/installer/index.js");
 
@@ -66,6 +67,7 @@ const CACHED = path.join(TEST_HOME, "rules", "opengrep-registry.yaml");
 const SHIM_LOG = path.join(TEST_HOME, "shim.log");
 const SHIM_MODE = path.join(TEST_HOME, "shim.mode");
 const SHIM_SEEN = path.join(TEST_HOME, "shim.seen");
+const SHIM_RELEASE = path.join(TEST_HOME, "shim.release");
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = 1_800_000_000_000;
 
@@ -147,8 +149,13 @@ function installOpengrepShim(): void {
 			`mode=$(cat "${SHIM_MODE}" 2>/dev/null || echo ok)`,
 			`cat "${CACHED}" > "${SHIM_SEEN}" 2>/dev/null`,
 			`[ "$mode" = fail ] && { echo "invalid rule" >&2; exit 5; }`,
+			// `hold` parks the validate until the test releases it, so the test can
+			// act while a refresh is mid-validation (bounded: 20 s, then it goes on).
+			`if [ "$mode" = hold ]; then i=0; while [ ! -f "${SHIM_RELEASE}" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; fi`,
 			`n=$(grep -o -E '^ *- id:|"id":' "$4" | wc -l)`,
 			`[ "$mode" = few ] && n=3`,
+			// `color`: the real CLI colours its summary when the host forces colour.
+			`[ "$mode" = color ] && { printf 'Configuration is valid - found 0 configuration error(s), and \\033[1;32m%s\\033[0m rule(s).\\n' "$n"; exit 0; }`,
 			`echo "Configuration is valid - found 0 configuration error(s), and $n rule(s)."`,
 			"",
 		].join("\n"),
@@ -156,8 +163,18 @@ function installOpengrepShim(): void {
 	fs.chmodSync(shim, 0o755);
 }
 
-function setShim(value: "ok" | "fail" | "few"): void {
+function setShim(value: "ok" | "fail" | "few" | "hold" | "color"): void {
 	fs.writeFileSync(SHIM_MODE, value);
+}
+
+/** Candidate files beside the cached pack: every refresh names and removes its own. */
+function leftoverCandidates(): string[] {
+	const dir = path.dirname(CACHED);
+	return fs.existsSync(dir)
+		? fs
+				.readdirSync(dir)
+				.filter((name) => name.startsWith(`${path.basename(CACHED)}.candidate`))
+		: [];
 }
 
 const shimCalls = (): number =>
@@ -186,6 +203,7 @@ beforeEach(() => {
 	fs.rmSync(SHIM_LOG, { force: true });
 	fs.rmSync(SHIM_MODE, { force: true });
 	fs.rmSync(SHIM_SEEN, { force: true });
+	fs.rmSync(SHIM_RELEASE, { force: true });
 	installOpengrepShim();
 	mode = "ok";
 	body = packOf(150, "v1");
@@ -204,6 +222,8 @@ beforeEach(() => {
 		// network; the pack step has its own cadence and spends none.
 		PI_LENS_TOOL_REFRESH_MAX_PER_SESSION: "0",
 		PI_LENS_TEST_OPENGREP_PACK_URL: baseUrl,
+		// A probe that waits on the shared install lock gives up in 2 s, not 150 s.
+		PI_LENS_INSTALL_LOCK_TIMEOUT_MS: "2000",
 	});
 });
 
@@ -239,7 +259,7 @@ describe.skipIf(process.platform === "win32")(
 			expect((await packStamp())?.failed).toBeUndefined();
 			expect(packDegradations()).toHaveLength(0);
 			// The candidate file never outlives the run.
-			expect(fs.existsSync(`${CACHED}.candidate`)).toBe(false);
+			expect(leftoverCandidates()).toEqual([]);
 		});
 
 		it("follows a cadence: a fresh stamp fetches nothing, a week later it fetches again", async () => {
@@ -289,6 +309,89 @@ describe.skipIf(process.platform === "win32")(
 			expect(shimCalls()).toBe(0);
 		});
 
+		it("does not hold the shared install lock while it validates, so an unrelated install is not starved", async () => {
+			// Recurrence (#4780 review): the refresh held the global tools install
+			// lock across a 60 s download and a 180 s validate, while an on-demand
+			// `ensureTool` for any missing tool gives up after 150 s and reports the
+			// tool unavailable for the session.
+			setShim("hold");
+			const refresh = refreshOpengrepRulePack(NOW);
+			await vi.waitFor(() => expect(shimCalls()).toBe(1));
+
+			const probe = await acquireManagedInstallGate("test: unrelated install");
+			expect(probe.ok, probe.reason).toBe(true);
+			await probe.release?.();
+
+			fs.writeFileSync(SHIM_RELEASE, "");
+			expect(await refresh).toBe("refreshed");
+		});
+
+		it("gives each overlapping refresh its own candidate, and only one of them swaps", async () => {
+			// Recurrence (#4780 review): two refreshes of one cache (a suspended
+			// process that lost its lock, or two sessions in the cadence window)
+			// shared a fixed `.candidate` name, so the older could publish or delete
+			// the newer one's file before it was validated.
+			setShim("hold");
+			const first = refreshOpengrepRulePack(NOW);
+			const second = refreshOpengrepRulePack(NOW);
+			await vi.waitFor(() => expect(shimCalls()).toBe(2));
+			const validated = fs
+				.readFileSync(SHIM_LOG, "utf-8")
+				.trim()
+				.split("\n")
+				.map((line) => line.split(" ")[3]);
+			expect(new Set(validated).size).toBe(2);
+			expect(fs.existsSync(CACHED)).toBe(false);
+
+			fs.writeFileSync(SHIM_RELEASE, "");
+			expect((await Promise.all([first, second])).sort()).toEqual([
+				"refreshed",
+				"skipped",
+			]);
+			expect(fs.readFileSync(CACHED, "utf-8")).toBe(body);
+			expect(leftoverCandidates()).toEqual([]);
+		});
+
+		it("reads the rule count through colour codes", async () => {
+			// Recurrence (#4780 review, AGENTS.md shape 63): a count split from
+			// `rule(s)` by an escape read as zero and rejected a valid download.
+			setShim("color");
+			const restore = withEnv({ FORCE_COLOR: "1" });
+			try {
+				expect(await refreshOpengrepRulePack(NOW)).toBe("refreshed");
+			} finally {
+				restore();
+			}
+			expect(fs.readFileSync(CACHED, "utf-8")).toBe(body);
+		});
+
+		it("removes candidates a killed refresh left behind, and only the stale ones", async () => {
+			fs.mkdirSync(path.dirname(CACHED), { recursive: true });
+			const stale = `${CACHED}.candidate-1-dead`;
+			const live = `${CACHED}.candidate-2-live`;
+			fs.writeFileSync(stale, "x");
+			fs.writeFileSync(live, "x");
+			const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+			fs.utimesSync(stale, old, old);
+
+			expect(await refreshOpengrepRulePack(NOW)).toBe("refreshed");
+
+			expect(fs.existsSync(stale)).toBe(false);
+			expect(fs.existsSync(live)).toBe(true);
+		});
+
+		it("leaves the pack alone when the session has Opengrep disabled", async () => {
+			// Recurrence (#4780 review): `--no-opengrep` / `opengrep.enabled=false`
+			// still downloaded the 2.5 MB registry pack every week.
+			await runManagedToolRefresh(NOW, { rulePack: false });
+			expect(hits).toBe(0);
+			expect(fs.existsSync(CACHED)).toBe(false);
+
+			await runManagedToolRefresh(NOW);
+			expect(hits).toBe(1);
+			expect(fs.existsSync(CACHED)).toBe(true);
+		});
+
 		describe.each([
 			["the registry answers HTTP 500", () => (mode = "http500"), /HTTP 500/],
 			[
@@ -319,7 +422,7 @@ describe.skipIf(process.platform === "win32")(
 
 				expect(await refreshOpengrepRulePack(NOW + 8 * DAY_MS)).toBe("failed");
 				expect(fs.readFileSync(CACHED, "utf-8")).toBe(good);
-				expect(fs.existsSync(`${CACHED}.candidate`)).toBe(false);
+				expect(leftoverCandidates()).toEqual([]);
 				expect(packDegradations()).toHaveLength(1);
 				expect(packDegradations()[0]?.reason).toMatch(reasonPattern);
 				expect(await packStamp()).toMatchObject({
@@ -377,7 +480,7 @@ describe.skipIf(process.platform === "win32")(
 			// What the validating process saw at the cache path: the old pack.
 			expect(fs.readFileSync(SHIM_SEEN, "utf-8")).toBe(oldPack);
 			expect(fs.readFileSync(CACHED, "utf-8")).toBe(body);
-			expect(fs.existsSync(`${CACHED}.candidate`)).toBe(false);
+			expect(leftoverCandidates()).toEqual([]);
 		});
 
 		it("skips without fetching when there is no managed opengrep to validate with", async () => {

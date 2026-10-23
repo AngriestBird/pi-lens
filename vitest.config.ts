@@ -325,6 +325,14 @@ const timingSensitiveInclude = [
 // silently goes stale.
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
+	// #4765: real Opengrep children. The first launches `OpengrepServer.spawn`
+	// against a PATH stub that only stays alive; the second is the opt-in live
+	// twin over the real binary (rules compile ~1 s, no network), skipped when
+	// none is installed. Neither contains a launchLSP/getServerById marker, so
+	// the census cannot derive them (its known marker gap); membership is by
+	// hand.
+	"tests/clients/opengrep-rule-pack-4765.test.ts",
+	"tests/clients/lsp/opengrep-offline-findings-4765.integration.test.ts",
 	// #1712/#4485: the cascade's live twin over a real classic TypeScript
 	// server (opt-in, PI_LENS_INTEGRATION=1); three cascades each wait on
 	// the wrapper's tsserver answers.

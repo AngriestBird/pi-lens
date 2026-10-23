@@ -11,4 +11,4 @@ export function buildPack(options: {
 	same?: boolean;
 	rulesPath?: string;
 };
-export function defuseSecretShapes(text: string): string;
+export function defuseRiskyLiterals(text: string): string;

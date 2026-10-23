@@ -15,7 +15,7 @@ import { load } from "js-yaml";
 
 import {
 	buildPack,
-	defuseSecretShapes,
+	defuseRiskyLiterals,
 } from "../../scripts/build-opengrep-pack.mjs";
 import { pinFixtureHome, removeTempDirSync } from "../clients/test-utils.js";
 
@@ -124,7 +124,7 @@ describe("scripts/build-opengrep-pack.mjs", () => {
 	});
 });
 
-describe("defuseSecretShapes", () => {
+describe("defuseRiskyLiterals", () => {
 	// Recurrence: GitHub push protection declined the first push of this pack
 	// (GH013, 2026-10-23) because one upstream rule lists the placeholder
 	// `https://hooks.slack.com/services/T00000000/B00000000/XXXX...` as a
@@ -135,13 +135,13 @@ describe("defuseSecretShapes", () => {
 
 	it("rewrites a whole webhook-shaped scalar so it parses to the same string", () => {
 		const text = `rules:\n  - id: r\n    patterns:\n      - pattern-not: ${placeholder}\n`;
-		const out = defuseSecretShapes(text);
+		const out = defuseRiskyLiterals(text);
 		expect(out).not.toContain(placeholder);
 		expect(load(out)).toEqual(load(text));
 	});
 
 	it("leaves a regex that detects webhooks, and every other scalar, alone", () => {
 		const text = `rules:\n  - id: r\n    pattern-regex: https://hooks\\.slack\\.com/services/T[a-zA-Z0-9_]{8,10}/B[a-zA-Z0-9_]{8,10}/[a-zA-Z0-9_]{24}\n    message: see ${placeholder} in prose\n`;
-		expect(defuseSecretShapes(text)).toBe(text);
+		expect(defuseRiskyLiterals(text)).toBe(text);
 	});
 });

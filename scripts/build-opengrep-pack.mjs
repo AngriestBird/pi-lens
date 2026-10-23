@@ -61,26 +61,47 @@ function* walk(dir, rel = "") {
 }
 
 /**
- * One upstream rule (`detected-slack-webhook`) names the all-placeholder
- * `https://hooks.slack.com/services/T00000000/B00000000/XXXX...` as the thing
- * it must NOT report. The literal has the shape of a real Slack webhook, so
- * GitHub push protection declines any push that contains it (2026-10-23) and
- * secret scanners flag the file. A YAML double-quoted scalar can spell the same
- * string with a `\x58` escape for one character: the parsed rule is identical,
- * the file no longer holds the contiguous literal. Only a whole plain scalar of
- * that shape is rewritten, and the caller's check proves the parse is unchanged.
+ * Two kinds of literal in the upstream rule bodies trip scanners that run over
+ * this repository, though the pack only ever holds them as data. Each is
+ * rewritten as a YAML double-quoted scalar whose escapes parse back to the
+ * identical string, and the caller's check proves the parse is unchanged:
+ *
+ * - One rule (`detected-slack-webhook`) names the all-placeholder
+ *   `https://hooks.slack.com/services/T00000000/B00000000/XXXX...` as the thing
+ *   it must NOT report. The literal has the shape of a real Slack webhook, so
+ *   GitHub push protection declines any push that contains it (2026-10-23). One
+ *   character is spelled `\x58`.
+ * - The `generic.unicode.security.bidi` rule lists the bidirectional control
+ *   characters it detects as raw bytes in `pattern-regex` scalars. SonarCloud
+ *   reads each as a Trojan Source line (text:S6389) and fails its Security
+ *   Rating (#4780 review). They become `\uXXXX` escapes.
+ *
+ * Only a whole plain scalar is rewritten. A control character that survives
+ * (a quoted spelling this does not handle) throws, so the pack fails closed.
  */
 const SLACK_SHAPE =
 	/^(\s*(?:- )?[\w-]+: )(https:\/\/hooks\.slack\.com\/services\/T\w{8,10}\/B\w{8,10}\/)(\w)(\w{23})$/gm;
+const BIDI_CONTROL = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const BIDI_PLAIN_SCALAR = /^(\s*(?:- )?[\w-]+: )([^"'|>\s][^\n]*)$/gm;
 
-export function defuseSecretShapes(text) {
-	const out = text.replace(
+export function defuseRiskyLiterals(text) {
+	let out = text.replace(
 		SLACK_SHAPE,
 		(_all, key, head, first, rest) =>
 			`${key}"${head}\\x${first.charCodeAt(0).toString(16)}${rest}"`,
 	);
+	out = out.replace(BIDI_PLAIN_SCALAR, (all, key, value) =>
+		BIDI_CONTROL.test(value)
+			? `${key}${JSON.stringify(value).replace(
+					/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+					(c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+				)}`
+			: all,
+	);
 	if (out !== text && JSON.stringify(load(out)) !== JSON.stringify(load(text)))
-		throw new Error("defusing a secret-shaped scalar changed the parsed rules");
+		throw new Error("defusing a risky literal changed the parsed rules");
+	if (BIDI_CONTROL.test(out))
+		throw new Error("a bidirectional control character survived the pack");
 	return out;
 }
 
@@ -172,7 +193,7 @@ export function buildPack({
 		"",
 	].join("\n");
 	const dumped = dump({ rules: chosen }, { lineWidth: -1, noRefs: true });
-	const body = header + defuseSecretShapes(dumped);
+	const body = header + defuseRiskyLiterals(dumped);
 
 	const sourceRels = [
 		...new Set(chosen.map((r) => rules.get(r.id).rel)),
