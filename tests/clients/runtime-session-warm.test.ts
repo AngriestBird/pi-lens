@@ -123,7 +123,7 @@ describe("warmFiles session start", () => {
 		delete process.env.PI_LENS_STARTUP_MODE;
 	});
 
-	it("calls touchFile for each warm file in .pi-lens/lsp.json", async () => {
+	it("calls touchFile for each warm file in .pi-lens.json lsp.warmFiles", async () => {
 		const env = setupTestEnvironment("pi-lens-warm-");
 		const restoreStartupMode = setStartupMode("full");
 
