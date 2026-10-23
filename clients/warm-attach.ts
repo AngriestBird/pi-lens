@@ -8,6 +8,7 @@ import {
 import { realIsPidAlive } from "./instance-reaper.js";
 import { logLatency } from "./latency-logger.js";
 import { touchCoverageGap } from "./lsp/diagnostic-binding.js";
+import { demoteInferredProjectDiagnostics } from "./lsp/inferred-project.js";
 import { loadLspService } from "./lsp-lazy.js";
 import {
 	contentHash,
@@ -128,18 +129,19 @@ async function serveRequest(
 	) {
 		return { error: "stale request" };
 	}
-	const touched = await (
-		await loadLspService()
-	)
-		.getLSPService()
-		.touchFile(req.file, req.content, {
-			diagnostics: "document",
-			collectDiagnostics: true,
-			clientScope: "with-auxiliary",
-			maxClientWaitMs: Math.max(1, req.deadlineAt - Date.now()),
-			maxDiagnosticsWaitMs: Math.max(1, req.deadlineAt - Date.now()),
-			source: "warm-attach-incumbent",
-		});
+	const service = (await loadLspService()).getLSPService();
+	const touched = await service.touchFile(req.file, req.content, {
+		diagnostics: "document",
+		collectDiagnostics: true,
+		clientScope: "with-auxiliary",
+		maxClientWaitMs: Math.max(1, req.deadlineAt - Date.now()),
+		maxDiagnosticsWaitMs: Math.max(1, req.deadlineAt - Date.now()),
+		source: "warm-attach-incumbent",
+	});
+	const diagnostics = await demoteInferredProjectDiagnostics(
+		touched?.diags ?? [],
+		{ filePath: req.file, cwd: req.cwd, service },
+	);
 	const servedAt = Date.now();
 	// #1470: the coverage gap is read through the shared helper, never re-derived
 	// from `confirmation === "partial"`. The two fields are set together today, so
@@ -165,7 +167,7 @@ async function serveRequest(
 			// serialization boundary: the diagnostics array crosses the IPC socket
 			// and `inconclusive` is re-surfaced below as an EXPLICIT enumerable DTO
 			// field (no side-channel survives `JSON.stringify`).
-			diagnostics: touched?.diags ?? [],
+			diagnostics,
 			contentHash: req.contentHash,
 			servedAt,
 			fresh: servedAt <= req.deadlineAt && touched !== undefined,

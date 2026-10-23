@@ -29,17 +29,19 @@ import {
 } from "../../clients/mcp/ipc.js";
 import type { WarmDiagnosticsResponse } from "../../clients/mcp/ipc.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
+import { INFERRED_PROJECT_MARKER } from "../../clients/lsp/inferred-project.js";
 
 const touchFile = vi.fn();
+const projectInfo = vi.fn();
 
 const FILE = "C:/repo/notes.md";
 const CONTENT = "# hi\n";
 
-function request() {
+function request(file = FILE) {
 	return {
 		route: "diagnostics" as const,
 		version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
-		file: FILE,
+		file,
 		cwd: "C:/repo",
 		content: CONTENT,
 		contentHash: contentHash(CONTENT),
@@ -49,10 +51,10 @@ function request() {
 	};
 }
 
-async function serve() {
+async function serve(file = FILE) {
 	const { _serveWarmRequestForTests } =
 		await import("../../clients/warm-attach.js");
-	const served = await _serveWarmRequestForTests(request());
+	const served = await _serveWarmRequestForTests(request(file));
 	expect(served.error).toBeUndefined();
 	return served.result as WarmDiagnosticsResponse;
 }
@@ -61,15 +63,21 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 	beforeEach(async () => {
 		vi.resetModules();
 		touchFile.mockReset();
-		// `_serveWarmRequestForTests` reads only `touchFile` on the diagnostics
-		// route; the rest of the surface comes from the factory (#2592). The
-		// install resets and re-evaluates the facade's graph around the
-		// `vi.resetModules()` above, so `serve()`'s own dynamic import reuses this
-		// evaluation instead of re-installing the host's real lifecycle.
-		await installLspServiceDouble({ touchFile });
+		projectInfo.mockReset();
+		projectInfo.mockResolvedValue({
+			executed: false,
+			reason: "no live client",
+		});
+		// The install re-evaluates the facade after `vi.resetModules()` so
+		// `serve()` reuses the lifecycle containing this case's double (#2592).
+		await installLspServiceDouble({
+			touchFile,
+			executeReadOnlyCommandOnLiveClient: projectInfo,
+		});
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.useRealTimers();
 	});
 
 	it("carries confirmation:'confirmed' for a confirmed clean touch", async () => {
@@ -167,6 +175,88 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 
 		expect(result.confirmation).toBe("partial");
 		expect(result.unconfirmedServerIds).toEqual(["opengrep"]);
+	});
+
+	// #4645: only the incumbent owns the client that can answer membership;
+	// attached readers must receive its demotion without starting another fleet.
+	describe("inferred-project authority", () => {
+		const file = "C:/repo/orphan.ts";
+		const diagnostic = {
+			severity: 1,
+			message: "Type 'number' is not assignable to type 'string'.",
+			source: "typescript",
+			code: 2322,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 4 },
+			},
+		};
+		const inferred = {
+			executed: true,
+			result: {
+				success: true,
+				body: { configFileName: "/dev/null/inferredProject1*" },
+			},
+		};
+
+		beforeEach(() => {
+			touchFile.mockResolvedValue({
+				diags: [diagnostic],
+				confirmation: "confirmed",
+			});
+		});
+
+		it("serializes inferred-project errors as labelled warnings", async () => {
+			projectInfo.mockResolvedValue(inferred);
+
+			const result = JSON.parse(
+				JSON.stringify(await serve(file)),
+			) as WarmDiagnosticsResponse;
+
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0].severity).toBe(2);
+			expect(result.diagnostics[0].message).toContain(INFERRED_PROJECT_MARKER);
+			expect(result.confirmation).toBe("confirmed");
+			expect(result.fresh).toBe(true);
+			expect(projectInfo).toHaveBeenCalledExactlyOnceWith(
+				file,
+				"typescript.tsserverRequest",
+				["projectInfo", { file, needFileNameList: false }],
+			);
+		});
+
+		it("preserves configured-project errors", async () => {
+			projectInfo.mockResolvedValue({
+				executed: true,
+				result: {
+					success: true,
+					body: { configFileName: "C:/repo/tsconfig.json" },
+				},
+			});
+
+			expect((await serve(file)).diagnostics).toEqual([diagnostic]);
+		});
+
+		it("preserves errors when membership is unavailable", async () => {
+			expect((await serve(file)).diagnostics).toEqual([diagnostic]);
+		});
+
+		it("does not probe membership for clean diagnostics", async () => {
+			touchFile.mockResolvedValue({ diags: [], confirmation: "confirmed" });
+
+			expect((await serve(file)).diagnostics).toEqual([]);
+			expect(projectInfo).not.toHaveBeenCalled();
+		});
+
+		it("counts membership work against the response deadline", async () => {
+			vi.useFakeTimers();
+			projectInfo.mockImplementation(async () => {
+				vi.setSystemTime(Date.now() + 60_001);
+				return inferred;
+			});
+
+			expect((await serve(file)).fresh).toBe(false);
+		});
 	});
 
 	it("survives the JSON round trip the socket actually performs", async () => {

@@ -2704,7 +2704,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/tool-definition.ts": 1,
 	"clients/tree-sitter-shared.ts": 1,
 	"clients/trivy-client.ts": 2,
-	"clients/warm-attach.ts": 9,
+	// #4645: 9 -> 10. The incumbent awaits membership demotion through the
+	// existing non-spawning read-only probe channel. Its short command timeout
+	// still applies, and serveRequest samples freshness after the probe.
+	"clients/warm-attach.ts": 10,
 	// 3 -> 4 (#3612): the widget store's restore awaits `dropStaleFiles` for a
 	// sidecar source, the reconciliation index.ts's rehydrate block awaited.
 	"clients/widget-state.ts": 4,
