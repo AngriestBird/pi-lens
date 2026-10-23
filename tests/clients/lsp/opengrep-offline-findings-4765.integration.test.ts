@@ -73,7 +73,7 @@ import {
 } from "../../../clients/project-trust.js";
 import { withEnv } from "../../support/with-env.js";
 import { waitFor } from "../interleaving-kit.js";
-import { removeTempDirSync } from "../test-utils.js";
+import { pinFixtureHome, removeTempDirSync } from "../test-utils.js";
 
 const EXE = process.platform === "win32" ? "opengrep.exe" : "opengrep";
 
@@ -149,6 +149,17 @@ function packYaml(): string {
 	return `rules:\n${rules.join("\n")}\n`;
 }
 
+/**
+ * Resolve the binary once, then pin HOME for every case: the real `opengrep`
+ * child writes its own settings and caches under `$HOME/.config/.opengrep` and
+ * `$HOME/.config/.semgrep`, so a case that pins only `PI_LENS_HOME` still writes
+ * into the developer's home (AGENTS.md "Paths, data, and operating systems";
+ * #4780 review). A probe over the strace of this file records zero writes to the
+ * real `~/.config/.opengrep` and `~/.config/.semgrep`.
+ */
+let restorePinnedHome: (() => void) | undefined;
+let restoreXdg: (() => void) | undefined;
+
 let work: string;
 let restoreEnv: (() => void) | undefined;
 let server: http.Server | undefined;
@@ -156,6 +167,20 @@ const cleanups: Array<() => Promise<void>> = [];
 
 beforeEach(() => {
 	fs.mkdirSync(HOME, { recursive: true });
+	const pinned = pinFixtureHome("opengrep-live-4765");
+	restorePinnedHome = pinned.restore;
+	// The XDG variables override HOME for everything that honours them, so they
+	// are pinned to the same fixture home rather than left to the developer's.
+	// Both directories must EXIST: opengrep raises `Sys_error(... .config: No
+	// such file or directory)` instead of creating a missing XDG root.
+	const xdgConfig = path.join(pinned.home, ".config");
+	const xdgCache = path.join(pinned.home, ".cache");
+	fs.mkdirSync(xdgConfig, { recursive: true });
+	fs.mkdirSync(xdgCache, { recursive: true });
+	restoreXdg = withEnv({
+		XDG_CONFIG_HOME: xdgConfig,
+		XDG_CACHE_HOME: xdgCache,
+	});
 	work = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-opengrep-live-4765-"));
 	fs.rmSync(path.join(HOME, "rules"), { recursive: true, force: true });
 	fs.rmSync(path.join(HOME, "tools"), { recursive: true, force: true });
@@ -173,6 +198,11 @@ afterEach(async () => {
 	server = undefined;
 	restoreEnv?.();
 	restoreEnv = undefined;
+	// Restore in the reverse order of the pins: the XDG pair first, then HOME.
+	restoreXdg?.();
+	restoreXdg = undefined;
+	restorePinnedHome?.();
+	restorePinnedHome = undefined;
 	resetProjectTrust();
 	removeTempDirSync(work);
 });
@@ -221,6 +251,13 @@ async function spawnClient(project: string, file: string) {
 		process: launched.process,
 		root: project,
 		initialization: launched.initialization,
+		// The production client registry passes the registry entry's declared
+		// `role` (`client-registry.ts`: `role: server.role`). This case builds the
+		// client directly, so it must pass the same declaration: without it the
+		// client is created with no role, #4786's auxiliary hold never arms, and
+		// opengrep's late empty publication erases the finding this case asserts
+		// (#4790 fixed that hold; the case had never exercised it).
+		role: OpengrepServer.role,
 		initializeTimeoutMs: 30_000,
 	});
 	cleanups.push(async () => {

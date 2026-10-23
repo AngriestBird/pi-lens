@@ -254,14 +254,22 @@ export async function readManagedToolRefreshState(): Promise<ManagedToolRefreshS
  * later commit can replace it. The read path above still reports `unreadable`,
  * which is what suppresses the refresh; this side only has to make sure the
  * file becomes valid again instead of staying corrupt forever.
+ *
+ * `retainNewerSuccess` is for a FAILURE record (AGENTS.md shape 21): the merge
+ * runs under the store lock, i.e. against the bytes on disk now, so a success
+ * a sibling wrote while this attempt was in flight is newer work than this
+ * attempt's start. Keeping the winner's entry keeps its `version` and its
+ * weekly cadence; replacing it with `failed: true` would erase both and demote
+ * the tool to the one-day retry (#4780 review, #4786's sibling).
  */
 async function writeRefreshStamp(
 	toolId: string,
 	entry: ManagedToolRefreshEntry,
+	options: { retainNewerSuccess?: boolean } = {},
 ): Promise<void> {
 	try {
 		await fs.mkdir(getManagedToolsDir(), { recursive: true });
-		await commitDurableStoreAsync<ManagedToolRefreshState>({
+		const committed = await commitDurableStoreAsync<ManagedToolRefreshState>({
 			path: getManagedToolRefreshStatePath(),
 			deserialize: (contents) => {
 				if (contents === undefined) return emptyState();
@@ -272,6 +280,16 @@ async function writeRefreshStamp(
 				}
 			},
 			merge: (disk) => {
+				const current = disk.tools[toolId];
+				if (
+					options.retainNewerSuccess === true &&
+					entry.failed === true &&
+					current !== undefined &&
+					current.failed !== true &&
+					current.checkedAt >= entry.checkedAt
+				) {
+					return disk;
+				}
 				disk.tools[toolId] = entry;
 				return disk;
 			},
@@ -287,6 +305,13 @@ async function writeRefreshStamp(
 				);
 			},
 		});
+		if (committed !== undefined && committed.tools[toolId] !== entry) {
+			// The merge kept another writer's newer success: one bounded record, and
+			// the caller's failure record still stands (only the stamp is kept).
+			logSessionStart(
+				`managed-tool-refresh ${toolId}: kept a newer successful stamp (checkedAt ${committed.tools[toolId]?.checkedAt ?? "unknown"}) — this failure does not replace it`,
+			);
+		}
 	} catch (err) {
 		// A stamp that cannot be written means this tool is eligible again next
 		// session. That is noisier than intended but never wrong, so it degrades
@@ -578,17 +603,21 @@ async function refreshNonNpmOne(
 		logSessionStart(
 			`managed-tool-refresh ${candidate.toolId}: ${candidate.strategy} refresh failed after ${elapsedMs}ms — keeping ${previousVersion ?? "installed"} (${attempt.reason ?? "unknown"})`,
 		);
-		await writeRefreshStamp(candidate.toolId, {
-			checkedAt: now,
-			failed: true,
-			...(previousVersion !== undefined && { version: previousVersion }),
-			...(entry?.resolutionId !== undefined && {
-				resolutionId: entry.resolutionId,
-			}),
-			// Deliberately NOT carrying `entry.etag` forward: a stamp that replays
-			// the validator of a run whose download failed would get a 304 next
-			// time and skip the install that never happened.
-		});
+		await writeRefreshStamp(
+			candidate.toolId,
+			{
+				checkedAt: now,
+				failed: true,
+				...(previousVersion !== undefined && { version: previousVersion }),
+				...(entry?.resolutionId !== undefined && {
+					resolutionId: entry.resolutionId,
+				}),
+				// Deliberately NOT carrying `entry.etag` forward: a stamp that replays
+				// the validator of a run whose download failed would get a 304 next
+				// time and skip the install that never happened.
+			},
+			{ retainNewerSuccess: true },
+		);
 		return {
 			toolId: candidate.toolId,
 			strategy: candidate.strategy,
@@ -729,11 +758,15 @@ async function performNpmRefresh(
 		logSessionStart(
 			`managed-tool-refresh ${candidate.toolId}: ${pm} update failed after ${elapsedMs}ms — package ${packageName}, covered ids ${coveredIds}; on disk now ${onDisk ?? "unreadable"} (was ${previousVersion ?? "unknown"}); resolution cache cleared for re-probe (${reason || "non-zero exit"})`,
 		);
-		await writeRefreshStamp(candidate.toolId, {
-			checkedAt: now,
-			failed: true,
-			...(onDisk !== undefined && { version: onDisk }),
-		});
+		await writeRefreshStamp(
+			candidate.toolId,
+			{
+				checkedAt: now,
+				failed: true,
+				...(onDisk !== undefined && { version: onDisk }),
+			},
+			{ retainNewerSuccess: true },
+		);
 		return {
 			toolId: candidate.toolId,
 			strategy: "npm",
@@ -794,11 +827,15 @@ async function performNpmRefresh(
 		logSessionStart(
 			`managed-tool-refresh ${candidate.toolId}: ${pm} update ran but ${binPath} failed verification — package ${packageName}, covered ids ${coveredIds}; resolution cache cleared for re-probe (${elapsedMs}ms)`,
 		);
-		await writeRefreshStamp(candidate.toolId, {
-			checkedAt: now,
-			failed: true,
-			...(currentVersion !== undefined && { version: currentVersion }),
-		});
+		await writeRefreshStamp(
+			candidate.toolId,
+			{
+				checkedAt: now,
+				failed: true,
+				...(currentVersion !== undefined && { version: currentVersion }),
+			},
+			{ retainNewerSuccess: true },
+		);
 		return {
 			toolId: candidate.toolId,
 			strategy: "npm",
@@ -1030,13 +1067,17 @@ async function executeManagedToolRefresh(
 					for (const toolId of candidate.coveredToolIds) {
 						if (toolId === candidate.toolId) continue;
 						await bounded(
-							writeRefreshStamp(toolId, {
-								checkedAt: now,
-								...(result.currentVersion !== undefined && {
-									version: result.currentVersion,
-								}),
-								...(result.ok ? {} : { failed: true }),
-							}),
+							writeRefreshStamp(
+								toolId,
+								{
+									checkedAt: now,
+									...(result.currentVersion !== undefined && {
+										version: result.currentVersion,
+									}),
+									...(result.ok ? {} : { failed: true }),
+								},
+								{ retainNewerSuccess: true },
+							),
 							{
 								ms: HOOK_WALL_BUDGET_MS.session_start,
 								// The unref'd timer runs after session_start returns, so no
@@ -1328,11 +1369,17 @@ export async function refreshOpengrepRulePack(
 			logSessionStart(
 				`managed-tool-refresh ${OPENGREP_PACK_STAMP_ID}: refresh failed after ${Date.now() - startedAt}ms — keeping the current pack (${reason})`,
 			);
-			await writeRefreshStamp(OPENGREP_PACK_STAMP_ID, {
-				checkedAt: now,
-				failed: true,
-				...(entry?.version !== undefined && { version: entry.version }),
-			});
+			await writeRefreshStamp(
+				OPENGREP_PACK_STAMP_ID,
+				{
+					checkedAt: now,
+					failed: true,
+					...(entry?.version !== undefined && { version: entry.version }),
+				},
+				// A winner that stamped while this attempt was validating keeps its
+				// `{checkedAt, version}` and its weekly cadence (shape 21).
+				{ retainNewerSuccess: true },
+			);
 			return "failed";
 		} finally {
 			try {

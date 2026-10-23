@@ -237,11 +237,18 @@ describe("rule ids the CLI scan reports for the cached pack", () => {
 		expect(await scanReporting(`${cachedDir}.${bare}`)).toEqual([bare]);
 
 		// A repo's own rule file keeps the ids Opengrep gives it, prefix included
-		// (pre-existing behaviour users' dispositions may already key on).
+		// (pre-existing behaviour users' dispositions may already key on). Two
+		// spellings, because each catches a different way of losing the gate: an id
+		// under the PROJECT directory reds when the strip uses the resolved config's
+		// own directory, and an id under the PACK directory reds when the strip is
+		// applied to every finding with the cached pack's prefix (#4780 review).
 		fs.writeFileSync(path.join(project, ".opengrep.yml"), "rules: []\n");
 		const projectDir = project.replace(/^\//, "").replaceAll("/", ".");
 		expect(await scanReporting(`${projectDir}.repo-eval`)).toEqual([
 			`${projectDir}.repo-eval`,
+		]);
+		expect(await scanReporting(`${cachedDir}.repo-eval`)).toEqual([
+			`${cachedDir}.repo-eval`,
 		]);
 	});
 });

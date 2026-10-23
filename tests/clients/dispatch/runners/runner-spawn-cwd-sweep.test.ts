@@ -151,7 +151,11 @@ const EXPECTED_FILES = 79;
 // 135 -> 134 (#4532 round 3): `findBinaryOnPath` stopped spawning
 // `which`/`where` — the bare-command probe resolved its own binary through the
 // path and cwd it was asked to judge, so a project-supplied `which` ran. It is
-// an in-process PATH scan now, and 134 counts the direct spawns that remain.
+// an in-process PATH scan now, and 134 was the direct-spawn population it left.
+// 134 -> 135 (#4765): `validateOpengrepPack` runs the installed `opengrep`
+// `scan --validate --config <candidate>` before the cached registry pack is
+// swapped in, through this seam. (#4776 also moves this pin; whichever of the
+// two lands second re-pins, so this value is not pre-adjusted for it.)
 const EXPECTED_DIRECT_SITES = 135;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned

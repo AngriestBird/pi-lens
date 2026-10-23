@@ -153,6 +153,9 @@ function installOpengrepShim(): void {
 			// `hold` parks the validate until the test releases it, so the test can
 			// act while a refresh is mid-validation (bounded: 20 s, then it goes on).
 			`if [ "$mode" = hold ]; then i=0; while [ ! -f "${SHIM_RELEASE}" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; fi`,
+			// `holdfail` parks the same way and then FAILS: a refresh that started
+			// before its winner and settles after it.
+			`if [ "$mode" = holdfail ]; then i=0; while [ ! -f "${SHIM_RELEASE}" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; echo "invalid rule" >&2; exit 5; fi`,
 			`n=$(grep -o -E '^ *- id:|"id":' "$4" | wc -l)`,
 			`[ "$mode" = few ] && n=3`,
 			// `color`: the real CLI colours its summary when the host forces colour.
@@ -164,7 +167,9 @@ function installOpengrepShim(): void {
 	fs.chmodSync(shim, 0o755);
 }
 
-function setShim(value: "ok" | "fail" | "few" | "hold" | "color"): void {
+function setShim(
+	value: "ok" | "fail" | "few" | "hold" | "holdfail" | "color",
+): void {
 	fs.writeFileSync(SHIM_MODE, value);
 }
 
@@ -349,6 +354,43 @@ describe.skipIf(process.platform === "win32")(
 			]);
 			expect(fs.readFileSync(CACHED, "utf-8")).toBe(body);
 			expect(leftoverCandidates()).toEqual([]);
+		});
+
+		it("keeps a newer successful stamp when a late refresh fails", async () => {
+			// Recurrence (#4780 review, AGENTS.md shape 21): a refresh that STARTED
+			// before the winner and failed after it replaced the winner's
+			// `{checkedAt, version}` with `{failed: true}`, erasing the version and
+			// demoting the tool to the one-day retry. `writeRefreshStamp` now decides
+			// under the durable-store lock, against the bytes a sibling wrote.
+			setShim("holdfail");
+			const loser = refreshOpengrepRulePack(NOW);
+			await waitFor(shimCalls, (calls) => calls === 1);
+
+			setShim("ok");
+			body = packOf(155, "v2");
+			expect(await refreshOpengrepRulePack(NOW + 60_000)).toBe("refreshed");
+			expect(fs.readFileSync(CACHED, "utf-8")).toBe(body);
+			expect(await packStamp()).toMatchObject({ checkedAt: NOW + 60_000 });
+
+			fs.writeFileSync(SHIM_RELEASE, "");
+			expect(await loser).toBe("failed");
+
+			// The failure is still recorded — only its stamp write is withheld.
+			expect(packDegradations()).toHaveLength(1);
+			expect(packDegradations()[0]?.reason).toMatch(
+				/opengrep --validate failed/,
+			);
+			// The winner's success survives, version included.
+			const stamp = await packStamp();
+			expect(stamp?.failed).toBeUndefined();
+			expect(stamp?.checkedAt).toBe(NOW + 60_000);
+			expect(stamp?.version).toBeDefined();
+			// And its cadence: the next refresh is a week away, not a day.
+			const hitsAfter = hits;
+			expect(await refreshOpengrepRulePack(NOW + 60_000 + DAY_MS - 1000)).toBe(
+				"skipped",
+			);
+			expect(hits).toBe(hitsAfter);
 		});
 
 		it("reads the rule count through colour codes", async () => {

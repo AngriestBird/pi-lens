@@ -453,6 +453,17 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"bounded() races the touch against a live wall budget; fake timers settle the bound instantly and the budget semantics are unmeasurable",
 	},
+	// 2026-10-23 (#4780 R3 review): the case's ASSERTION IS A NEGATIVE — a
+	// `/reload` cancelled the previous activation's refresh timer, so nothing is
+	// fetched, validated or cached. There is no event to await, so a bounded real
+	// window is the only observer; the assertions are the fetch count, the shim's
+	// call count and the stamp, never elapsed ms.
+	"raw-timer-wait:clients/runtime-session-opengrep-refresh-timer-4780.test.ts":
+		{
+			detector: "raw-timer-wait",
+			reason:
+				"a cancelled timer produces no event to await; a bounded real window observes the absence, and every assertion is a count, never elapsed ms",
+		},
 	// 2026-09-15 (#2042 cheapest probe): the sample-tail file is written by the
 	// wrapper's own real setInterval loop in a separate process; a poll waits
 	// for that file's first write rather than a fixed sleep, and one case kills

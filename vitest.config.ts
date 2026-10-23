@@ -640,6 +640,10 @@ export const wallClockBudgetInclude = [
 	"tests/clients/read-guard-glob-nonbacktracking.test.ts",
 	// #4638: the fix passes are measured through the real ruff binary (flake-shape admission).
 	"tests/clients/ruff-target-version-real.test.ts",
+	// #4780 R3 review: the reload-timer case asserts a negative (a cancelled timer
+	// fetched nothing), so it waits a bounded real window; serialized here like its
+	// flake-shape peers (admission header + baseline row in the same change).
+	"tests/clients/runtime-session-opengrep-refresh-timer-4780.test.ts",
 	"tests/clients/runtime-session-scan-cache.test.ts",
 	// #4126: the first-session warmup has no awaitable completion signal; keep
 	// its real deferred-notification ordering in the serialized phase.
