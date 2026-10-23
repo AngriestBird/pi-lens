@@ -1358,11 +1358,13 @@ function getSpawnEnvironment(
  * rather than a file the caller named by spelling a path. #4530 covers the
  * lookups: the search path is where a project substitutes its own bytes for a
  * global tool. A caller that spells a path chose that file itself. A
- * drive-relative `D:tool.exe` is a path on Windows, not a search.
+ * drive-relative `D:tool.exe` is a path on Windows, not a search. The
+ * separators are the platform's own: on POSIX a backslash is a name
+ * character, so `tool\name` is a bare name the search path resolves (#4776).
  */
 function isSpawnLookup(command: string): boolean {
-	if (/[\\/]/.test(command)) return false;
-	return !(process.platform === "win32" && driveLetter(command) !== undefined);
+	if (process.platform !== "win32") return !command.includes("/");
+	return !/[\\/]/.test(command) && driveLetter(command) === undefined;
 }
 
 /** The directory a search-path entry names for a child running in `cwd`. */

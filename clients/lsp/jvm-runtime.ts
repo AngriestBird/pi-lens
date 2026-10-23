@@ -175,7 +175,11 @@ const javaAvailabilityLatch = createAvailabilityLatch();
  * every expired cooldown reopens that window for the process's whole
  * lifetime, not just at startup.
  */
-let inFlightJavaProbe: Promise<boolean | undefined> | null = null;
+let inFlightJavaProbe: {
+	/** #4776: the probe answers for this trust; a later one never joins it. */
+	trustGeneration: number;
+	promise: Promise<boolean | undefined>;
+} | null = null;
 
 export function _resetJvmRuntimeCacheForTests(): void {
 	_cachedEnv = undefined;
@@ -202,6 +206,7 @@ export function _resetJvmRuntimeCacheForTests(): void {
  * `outcome` distinguishes the two; a durable verdict is never `"transient"`.
  */
 function probeJavaOnPath(): Promise<boolean | undefined> {
+	const trustGeneration = getProjectTrustGeneration();
 	const memo = javaAvailabilityLatch.read();
 	if (memo !== null) {
 		if (javaAvailabilityLatch.getOutcome() === "transient") {
@@ -230,11 +235,13 @@ function probeJavaOnPath(): Promise<boolean | undefined> {
 		return Promise.resolve(memo);
 	}
 
-	if (inFlightJavaProbe) return inFlightJavaProbe;
-	inFlightJavaProbe = runJavaProbe().finally(() => {
-		inFlightJavaProbe = null;
+	if (inFlightJavaProbe?.trustGeneration === trustGeneration)
+		return inFlightJavaProbe.promise;
+	const promise = runJavaProbe().finally(() => {
+		if (inFlightJavaProbe?.promise === promise) inFlightJavaProbe = null;
 	});
-	return inFlightJavaProbe;
+	inFlightJavaProbe = { trustGeneration, promise };
+	return promise;
 }
 
 /** The actual `where`/`which java` spawn + classification. Never call this

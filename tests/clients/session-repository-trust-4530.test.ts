@@ -33,6 +33,7 @@ import {
 	gofmtFormatter,
 } from "../../clients/formatters.js";
 import {
+	getToolPath,
 	isCommandAvailable,
 	isSpawnableCommand,
 	resetPathWalkMemo,
@@ -64,7 +65,7 @@ import {
 	writeStandIn,
 } from "../support/path-probe-stub.js";
 import { withEnv } from "../support/with-env.js";
-import { setupTestEnvironment } from "./test-utils.js";
+import { pinFixtureHome, setupTestEnvironment } from "./test-utils.js";
 
 const TOOL = "pi-lens-4530-tool";
 const POSIX = process.platform !== "win32";
@@ -87,12 +88,20 @@ let stub: PathProbeStub;
 let cleanups: Array<() => void> = [];
 let originalCwd: string;
 
-/** Real git metadata, written by hand: a main checkout and one linked worktree. */
+/**
+ * Real git metadata, written by hand: a main checkout and one linked worktree.
+ * HOME is pinned outside the fixture root the harness deletes (#4776 review:
+ * a child that outlives its cell writes to its inherited HOME, and a home
+ * inside the deleted root would re-create it); the checkouts live under it,
+ * because the rule's ceiling is HOME.
+ */
 function makeLayout(): Layout {
 	const env = setupTestEnvironment("pi-lens-4530-trust-");
 	cleanups.push(env.cleanup);
+	const pinned = pinFixtureHome("4530-trust");
+	cleanups.push(pinned.restore);
 	const root = fs.realpathSync(env.tmpDir);
-	const home = path.join(root, "home");
+	const home = fs.realpathSync(pinned.home);
 	const main = path.join(home, "main");
 	const wt = path.join(home, "wt");
 	const outside = path.join(root, "outside");
@@ -145,14 +154,7 @@ beforeEach(() => {
 	resetPathWalkMemo();
 	clearFormatterCache();
 	layout = makeLayout();
-	// os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
-	cleanups.push(
-		withEnv({
-			HOME: layout.home,
-			USERPROFILE: layout.home,
-			PI_LENS_HOME: layout.data,
-		}),
-	);
+	cleanups.push(withEnv({ PI_LENS_HOME: layout.data }));
 	// Hermetic: PATH holds only the stub's stand-ins and the host's `which`,
 	// so no lookup reaches a package manager the test did not plant.
 	if (POSIX) {
@@ -338,6 +340,40 @@ describe.skipIf(!POSIX)("bare lookups under untrusted pi trust (#4530)", () => {
 		expect(result.status).toBeNull();
 		expect(ran(marker)).toBe(false);
 		expect(trustRefusals()).toEqual([`project-command:${target}`]);
+	});
+
+	// #4776 review F1: on POSIX a backslash is a name character, not a
+	// separator, so `tool\name` is a bare name the search path resolves. A
+	// Windows-shaped separator test classified it as a named path and skipped the
+	// lookup judgment, so the project's bytes ran unrecorded.
+	it("I7/A1: a POSIX name holding a backslash is a lookup, judged like any other", async () => {
+		const name = `${TOOL}\\name`;
+		const marker = path.join(layout.root, "project-ran");
+		const target = plant(path.join(layout.main, "tools"), marker, name);
+		const global = path.join(layout.outside, "global-bin");
+		fs.mkdirSync(global);
+		fs.symlinkSync(target, path.join(global, name));
+
+		const result = await safeSpawnAsync(name, [], {
+			env: { PATH: global },
+			timeout: 10_000,
+		});
+
+		expect(result.spawnFailure?.kind).toBe("trust-refused");
+		expect(result.status).toBeNull();
+		expect(ran(marker)).toBe(false);
+		expect(trustRefusals()).toEqual([`project-command:${target}`]);
+	});
+
+	it("I7/A9: the installer reads a POSIX name holding a backslash as a lookup", async () => {
+		const name = `${TOOL}\\name`;
+		const global = path.join(layout.outside, "global-bin");
+		fs.mkdirSync(global);
+		plant(global, path.join(layout.root, "unused"), name);
+		cleanups.push(withEnv({ PATH: global }));
+
+		// Statted as a path, the name would be looked for under the cwd.
+		expect(await isSpawnableCommand(name)).toBe(true);
 	});
 
 	it("A5: a `which` answer that links into the project is no answer", async () => {
@@ -574,6 +610,48 @@ describe.skipIf(!POSIX)("package-manager global lookups (#4530)", () => {
 		);
 	});
 
+	// #4776 review G1: the installer's own global-dir rungs start what they
+	// find by path to verify it, past the spawn seam's lookup judgment, so a
+	// link in a global dir ran the project's bytes during verification.
+	it("I8/A3: the installer's npm-global candidate that links into the project is refused", async () => {
+		const marker = path.join(layout.root, "project-ran");
+		const target = plant(path.join(layout.main, "tools"), marker, "stylelint");
+		const globalBin = path.join(layout.home, ".npm-global", "bin");
+		fs.mkdirSync(globalBin, { recursive: true });
+		fs.symlinkSync(target, path.join(globalBin, "stylelint"));
+
+		expect(await getToolPath("stylelint")).toBeUndefined();
+		expect(ran(marker)).toBe(false);
+		expect(trustRefusals()).toEqual([`project-command:${target}`]);
+		// Control: trusted, the same rung verifies and answers with the link.
+		setProjectTrustState("trusted");
+		expect(await getToolPath("stylelint")).toBe(
+			path.join(globalBin, "stylelint"),
+		);
+		expect(ran(marker)).toBe(true);
+	});
+
+	it("I8/A3: the installer's Python user-base candidate that links into the project is refused", async () => {
+		const marker = path.join(layout.root, "project-ran");
+		const target = plant(path.join(layout.main, "tools"), marker, "yamllint");
+		const userBase = path.join(layout.outside, "py-user");
+		fs.mkdirSync(path.join(userBase, "bin"), { recursive: true });
+		fs.symlinkSync(target, path.join(userBase, "bin", "yamllint"));
+		stub.plantOnPath(
+			"python3",
+			`if [ "$*" = '-m site --user-base' ]; then printf '%s\\n' '${userBase}'; else exit 1; fi`,
+		);
+
+		expect(await getToolPath("yamllint")).toBeUndefined();
+		expect(ran(marker)).toBe(false);
+		expect(trustRefusals()).toEqual([`project-command:${target}`]);
+		setProjectTrustState("trusted");
+		expect(await getToolPath("yamllint")).toBe(
+			path.join(userBase, "bin", "yamllint"),
+		);
+		expect(ran(marker)).toBe(true);
+	});
+
 	it("F8/A4: project configuration cannot redirect the global-bin query", async () => {
 		// The stand-in answers like npm does: a `.npmrc` in its cwd sets the
 		// prefix. The redirected prefix sits OUTSIDE the session, so only the
@@ -652,6 +730,51 @@ describe.skipIf(!POSIX)("package-manager global lookups (#4530)", () => {
 		setProjectTrustState("trusted");
 		// Trusted: the PATH `java` answers, so nothing is injected.
 		expect(await resolveJavaRuntimeEnv()).toBeUndefined();
+	});
+
+	// #4776 review G2 (and the Java thread): a verdict written after a trust
+	// change by a probe that started before it answered for the OLD trust, and
+	// stamping it current kept a tool missing (or found) under the new trust.
+	it("F10/A11: a Java probe joined after a trust flip is not shared across it", async () => {
+		const jdk = path.join(layout.outside, "jdk");
+		writeStandIn(path.join(jdk, "bin"), "java", "exit 0");
+		writeStandIn(path.join(layout.main, "bin"), "java", "exit 0");
+		cleanups.push(
+			withEnv({
+				JAVA_HOME: jdk,
+				PATH: `${process.env.PATH}${path.delimiter}${path.join(layout.main, "bin")}`,
+			}),
+		);
+
+		// The untrusted probe is in flight (its search path is already scoped)
+		// when pi trusts the project and a second caller asks.
+		const untrusted = resolveJavaRuntimeEnv();
+		setProjectTrustState("trusted");
+		const trusted = resolveJavaRuntimeEnv();
+
+		expect((await untrusted)?.JAVA_HOME).toBe(jdk);
+		expect(await trusted).toBeUndefined();
+		expect(await resolveJavaRuntimeEnv()).toBeUndefined();
+	});
+
+	it("A11: a verdict whose probe straddled a trust change answers for the old trust", () => {
+		const latch = createAvailabilityLatch();
+		expect(latch.read()).toBeNull();
+		setProjectTrustState("trusted");
+		latch.noteUnavailable("missing", "not-found");
+		expect(latch.read()).toBeNull();
+		latch.noteAvailable();
+		expect(latch.read()).toBe(true);
+	});
+
+	it("A11: a probe a later read joined after a trust change still answers for the old trust", () => {
+		const latch = createAvailabilityLatch();
+		expect(latch.read()).toBeNull();
+		setProjectTrustState("trusted");
+		// The second caller shares the probe already in flight.
+		expect(latch.read()).toBeNull();
+		latch.noteUnavailable("missing", "not-found");
+		expect(latch.read()).toBeNull();
 	});
 
 	it("A11: every availability verdict is dropped when pi's trust answer changes", () => {

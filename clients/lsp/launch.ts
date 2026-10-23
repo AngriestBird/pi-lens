@@ -22,12 +22,12 @@ import { getGlobalPiLensLogDir } from "../probe-home-state.js";
 import { isFullyQualified } from "../path-utils.js";
 import { findGlobalBinary, isProjectLocalBinPath } from "../package-manager.js";
 import {
+	isSessionRepositoryPath,
 	isUntrustedProjectPath,
 	recordProjectCommandRefusal,
 } from "../session-repository.js";
 import {
 	getDegradationLedgerGeneration,
-	getDegradationSummary,
 	recordDegradationOnce,
 } from "../degradation-ledger.js";
 import { getProjectTrustState } from "../project-trust.js";
@@ -615,11 +615,7 @@ function recordUnresolvedTypeScriptCompiler(
 	// entry dropped, a resolved answer refused) already told the user, in this
 	// session, that trust is the cause; a resolution notice after it would
 	// blame resolution for a compiler pi found and refused (#4414 F1).
-	if (
-		trust !== "trusted" &&
-		getDegradationSummary().some((group) => group.kind === "trust-refusal")
-	)
-		return;
+	if (trust !== "trusted" && sessionRepositoryHoldsCompiler(cwd)) return;
 	logExtension({
 		subsystem: "lsp-registry",
 		level: "warn",
@@ -627,6 +623,18 @@ function recordUnresolvedTypeScriptCompiler(
 			"TypeScript language server not started: no absolute TypeScript compiler (tsserver.js) could be resolved; install typescript in the project or let pi-lens install it",
 		metadata: { field: "typescript-compiler" },
 	});
+}
+
+/**
+ * Whether the bare `tsc` lookup, through the search path before trust scoping,
+ * answers with the session repository's bytes: the refusal that explains a
+ * missing compiler. Any other trust refusal (a project scripts dir dropped
+ * from the search path) says nothing about TypeScript, so it never hides the
+ * notice (#4776 review F3).
+ */
+function sessionRepositoryHoldsCompiler(cwd: string): boolean {
+	const found = findBinaryOnPath("tsc", process.env, cwd);
+	return found !== undefined && isSessionRepositoryPath(found);
 }
 
 /**

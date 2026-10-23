@@ -224,12 +224,25 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 		const target = (statement[1] ?? "").trim();
 		const destructured = /^\{([\s\S]*)\}$/.exec(target);
 		if (destructured) {
+			// Known-good entries only, `name` or `name: local` (#4776 review): a
+			// rest element or a nested pattern binds the module under a name this
+			// reader would never follow, so it is reported. (A default's `=` never
+			// reaches here: the statement pattern stops at it, and the specifier
+			// is reported as unbound.)
+			const entryForm = new RegExp(`^(${IDENT})(?:\\s*:\\s*(${IDENT}))?$`);
 			for (const entry of (destructured[1] ?? "").split(",")) {
 				const cleaned = entry.trim();
 				if (!cleaned) continue;
-				const [imported = "", local] = cleaned.split(/\s*:\s*/);
-				if ((PROCESS_MEMBERS as readonly string[]).includes(imported.trim()))
-					members.add((local ?? imported).trim());
+				const form = entryForm.exec(cleaned);
+				if (!form) {
+					unclassified.push(
+						`${file}:${lineAt(raw, statement.index ?? 0)}: a require of child_process destructured to an entry this reader cannot follow`,
+					);
+					continue;
+				}
+				const [, imported = "", local] = form;
+				if ((PROCESS_MEMBERS as readonly string[]).includes(imported))
+					members.add(local ?? imported);
 			}
 			continue;
 		}
@@ -522,6 +535,24 @@ describe("spawn chokepoint sweep (#4530)", () => {
 			]) {
 				const result = scan(lines);
 				expect(result.unclassified.length, lines.join(" ")).toBeGreaterThan(0);
+			}
+		});
+
+		// #4776 review G3: these entries consumed the module reference and
+		// registered nothing, so `cp.spawn` below was neither a site nor a report.
+		it("reports a destructured require entry it cannot follow", () => {
+			for (const binding of [
+				"{ ...cp }",
+				"{ spawn, ...rest }",
+				"{ spawn: { call } }",
+			]) {
+				const result = scan([
+					requireLine(binding),
+					"cp.spawn(process.execPath, []);",
+				]);
+				expect(result.unclassified, binding).toEqual([
+					"clients/planted.ts:1: a require of child_process destructured to an entry this reader cannot follow",
+				]);
 			}
 		});
 

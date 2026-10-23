@@ -2590,7 +2590,13 @@ export async function isCommandAvailable(
  * probe that is guaranteed to fail with a full spawn round-trip.
  */
 export async function isSpawnableCommand(command: string): Promise<boolean> {
-	if (/[\\/]/.test(command)) {
+	// The platform's separators (#4776): on POSIX a backslash is a name
+	// character, so such a name is a search-path lookup, not a file to stat.
+	const namesPath =
+		installerPlatform() === "win32"
+			? /[\\/]/.test(command)
+			: command.includes("/");
+	if (namesPath) {
 		try {
 			const stat = statSync(command);
 			return stat.isFile() && stat.size > 0;
@@ -3611,6 +3617,12 @@ async function findNpmGlobalToolPath(
 		for (const candidate of candidates) {
 			try {
 				await fs.access(candidate);
+				// #4530 (#4776): a global bin dir can hold a link into the
+				// project, and the verification below starts the candidate.
+				if (isUntrustedProjectPath(candidate)) {
+					recordProjectCommandRefusal(candidate);
+					continue;
+				}
 				if (
 					await verifyToolBinary(
 						candidate,
@@ -3707,6 +3719,12 @@ async function findPipUserToolPath(
 			for (const candidate of candidates) {
 				try {
 					await fs.access(candidate);
+					// #4530 (#4776): the Python user base is an interpreter's
+					// answer, and its scripts dir can link into the project.
+					if (isUntrustedProjectPath(candidate)) {
+						recordProjectCommandRefusal(candidate);
+						continue;
+					}
 					if (
 						await verifyToolBinary(
 							candidate,
