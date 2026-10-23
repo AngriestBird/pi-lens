@@ -515,8 +515,9 @@ async function isExcludedLspRoot(
 async function nearestNonExcludedFallbackRoot(
 	candidate: string,
 	stopDir?: string,
-): Promise<string | undefined> {
+): Promise<string> {
 	let current = path.resolve(candidate);
+	const startDir = current;
 	const fsRoot = path.parse(current).root;
 	let nearestAllowed: string | undefined;
 	const gitBoundaries = new Map<string, string | undefined>();
@@ -531,9 +532,11 @@ async function nearestNonExcludedFallbackRoot(
 			break;
 		current = path.dirname(current);
 	}
-	// A walk bounded by `stopDir` that met no allowed directory declines: the
-	// filesystem root is above the boundary it was told to respect (#4788 F1).
-	if (stopDir !== undefined) return nearestAllowed;
+	// A walk bounded by `stopDir` that met no allowed directory keeps the file's
+	// own directory: the filesystem root is above the boundary it was told to
+	// respect (#4788 F1), and declining would drop TypeScript's diagnostics for
+	// extension files (#123).
+	if (stopDir !== undefined) return nearestAllowed ?? startDir;
 	// No project marker was available. Keep the file attached to a stable,
 	// non-excluded ancestor rather than minting a client inside the fixture/stage.
 	return nearestAllowed ?? fsRoot;

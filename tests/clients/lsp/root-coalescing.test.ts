@@ -150,8 +150,10 @@ describe("LSP project-root fallback (#4728)", () => {
 	// directory up to the extensions boundary. The bounded walk then recorded no
 	// allowed ancestor and returned the filesystem root, which two production
 	// consumers (`findOutsideProjectRoot`, `resolveLspServerCwd`) trust as a root.
-	// A bounded walk with nothing allowed inside it declines (`undefined`).
-	it("never returns the filesystem root when the extensions boundary is gitignored", async () => {
+	// The follow-up decision: a bounded walk with nothing allowed inside it takes
+	// the file's own directory (below the boundary, #123), so TypeScript keeps
+	// its diagnostics for extension authors instead of declining.
+	it("roots at the file's directory, never the filesystem root, when the extensions boundary is gitignored", async () => {
 		const env = setupTestEnvironment("pi-lens-4788-ext-excluded-");
 		try {
 			const home = env.tmpDir;
@@ -159,20 +161,13 @@ describe("LSP project-root fallback (#4728)", () => {
 			vi.stubEnv("USERPROFILE", home);
 			fs.writeFileSync(path.join(home, ".gitignore"), ".pi/\n");
 			const agentDir = path.join(home, ".pi", "agent");
-			fs.mkdirSync(path.join(agentDir, "extensions", "myext", "src"), {
-				recursive: true,
-			});
+			const srcDir = path.join(agentDir, "extensions", "myext", "src");
+			fs.mkdirSync(srcDir, { recursive: true });
 			// The #123 setup: pi's own package.json sits above the boundary.
 			fs.writeFileSync(path.join(agentDir, "package.json"), "{}\n");
-			const file = path.join(
-				agentDir,
-				"extensions",
-				"myext",
-				"src",
-				"index.ts",
-			);
+			const file = path.join(srcDir, "index.ts");
 			fs.writeFileSync(file, "export const x = 1;\n");
-			const php = path.join(agentDir, "extensions", "myext", "src", "a.php");
+			const php = path.join(srcDir, "a.php");
 			fs.writeFileSync(php, "<?php echo 1;\n");
 			const roots = [
 				await TypeScriptServer.root(file),
@@ -183,7 +178,7 @@ describe("LSP project-root fallback (#4728)", () => {
 					root,
 					"filesystem root escaped the extensions boundary",
 				).not.toBe(path.parse(home).root);
-				expect(root).toBeUndefined();
+				expect(root).toBe(srcDir);
 			}
 		} finally {
 			env.cleanup();
