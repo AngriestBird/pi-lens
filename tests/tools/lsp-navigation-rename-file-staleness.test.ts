@@ -71,6 +71,20 @@ const importEdit = (importPath: string) => ({
 	},
 });
 
+const agentImportEdit = (importPath: string) => ({
+	changes: {
+		[pathToFileURL(importPath).href]: [
+			{
+				range: {
+					start: { line: 1, character: 25 },
+					end: { line: 1, character: 28 },
+				},
+				newText: "new",
+			},
+		],
+	},
+});
+
 let env: ReturnType<typeof setupTestEnvironment>;
 let oldPath: string;
 let newPath: string;
@@ -114,14 +128,15 @@ let clientFor = (): RenameClientDouble => makeRenameClient(env.tmpDir, null);
 let clientsFor = (): Array<{
 	serverId: string;
 	client: RenameClientDouble;
+	root?: string;
 }> => [{ serverId: "typescript", client: clientFor() }];
 
 /** A real `LSPService` rename behind the shell the tool resolves. Nothing the
  *  case starts may outlive it: `shutdown` runs before the fixture goes. */
 function makeHarness(): { realService: LSPService } {
 	const realService = new LSPService();
-	for (const { serverId, client } of clientsFor()) {
-		addRenameClient(realService, serverId, env.tmpDir, client);
+	for (const { serverId, client, root } of clientsFor()) {
+		addRenameClient(realService, serverId, root ?? env.tmpDir, client);
 	}
 	lsp.service = installLspService(
 		makeLspServiceDouble({
@@ -215,7 +230,80 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 			expect(fs.readFileSync(importPath, "utf-8")).toBe(AGENT_IMPORT);
 			expect(result.isError).toBe(true);
 			expect(resultText(result)).toContain(path.basename(importPath));
+			expect(resultText(result)).toContain(
+				"it changed after the language server computed the rename from it",
+			);
 			expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
+		} finally {
+			await harness.realService.shutdown();
+		}
+	});
+
+	it("ignores a same-server client that contributed no edit", async () => {
+		const edit = agentImportEdit(importPath);
+		const contributor = makeRenameClient(env.tmpDir, edit);
+		contributor.getSentContent = vi.fn(() => ({
+			hash: hashDiagnosticContent(AGENT_IMPORT),
+			changedAtMs: 0,
+		}));
+		contributor.willRenameFiles.mockImplementation(async () => {
+			fs.writeFileSync(importPath, AGENT_IMPORT);
+			return edit;
+		});
+		const bystanderRoot = path.join(env.tmpDir, "package");
+		fs.mkdirSync(bystanderRoot);
+		const bystander = makeRenameClient(bystanderRoot, null);
+		bystander.getSentContent = vi.fn(() => ({
+			hash: hashDiagnosticContent(OLD_IMPORT),
+			changedAtMs: 0,
+		}));
+		clientsFor = () => [
+			{ serverId: "typescript", client: contributor },
+			{ serverId: "typescript", client: bystander, root: bystanderRoot },
+		];
+		const harness = makeHarness();
+
+		try {
+			const result = await runRenameFile(env.tmpDir, true);
+
+			expect(result.isError).toBeUndefined();
+			expect(fs.readFileSync(importPath, "utf-8")).toContain("./new");
+			expect(fs.existsSync(newPath)).toBe(true);
+			expect(staleRows()).toEqual([]);
+		} finally {
+			await harness.realService.shutdown();
+		}
+	});
+
+	it("excludes a non-contributing server with a different stale send", async () => {
+		const edit = agentImportEdit(importPath);
+		const contributor = makeRenameClient(env.tmpDir, edit);
+		contributor.getSentContent = vi.fn(() => ({
+			hash: hashDiagnosticContent(AGENT_IMPORT),
+			changedAtMs: 0,
+		}));
+		contributor.willRenameFiles.mockImplementation(async () => {
+			fs.writeFileSync(importPath, AGENT_IMPORT);
+			return edit;
+		});
+		const bystander = makeRenameClient(env.tmpDir, null);
+		bystander.getSentContent = vi.fn(() => ({
+			hash: hashDiagnosticContent(OLD_IMPORT),
+			changedAtMs: 0,
+		}));
+		clientsFor = () => [
+			{ serverId: "eslint", client: contributor },
+			{ serverId: "typescript", client: bystander },
+		];
+		const harness = makeHarness();
+
+		try {
+			const result = await runRenameFile(env.tmpDir, true);
+
+			expect(result.isError).toBeUndefined();
+			expect(fs.readFileSync(importPath, "utf-8")).toContain("./new");
+			expect(fs.existsSync(newPath)).toBe(true);
+			expect(staleRows()).toEqual([]);
 		} finally {
 			await harness.realService.shutdown();
 		}

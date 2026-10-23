@@ -2711,12 +2711,16 @@ export class LSPService {
 	private activeClientsForCwd(
 		cwd: string,
 		priorityServerIds: string[] = [],
-	): Array<{ serverId: string; client: LSPClientInfo }> {
+	): Array<{ clientKey: string; serverId: string; client: LSPClientInfo }> {
 		const normalizedCwd = normalizeMapKey(cwd);
 		const priority = new Map(
 			priorityServerIds.map((serverId, index) => [serverId, index]),
 		);
-		const entries: Array<{ serverId: string; client: LSPClientInfo }> = [];
+		const entries: Array<{
+			clientKey: string;
+			serverId: string;
+			client: LSPClientInfo;
+		}> = [];
 		for (const [key, client] of this.state.clients) {
 			if (!client.isAlive()) continue;
 			const separator = key.indexOf(":");
@@ -2727,7 +2731,7 @@ export class LSPService {
 				root.startsWith(`${normalizedCwd}/`) ||
 				normalizedCwd.startsWith(`${root}/`);
 			if (!sameOrNested) continue;
-			entries.push({ serverId, client });
+			entries.push({ clientKey: key, serverId, client });
 		}
 		return entries.sort(
 			(a, b) =>
@@ -2774,21 +2778,21 @@ export class LSPService {
 	getTrackedContent(
 		filePath: string,
 		cwd: string,
-		sourceServerIds: readonly string[],
+		sourceClientKeys: readonly string[],
 	): readonly RenameTrackedSend[];
 	getTrackedContent(
 		filePath: string,
 		cwd: string,
-		sourceServerIds?: readonly string[],
+		sourceClientKeys?: readonly string[],
 	): RenameTrackedSend | readonly RenameTrackedSend[] | undefined {
 		const priorityServerIds = getServersForFileWithConfig(filePath).map(
 			(server) => server.id,
 		);
 		const clients = this.activeClientsForCwd(cwd, priorityServerIds);
-		if (sourceServerIds !== undefined) {
-			const sourceSet = new Set(sourceServerIds);
+		if (sourceClientKeys !== undefined) {
+			const sourceSet = new Set(sourceClientKeys);
 			const sends = clients
-				.filter(({ serverId }) => sourceSet.has(serverId))
+				.filter(({ clientKey }) => sourceSet.has(clientKey))
 				.flatMap(({ client }) => {
 					const sent = client.getSentContent?.(filePath);
 					return sent === undefined ? [] : [sent];
@@ -7874,9 +7878,10 @@ export class LSPService {
 		// (#3601); see `captureRenameExpectedContent` for the rules.
 		const renameRequestedAtMs = Date.now();
 		const willResults = await Promise.all(
-			willRenameClients.map(async ({ serverId, client }) => {
+			willRenameClients.map(async ({ clientKey, serverId, client }) => {
 				try {
 					return {
+						clientKey,
 						serverId,
 						edit: await client.willRenameFiles(oldFilePath, newFilePath),
 					};
@@ -7930,12 +7935,12 @@ export class LSPService {
 					merged.edit,
 					cwd,
 					renameRequestedAtMs,
-					(filePath: string, atCwd: string, sourceServerIds) =>
-						sourceServerIds === undefined
+					(filePath: string, atCwd: string, sourceClientKeys) =>
+						sourceClientKeys === undefined
 							? this.getTrackedContent(filePath, atCwd)
-							: this.getTrackedContent(filePath, atCwd, sourceServerIds),
+							: this.getTrackedContent(filePath, atCwd, sourceClientKeys),
 					undefined,
-					merged.sourceServerIds,
+					merged.sourceClientKeys,
 				),
 			});
 		} catch (err) {

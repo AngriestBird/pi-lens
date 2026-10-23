@@ -629,12 +629,13 @@ export interface MergeWorkspaceEditsResult {
 	inputEditCount: number;
 	serverIds: string[];
 	/** The provenance side channel, keyed by the same normalized path as `edit`. */
-	sourceServerIds: ReadonlyMap<string, readonly string[]>;
+	sourceClientKeys: ReadonlyMap<string, readonly string[]>;
 }
 
 export function mergeWorkspaceTextEditsByPriority(
 	entries: Array<{
 		serverId: string;
+		clientKey?: string;
 		edit:
 			| { changes?: Record<string, unknown[]>; documentChanges?: unknown[] }
 			| null
@@ -643,7 +644,7 @@ export function mergeWorkspaceTextEditsByPriority(
 ): MergeWorkspaceEditsResult {
 	const merged = new Map<
 		string,
-		{ uri: string; edits: LSPTextEdit[]; sourceServerIds: Set<string> }
+		{ uri: string; edits: LSPTextEdit[]; sourceClientKeys: Set<string> }
 	>();
 	// Exact-duplicate dedup is a CROSS-SERVER concern only: two servers proposing
 	// the identical non-empty replace should collapse to one. Zero-width inserts
@@ -666,7 +667,7 @@ export function mergeWorkspaceTextEditsByPriority(
 			const bucket = merged.get(key) ?? {
 				uri,
 				edits: [],
-				sourceServerIds: new Set<string>(),
+				sourceClientKeys: new Set<string>(),
 			};
 			const kept = bucket.edits;
 			for (const edit of edits) {
@@ -683,23 +684,23 @@ export function mergeWorkspaceTextEditsByPriority(
 				}
 				if (exactKey !== undefined) seenExact.add(exactKey);
 				kept.push(edit);
-				bucket.sourceServerIds.add(entry.serverId);
+				bucket.sourceClientKeys.add(entry.clientKey ?? entry.serverId);
 			}
 			if (kept.length > 0) merged.set(key, bucket);
 		}
 	}
 	const changes: Record<string, LSPTextEdit[]> = {};
-	const sourceServerIds = new Map<string, readonly string[]>();
-	for (const [key, { uri, edits, sourceServerIds: sources }] of merged) {
+	const sourceClientKeys = new Map<string, readonly string[]>();
+	for (const [key, { uri, edits, sourceClientKeys: sources }] of merged) {
 		changes[uri] = edits;
-		sourceServerIds.set(key, [...sources]);
+		sourceClientKeys.set(key, [...sources]);
 	}
 	return {
 		edit: { changes },
 		droppedConflicts,
 		inputEditCount,
 		serverIds,
-		sourceServerIds,
+		sourceClientKeys,
 	};
 }
 
@@ -858,10 +859,10 @@ export function captureRenameExpectedContent(
 	readTrackedSend: (
 		filePath: string,
 		cwd: string,
-		sourceServerIds?: readonly string[],
+		sourceClientKeys?: readonly string[],
 	) => RenameTrackedSend | readonly RenameTrackedSend[] | undefined,
 	target?: { filePath: string; content: string },
-	sourceServerIdsByPath?: ReadonlyMap<string, readonly string[]>,
+	sourceClientKeysByPath?: ReadonlyMap<string, readonly string[]>,
 ): Map<string, string> {
 	const expected = new Map<string, string>();
 	let targetRealPath: string | undefined;
@@ -896,7 +897,7 @@ export function captureRenameExpectedContent(
 		const trackedResult = readTrackedSend(
 			diskPath,
 			cwd,
-			sourceServerIdsByPath?.get(normalizeEphemeralMapKey(realPath)),
+			sourceClientKeysByPath?.get(normalizeEphemeralMapKey(realPath)),
 		);
 		const tracked =
 			trackedResult === undefined
