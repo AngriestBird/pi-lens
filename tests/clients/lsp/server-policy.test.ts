@@ -865,11 +865,14 @@ describe("lsp server policy", () => {
 			const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
 			try {
 				const first = await server.root(file);
+				// The directory mtimes ride the failure text: an equal pair across the
+				// plant names the memo's mtime key (#4756) as the cause without a rerun.
+				const before = fs.statSync(nested).mtimeMs;
 				materialize(nested, pattern);
 				const second = await server.root(file);
 				if (first !== ws || second !== nested) {
 					stale.push(
-						`${server.id} [${pattern}] first=${first} second=${second}`,
+						`${server.id} [${pattern}] first=${first} second=${second} dirMtime=${before}->${fs.statSync(nested).mtimeMs}`,
 					);
 				}
 			} finally {
