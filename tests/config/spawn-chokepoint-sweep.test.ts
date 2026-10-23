@@ -41,6 +41,7 @@ import * as path from "node:path";
 import type { SgNode } from "@ast-grep/napi";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseNodes } from "../support/ast-census.js";
+import { cookedIdentifier, cookedString } from "../support/cooked-literal.js";
 import {
 	assertNonEmptyScan,
 	auditRegistry,
@@ -186,18 +187,28 @@ const INERT_KINDS: ReadonlySet<string> = new Set([
 	"comment",
 ]);
 
+/** The collector's module, repo-relative, without its extension. */
+const WRAPPER_MODULE = "clients/child-unref";
+
 /**
- * The module name a literal spells, when the WHOLE literal is one: a string,
- * or a template with no substitution. Text inside a longer string or template
- * is prose, never a mention, and a substitution's code is parsed as code.
+ * `text` with every escape that can spell a character decoded and every other
+ * backslash dropped (#4776 verify V5). It holds every cooked spelling a
+ * literal or an identifier in `text` can carry, so a name spelled through an
+ * escape is still in it; an escaped backslash may make it read one name too
+ * many, which costs a parse or a refusal, never a missed name. A backslash is
+ * spelled `\x5c` in these patterns.
  */
-function literalModuleName(node: SgNode): string | undefined {
-	const kind = String(node.kind());
-	if (kind !== "string" && kind !== "template_string") return undefined;
-	const text = node.text();
-	if (kind === "template_string" && text.includes("${")) return undefined;
-	const value = text.slice(1, -1);
-	return MODULE_NAMES.has(value) ? value : undefined;
+function looseText(text: string): string {
+	return text
+		.replace(
+			/\x5cu\{([0-9a-fA-F]+)\}|\x5cu([0-9a-fA-F]{4})|\x5cx([0-9a-fA-F]{2})/g,
+			(whole: string, braced?: string, four?: string, two?: string) => {
+				const point = Number.parseInt(braced ?? four ?? two ?? "", 16);
+				return point <= 0x10ffff ? String.fromCodePoint(point) : whole;
+			},
+		)
+		.replace(/\x5c\r?\n/g, "")
+		.replace(/\x5c/g, "");
 }
 
 /**
@@ -216,16 +227,34 @@ function literalModuleName(node: SgNode): string | undefined {
  * - `typeof import(<module>)`, which starts nothing.
  *
  * A bound name must then be used only as a call (`spawn(`, `cp.spawn(`).
+ *
+ * #4776 verify V5 (the third round on one seam, so the rule, not a case):
+ * every name is read by its COOKED value in every position, never by node
+ * kind or source text (`nameOf`). The collector is admitted in four forms
+ * only: its declaration, an unaliased import or export specifier, and a plain
+ * call (a site). Every other node whose cooked value is its name is refused:
+ * a member read, a string key, a computed key, a string specifier, a template,
+ * a variable that holds the name. The collector's module is bound like
+ * child_process's: an import (its named specifiers judged by that name rule),
+ * a named re-export, or `typeof import(…)`; every other mention is refused,
+ * and a namespace or default binding of it may only be read as
+ * `ns.<identifier>`, so a key built at run time is refused at the subscript.
  */
 function scanProcessStarts(file: string, source: string): ScanResult {
-	// A cheap text narrowing, never the decision: a literal that names the
-	// module contains its name, and a wrapper call contains the wrapper's. A
-	// file with neither binds nothing, and skipping its parse keeps the census
-	// to the few files that can (parsing every runtime file held a native tree
-	// per file and peaked over the 2 GB worker budget in CI). Stated bound: a
-	// module name built at run time or spelled with escapes is not a literal
-	// this reader sees.
-	if (!source.includes("child_process") && !source.includes(WRAPPER_CALLEE))
+	// A cheap text narrowing, never the decision: a literal that names either
+	// module, and any spelling of the collector, holds that name in the file's
+	// loose text, escapes included (#4776 verify V5). A file with none binds
+	// nothing, and skipping its parse keeps the census to the few files that
+	// can (parsing every runtime file held a native tree per file and peaked
+	// over the 2 GB worker budget in CI). Stated bound: a specifier built at
+	// run time (`import(name)`, `require(name)`) is not a literal, so no
+	// reader of source sees it.
+	const loose = looseText(source);
+	if (
+		!loose.includes("child_process") &&
+		!loose.includes("child-unref") &&
+		!loose.includes(WRAPPER_CALLEE)
+	)
 		return { sites: new Map(), unclassified: [], unboundMentions: 0 };
 	const nodes = parseNodes(source.replace(/\r\n/g, "\n"));
 	const kidsOf = new Map<string, SgNode[]>();
@@ -240,9 +269,53 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 	const kids = (node: SgNode): SgNode[] => kidsOf.get(nodeId(node)) ?? [];
 	const same = (a: SgNode | null | undefined, b: SgNode): boolean =>
 		a !== null && a !== undefined && nodeId(a) === nodeId(b);
+	const kindOf = (node: SgNode | null | undefined): string =>
+		String(node?.kind());
+
+	/**
+	 * The name a node spells, by its cooked value: a whole string or template
+	 * is its cooked string; any other leaf is its cooked identifier; the
+	 * pieces inside a string or template name nothing alone. A template with a
+	 * substitution keeps its `${` in that value, which no name holds, so it
+	 * names nothing. A string `cookedString` cannot decode reads as its loose
+	 * value, which can only add a refusal: module code refuses octal escapes,
+	 * and a simple escape cooks to a control character no name holds.
+	 */
+	const nameOf = (node: SgNode): string | undefined => {
+		const kind = kindOf(node);
+		const text = node.text();
+		if (kind === "string" || kind === "template_string")
+			return cookedString(text) ?? looseText(text.slice(1, -1));
+		if (kids(node).length > 0) return undefined;
+		const parentKind = kindOf(node.parent());
+		if (parentKind === "string" || parentKind === "template_string")
+			return undefined;
+		return cookedIdentifier(text);
+	};
+
+	/** The governed module a string or template names, by its cooked value. */
+	const moduleOf = (
+		node: SgNode,
+	): "child_process" | "collector" | undefined => {
+		const kind = kindOf(node);
+		if (kind !== "string" && kind !== "template_string") return undefined;
+		const value = nameOf(node);
+		if (value === undefined) return undefined;
+		if (MODULE_NAMES.has(value)) return "child_process";
+		if (
+			value.startsWith(".") &&
+			path.posix
+				.join(path.posix.dirname(file), value)
+				.replace(/\.[cm]?[jt]s$/, "") === WRAPPER_MODULE
+		)
+			return "collector";
+		return undefined;
+	};
 
 	const members = new Set<string>();
 	const namespaces = new Set<string>();
+	/** Namespace and default bindings of the collector's module. */
+	const collectorNamespaces = new Set<string>();
 	const bindingNodes = new Set<string>();
 	const unclassified: string[] = [];
 	let unboundMentions = 0;
@@ -250,45 +323,55 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 		unclassified.push(`${file}:${lineOf(node)}: ${what}`);
 	};
 	const bind = (target: Set<string>, local: SgNode): void => {
-		target.add(local.text());
+		target.add(cookedIdentifier(local.text()));
 		bindingNodes.add(nodeId(local));
 	};
-	const bindMember = (imported: string, local: SgNode): void => {
-		if ((PROCESS_MEMBERS as readonly string[]).includes(imported))
+	const bindMember = (imported: SgNode, local: SgNode): void => {
+		const name = cookedIdentifier(imported.text());
+		if ((PROCESS_MEMBERS as readonly string[]).includes(name))
 			bind(members, local);
 		else bindingNodes.add(nodeId(local));
 	};
 
-	/** An `import … from <module>`: true when every part is a known form. */
-	const readImport = (statement: SgNode): boolean => {
+	/**
+	 * An `import … from <module>`: true when every part is a known form. For
+	 * the collector's module only the namespace or default name binds; each
+	 * named specifier is judged by the collector's name rule below.
+	 */
+	const readImport = (
+		statement: SgNode,
+		module: "child_process" | "collector",
+	): boolean => {
+		const namespaceTarget =
+			module === "collector" ? collectorNamespaces : namespaces;
 		const parts = kids(statement);
-		if (parts.some((part) => String(part.kind()) === "type")) return true;
-		const clause = parts.find(
-			(part) => String(part.kind()) === "import_clause",
-		);
+		if (parts.some((part) => kindOf(part) === "type")) return true;
+		const clause = parts.find((part) => kindOf(part) === "import_clause");
 		if (!clause) return true; // a side-effect import binds nothing
 		for (const part of kids(clause)) {
-			const kind = String(part.kind());
-			if (kind === "identifier") bind(namespaces, part);
+			const kind = kindOf(part);
+			if (kind === "identifier") bind(namespaceTarget, part);
 			else if (kind === "namespace_import") {
 				const local = kids(part).find(
-					(child) => String(child.kind()) === "identifier",
+					(child) => kindOf(child) === "identifier",
 				);
 				if (!local) return false;
-				bind(namespaces, local);
+				bind(namespaceTarget, local);
 			} else if (kind === "named_imports") {
+				if (module === "collector") continue;
 				for (const entry of kids(part)) {
-					const entryKind = String(entry.kind());
+					const entryKind = kindOf(entry);
 					if (INERT_KINDS.has(entryKind)) continue;
 					if (entryKind !== "import_specifier") return false;
-					if (kids(entry).some((k) => String(k.kind()) === "type")) continue;
+					if (kids(entry).some((k) => kindOf(k) === "type")) continue;
 					const name = entry.field("name");
 					const alias = entry.field("alias");
-					if (String(name?.kind()) !== "identifier" || !name) return false;
-					if (alias && String(alias.kind()) !== "identifier") return false;
+					if (kindOf(name) !== "identifier" || !name) return false;
+					if (alias && kindOf(alias) !== "identifier") return false;
 					const local = alias ?? name;
-					if (name.text() === "default") bind(namespaces, local);
-					else bindMember(name.text(), local);
+					if (cookedIdentifier(name.text()) === "default")
+						bind(namespaces, local);
+					else bindMember(name, local);
 				}
 			} else if (!INERT_KINDS.has(kind)) return false;
 		}
@@ -298,42 +381,44 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 	/** `const <pattern> = require(<module>)`: true when the pattern is a known form. */
 	const readRequire = (call: SgNode): boolean => {
 		const declarator = call.parent();
-		if (String(declarator?.kind()) !== "variable_declarator" || !declarator)
+		if (kindOf(declarator) !== "variable_declarator" || !declarator)
 			return false;
 		if (!same(declarator.field("value"), call)) return false;
 		const target = declarator.field("name");
 		if (!target) return false;
-		if (String(target.kind()) === "identifier") {
+		if (kindOf(target) === "identifier") {
 			bind(namespaces, target);
 			return true;
 		}
-		if (String(target.kind()) !== "object_pattern") return false;
+		if (kindOf(target) !== "object_pattern") return false;
 		for (const entry of kids(target)) {
-			const kind = String(entry.kind());
+			const kind = kindOf(entry);
 			if (INERT_KINDS.has(kind)) continue;
 			if (kind === "shorthand_property_identifier_pattern") {
-				bindMember(entry.text(), entry);
+				bindMember(entry, entry);
 				continue;
 			}
 			if (kind !== "pair_pattern") return false;
 			const key = entry.field("key");
 			const value = entry.field("value");
-			if (String(key?.kind()) !== "property_identifier" || !key) return false;
-			if (String(value?.kind()) !== "identifier" || !value) return false;
-			bindMember(key.text(), value);
+			if (kindOf(key) !== "property_identifier" || !key) return false;
+			if (kindOf(value) !== "identifier" || !value) return false;
+			bindMember(key, value);
 		}
 		return true;
 	};
 
 	for (const node of nodes) {
-		if (literalModuleName(node) === undefined) continue;
+		const module = moduleOf(node);
+		if (module === undefined) continue;
 		const parent = node.parent();
-		const parentKind = String(parent?.kind());
+		const parentKind = kindOf(parent);
+		const isSource = parent !== null && same(parent.field("source"), node);
 		if (parent && parentKind === "import_statement") {
-			if (!same(parent.field("source"), node) || !readImport(parent))
+			if (!isSource || !readImport(parent, module))
 				refuse(
 					parent,
-					"an import of child_process with a binding this reader cannot follow",
+					`an import of ${module === "collector" ? "the collector's module" : "child_process"} with a binding this reader cannot follow`,
 				);
 			continue;
 		}
@@ -342,12 +427,16 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 			parent !== null &&
 			parentKind === "arguments" &&
 			kids(parent).every(
-				(kid) => same(kid, node) || INERT_KINDS.has(String(kid.kind())),
+				(kid) => same(kid, node) || INERT_KINDS.has(kindOf(kid)),
 			);
-		if (call && isSoleArgument && String(call.kind()) === "call_expression") {
+		if (call && isSoleArgument && kindOf(call) === "call_expression") {
 			const callee = call.field("function");
-			const calleeKind = String(callee?.kind());
-			if (calleeKind === "identifier" && callee?.text() === "require") {
+			const calleeKind = kindOf(callee);
+			if (
+				module === "child_process" &&
+				calleeKind === "identifier" &&
+				callee?.text() === "require"
+			) {
 				if (!readRequire(call))
 					refuse(
 						call,
@@ -355,11 +444,22 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 					);
 				continue;
 			}
-			if (
-				calleeKind === "import" &&
-				String(call.parent()?.kind()) === "type_query"
-			)
+			if (calleeKind === "import" && kindOf(call.parent()) === "type_query")
 				continue; // `typeof import(…)` starts nothing
+		}
+		if (module === "collector") {
+			// A named re-export: each specifier is judged by the name rule.
+			if (
+				parentKind === "export_statement" &&
+				isSource &&
+				kids(parent).some((kid) => kindOf(kid) === "export_clause")
+			)
+				continue;
+			refuse(
+				node,
+				"a reference to the collector's module this reader cannot follow",
+			);
+			continue;
 		}
 		unboundMentions += 1;
 	}
@@ -381,26 +481,19 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 	const isCallee = (node: SgNode): boolean => {
 		const parent = node.parent();
 		return (
-			String(parent?.kind()) === "call_expression" &&
+			kindOf(parent) === "call_expression" &&
 			same(parent?.field("function"), node)
 		);
 	};
 	for (const node of nodes) {
-		const kind = String(node.kind());
-		const name = node.text();
-		// #4776 verify V1: the wrapper is admitted in the same few forms as the
-		// module binding (its declaration, an unaliased import or export, a
-		// plain call); an alias or a member read (`u.spawnCollectStdoutResult`)
-		// hides its starts, so it is reported.
-		// Name-bearing nodes only: a specifier node spells the same text as the
-		// identifier inside it.
-		const namesNode =
-			kind === "identifier" ||
-			kind === "shorthand_property_identifier" ||
-			kind === "property_identifier";
-		if (namesNode && name === WRAPPER_CALLEE) {
+		const name = nameOf(node);
+		if (name === undefined) continue;
+		const kind = kindOf(node);
+		// #4776 verify V1 and V5: any node whose cooked value is the
+		// collector's name, in the four admitted forms or refused.
+		if (name === WRAPPER_CALLEE) {
 			const parent = node.parent();
-			const parentKind = String(parent?.kind());
+			const parentKind = kindOf(parent);
 			if (kind === "identifier" && isCallee(node)) add(WRAPPER_CALLEE, node);
 			else if (
 				kind === "identifier" &&
@@ -418,6 +511,9 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 			else refuse(node, `${WRAPPER_CALLEE} is used other than by a call`);
 			continue;
 		}
+		// A local binding is referenced only through these two kinds in the
+		// grammar: a `property_identifier` is a property's name, a
+		// `type_identifier` a type, and a string a value, none a reference.
 		if (kind !== "identifier" && kind !== "shorthand_property_identifier")
 			continue;
 		if (bindingNodes.has(nodeId(node))) continue;
@@ -430,19 +526,30 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 				);
 			continue;
 		}
-		if (!namespaces.has(name)) continue;
 		const access = node.parent();
 		const property = access?.field("property");
-		if (
+		const isMemberObject =
 			kind === "identifier" &&
+			kindOf(access) === "member_expression" &&
+			same(access?.field("object"), node);
+		if (collectorNamespaces.has(name)) {
+			// The property itself is judged by the collector's name rule above.
+			if (!isMemberObject)
+				refuse(
+					node,
+					`${name} (the collector's module) is used other than by a member read`,
+				);
+			continue;
+		}
+		if (!namespaces.has(name)) continue;
+		const member = property ? cookedIdentifier(property.text()) : "";
+		if (
+			isMemberObject &&
 			access &&
-			String(access.kind()) === "member_expression" &&
-			same(access.field("object"), node) &&
-			property &&
-			(PROCESS_MEMBERS as readonly string[]).includes(property.text()) &&
+			(PROCESS_MEMBERS as readonly string[]).includes(member) &&
 			isCallee(access)
 		)
-			add(`${name}.${property.text()}`, node);
+			add(`${name}.${member}`, node);
 		else
 			refuse(
 				node,
@@ -774,6 +881,180 @@ describe("spawn chokepoint sweep (#4530)", () => {
 			expect([...result.sites]).toEqual([["spawnCollectStdoutResult", [2]]]);
 			expect(result.unclassified).toEqual([]);
 		});
+
+		// #4776 verify V5: the collector branch matched node KINDS, so a name
+		// spelled as a string, an escape or a computed key, and a start reached
+		// through the module object, were neither a site nor a report. The
+		// reader now names the collector by its cooked text in every position
+		// and follows the collector's module binding like child_process's.
+		const namespace = 'import * as unref from "./child-unref.js";';
+		const refusedName = (line: number): string =>
+			`clients/planted.ts:${line}: spawnCollectStdoutResult is used other than by a call`;
+		// A planted subscript call, built from parts: the AST census guard keeps
+		// string text, and `x[k](` spelled in one literal reads to it as a
+		// traversal site (tests/support/ast-census.test.ts).
+		const collectorCall = (callee: string): string => `${callee}("ps", []);`;
+		const refusedModule = (line: number): string =>
+			`clients/planted.ts:${line}: unref (the collector's module) is used other than by a member read`;
+		const refusedCases: Array<[string, string[], string[]]> = [
+			[
+				"subscript call on the module namespace",
+				[namespace, collectorCall('unref["spawnCollectStdoutResult"]')],
+				[refusedModule(2), refusedName(2)],
+			],
+			[
+				"string-named import specifier",
+				[
+					'import { "spawnCollectStdoutResult" as collect } from "./child-unref.js";',
+					'collect("ps", []);',
+				],
+				[refusedName(1)],
+			],
+			[
+				"element access through a variable holding the name",
+				[
+					namespace,
+					'const name = "spawnCollectStdoutResult";',
+					collectorCall("unref[name]"),
+				],
+				[refusedName(2), refusedModule(3)],
+			],
+			[
+				"a key built at run time",
+				[namespace, collectorCall('unref["spawnCollect" + "StdoutResult"]')],
+				[refusedModule(2)],
+			],
+			[
+				"computed key destructuring the namespace",
+				[
+					namespace,
+					"const { [`spawnCollectStdoutResult`]: run } = unref;",
+					'run("ps", []);',
+				],
+				[refusedName(2), refusedModule(2)],
+			],
+			[
+				"escaped member name",
+				[namespace, 'unref.spawnCollect\x5cu0053tdoutResult("ps", []);'],
+				[refusedName(2)],
+			],
+			[
+				"escaped string key",
+				[namespace, collectorCall('unref["spawnCollect\x5cx53tdoutResult"]')],
+				[refusedModule(2), refusedName(2)],
+			],
+			[
+				"identity-escaped string key",
+				[namespace, collectorCall('unref["spawnCollect\x5cStdoutResult"]')],
+				[refusedModule(2), refusedName(2)],
+			],
+			[
+				"require of the module",
+				[
+					`const unref = require(${JSON.stringify("./child-unref.js")});`,
+					'unref.spawnCollectStdoutResult("ps", []);',
+				],
+				[
+					"clients/planted.ts:1: a reference to the collector's module this reader cannot follow",
+					refusedName(2),
+				],
+			],
+			[
+				"star re-export of the module",
+				['export * from "./child-unref.js";'],
+				[
+					"clients/planted.ts:1: a reference to the collector's module this reader cannot follow",
+				],
+			],
+			[
+				"dynamic import of the module",
+				[
+					'void import("../clients/child-unref.js").then((m) => m.spawnCollectStdoutResult("ps", []));',
+				],
+				[
+					"clients/planted.ts:1: a reference to the collector's module this reader cannot follow",
+					refusedName(1),
+				],
+			],
+		];
+		for (const [name, lines, report] of refusedCases)
+			it(`refuses the collector: ${name}`, () => {
+				const result = scan(lines);
+				expect([...result.sites]).toEqual([]);
+				expect(result.unclassified).toEqual(report);
+			});
+
+		it("follows the collector's module through a named import and a member read", () => {
+			const result = scan([
+				'import { spawnCollectStdoutResult, unrefChildAndPipes } from "./child-unref.js";',
+				'import * as unref from "./child-unref.js";',
+				'export { spawnCollectStdoutResult } from "./child-unref.js";',
+				"unref.unrefChildAndPipes(child);",
+				'spawnCollectStdoutResult("ps", []);',
+				'const note = "child-unref.js names a package, not the module";',
+				'const file = "child-unref.js";',
+				'type Unref = typeof import("./child-unref.js");',
+			]);
+			expect([...result.sites]).toEqual([["spawnCollectStdoutResult", [5]]]);
+			expect(result.unclassified).toEqual([]);
+		});
+
+		const escapedCases: Array<[string, string[], string]> = [
+			[
+				"escaped module specifier",
+				[
+					'import { spawn } from "node:child\x5cx5fprocess";',
+					'spawn("a", []);',
+				],
+				"spawn",
+			],
+			[
+				"escaped imported member",
+				[
+					'import { sp\x5cu0061wn as run } from "node:child_process";',
+					'run("a", []);',
+				],
+				"run",
+			],
+			[
+				"escaped local binding",
+				[
+					'import { spawn as r\x5cu0075n } from "node:child_process";',
+					'run("a", []);',
+				],
+				"run",
+			],
+			[
+				"escaped default specifier",
+				[
+					'import { d\x5cu0065fault as cp } from "node:child_process";',
+					'cp.spawn("a", []);',
+				],
+				"cp.spawn",
+			],
+			[
+				"escaped call of a bound member",
+				[
+					'import { spawn } from "node:child_process";',
+					'sp\x5cu0061wn("a", []);',
+				],
+				"spawn",
+			],
+			[
+				"escaped namespace member",
+				[
+					'import * as cp from "node:child_process";',
+					'cp.sp\x5cu0061wnSync("a", []);',
+				],
+				"cp.spawnSync",
+			],
+		];
+		for (const [name, lines, callee] of escapedCases)
+			it(`reads an escaped child_process spelling by its cooked name: ${name}`, () => {
+				const result = scan(lines);
+				expect([...result.sites.keys()]).toEqual([callee]);
+				expect(result.unclassified).toEqual([]);
+			});
 
 		it("reads import-shaped text in a string or template as prose", () => {
 			const result = scan([
