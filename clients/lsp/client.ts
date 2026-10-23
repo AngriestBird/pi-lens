@@ -4825,15 +4825,17 @@ async function handleAnnounceCreated(
 			state.openDocumentUris?.get(normalizedPath) ??
 			pathToFileURL(filePath).href;
 		enqueueWatchedChange(state, normalizedPath, uri, FILE_CREATED);
+		// The filters come from the predicate that derives
+		// operationSupport.didCreateFiles (isFileOperationRegistrationOptions),
+		// so a match implies the capability, as for didRenameFiles.
 		if (
-			state.operationSupport.didCreateFiles &&
-			(await fileOperationFiltersMatch(
+			await fileOperationFiltersMatch(
 				state.fileOperationFilters?.didCreate,
 				uri,
 				uri,
 				filePath,
 				filePath,
-			))
+			)
 		) {
 			didCreateUris.push(uri);
 		}
@@ -5151,10 +5153,8 @@ async function handleNotifyOpenOnce(
 		if (
 			info &&
 			watchedType === FILE_CREATED &&
-			state.operationSupport.didCreateFiles &&
-			state.fileOperationFilters?.didCreate &&
 			(await fileOperationFiltersMatch(
-				state.fileOperationFilters.didCreate,
+				state.fileOperationFilters?.didCreate,
 				uri,
 				uri,
 				filePath,
