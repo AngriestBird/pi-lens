@@ -663,7 +663,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/client.ts": 18,
 		"clients/lsp/config.ts": 3,
 		"clients/lsp/diagnostic-binding.ts": 1,
-		"clients/lsp/edits.ts": 1,
+		// 1 -> 2 (#3734 r3): the rename capture selects the contributing
+		// clients that hold no comparable send record.
+		"clients/lsp/edits.ts": 2,
 		// 48 → 50 (#3828 r3): `resyncGitChangedFiles` splits its held targets
 		// into the changed paths (queued as a save) and their importers (not).
 		// 50 -> 51 (#3734): rename-file provenance selects contributing clients.
