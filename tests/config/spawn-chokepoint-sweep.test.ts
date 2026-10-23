@@ -567,8 +567,9 @@ describe("spawn chokepoint sweep (#4530)", () => {
 		// A planted `require` line, built from parts: the flake-shape scan keeps
 		// string text, and a literal require of the module in this file would
 		// count as this file's own real-process import.
+		const requireCall = `require(${JSON.stringify("node:child_process")})`;
 		const requireLine = (binding: string): string =>
-			`const ${binding} = require(${JSON.stringify("node:child_process")});`;
+			`const ${binding} = ${requireCall};`;
 
 		it("flags a raw start in a file with no admission", () => {
 			const result = scan([
@@ -679,15 +680,13 @@ describe("spawn chokepoint sweep (#4530)", () => {
 				],
 				[
 					"require inside template text",
-					[
-						'const shown = `${require("node:child_process").spawn(process.execPath, [])}`;',
-					],
+					[`const shown = \`\${${requireCall}.spawn(process.execPath, [])}\`;`],
 					"clients/planted.ts:1: a require of child_process bound to a pattern this reader cannot follow",
 				],
 				[
 					"import-shaped template text around a real require",
 					[
-						'const shown = `import ${require("node:child_process").spawn(process.execPath, [])} from "node:child_process"`;',
+						`const shown = \`import \${${requireCall}.spawn(process.execPath, [])} from "node:child_process"\`;`,
 					],
 					"clients/planted.ts:1: a require of child_process bound to a pattern this reader cannot follow",
 				],
@@ -716,7 +715,7 @@ describe("spawn chokepoint sweep (#4530)", () => {
 		it("reads import-shaped text in a string or template as prose", () => {
 			const result = scan([
 				'const doc = `import { spawn } from "node:child_process"; spawn("a")`;',
-				'const note = \'require("node:child_process").spawn("a")\';',
+				`const note = '${requireCall}.spawn("a")';`,
 			]);
 			expect([...result.sites]).toEqual([]);
 			expect(result.unclassified).toEqual([]);
