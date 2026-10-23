@@ -19,13 +19,14 @@
  *   8    warm   announced first  not advertised     one    dO(c)
  *   9    warm   announced first  in filter          a, b   dCF(a b) < dO(a), dO(b)
  *   10   warm   open-only        in filter          x, y   dCF(x) < dO(x), dCF(y) < dO(y)
+ *   12   warm   open-only        in filter, no file one    dO(c)
  *
  * Row 2 (cold, announced first) cannot occur: the touch announces before it
  * spawns and `announceCreatedFiles` reaches live clients only, which row 1's
  * single didCreateFiles pins. "Warm" means the auxiliary was spawned by a
  * touch of another file: `getClientForFile` skips auxiliaries, so it cannot
- * warm one (round 4 F2). Row 10 drives the client directly: through the
- * service a warm auxiliary always hears the announcement first.
+ * warm one (round 4 F2). Rows 10 and 12 drive the client directly: through
+ * the service a warm auxiliary always hears the announcement first.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -324,6 +325,22 @@ describe("opengrep hears a file created after spawn (#4787)", () => {
 				"didOpen second.py",
 			],
 			createdWatched: ["watched first.py 1", "watched second.py 1"],
+		});
+	}, 15_000);
+
+	it("row 12: a live client opening a document with no file on disk sends no didCreateFiles", async () => {
+		await spawnServer({ FAKE_LSP_DID_CREATE: "true" });
+		client = await createLSPClient({
+			serverId: "opengrep",
+			process: proc!,
+			root: dir,
+		});
+		const unsaved = path.join(dir, "unsaved.py");
+		await client.notify.open(unsaved, "unsaved_call()\n", "python");
+
+		expect(await settledWire([unsaved])).toEqual({
+			order: ["didOpen unsaved.py"],
+			createdWatched: ["watched unsaved.py 1"],
 		});
 	}, 15_000);
 });
