@@ -6445,12 +6445,21 @@ export class LSPService {
 				// findings — otherwise the fix would remove the only record of the blackout.
 				auxNoAnswerServerIds.length > 0
 			) {
+				const configFailureSuffix = (serverId: string): string => {
+					const failure = spawned
+						.find((entry) => entry.info.id === serverId)
+						?.client.getConfigLoadFailure?.();
+					return failure ? ` (server reported: ${failure})` : "";
+				};
 				for (const serverId of unconfirmedServerIds) {
 					const reasons = [
 						brokenSkippedServerIds.includes(serverId) && "breaker skip",
 						policySkippedServerIds.includes(serverId) && "root policy skip",
 						uncoveredDeferredServerIds.includes(serverId) && "deferred resync",
-						auxNoAnswerServerIds.includes(serverId) && "no diagnostics answer",
+						auxNoAnswerServerIds.includes(serverId) &&
+							// #4764: WHY it did not answer, when the server said so itself
+							// (a failed config load reads like a timeout otherwise).
+							`no diagnostics answer${configFailureSuffix(serverId)}`,
 					].filter(Boolean);
 					incrementDegradationCount({
 						kind: "lsp-scanner-coverage-gap",

@@ -1228,6 +1228,19 @@ file-scoped worklist and receives no project-wide scanner output.
   with `primary-unavailable`, naming those primaries, and `getDiagnostics`
   records the same ids as `unavailablePrimaryServerIds` (one rule,
   `unansweredPrimaries`; an auxiliary-only language is unaffected).
+- A server's `window/showMessage` is observed once per distinct text per
+  session (`lsp_server_message`), and an error-level message reporting that the
+  server's own config or rules failed to load records
+  `lsp-server-config-load-failed`. An AUXILIARY in that state never evaluated
+  the bytes it reports on, so its empty publications are refused as evidence
+  (`lsp_publish_dropped_server_config_failed`) and empty answers already stored
+  are retracted; a non-empty answer still flows, and a language-role server is
+  recorded but never gated. A refused publication still answers its send,
+  the server's own `semgrep/rulesRefreshed` clears the failure, and the
+  touch's `lsp-scanner-coverage-gap` reason carries the failure text. It
+  composes with the hold of the empty publish before the rules load (table:
+  `tests/clients/lsp/opengrep-pre-rules-publish-4763.test.ts`). Proven by
+  `tests/clients/lsp/opengrep-offline-config-failure.test.ts`.
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records
