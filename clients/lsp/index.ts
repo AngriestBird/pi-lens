@@ -119,6 +119,7 @@ import {
 } from "../reverse-deps.js";
 import type { LSPServerInfo } from "./server.js";
 import {
+	declinesLooseFileRoot,
 	getServerById,
 	resetClassicTsRepairGuard,
 	resetLspLaunchAvailabilityGeneration,
@@ -2648,27 +2649,35 @@ export class LSPService {
 	 * normal, expected answer.
 	 *
 	 * SCOPE, stated so the next reader does not assume the room is closed: this
-	 * covers the BREAKER doors only (cooldown + permanent). `ensureClientForServer`
-	 * also drops a scanner for a temporarily-unavailable command (the #1496 latch),
-	 * `optionalDisabled`, a spawn failure, or capacity eviction. Those are the same
-	 * defect class in the same lane, but they are persistent-absence states rather
-	 * than a transient blackout, so flagging every touch partial for them is a
-	 * broader behavior change than #1459 is scoped to make. Tracked separately.
+	 * covers the BREAKER doors only (cooldown + permanent), plus the #4760
+	 * root-policy decline, which is a PERMANENT policy answer (the resolved
+	 * root is at or above `$HOME`) and never retries in this session.
+	 * `ensureClientForServer` also drops a scanner for a temporarily-unavailable
+	 * command (the #1496 latch), `optionalDisabled`, a spawn failure, or capacity
+	 * eviction. Those are the same defect class in the same lane, but they are
+	 * persistent-absence states rather than a transient blackout, so flagging
+	 * every touch partial for them is a broader behavior change than #1459 is
+	 * scoped to make. Tracked separately.
 	 */
-	private async brokenSkippedAuxiliaryServerIds(
+	private async skippedAuxiliaryServerIds(
 		filePath: string,
 		clientScope: LSPTouchClientScope,
 		options: LSPTouchFileOptions,
 		spawned: SpawnedServer[],
-	): Promise<string[]> {
+	): Promise<{
+		brokenSkippedServerIds: string[];
+		policySkippedServerIds: string[];
+	}> {
 		// "primary" scope attaches no auxiliaries at all, so nothing was skipped.
-		if (clientScope === "primary") return [];
+		if (clientScope === "primary")
+			return { brokenSkippedServerIds: [], policySkippedServerIds: [] };
 		const enabledAuxiliaries =
 			clientScope === "with-auxiliary"
 				? new Set(options.auxiliaryServerIds ?? [])
 				: undefined;
 		const attached = new Set(spawned.map((entry) => entry.info.id));
-		const skipped: string[] = [];
+		const brokenSkippedServerIds: string[] = [];
+		const policySkippedServerIds: string[] = [];
 		for (const server of getServersForFileWithConfig(filePath)) {
 			if (!isAuxiliary(server)) continue;
 			if (attached.has(server.id)) continue;
@@ -2677,17 +2686,25 @@ export class LSPService {
 			// a routing decision, not a coverage gap.
 			if (options.excludeServerIds?.has(server.id)) continue;
 			if (enabledAuxiliaries && !enabledAuxiliaries.has(server.id)) continue;
-			const key = await this.demonstratedReadyKeyFor(server, filePath);
-			if (!key) continue;
+			const root = await this.clientRegistry.resolveServerRoot(
+				server,
+				filePath,
+			);
+			if (!root) continue;
+			if (declinesLooseFileRoot(server, root)) {
+				policySkippedServerIds.push(server.id);
+				continue;
+			}
+			const key = `${server.id}:${normalizeMapKey(root)}`;
 			const brokenUntil = this.state.broken.get(key);
 			if (
 				this.clientRegistry.permanentlyBroken.has(key) ||
 				(typeof brokenUntil === "number" && brokenUntil > Date.now())
 			) {
-				skipped.push(server.id);
+				brokenSkippedServerIds.push(server.id);
 			}
 		}
-		return skipped;
+		return { brokenSkippedServerIds, policySkippedServerIds };
 	}
 
 	private activeClientsForCwd(
@@ -4460,6 +4477,17 @@ export class LSPService {
 					)
 				);
 			};
+			// #4763: how many diagnostics an auxiliary's publication for this touch
+			// holds, recorded on `lsp_aux_wait_outcome` so a field query can tell an
+			// auxiliary that answered "clean" (0) from one that answered with findings
+			// (n) and from one that published nothing (also 0, but outcome `silent`).
+			// `published` is the caller's own evidence verdict (the stamp, the binding
+			// or both), so a cache entry left by an earlier revision never counts.
+			const auxPublishedCount = (
+				client: (typeof spawned)[number]["client"],
+				published: boolean,
+			): number =>
+				published ? (client.getDiagnostics?.(filePath)?.length ?? 0) : 0;
 			// #743: PER-SERVER notify-write deadlines. Each server's didOpen/didChange
 			// write gets its OWN notifyWriteBudgetMs budget rather than one shared
 			// deadline over a single Promise.all — otherwise one backpressured server
@@ -5379,18 +5407,23 @@ export class LSPService {
 									auxWaits.map(async (aux) => {
 										const { budgetMs } = aux;
 										if (aux.demoted) {
+											const demotedPublished = auxiliaryPublicationEvidence({
+												bindingMatchesContent: auxCoversThisContent(
+													aux.serverId,
+												),
+												baseline: aux.baseline,
+												currentPathVersion: readPathVersion(aux.client),
+											});
 											return {
 												serverId: aux.serverId,
 												outcome: deferredResyncServerIds.has(aux.serverId)
 													? ("deferred" as const)
 													: ("demoted" as const),
-												publishedThisContent: auxiliaryPublicationEvidence({
-													bindingMatchesContent: auxCoversThisContent(
-														aux.serverId,
-													),
-													baseline: aux.baseline,
-													currentPathVersion: readPathVersion(aux.client),
-												}),
+												publishedThisContent: demotedPublished,
+												publishedCount: auxPublishedCount(
+													aux.client,
+													demotedPublished,
+												),
 												budgetMs,
 												elapsedMs: 0,
 												elapsedSinceNotifyMs: 0,
@@ -5473,6 +5506,10 @@ export class LSPService {
 											// below is master's line; the stamp axis already decided
 											// the outcome above and must not re-admit the row here.
 											publishedThisContent: auxCoversThisContent(aux.serverId),
+											publishedCount: auxPublishedCount(
+												aux.client,
+												publishedEvidence || auxCoversThisContent(aux.serverId),
+											),
 											budgetMs,
 											elapsedMs,
 											// #1458 S3: elapsed measured from BEFORE the primary wait
@@ -5782,6 +5819,10 @@ export class LSPService {
 								// below is master's line; the stamp axis already decided
 								// the outcome above and must not re-admit the row here.
 								publishedThisContent: auxCoversThisContent(entry.info.id),
+								publishedCount: auxPublishedCount(
+									entry.client,
+									publishedEvidence || auxCoversThisContent(entry.info.id),
+								),
 								budgetMs: timeoutFor(entry.client.serverId),
 								elapsedMs: waitedMs,
 								elapsedSinceNotifyMs: waitedMs,
@@ -6338,15 +6379,20 @@ export class LSPService {
 			// double-reports, and #1493's content-hash exemption is not bypassed here:
 			// a deferred aux is only unioned in because the gate itself proves it was
 			// never sent this content.
-			const brokenSkippedServerIds =
+			const skippedAuxiliaries =
 				collected !== undefined
-					? await this.brokenSkippedAuxiliaryServerIds(
+					? await this.skippedAuxiliaryServerIds(
 							filePath,
 							clientScope,
 							options,
 							spawned,
 						)
-					: [];
+					: { brokenSkippedServerIds: [], policySkippedServerIds: [] };
+			const brokenSkippedServerIds = skippedAuxiliaries.brokenSkippedServerIds;
+			// #4760: a scanner declined because its resolved root is at or above
+			// `$HOME` never spawned, so it is uncovered exactly like a breaker skip — but
+			// the cause is a root policy, not a broken server. It keeps its own field.
+			const policySkippedServerIds = skippedAuxiliaries.policySkippedServerIds;
 			// #1549: the fourth door, and the one this issue opened. An auxiliary that
 			// missed a deadline no longer makes the touch inconclusive, so it MUST arrive
 			// here instead — otherwise the fix would launder a scanner blackout into a
@@ -6384,6 +6430,7 @@ export class LSPService {
 					...auxNoAnswerServerIds,
 					...uncoveredDeferredServerIds,
 					...brokenSkippedServerIds,
+					...policySkippedServerIds,
 				]),
 			].filter((serverId) => !auxCoveredAtMerge.has(serverId));
 			const coverageGap = unconfirmedServerIds.length > 0;
@@ -6391,6 +6438,7 @@ export class LSPService {
 			// touch that a scanner did not cover, naming the scanner and the reason.
 			if (
 				brokenSkippedServerIds.length > 0 ||
+				policySkippedServerIds.length > 0 ||
 				uncoveredDeferredServerIds.length > 0 ||
 				// #1549: the auxiliary deadline misses that used to surface as a blanket
 				// `inconclusive` need their own row now that the touch reports usable
@@ -6400,6 +6448,7 @@ export class LSPService {
 				for (const serverId of unconfirmedServerIds) {
 					const reasons = [
 						brokenSkippedServerIds.includes(serverId) && "breaker skip",
+						policySkippedServerIds.includes(serverId) && "root policy skip",
 						uncoveredDeferredServerIds.includes(serverId) && "deferred resync",
 						auxNoAnswerServerIds.includes(serverId) && "no diagnostics answer",
 					].filter(Boolean);
@@ -6417,6 +6466,9 @@ export class LSPService {
 						clientScope,
 						...(brokenSkippedServerIds.length > 0 && {
 							brokenSkippedServerIds,
+						}),
+						...(policySkippedServerIds.length > 0 && {
+							policySkippedServerIds,
 						}),
 						// #1586: the deferrals this touch is actually uncovered for. The
 						// gate action keeps its own record in `lsp_notify_resync_deferred`;
@@ -6710,6 +6762,7 @@ export class LSPService {
 					// named here either. The gate's own action is recorded regardless, in
 					// `lsp_notify_resync_deferred`.
 					...(brokenSkippedServerIds.length > 0 && { brokenSkippedServerIds }),
+					...(policySkippedServerIds.length > 0 && { policySkippedServerIds }),
 					...(uncoveredDeferredServerIds.length > 0 && {
 						deferredResyncServerIds: uncoveredDeferredServerIds,
 					}),

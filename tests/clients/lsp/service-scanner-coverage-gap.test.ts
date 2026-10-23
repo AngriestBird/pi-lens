@@ -21,10 +21,13 @@
  *     `"partial"` and names the scanner, not `"confirmed"`.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import { pinFixtureHome } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -478,6 +481,61 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 				}),
 			}),
 		);
+	});
+
+	// #4760 / #4769 review F2: the root-policy door. A scanner declined because
+	// its root is `$HOME` never spawned, so the touch that skipped it must read
+	// `"partial"` and name it, never `"confirmed"`: the #1459 false-clean shape
+	// with a policy cause instead of a breaker. Pins both lines that deliver it,
+	// the `unconfirmedServerIds` union and the gap-record condition.
+	it("a scanner declined by its root policy makes the touch partial, not confirmed", async () => {
+		// A file in `~/testdata` whose scanner root is `$HOME` itself (the
+		// `FileDirRoot` walk-up past an excluded directory): the policy declines
+		// it on the ROOT, though the file's own directory is below `$HOME`, and
+		// only the primary spawns.
+		const { home, restore } = pinFixtureHome("coverage-gap-root-policy");
+		try {
+			const file = path.join(home, "testdata", "a.ts");
+			mkdirSync(path.dirname(file), { recursive: true });
+			writeFileSync(file, "content");
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+
+			const primary = makeClient("typescript", 0, [
+				makeDiagnostic("primary finding"),
+			]);
+			getServersForFileWithConfig.mockReturnValue([
+				makeServer("typescript", undefined, { root: async () => home }),
+				makeServer("opengrep", "auxiliary", {
+					looseFileRoot: "decline",
+					root: async () => home,
+				}),
+			]);
+			createLSPClient.mockResolvedValue(primary);
+
+			const pending = service.touchFile(file, "content", {
+				clientScope: "all",
+				diagnostics: "document",
+				collectDiagnostics: true,
+				source: "cascade",
+			});
+			await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 20);
+			const result = (await pending) as
+				| { confirmation?: string; unconfirmedServerIds?: string[] }
+				| undefined;
+
+			expect(createLSPClient).toHaveBeenCalledTimes(1);
+			expect(result?.confirmation).toBe("partial");
+			expect(result?.unconfirmedServerIds).toEqual(["opengrep"]);
+			const gapRows = rowsFor("lsp_scanner_coverage_gap");
+			expect(gapRows).toHaveLength(1);
+			expect(gapRows[0]?.metadata).toMatchObject({
+				policySkippedServerIds: ["opengrep"],
+			});
+			expect(gapRows[0]?.metadata).not.toHaveProperty("brokenSkippedServerIds");
+		} finally {
+			restore();
+		}
 	});
 
 	// #1533 makes the "still confirmed" half load-bearing on this scope too: `"all"`

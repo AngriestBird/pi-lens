@@ -213,8 +213,9 @@ and were characterized `push-only` in the run above).
 - **Mode ≠ tier, and the split needs BOTH axes.** Push-only further splits along
   latency (does anything publish on a clean transition? — silence is the only
   budget-wait case, because pi-lens's publish handler emits and early-returns the
-  wait on every publish, versioned or not, with the single #3310 exception of a
-  held empty FIRST publish from an `empty-first` server) and currency-proof (is the publish
+  wait on every publish, versioned or not, with two exceptions: #3310's held
+  empty FIRST publish from an `empty-first` server, and #4763's held empty
+  publish from opengrep before `semgrep/rulesRefreshed`) and currency-proof (is the publish
   versioned, i.e. provably about the live edit?). The 4-way
   `probe-clean-signal.mjs` measurement drives this: ast-grep → 2, yaml/opengrep →
   2\*, typescript (clean file) → 3.
@@ -223,6 +224,32 @@ and were characterized `push-only` in the run above).
   `pubVersion=undefined`, so currency is only temporally correlated, not proven —
   a staleness-risk note, not a latency cost. An earlier hand-note called it Tier 2
   on the "re-publishes" observation alone; the phase-aware probe refines it to 2\*.
+- **opengrep's first publish depends on its config (#4763).** With a local rule
+  file the rules load before the first scan and `semgrep/rulesRefreshed` precedes
+  the first publish (`direct`, the column above). With `--config auto` (the
+  default pi-lens launch) opengrep scans the opened document before its rules
+  load, logs "Rules not loaded yet, not scanning anything" and publishes `[]`;
+  it then sends `semgrep/rulesRefreshed` and republishes every open document
+  (opengrep@60ed3b3 `Scan_helpers.run_semgrep` / `refresh_rules`, unchanged since
+  v1.0.0). Cold, online, 1.30.0 x3 and 1.32.0 x2: `[]` at +11..18 ms, the
+  notification at +0.7..1.0 s, the findings 0.25..0.5 s later. Warm: `didChange`
+  publishes nothing; the reopen pi-lens sends instead (`reopenOnResync`)
+  publishes the fresh scan once, +0.25..0.4 s on both versions; a reopen with
+  `didSave` publishes twice (+0.3..0.9 s), a lone `didSave` once (+0.25..0.5 s).
+  Rules that never load (offline) leave the `[]` as the only publish and
+  `window/showMessage` carries the error after it (#4764). Measured offline on
+  the built tree, nine touches: the edit path (`with-auxiliary`) waits the
+  aux grace ceiling (about 2 s) for six touches, then the existing demotion
+  (`aux_wait_demoted`) skips the wait (0 ms); the explicit all-scope
+  `lsp_diagnostics` call waits the full wait budget (3 s) every time and
+  reports the coverage notice. The strategy marker
+  `emptyUntilRulesRefreshed` holds that `[]`, released by the notification, not
+  by a timer. The other three auxiliaries do not need it, measured in
+  `tests/fixtures/opengrep-lsp-trace/auxiliary-first-publish.json`: ast-grep
+  compiles its rules before the first parse (3/3, first publish carries the
+  findings at +30..35 ms), zizmor audits inline and publishes once (3/3, +3 ms;
+  its source runs every audit, online ones included, before the one publish),
+  typos has the dictionary compiled in (3/3, +0..1 ms).
 - **typescript's clean behavior is diagnostic-set-dependent (major probe finding).**
   On a DIRTY file it re-publishes (version-lessly) after every change — the dirty
   fixture measures 2\*. On a genuinely CLEAN file (the `typescript-clean` fixture)

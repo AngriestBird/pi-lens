@@ -43,6 +43,7 @@ import {
 	matchesWorkspaceMemberPattern,
 	normalizeEphemeralMapKey,
 	pathsEqual,
+	realpathOrResolve,
 	toPosix,
 } from "../path-utils.js";
 import {
@@ -557,6 +558,23 @@ export interface LSPServerInfo {
 	root: RootFunction;
 	/** Marker table used by the shared LSP cwd/root seam. */
 	rootMarkers?: readonly string[];
+	/**
+	 * #4760: this server's workspace walk is bounded by its ROOT, and it needs
+	 * no project config, so a file with no marker ancestor is hosted at its own
+	 * directory (the shared `FileDirRoot` fallback) rather than at
+	 * `process.cwd()`. A `$HOME`-cwd session would otherwise hand the scanner
+	 * the whole home tree; measured, opengrep's workspace-targets walk does not
+	 * answer `initialize` inside 150 s there.
+	 *
+	 * `fileDir` (default) is the declared behaviour. `decline` refuses any
+	 * file whose RESOLVED root is at or above `$HOME`, whatever route reached
+	 * it: a file directly in the home directory, an excluded directory
+	 * (`~/testdata`) that `FileDirRoot` walks up past, a `.git` at `$HOME`, or
+	 * the session-cwd ceiling. No such root is small enough to walk, so the
+	 * client is declined before any process starts, with one bounded record
+	 * per session (#4769 review F1).
+	 */
+	looseFileRoot?: "fileDir" | "decline";
 	/**
 	 * The lifecycle-class trait (#1488, #1756 stage 1): "language" = the file's
 	 * primary language server (one is chosen per file); "auxiliary" = a
@@ -1702,6 +1720,27 @@ export const FileDirRoot: RootFunction = async (file: string) => {
 	const candidate = path.resolve(path.dirname(file));
 	return nearestNonExcludedFallbackRoot(candidate);
 };
+
+/**
+ * #4760: does this server's root policy refuse the resolved `root`? It does
+ * when the root is at or above `$HOME`, the walk that never finishes; a root
+ * below home (a repo, or `~/bin`) stays eligible. The root, not the file's
+ * directory, is the input: the root is always that directory or an ancestor
+ * of it, so it is the one value that sees every route to `$HOME` (#4769
+ * review F1). Both sides are real paths, so a `$HOME` reached through a
+ * symlink is the same directory (review F3), as `clients/ephemeral-root.ts`
+ * compares for the sibling `lsp-root-declined` writer.
+ */
+export function declinesLooseFileRoot(
+	server: Pick<LSPServerInfo, "looseFileRoot">,
+	root: string,
+): boolean {
+	if (server.looseFileRoot !== "decline") return false;
+	return isAtOrAboveHomeDir(
+		realpathOrResolve(root),
+		realpathOrResolve(os.homedir()),
+	);
+}
 
 export function RootWithFallback(
 	primary: RootFunction,
@@ -4532,8 +4571,11 @@ export const OpengrepServer: LSPServerInfo = {
 	extensions: OPENGREP_EXTENSIONS,
 	// Stable per-repo root so ONE warm server serves the whole project (a
 	// per-directory root would spawn a fresh server — and re-pay rule load —
-	// for every folder).
-	root: RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
+	// for every folder). A loose file needs no project config, so it is hosted
+	// at its own directory (#4760): the `$HOME`-cwd fallback rooted the scanner
+	// at the whole home tree, where its workspace walk never finished.
+	root: RootWithFallback(NearestRoot([".git"])),
+	looseFileRoot: "decline",
 	availabilityKey: "opengrep",
 	// Rule compilation can take a few seconds on the first scan of a session.
 	initializeTimeoutMs: 15000,
@@ -4614,8 +4656,9 @@ export const AstGrepServer: LSPServerInfo = {
 	// (it falls back to napi when the ast-grep binary is absent — Gate B).
 	root: RootWithFallback(
 		createRootDetector(["sgconfig.yml", "sgconfig.yaml"]),
-		RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
+		RootWithFallback(NearestRoot([".git"])),
 	),
+	looseFileRoot: "decline",
 	availabilityKey: "ast-grep",
 	// #1714: the one auxiliary with a measured wedge ceiling. A `lens_diagnostics
 	// mode=full` sweep of 225 files drove this server into an unrecoverable stall
@@ -4686,8 +4729,10 @@ export const ZizmorServer: LSPServerInfo = {
 	extensions: ZIZMOR_EXTENSIONS,
 	pathFilter: isZizmorAuditTarget,
 	// Stable per-repo root so ONE warm server serves the whole project (like
-	// Opengrep) — config + workflow discovery is repo-relative.
-	root: RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
+	// Opengrep) — config + workflow discovery is repo-relative. A loose file is
+	// hosted at its own directory (#4760), never at the session cwd.
+	root: RootWithFallback(NearestRoot([".git"])),
+	looseFileRoot: "decline",
 	availabilityKey: "zizmor",
 	async spawn(root, options) {
 		// Forward a token so the online audits run; absent one, zizmor self-selects
@@ -4774,8 +4819,10 @@ export const TyposServer: LSPServerInfo = {
 	name: "typos Spell Checker",
 	extensions: TYPOS_EXTENSIONS,
 	// Stable per-repo root so ONE warm server serves the whole project (like the
-	// other auxiliaries) — typos.toml discovery is repo-relative.
-	root: RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
+	// other auxiliaries) — typos.toml discovery is repo-relative. A loose file is
+	// hosted at its own directory (#4760), never at the session cwd.
+	root: RootWithFallback(NearestRoot([".git"])),
+	looseFileRoot: "decline",
 	availabilityKey: "typos-lsp",
 	async spawn(root, options) {
 		const launched = await resolveAndLaunch(
