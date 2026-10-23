@@ -36,12 +36,6 @@ import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 const touchFileSpy = vi.hoisted(() => vi.fn());
 const logLatencySpy = vi.hoisted(() => vi.fn());
 
-vi.mock("../../clients/lsp/config.js", () => ({
-	loadLSPConfig: vi.fn().mockResolvedValue({}),
-	initLSPConfig: vi.fn().mockResolvedValue(undefined),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../clients/latency-logger.js")>();
@@ -51,6 +45,8 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 import { waitForProjectSnapshotPersistsForTests } from "../../clients/project-snapshot.js";
 import { handleSessionStart } from "../../clients/runtime-session.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
+import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import { pinFixtureHome } from "./test-utils.js";
 
 function makeDeps(ctxCwd: string, overrides: Record<string, unknown> = {}) {
 	return withResidentBootstrap({
@@ -121,6 +117,9 @@ describe("quick-mode warmup LSP pre-warm (#947)", () => {
 	let previousDataDir: string | undefined;
 
 	beforeEach(async () => {
+		// The real config loader walks up from the session cwd to HOME (#4709);
+		// a pinned fixture HOME keeps that read off the maintainer's home.
+		pinFixtureHome("runtime-session-warmup-prewarm");
 		await installLspServiceDouble({
 			touchFile: touchFileSpy,
 			supportsLSP: (file: string) => file.endsWith(".ts"),
@@ -141,6 +140,7 @@ describe("quick-mode warmup LSP pre-warm (#947)", () => {
 	});
 
 	afterEach(() => {
+		resetLSPConfigStateForTests();
 		globals.__piLensFirstSessionDone = prevFirst;
 		globals.__piLensWarmupScheduled = prevWarmup;
 		if (prevDelay === undefined) delete process.env.PI_LENS_WARMUP_DELAY_MS;

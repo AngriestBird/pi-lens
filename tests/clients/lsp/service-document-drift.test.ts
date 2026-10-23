@@ -21,12 +21,6 @@ const createLSPClient = vi.fn();
 const loadReverseDependencyIndexFromSnapshot = vi.fn(() => null);
 const getReverseDepsFromIndex = vi.fn(() => [] as string[]);
 
-vi.mock("../../../clients/lsp/config.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../../clients/lsp/config.js")>()),
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../../clients/lsp/client.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../../clients/lsp/client.js")>()),
 	createLSPClient,
@@ -122,6 +116,9 @@ describe("LSPService disk-drift backstop (#1783)", () => {
 
 	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		loadReverseDependencyIndexFromSnapshot.mockReset().mockReturnValue(null);

@@ -28,12 +28,6 @@ const supersede = vi.hoisted(() => ({
 	run: undefined as undefined | (() => void),
 }));
 
-vi.mock("../../clients/lsp/config.js", () => ({
-	loadLSPConfig: vi.fn().mockResolvedValue({}),
-	initLSPConfig: vi.fn().mockResolvedValue(undefined),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../clients/latency-logger.js")>();
@@ -56,6 +50,8 @@ vi.mock("../../clients/word-index.js", async (importOriginal) => {
 
 import { handleSessionStart } from "../../clients/runtime-session.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
+import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import { pinFixtureHome } from "./test-utils.js";
 
 function makeDeps(ctxCwd: string, runtime: RuntimeCoordinator) {
 	return withResidentBootstrap({
@@ -119,6 +115,9 @@ describe("quick-mode warmup survives a superseded word-index build (#1197)", () 
 	let previousDataDir: string | undefined;
 
 	beforeEach(async () => {
+		// The real config loader walks up from the session cwd to HOME (#4709);
+		// a pinned fixture HOME keeps that read off the maintainer's home.
+		pinFixtureHome("runtime-session-warmup-supersession");
 		await installLspServiceDouble({
 			touchFile: touchFileSpy,
 			supportsLSP: (file: string) => file.endsWith(".ts"),
@@ -140,6 +139,7 @@ describe("quick-mode warmup survives a superseded word-index build (#1197)", () 
 	});
 
 	afterEach(() => {
+		resetLSPConfigStateForTests();
 		globals.__piLensFirstSessionDone = prevFirst;
 		globals.__piLensWarmupScheduled = prevWarmup;
 		if (prevDelay === undefined) delete process.env.PI_LENS_WARMUP_DELAY_MS;

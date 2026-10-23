@@ -42,11 +42,6 @@ import { normalizeMapKey } from "../../../clients/path-utils.js";
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
 }));
@@ -166,8 +161,11 @@ function makeClient(overrides: Record<string, unknown> = {}) {
 // ---------------------------------------------------------------------------
 
 describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		delete process.env.PI_LENS_TSSERVER_SYNC_GRACE_MS;

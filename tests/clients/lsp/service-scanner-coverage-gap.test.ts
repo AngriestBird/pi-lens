@@ -40,11 +40,6 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 	logLatency,
 }));
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
 }));
@@ -246,9 +241,12 @@ async function touchAll(
 }
 
 describe("#1459 — sweep fan-out must not black out a scanner silently", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
@@ -1093,6 +1091,9 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		(
 			await import("../../../clients/lsp/spawn-history.js")
 		)._clearSuccessfulLspSpawnHistoryForTests();
@@ -1614,9 +1615,12 @@ describe("#1586 review round (FIND-1) — publication lands between the aux wait
 	const FILE = `${ROOT}/a.ts`;
 	const CONTENT = "const value = 1;";
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();

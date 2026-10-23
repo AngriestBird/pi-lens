@@ -9,10 +9,6 @@ const createLSPClient = vi.fn();
 let warmAttached = false;
 const tryWarmAttachedDiagnostics = vi.fn();
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
 vi.mock("../../../clients/warm-attach.js", () => ({
 	isWarmAttached: () => warmAttached,
@@ -44,8 +40,11 @@ function makeServer() {
 describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 	let tmp: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		tryWarmAttachedDiagnostics.mockReset();

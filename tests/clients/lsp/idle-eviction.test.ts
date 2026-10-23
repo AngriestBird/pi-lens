@@ -4,11 +4,6 @@ import { suspendAt } from "../interleaving-kit.js";
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
 
 function fakeClient(label: string, busy = false) {
@@ -59,8 +54,11 @@ function configureServer(
 }
 
 describe("LSP idle eviction (#1332 b2)", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		process.env.PI_LENS_TS_IDLE_EVICT_MS = "20";

@@ -13,7 +13,7 @@
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	clearLatencyLog,
 	flushLatencyLog,
@@ -24,13 +24,9 @@ import type { SessionStartRootTelemetry } from "../../clients/runtime-session.js
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
-vi.mock("../../clients/lsp/config.js", () => ({
-	loadLSPConfig: vi.fn().mockResolvedValue({}),
-	initLSPConfig: vi.fn().mockResolvedValue(undefined),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 import { handleSessionStart } from "../../clients/runtime-session.js";
+import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import { pinFixtureHome } from "./test-utils.js";
 
 function setStartupMode(mode: "full" | "quick"): () => void {
 	const prev = process.env.PI_LENS_STARTUP_MODE;
@@ -136,6 +132,9 @@ describe("session_start_total carries the classification decision (#2129)", () =
 	let previousTestMode: string | undefined;
 
 	beforeEach(async () => {
+		// The real config loader walks up from the session cwd to HOME (#4709);
+		// a pinned fixture HOME keeps that read off the maintainer's home.
+		pinFixtureHome("session-start-total-classification");
 		await installLspServiceDouble();
 		previousTestMode = process.env.PI_LENS_TEST_MODE;
 		process.env.PI_LENS_TEST_MODE = "0";
@@ -144,6 +143,7 @@ describe("session_start_total carries the classification decision (#2129)", () =
 	});
 
 	afterEach(async () => {
+		resetLSPConfigStateForTests();
 		await flushLatencyLog();
 		if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 		else process.env.PI_LENS_TEST_MODE = previousTestMode;
