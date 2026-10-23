@@ -623,6 +623,40 @@ describe("LSPService.renameFile", () => {
 		}
 	});
 
+	// #3734 r3 class sweep: the open-document lookup was joined by server id, so
+	// a second root of the same server that never opened the file was told the
+	// first root's URI spelling, which names a document it does not hold.
+	it("gives each root of one server its own old URI spelling, not another root's", async () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"),
+		);
+		const oldPath = path.join(tmpDir, "old.ts");
+		const newPath = path.join(tmpDir, "new.ts");
+		fs.writeFileSync(oldPath, "value\n", "utf-8");
+		const originalUri = `file://localhost/${tmpDir.replace(/\\/g, "/")}/OLD%2Ets`;
+		const opener = makeRenameClient(tmpDir, null);
+		opener.isDocumentOpen.mockReturnValue(true);
+		opener.getDocumentUri.mockReturnValue(originalUri);
+		const otherRoot = path.join(tmpDir, "package");
+		fs.mkdirSync(otherRoot);
+		const other = makeRenameClient(otherRoot, null);
+		const service = new LSPService();
+		addRenameClient(service, "typescript", tmpDir, opener);
+		addRenameClient(service, "typescript", otherRoot, other);
+		try {
+			await service.renameFile(oldPath, newPath, { cwd: tmpDir, apply: true });
+			expect(opener.didRenameFiles).toHaveBeenCalledWith(
+				oldPath,
+				newPath,
+				originalUri,
+				`file://localhost/${tmpDir.replace(/\\/g, "/")}/new%2Ets`,
+			);
+			expect(other.didRenameFiles.mock.calls).toEqual([[oldPath, newPath]]);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
 	it("rejects a rename source outside the workspace", async () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"),

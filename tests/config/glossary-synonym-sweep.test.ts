@@ -663,13 +663,15 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/client.ts": 18,
 		"clients/lsp/config.ts": 3,
 		"clients/lsp/diagnostic-binding.ts": 1,
-		"clients/lsp/edits.ts": 1,
+		// 1 -> 2 (#3734 r3): the rename capture selects the contributing
+		// clients that hold no comparable send record.
+		"clients/lsp/edits.ts": 2,
 		// 48 → 50 (#3828 r3): `resyncGitChangedFiles` splits its held targets
 		// into the changed paths (queued as a save) and their importers (not).
-		// 50 -> 51 (#4346): the sweep selects its finding-bearing files to resolve.
+		// 50 -> 51 (#3734): rename-file provenance selects contributing clients.
 		// 49 -> 50 (#4323): a read that excludes a switched-off server drops
 		// that server's rows from the last known answer it falls back to.
-		"clients/lsp/index.ts": 50,
+		"clients/lsp/index.ts": 51,
 		"clients/lsp/inferred-project.ts": 2,
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,

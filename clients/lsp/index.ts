@@ -2711,12 +2711,16 @@ export class LSPService {
 	private activeClientsForCwd(
 		cwd: string,
 		priorityServerIds: string[] = [],
-	): Array<{ serverId: string; client: LSPClientInfo }> {
+	): Array<{ clientKey: string; serverId: string; client: LSPClientInfo }> {
 		const normalizedCwd = normalizeMapKey(cwd);
 		const priority = new Map(
 			priorityServerIds.map((serverId, index) => [serverId, index]),
 		);
-		const entries: Array<{ serverId: string; client: LSPClientInfo }> = [];
+		const entries: Array<{
+			clientKey: string;
+			serverId: string;
+			client: LSPClientInfo;
+		}> = [];
 		for (const [key, client] of this.state.clients) {
 			if (!client.isAlive()) continue;
 			const separator = key.indexOf(":");
@@ -2727,7 +2731,7 @@ export class LSPService {
 				root.startsWith(`${normalizedCwd}/`) ||
 				normalizedCwd.startsWith(`${root}/`);
 			if (!sameOrNested) continue;
-			entries.push({ serverId, client });
+			entries.push({ clientKey: key, serverId, client });
 		}
 		return entries.sort(
 			(a, b) =>
@@ -2761,19 +2765,42 @@ export class LSPService {
 	}
 
 	/**
-	 * #3601: the fingerprint of the content the first live client (the file's
-	 * own servers first) last sent for `filePath`, and when a send last changed
-	 * it, or `undefined` when no live client under `cwd` tracks the document.
-	 * In-memory only: it spawns, opens and stats nothing.
+	 * #3601: the fingerprint of the content a live client last sent for
+	 * `filePath`, and when a send last changed it. With source client keys,
+	 * returns the record of every contributing client that holds one, tagged
+	 * with its key so the caller can name a contributor that holds none; without
+	 * them, preserves the original first-live-client lookup. In-memory only: it
+	 * spawns, opens and stats nothing.
 	 */
 	getTrackedContent(
 		filePath: string,
 		cwd: string,
-	): RenameTrackedSend | undefined {
+	): RenameTrackedSend | undefined;
+	getTrackedContent(
+		filePath: string,
+		cwd: string,
+		sourceClientKeys: readonly string[],
+	): readonly RenameTrackedSend[];
+	getTrackedContent(
+		filePath: string,
+		cwd: string,
+		sourceClientKeys?: readonly string[],
+	): RenameTrackedSend | readonly RenameTrackedSend[] | undefined {
 		const priorityServerIds = getServersForFileWithConfig(filePath).map(
 			(server) => server.id,
 		);
-		for (const { client } of this.activeClientsForCwd(cwd, priorityServerIds)) {
+		const clients = this.activeClientsForCwd(cwd, priorityServerIds);
+		if (sourceClientKeys !== undefined) {
+			const sourceSet = new Set(sourceClientKeys);
+			const sends = clients
+				.filter(({ clientKey }) => sourceSet.has(clientKey))
+				.flatMap(({ clientKey, client }) => {
+					const sent = client.getSentContent?.(filePath);
+					return sent === undefined ? [] : [{ ...sent, clientKey }];
+				});
+			return sends;
+		}
+		for (const { client } of clients) {
 			const sent = client.getSentContent?.(filePath);
 			if (sent !== undefined) return sent;
 		}
@@ -7852,27 +7879,29 @@ export class LSPService {
 		// (#3601); see `captureRenameExpectedContent` for the rules.
 		const renameRequestedAtMs = Date.now();
 		const willResults = await Promise.all(
-			willRenameClients.map(async ({ serverId, client }) => {
+			willRenameClients.map(async ({ clientKey, serverId, client }) => {
 				try {
 					return {
+						clientKey,
 						serverId,
 						edit: await client.willRenameFiles(oldFilePath, newFilePath),
+						failed: false,
 					};
 				} catch (err) {
 					willRenameFailures.push({
 						serverId,
 						error: err instanceof Error ? err.message : String(err),
 					});
-					return { serverId, edit: null };
+					return { clientKey, serverId, edit: null, failed: true };
 				}
 			}),
 		);
 
+		// #3734 r3: each answer carries its own outcome. A server id is not a
+		// client: another root of the same server failing must not discard this
+		// one's edit.
 		const successfulWillResults = willResults.filter(
-			(result) =>
-				!willRenameFailures.some(
-					(failure) => failure.serverId === result.serverId,
-				),
+			(result) => !result.failed,
 		);
 		if (willRenameClients.length > 0 && successfulWillResults.length === 0) {
 			throw new Error(
@@ -7908,8 +7937,12 @@ export class LSPService {
 					merged.edit,
 					cwd,
 					renameRequestedAtMs,
-					(filePath: string, atCwd: string) =>
-						this.getTrackedContent(filePath, atCwd),
+					(filePath: string, atCwd: string, sourceClientKeys) =>
+						sourceClientKeys === undefined
+							? this.getTrackedContent(filePath, atCwd)
+							: this.getTrackedContent(filePath, atCwd, sourceClientKeys),
+					undefined,
+					merged.sourceClientKeys,
 				),
 			});
 		} catch (err) {
@@ -7927,7 +7960,8 @@ export class LSPService {
 		}
 		const openDocuments = activeClients
 			.filter(({ client }) => client.isDocumentOpen(oldFilePath))
-			.map(({ serverId, client }) => ({
+			.map(({ clientKey, serverId, client }) => ({
+				clientKey,
 				serverId,
 				client,
 				oldUri: client.getDocumentUri(oldFilePath),
@@ -8082,7 +8116,7 @@ export class LSPService {
 		const renameDescription = `Renamed ${relOld} → ${relNew}`;
 
 		await Promise.all(
-			activeClients.map(async ({ serverId, client }) => {
+			activeClients.map(async ({ clientKey, serverId, client }) => {
 				// #1971 review: didRename has its own registration. A server that
 				// never asked for didRenameFiles notifications must not receive
 				// them — same chokepoint discipline as the willRename preflight.
@@ -8098,8 +8132,10 @@ export class LSPService {
 					});
 					return;
 				}
+				// #3734 r3: this client's own open document; another root of the
+				// same server holds its own spelling, or none.
 				const opened = openDocuments.find(
-					(entry) => entry.serverId === serverId,
+					(entry) => entry.clientKey === clientKey,
 				);
 				// #1621: bounded for the same reason as the didClose notify above —
 				// rename propagation is best-effort advice to servers, not a
