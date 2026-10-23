@@ -798,6 +798,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/sink-read-drain-sweep.test.ts",
 			"tests/config/env-path-key-composition-sweep.test.ts",
 			"tests/config/git-fixture-governance.test.ts",
+			"tests/config/real-home-reader-registry.test.ts",
 			"tests/config/test-env-restore-sweep.test.ts",
 			"tests/config/test-server-teardown-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",

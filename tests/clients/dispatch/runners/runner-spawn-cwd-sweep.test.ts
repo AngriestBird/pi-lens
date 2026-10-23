@@ -308,15 +308,15 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"`python -m site --user-base` — a Python installation query, unrelated to any project",
 	],
 	[
-		"clients/installer/index.ts#installGitHubTool:13e31114~5ede8ca9",
+		"clients/installer/index.ts#installGitHubTool:13e31114~e4877154",
 		"`tar xf <archive> -C <tmpDir>` extraction inside the global pi-lens bin directory (GITHUB_BIN_DIR): the name carries no `cwd`, and the target is not a project",
 	],
 	[
-		"clients/installer/index.ts#installGitHubTool:34276407~5ede8ca9",
+		"clients/installer/index.ts#installGitHubTool:34276407~e4877154",
 		"Windows `Expand-Archive` extraction inside the global pi-lens bin directory",
 	],
 	[
-		"clients/installer/index.ts#installGitHubTool:bd7b7ee6~5ede8ca9",
+		"clients/installer/index.ts#installGitHubTool:bd7b7ee6~e4877154",
 		"`unzip -q -o <archive> -d <tmpDir>` extraction inside the global pi-lens bin directory",
 	],
 	[
