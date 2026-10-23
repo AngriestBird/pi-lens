@@ -14,3 +14,4 @@ export interface MarkdownHeading {
 	text: string;
 }
 export function markdownHeadings(text: string): MarkdownHeading[];
+export function markdownBlockComments(text: string): number[];

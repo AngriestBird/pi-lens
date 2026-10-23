@@ -72,6 +72,7 @@ import { resolvePackagePath } from "../package-root.js";
 import { resolveToolCwd } from "../tool-cwd.js";
 import {
 	type DirMtimeRecord,
+	dirMtimeIsRacy,
 	dirMtimeRecordsAsync,
 	dirMtimesStillFreshAsync,
 	unknownDirMtimeRecords,
@@ -1837,7 +1838,10 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
  * and a directory mtime cannot see a change made inside the same timestamp tick
  * as the walk's own stat (1 s granularity on HFS+/FAT and on some network
  * mounts), so `walkedAt` bounds how long a hit may be served without a real
- * walk at all (#3412 review round 1, M-3421-01).
+ * walk at all (#3412 review round 1, M-3421-01). A directory stamped inside
+ * the tick before the walk is not memoized in the first place (#4756,
+ * `dirMtimeIsRacy`), which leaves the cadence bounding only what a stamp
+ * older than the tick can still hide.
  */
 type RootMemoEntry = {
 	root: string;
@@ -2021,7 +2025,13 @@ export function NearestRoot(
 		inFlight.set(dirKey, promise);
 		try {
 			const result = await promise;
-			if (result !== undefined)
+			// A record stamped inside the file system's timestamp tick before the
+			// walk cannot show a later same-tick change (#4756): the answer is
+			// returned, not memoized.
+			if (
+				result !== undefined &&
+				!probedDirs.some((r) => dirMtimeIsRacy(r.mtimeMs, walkedAt))
+			)
 				cache.set(dirKey, { root: result, probedDirs, walkedAt });
 			return result;
 		} finally {
