@@ -84,6 +84,8 @@ describe("a vitest worker and every child it spawns run under a pinned home (#47
 			// What the child's `os.homedir()` answers is what a `~` expands to.
 			expect(same(child.homedir!, REAL_HOME)).toBe(false);
 			expect(same(child.homedir!, child.HOME!)).toBe(true);
+			// Windows resolves `os.homedir()` from USERPROFILE: pinned with HOME.
+			expect(child.USERPROFILE).toBe(child.HOME);
 		},
 		scaledTestTimeout(30_000),
 	);
