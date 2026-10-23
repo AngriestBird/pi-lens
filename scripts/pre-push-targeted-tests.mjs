@@ -245,6 +245,9 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	// #4104 F4 fold: the both-tree scanner (tests/ and scripts/), armed by a
 	// tests/ change here as well as by a production change above.
 	"tests/config/git-fixture-governance.test.ts",
+	// #4789: walks tests/ for files that read the real home outside the named
+	// opt-out registry.
+	"tests/config/real-home-reader-registry.test.ts",
 	// #4589: walks tests/ for env writes with no restore in the same file.
 	"tests/config/test-env-restore-sweep.test.ts",
 	// #4589: walks tests/ for listeners with no awaited teardown.

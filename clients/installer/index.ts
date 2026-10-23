@@ -64,7 +64,11 @@ import path from "node:path";
 import { writeFileAtomicAsync } from "../atomic-write.js";
 import { BoundedLruCache } from "../bounded-cache.js";
 import { logExtension } from "../extension-log.js";
-import { isFullyQualified } from "../path-utils.js";
+import {
+	isFullyQualified,
+	isUnderDir,
+	realpathOrResolve,
+} from "../path-utils.js";
 import {
 	assertInstallAllowed,
 	projectTrustDenialReason,
@@ -345,7 +349,36 @@ async function acquireInstallLock(): Promise<{
 }
 
 // Directory for GitHub-downloaded binaries
-const GITHUB_BIN_DIR = path.join(getGlobalPiLensDir(), "bin");
+const GLOBAL_HOME_DIR = getGlobalPiLensDir();
+const GITHUB_BIN_DIR = path.join(GLOBAL_HOME_DIR, "bin");
+// Whether PI_LENS_HOME named the home GITHUB_BIN_DIR derives from. Read at the
+// same moment as the directory itself, so the answer cannot drift from it.
+const GITHUB_BIN_DIR_PINNED = Boolean(process.env.PI_LENS_HOME?.trim());
+
+/**
+ * Refuse a managed bin directory that leaves a PINNED home (#4789). A probe or
+ * test worker pins `PI_LENS_HOME`; a `bin` there that is a link to a directory
+ * outside it lets every write below land in the target, and the #4780 lane probe
+ * overwrote the maintainer's real `~/.pi-lens/bin/opengrep` that way (a symlinked
+ * FILE is replaced by the atomic writer's rename and never written through).
+ * Called after each `mkdir(GITHUB_BIN_DIR)`, so the link resolves. Throws, so
+ * each caller's existing install-failed catch reports it; the refusal is
+ * recorded once per tool. The default home is the user's own, so a link there
+ * (dotfiles) stays honored.
+ */
+function assertManagedBinDirInsidePinnedHome(toolId: string): void {
+	if (!GITHUB_BIN_DIR_PINNED) return;
+	const home = realpathOrResolve(GLOBAL_HOME_DIR);
+	const bin = realpathOrResolve(GITHUB_BIN_DIR);
+	if (isUnderDir(bin, home)) return;
+	const reason = `bin directory escapes the pinned PI_LENS_HOME: ${GITHUB_BIN_DIR} resolves to ${bin}, outside ${home}; refusing to write through the link`;
+	recordDegradationOnce({
+		kind: "managed-tool-install",
+		subject: `${toolId}:bin-dir-escape`,
+		reason,
+	});
+	throw new Error(reason);
+}
 
 // Debug flag - set via PI_LENS_DEBUG=1 or --debug
 const DEBUG =
@@ -4131,6 +4164,7 @@ async function installGitHubTool(
 	}
 
 	try {
+		assertManagedBinDirInsidePinnedHome(tool.id);
 		if (launcherRuntime) {
 			const assetPath = path.join(
 				GITHUB_BIN_DIR,
@@ -5139,6 +5173,7 @@ async function installMavenTool(
 
 	try {
 		await fs.mkdir(GITHUB_BIN_DIR, { recursive: true });
+		assertManagedBinDirInsidePinnedHome(tool.id);
 		const jarPath = path.join(GITHUB_BIN_DIR, `${tool.id}.jar`);
 		await writeFileAtomicAsync(jarPath, jarBuffer, { bestEffort: false });
 
@@ -5605,6 +5640,7 @@ async function installArchiveTool(
 		// it like any other managed tool. `call`/`exec` preserves the real
 		// launcher's own %~dp0/$0 so it still finds its sibling lib/.
 		await fs.mkdir(GITHUB_BIN_DIR, { recursive: true });
+		assertManagedBinDirInsidePinnedHome(tool.id);
 		const launcherName = isWindows ? `${binaryName}.bat` : binaryName;
 		const shimPath = path.join(GITHUB_BIN_DIR, launcherName);
 		if (isWindows) {

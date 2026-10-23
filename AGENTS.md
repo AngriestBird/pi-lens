@@ -791,6 +791,22 @@ file-scoped worklist and receives no project-wide scanner output.
     which loops parse without data-flow reading, so it could not fail closed.
     Instances and dates: `HISTORY.md`.
 
+82. **One home variable pinned, the rest left at the real home:** a test or
+    probe environment that pins `PI_LENS_HOME` but leaves `HOME`,
+    `USERPROFILE` and the XDG directories alone lets every child that resolves
+    its own config from them write into the maintainer's home
+    (`~/.config/.opengrep`, `~/.config/.semgrep`), and a symlinked managed `bin`
+    lets an installer write through to the real `~/.pi-lens/bin`. The pin is
+    the whole set, assigned once in the worker so every child inherits it.
+    Screen: which directory does the process I run resolve from, and is every
+    variable that names it pinned? Enforcer:
+    `tests/clients/worker-home-pin-hermeticity.test.ts` (a real child reports
+    its HOME and XDG directories; a file that reads the real home through
+    `REAL_HOME` or `userInfo` needs a row in `tests/support/real-home-readers.ts`)
+    and `tests/clients/installer/managed-bin-symlink-escape-4789.test.ts`
+    (a pinned `PI_LENS_HOME` whose `bin` links out is refused). Instances and
+    dates: `HISTORY.md`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
@@ -958,6 +974,15 @@ file-scoped worklist and receives no project-wide scanner output.
   `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator and
   reviewer scratch, `<worktree>/../probes-<pr>` for probes, and
   `.claude/worktrees/` for a fixer's own worktree.
+- Vitest also pins `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`
+  and `XDG_DATA_HOME` per worker, to a scratch directory under
+  `pi-lens-scratch`, so `os.homedir()` and every child a test spawns
+  resolve inside it. A test that sets `HOME` itself (`pinFixtureHome`) wins. The
+  real home stays reachable only as `REAL_HOME` from `tests/support/vitest-setup.ts`
+  (or `os.userInfo()`), and a file that spells either is a named row in
+  `tests/support/real-home-readers.ts` with a `// real-home: <reason>` header.
+  The managed bin directory refuses to resolve outside a pinned `PI_LENS_HOME`
+  (`ensureManagedBinDir`, `clients/installer/index.ts`).
 - Vitest gives every worker its own `PI_LENS_HOME`, `<run-shared home>/worker-home-<run>-<pid>`
   (#3721); log sinks bind their path at module load, so a `PI_LENS_HOME` assigned
   in `beforeEach`/an `it` body moves nothing. A test process never truncates a log

@@ -1,5 +1,18 @@
 # HISTORY
 
+## 2026-10-23 — one home variable pinned, the rest left at the real home (shape 82)
+
+`tests/support/vitest-setup.ts` pinned `PI_LENS_HOME` per worker (#525, #3721)
+but left `HOME` and the XDG directories at the maintainer's real home. The
+#4780 verify's live opengrep test wrote `$HOME/.config/.opengrep` and
+`$HOME/.config/.semgrep`, and a #4780 lane probe overwrote the real
+`~/.pi-lens/bin/opengrep` through a probe home whose `bin` was a link to a
+directory outside it. The full suite (1,618 files) ran green under the pin; one
+file read the real home on purpose (the managed-prettier probe in
+`formatter-template-preserve.test.ts`) and is now a named opt-out. Reproduced
+through `installTool("opengrep")`: a linked `bin` directory is written through, a
+linked `bin/opengrep` file is not (the atomic writer renames over the link) (#4789).
+
 ## 2026-10-22 — a synchronous native-tree walk holds every tree (shape 81)
 
 `silent-catch-sweep` parsed about 530 files in one synchronous loop. The

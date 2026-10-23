@@ -57,6 +57,7 @@
 		"clients/test-runner-resolve-exec.test.ts": 1,
 		"clients/tracked-aware-ignore-matcher.test.ts": 5,
 		"clients/turn-scenarios.test.ts": 2,
+		"clients/worker-home-pin-hermeticity.test.ts": 2,
 		"config/dependency-boundaries.test.ts": 2,
 		"config/gitignore-tracked-shadow.test.ts": 2,
 		"config/global-dir-probe-redirect.test.ts": 2,
