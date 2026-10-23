@@ -40,6 +40,7 @@ import type {
 import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
 import { demoteLanguageServerRows } from "../../lsp/inferred-project.js";
+import type { TsserverProjectIdentity } from "../../lsp/tsserver-sync.js";
 import {
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
@@ -194,6 +195,9 @@ const lspRunner: RunnerDefinition = {
 		let unconfirmedServerIds: readonly string[] = [];
 		let deferredServerIds: readonly string[] = [];
 		let usedWarmAttach = false;
+		// #4645: the warm incumbent's answer to the membership probe this runner
+		// may not send itself; it stands in for that probe below.
+		let incumbentProjectIdentity: TsserverProjectIdentity | undefined;
 		let failureReason = "";
 		// #3481: when the synced bytes were read, for the notify queue's order.
 		const readStamp = performance.now();
@@ -223,6 +227,9 @@ const lspRunner: RunnerDefinition = {
 				Math.max(LSP_SPAWN_BUDGET_MS, LSP_DIAGNOSTICS_WAIT_MS),
 			);
 			usedWarmAttach = attached?.available === true;
+			if (attached?.available) {
+				incumbentProjectIdentity = attached.response.projectIdentity;
+			}
 			// #1179 (shape-5 structural fix): both branches normalize to the
 			// `touchFile` wrapper shape. The warm-attach IPC branch resolves a plain
 			// diagnostics array — `available` no longer implies a fully confirmed
@@ -445,16 +452,20 @@ const lspRunner: RunnerDefinition = {
 		// request, and only when the file already has a TypeScript ERROR — an edit
 		// that type-checks clean pays nothing.
 		//
-		// #1645 review F2: NOT under warm attach. There, diagnostics came from an
-		// already-running remote session over IPC and no local client exists — so
-		// the probe would have to spawn a whole tsserver fleet to answer, breaking
-		// this branch's spawn-free contract (see the comment below), and the
-		// answer it spawned for would be the NEW server's project resolution, not
-		// the warm session's. A meaningless answer bought with a process is worse
-		// than no answer, so the warm-attach path keeps pre-#1640 rendering. This
-		// is a known gap, recorded on the issue rather than papered over with an
-		// "unverified" label that would fire on every warm-attach file including
-		// the properly configured majority.
+		// #1645 review F2: this runner does NOT probe under warm attach. There,
+		// diagnostics came from an already-running remote session over IPC and no
+		// local client exists — so the probe would have to spawn a whole tsserver
+		// fleet to answer, breaking this branch's spawn-free contract (see the
+		// comment below), and the answer it spawned for would be the NEW server's
+		// project resolution, not the warm session's. A meaningless answer bought
+		// with a process is worse than no answer.
+		// #4645: the probe is asked where the answer lives instead. The incumbent
+		// owns the live client, sends its `projectIdentity` beside the server's
+		// raw rows, and this reader seeds the pipeline's identity memo with it, so
+		// the one pipeline runs here exactly as on a local read: the environment
+		// rule first, then membership. This reader still passes no `service`.
+		// Against an incumbent built before #4645 no answer arrives and the rows
+		// render as they did before #1640 (the mixed-build gap).
 		// #4532: the environment-gap rule rides the same pipeline and is NOT
 		// gated on warm attach: it asks one filesystem question about the file's
 		// own directory, needs nothing from the remote session, and left behind
@@ -466,6 +477,9 @@ const lspRunner: RunnerDefinition = {
 				filePath: diagnosticPath,
 				cwd: ctx.cwd,
 				...(!usedWarmAttach && { service: lspService }),
+				...(incumbentProjectIdentity !== undefined && {
+					identityCache: new Map([[diagnosticPath, incumbentProjectIdentity]]),
+				}),
 			})
 		).rows;
 		const fixSuggestionByIndex = new Map<number, string>();

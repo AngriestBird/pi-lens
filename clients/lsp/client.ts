@@ -1271,7 +1271,7 @@ export interface LSPClientState {
 	 * when it runs offline with `--config auto`. An auxiliary in that state
 	 * never evaluated the bytes it reports on, so its EMPTY publications are the
 	 * absence of a scan and must not be read as a clean one
-	 * ({@link configFailureBlocksEmptyPublish}). Set only for an auxiliary
+	 * ({@link auxiliaryEmptyIsNotEvidence}). Set only for an auxiliary
 	 * ({@link noteServerShowMessage} asks `isAuxiliary`, the one role
 	 * decision), so a reader never re-checks the role. Cleared by the server's
 	 * own `semgrep/rulesRefreshed` (its rules then loaded). Per client session:
@@ -1297,12 +1297,22 @@ export interface LSPClientState {
 	 */
 	emptyFirstPublishHoldSpent: boolean;
 	/**
-	 * #4763: this client's server has sent `semgrep/rulesRefreshed`, so its rules
-	 * are loaded and an empty publish is an answer again. Set once, by that
-	 * notification, and read only for a server marked
-	 * `emptyUntilRulesRefreshed`; a respawn is a new client and starts unset.
+	 * The count of `semgrep/rulesRefreshed` notifications this client's server
+	 * has sent: its rules generation. #4763: above 0, its rules are loaded and an
+	 * empty publish is an answer again (read only for a server marked
+	 * `emptyUntilRulesRefreshed`). #4786: half of an answer's phase
+	 * ({@link answerPhase}). A respawn is a new client and starts at 0.
 	 */
-	rulesRefreshed?: boolean;
+	rulesGeneration?: number;
+	/**
+	 * #4786: per path, the phase ({@link answerPhase}) of the last NON-EMPTY
+	 * publication an auxiliary sent that went on to the store. Within that phase
+	 * an unversioned empty publication is refused
+	 * ({@link auxiliaryEmptyIsNotEvidence}). Dropped with the path's diagnostics
+	 * in {@link clearDiagnosticsForPath} (didOpen, didChange, didClose), so it holds at most
+	 * the paths the diagnostics store holds.
+	 */
+	nonEmptyAnswerPhases?: Map<string, string>;
 	/** #4763: empty publishes held since the last `lsp_rules_refreshed` row,
 	 *  which reports it and resets it. */
 	heldEmptyPublishes?: number;
@@ -2140,6 +2150,16 @@ export function diagnosticsVersionForPath(
 	return state.diagnosticsVersionsByPath?.get(normalizedPath) ?? 0;
 }
 
+/**
+ * #4782: emitted on `diagnosticEmitter` when a receipt leaves the quiet
+ * window WITHOUT being stored, so a diagnostics wait that deferred to it
+ * decides again (the timer's two unstored exits). A clear that cancels the
+ * timer emits nothing: it removed the stored answer too, so a waiting wait has
+ * nothing to settle on and keeps waiting (#4785 F4). Never `"diagnostics"`: nothing new was stored, and a wait
+ * that read it as a store would settle on an empty cache.
+ */
+const PENDING_RECEIPT_DROPPED = "pending-receipt-dropped";
+
 /** Exported for tests: the quiet-window timer cancel on clear/resync is the
  * headline #1412 safety property (a stale versionless publication must never
  * land after the document content changed). */
@@ -2168,6 +2188,8 @@ export function clearDiagnosticsForPath(
 	state.documentPullDiagnostics?.delete(normalizedPath);
 	state.documentPullDiagnosticTimestamps?.delete(normalizedPath);
 	state.diagnosticDocVersions?.delete(normalizedPath);
+	// #4786: the finding this phase stamp stood for is gone with the cache.
+	state.nonEmptyAnswerPhases?.delete(normalizedPath);
 	// #1095: a cleared path must never serve a stale content binding alongside a
 	// later publish — drop it with the diagnostics it described. (The last-sent
 	// `documentContentHashes` record is intentionally retained: it describes what
@@ -2650,7 +2672,7 @@ export function isConfigLoadFailureMessage(message: string): boolean {
  * - An ERROR-level message reporting a failed config/rule load marks an
  *   AUXILIARY client's {@link LSPClientState.configLoadFailure}: from then on
  *   its empty publications are not evidence of a clean scan
- *   ({@link configFailureBlocksEmptyPublish}), and any empty answer already
+ *   ({@link auxiliaryEmptyIsNotEvidence}), and any empty answer already
  *   stored is retracted, because it came from the same rule-less server. The
  *   state is not a record, so the cap never decides it: a distinct failure
  *   after a refresh gates again even when its text is only counted.
@@ -2718,17 +2740,74 @@ export function noteServerShowMessage(
 }
 
 /**
- * #4764: an auxiliary whose own config failed cannot evaluate the documents it
- * is sent, so an EMPTY publication from it is the absence of a scan, never
- * evidence of a clean one. A non-empty publication still flows: a broken rule
- * download does not erase findings the server did produce.
+ * #4786: the phase an answer for `filePath` belongs to: the server's rules
+ * generation (`semgrep/rulesRefreshed` count) and the document version of the
+ * client's last send of the path (-1 while it has none). Neither moves back
+ * while a stamp for the path exists: the generation only grows, and the
+ * version only grows within one open lifetime (a resync's close and reopen
+ * carries it forward, #1095). A lifetime ends at didClose, whose
+ * `clearDiagnosticsForPath` drops the stamp, and a fresh open clears it again,
+ * so the version's restart at 0 never meets an old stamp. Not
+ * `publicationCountsForPath(...).sent`: its save-rescan term is a balance
+ * that `giveBackSaveRescan` decrements (#4790 review F1).
  */
-function configFailureBlocksEmptyPublish(
+function answerPhase(state: LSPClientState, filePath: string): string {
+	return `${state.rulesGeneration ?? 0}:${state.documentVersions.get(filePath) ?? -1}`;
+}
+
+/**
+ * An EMPTY publication from an auxiliary that is not evidence of a clean scan,
+ * so it is refused: counted as the answer its send was owed, never stored.
+ * Two reasons, checked at receipt and again at debounce-store time:
+ *
+ * - #4764: the auxiliary's own config failed, so it cannot evaluate the
+ *   documents it is sent. A non-empty publication still flows: a broken rule
+ *   download does not erase findings the server did produce.
+ * - #4786: an UNVERSIONED empty that lands in the same phase
+ *   ({@link answerPhase}) as the path's stored or pending non-empty answer.
+ *   Within one rule set and one send the scanner's input is fixed, so a
+ *   finding then an empty are not two scans of it: opengrep's open-documents
+ *   scan publishes `[]` for every file it ever scanned and did not target this
+ *   time (opengrep@acf67b4 `Scan_helpers.scan_something`). A new send or a
+ *   rules refresh starts a new phase, where an empty clears as before. A
+ *   versioned publication is ordered by its version and never reaches this
+ *   reason; a language server never does either (last write wins).
+ */
+function auxiliaryEmptyIsNotEvidence(
 	state: LSPClientState,
 	filePath: string,
+	docVersion: number | undefined,
 ): boolean {
 	const failure = state.configLoadFailure;
-	if (failure === undefined) return false;
+	if (failure === undefined) {
+		if (docVersion !== undefined) return false;
+		// Only an auxiliary is stamped, and a stamp leaves with the path's
+		// diagnostics (`clearDiagnosticsForPath`). Every later receipt in its
+		// phase is non-empty or refused here, so a matching stamp means the
+		// stored or pending answer is that phase's finding.
+		const phase = answerPhase(state, filePath);
+		if (state.nonEmptyAnswerPhases?.get(filePath) !== phase) return false;
+		countPublication(state, filePath);
+		emitBounded(
+			"lsp_publish_dropped_empty_after_finding",
+			// Keyed per server and path, never per phase: a phase moves with every
+			// edit, so a phase key would add one tally per edit for the session
+			// (#4790 review F2, shape 46). The phase rides as a field.
+			`${state.serverId}:empty-after-finding:${filePath}`,
+			{
+				filePath,
+				durationMs: 0,
+				metadata: { serverId: state.serverId, phase },
+			},
+			{
+				ledgerKind: "lsp-auxiliary-empty-after-finding",
+				reason:
+					"empty publish dropped: a finding from the same rules generation and send stands",
+				risingEdgePer: "identity",
+			},
+		);
+		return true;
+	}
 	// A refused publication still answers the send it was owed (#3482), as a
 	// fence-dropped or held one does; otherwise the backlog keeps one send for
 	// good and the late-auxiliary drain waits for a publication already received.
@@ -2762,7 +2841,7 @@ function configFailureBlocksEmptyPublish(
  *
  * Only the STORED answer is dropped: its cache entry, stamp, version and
  * binding. A publication still inside its debounce window is left to the
- * store-time gate in {@link configFailureBlocksEmptyPublish}: a pending finding
+ * store-time gate in {@link auxiliaryEmptyIsNotEvidence}: a pending finding
  * is stored, a pending empty is refused and counted. `clearDiagnosticsForPath`
  * is not used here because it cancels that pending timer, and a newer finding
  * would be lost with it.
@@ -2854,11 +2933,13 @@ export function setupIncomingHandlers(
 			}
 			// #4764: a rule-less scanner's empty publication is not an answer, so it
 			// is decided BEFORE `onDiagnosticsPublished` — a refused publication must
-			// not also tell the first-publication gate this server reported.
+			// not also tell the first-publication gate this server reported. #4786:
+			// nor is an empty that lands in its finding's phase; refused here, it
+			// also leaves a pending finding's debounce timer running.
 			const newDiags = normalizeLspDiagnostics(params.diagnostics || []);
 			if (
 				newDiags.length === 0 &&
-				configFailureBlocksEmptyPublish(state, normalizedPath)
+				auxiliaryEmptyIsNotEvidence(state, normalizedPath, docVersion)
 			) {
 				return;
 			}
@@ -3071,7 +3152,7 @@ export function setupIncomingHandlers(
 			// and reports `silent`, which is the truth, not a clean file).
 			if (
 				strategy.emptyUntilRulesRefreshed &&
-				!state.rulesRefreshed &&
+				!state.rulesGeneration &&
 				newDiags.length === 0 &&
 				!state.pushDiagnostics.has(normalizedPath) &&
 				!state.pendingDiagnostics.has(normalizedPath)
@@ -3141,6 +3222,16 @@ export function setupIncomingHandlers(
 				return;
 			}
 
+			// #4786: this non-empty receipt goes on to the store, so it stands for
+			// its phase: a later unversioned empty in the same phase is refused
+			// (`auxiliaryEmptyIsNotEvidence`). Only an auxiliary is stamped.
+			if (newDiags.length > 0 && isAuxiliary({ role: state.serverRole })) {
+				(state.nonEmptyAnswerPhases ??= new Map()).set(
+					normalizedPath,
+					answerPhase(state, normalizedPath),
+				);
+			}
+
 			// Seed on first push for servers whose first push is known complete.
 			// Bypasses the debounce timer entirely — resolves waiting promises immediately.
 			if (
@@ -3152,6 +3243,16 @@ export function setupIncomingHandlers(
 				if (isSupersededPush()) {
 					countPublication(state, normalizedPath);
 					return;
+				}
+				// #4785 F1: a receipt still pending here arrived before this one
+				// (a #4764 retraction keeps its timer), so it is older: cancel it
+				// as a newer receipt does, or it overwrites this answer and the
+				// wait's pending-receipt rule defers to it.
+				const olderTimer = state.pendingDiagnostics.get(normalizedPath);
+				if (olderTimer) {
+					clearTimeout(olderTimer);
+					state.pendingDiagnostics.delete(normalizedPath);
+					countPublication(state, normalizedPath);
 				}
 				state.pushDiagnostics.set(normalizedPath, newDiags);
 				state.pushDiagnosticTimestamps.set(normalizedPath, Date.now());
@@ -3177,6 +3278,8 @@ export function setupIncomingHandlers(
 				state.pendingDiagnostics.delete(normalizedPath);
 				if (isSupersededPush()) {
 					countPublication(state, normalizedPath);
+					// #4782: a wait that deferred to this receipt decides again.
+					state.diagnosticEmitter.emit(PENDING_RECEIPT_DROPPED, normalizedPath);
 					return;
 				}
 				// #4764: the config failure may have landed while this publish sat in the
@@ -3185,8 +3288,9 @@ export function setupIncomingHandlers(
 				// now, so neither arrival order can store a rule-less empty answer.
 				if (
 					newDiags.length === 0 &&
-					configFailureBlocksEmptyPublish(state, normalizedPath)
+					auxiliaryEmptyIsNotEvidence(state, normalizedPath, docVersion)
 				) {
+					state.diagnosticEmitter.emit(PENDING_RECEIPT_DROPPED, normalizedPath);
 					return;
 				}
 				state.pushDiagnostics.set(normalizedPath, newDiags);
@@ -3371,7 +3475,7 @@ export function setupIncomingHandlers(
 		},
 	);
 	state.connection.onNotification("semgrep/rulesRefreshed", () => {
-		state.rulesRefreshed = true;
+		state.rulesGeneration = (state.rulesGeneration ?? 0) + 1;
 		// The notification is sent only after the rules loaded (opengrep
 		// `refresh_rules` sends it after `cache_session`), so an earlier config
 		// failure is resolved and its empty publishes are answers again.
@@ -4557,16 +4661,47 @@ export async function clientWaitForDiagnostics(
 		}
 	}
 
-	if (
+	// #4782: a receipt still in the publish handler's quiet window
+	// (`pendingDiagnostics`) is a LATER answer than the stored one, so the
+	// stored answer settles nothing while it waits there. A bash command's
+	// dependent a.ts had an answer stored that the server computed against
+	// z.ts's old bytes; the answer computed after z.ts's change arrived right
+	// before the drain reply, still in its window, and the dispatch's read took
+	// the stored one: a phantom STOP. Waiting for the receipt costs at most
+	// one quiet window.
+	const laterReceiptPending = (): boolean =>
+		state.pendingDiagnostics.has(normalizedPath);
+	const storedAnswerSettles = (): boolean =>
 		hasFreshDiagnostics() &&
 		!isVersionStale() &&
-		getMergedDiagnosticsForPath(state, normalizedPath).length > 0
-	) {
+		getMergedDiagnosticsForPath(state, normalizedPath).length > 0;
+
+	if (storedAnswerSettles() && !laterReceiptPending()) {
 		return;
 	}
+	// #4785 F4: a wait resolves before its deadline only while an answer for
+	// the path is stored. The touch reads "no answer" only from a wait that ran
+	// to its budget (clients/lsp/index.ts), so an early resolve on a store a
+	// clear removed read as a confirmed clean.
+	const answerStored = (): boolean =>
+		hasFreshDiagnostics() &&
+		!isVersionStale() &&
+		(state.pushDiagnostics.has(normalizedPath) ||
+			state.documentPullDiagnostics.has(normalizedPath));
 
 	return new Promise<void>((resolve) => {
 		let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+		/** A settle came due while a later receipt was pending: the early
+		 * return above, or the quiet window below. */
+		let settleDeferred = storedAnswerSettles();
+
+		const finish = (): void => {
+			if (debounceTimer) clearTimeout(debounceTimer);
+			state.diagnosticEmitter.off("diagnostics", onDiagnostics);
+			state.diagnosticEmitter.off(PENDING_RECEIPT_DROPPED, onReceiptDropped);
+			clearTimeout(timeout);
+			resolve();
+		};
 
 		const onDiagnostics = (fp: string) => {
 			if (normalizeMapKey(fp) !== normalizedPath) return;
@@ -4581,19 +4716,33 @@ export async function clientWaitForDiagnostics(
 			const remaining = Math.max(0, strategy.debounceMs - timeSincePush);
 
 			debounceTimer = setTimeout(() => {
-				state.diagnosticEmitter.off("diagnostics", onDiagnostics);
-				clearTimeout(timeout);
-				resolve();
+				debounceTimer = undefined;
+				// #4782: a later receipt is pending; its store re-arms this window.
+				if (laterReceiptPending()) {
+					settleDeferred = true;
+					return;
+				}
+				// A clear inside the window removed the store this window was
+				// armed for: keep waiting for the next one, or the deadline.
+				if (!answerStored()) return;
+				finish();
 			}, remaining);
 		};
 
-		state.diagnosticEmitter.on("diagnostics", onDiagnostics);
+		// #4782: the pending receipt this wait deferred to was dropped unstored
+		// (superseded, or refused from a rule-less scanner), so the wait decides
+		// as it would have without that receipt: on the stored answer, if a clear
+		// has not removed it since (#4785 F4). A wait still inside its quiet
+		// window keeps it.
+		const onReceiptDropped = (fp: string) => {
+			if (normalizeMapKey(fp) !== normalizedPath) return;
+			if (settleDeferred && answerStored()) finish();
+		};
 
-		const timeout = setTimeout(() => {
-			if (debounceTimer) clearTimeout(debounceTimer);
-			state.diagnosticEmitter.off("diagnostics", onDiagnostics);
-			resolve();
-		}, timeoutMs);
+		state.diagnosticEmitter.on("diagnostics", onDiagnostics);
+		state.diagnosticEmitter.on(PENDING_RECEIPT_DROPPED, onReceiptDropped);
+
+		const timeout = setTimeout(finish, timeoutMs);
 	});
 }
 
@@ -6674,7 +6823,7 @@ export async function createLSPClient(options: {
 		...(role !== undefined && { serverRole: role }),
 		// #3310: one-shot, per client session.
 		emptyFirstPublishHoldSpent: false,
-		rulesRefreshed: false,
+		rulesGeneration: 0,
 		diagnosticFences: new Map(),
 		closedDocuments: new Set(),
 		openDocumentUris: new Map(),

@@ -1651,6 +1651,9 @@ describe("clientWaitForDiagnostics", () => {
 			// #1531: advance through the production seam. Assigning the global counter
 			// alone no longer satisfies the gate, which now reads the per-path stamp —
 			// and a test that hand-rolls the bump would stop modelling a real publish.
+			// #4785 F4: a real publish stores before it emits, and the wait settles
+			// only while an answer is stored.
+			state.pushDiagnostics.set(TEST_KEY, []);
 			bumpDiagnosticsVersion(state, TEST_KEY);
 			state.diagnosticEmitter.emit("diagnostics", TEST_FILE);
 		}, 50);
@@ -1728,8 +1731,10 @@ describe("clientWaitForDiagnostics", () => {
 
 		const waitPromise = clientWaitForDiagnostics(state, TEST_FILE, 5000);
 
-		// Simulate diagnostics arriving after a short delay
+		// Simulate diagnostics arriving after a short delay (stored, then
+		// emitted, as the publish handler does: #4785 F4).
 		setTimeout(() => {
+			state.pushDiagnostics.set(TEST_KEY, []);
 			state.diagnosticEmitter.emit("diagnostics", TEST_FILE);
 		}, 50);
 
@@ -1762,8 +1767,10 @@ describe("clientWaitForDiagnostics", () => {
 				state.diagnosticEmitter.emit("diagnostics", "/project/other.ts");
 			}, 50);
 
-			// Emit for the right file after a bit longer
+			// Emit for the right file after a bit longer (stored first, as the
+			// publish handler does: #4785 F4).
 			setTimeout(() => {
+				state.pushDiagnostics.set(TEST_KEY, []);
 				state.diagnosticEmitter.emit("diagnostics", TEST_FILE);
 			}, 100);
 

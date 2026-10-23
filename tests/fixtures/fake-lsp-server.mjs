@@ -1006,6 +1006,14 @@ function handle(raw) {
 		if (typeof text === "string") {
 			openDocuments.set(data.params?.textDocument?.uri, text);
 		}
+		// #4782: a dependency whose change takes the checker long to analyze.
+		// The work runs BEFORE the republish below, so the dependents' previous
+		// answers (checked against the old bytes) are the latest the client
+		// holds until this change's answers arrive, right before the reply to
+		// any request queued behind it.
+		const slowMarker = process.env.FAKE_LSP_SLOW_CHANGE_TEXT;
+		if (slowMarker && typeof text === "string" && text.includes(slowMarker))
+			burnCpu(Number(process.env.FAKE_LSP_SLOW_CHANGE_MS ?? "400"));
 		publishSequenceFor(data.params?.textDocument?.uri);
 		if (STALE_MODULE_LOOKUP) publishModuleLookups(data.params?.textDocument?.uri);
 		if (CLOSED_FILE_CACHE) checkEveryOpenDocument();

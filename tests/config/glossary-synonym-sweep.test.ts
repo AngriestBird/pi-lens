@@ -1113,7 +1113,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// own directory to the home ceiling (`path.resolve`/`path.dirname`).
 		// 127 -> 125 (#4769 round 2): it now takes the resolved root and compares
 		// real paths through `realpathOrResolve`, so both uses are gone.
-		"clients/lsp/server.ts": 125,
+		// #4728: 125 -> 123; the fallback walk starts at the candidate itself,
+		// removing the early-return resolve and the parent-directory lookup.
+		"clients/lsp/server.ts": 123,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).

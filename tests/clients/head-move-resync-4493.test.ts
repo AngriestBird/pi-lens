@@ -1367,6 +1367,44 @@ describe("a bash command's writes reach the primaries before its dispatches (#45
 		120_000,
 	);
 
+	// Recurrence: #4782, the #4528 r1 F1 push case under load. The primary
+	// checks a.ts against z.ts's old bytes, stores that answer, and is slow to
+	// analyze z.ts's change; its republish of a.ts arrives right before the
+	// reply that drains the phase. That newer answer was still in its quiet
+	// window when the dispatch read a.ts, so the read took the stored one,
+	// computed before z.ts's new bytes: the phantom STOP.
+	it("checks a dependent against its rewritten dependency when the dependency's answer arrives right before the drain reply (push diagnostics)", async () => {
+		const repo = await makeRepo(
+			{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+			NOTES_B,
+			[],
+			{
+				...CHECKER,
+				FAKE_LSP_SLOW_CHANGE_TEXT: "export function isChatModelConfig",
+				FAKE_LSP_SLOW_CHANGE_MS: "400",
+			},
+		);
+		await hold(repo, ["a.ts", "z.ts"]);
+		const s = session(repo, "s-4782-slow-dependency");
+		// The window is the newer answer's quiet window (150 ms): a dispatch
+		// whose first run in this process loads its modules reads a.ts later
+		// than that. One earlier edit runs the dispatch once.
+		await s.bash("sed -i s/1/2/ a.ts", () => {
+			fs.writeFileSync(repo.file("a.ts"), A0.replace("(1)", "(2)"));
+		});
+
+		const text = await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+			fs.writeFileSync(repo.file("a.ts"), A1);
+			fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+		});
+
+		expect(text).not.toContain("no exported member");
+		expect(await primaryResyncRows(repo)).toMatchObject([
+			{ result: "sent", metadata: { targets: 1, primary: 1 } },
+			{ result: "sent", metadata: { targets: 2, primary: 2 } },
+		]);
+	}, 60_000);
+
 	// Recurrence: #4528 r1 F1, the second half. A send resolves once its bytes
 	// are in the pipe, not once the server read them. This primary reads its
 	// input at once and works through it slowly (150 ms a change), republishing
