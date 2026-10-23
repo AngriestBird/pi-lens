@@ -23,6 +23,13 @@
  *  | one opened (clean) + one unopened (written) | between T and the answer | two importers | the whole edit refused: neither importer rewritten, nothing moved |
  *  | unopened, mtime before T                 | none                    | one importer  | applies: importer rewritten, file moved |
  *  | unopened, written                        | between T and the answer| one importer, preview | preview returns the merged edit and writes nothing |
+ *
+ * Round 3 (one identity, the registry client key; table in the PR body):
+ *
+ *  | contributors                                   | write lands             | expected |
+ *  |------------------------------------------------|-------------------------|----------|
+ *  | one root of a server throws, another answers   | none                    | applies the answer; the failure is still reported |
+ *  | one with a matching record + one with none     | after T, or in the margin | refused, names the contributor with no record |
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -37,6 +44,7 @@ import {
 	makeRenameClient,
 } from "../support/lsp-rename-client-double.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 import { setHostFileMutationQueueLoader } from "../../clients/file-mutation-queue.js";
 import {
 	getDegradationSummary,
@@ -308,6 +316,114 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 			await harness.realService.shutdown();
 		}
 	});
+
+	// #3734 r3 F5: the failure partition was keyed by server id, so one root of
+	// `typescript` throwing discarded the other root's answer too. Alone, that
+	// refused a valid rename ("failed for all active LSP servers"); beside a
+	// server that answered no edit, the rename moved the file and silently left
+	// the importer on `./old`.
+	it.each([
+		{ label: "the only answer", withBystander: false },
+		{ label: "beside a server that answered no edit", withBystander: true },
+	])(
+		"keeps a same-server client's edit when another root of that server fails ($label)",
+		async ({ withBystander }) => {
+			ageFile(importPath, 60_000);
+			ageFile(oldPath, 60_000);
+			const failing = makeRenameClient(env.tmpDir, null);
+			failing.willRenameFiles.mockRejectedValue(
+				new Error("boom from the first root"),
+			);
+			const answeringRoot = path.join(env.tmpDir, "package");
+			fs.mkdirSync(answeringRoot);
+			const answering = makeRenameClient(answeringRoot, importEdit(importPath));
+			clientsFor = () => [
+				{ serverId: "typescript", client: failing },
+				{ serverId: "typescript", client: answering, root: answeringRoot },
+				...(withBystander
+					? [{ serverId: "eslint", client: makeRenameClient(env.tmpDir, null) }]
+					: []),
+			];
+			const harness = makeHarness();
+
+			try {
+				const result = await runRenameFile(env.tmpDir, true);
+
+				expect(result.isError).toBeUndefined();
+				expect(fs.readFileSync(importPath, "utf-8")).toBe(
+					"import { value } from './new';\n",
+				);
+				expect(fs.existsSync(newPath)).toBe(true);
+				// The failing root is still reported, not swallowed.
+				expect(resultText(result)).toContain("boom from the first root");
+				expect(staleRows()).toEqual([]);
+			} finally {
+				await harness.realService.shutdown();
+			}
+		},
+	);
+
+	// #3734 r3 F6: one contributor's matching record bound the whole file, so a
+	// second contributor holding no record had its stale edit applied with no
+	// refusal (`rnewme`). Both mtime branches must see it: a write stamped after
+	// the request, and one inside the margin before it (a coarse clock).
+	it.each([
+		{
+			label: "stamped after the request",
+			stampMs: 5_000,
+			why: "it was written after the rename was requested",
+		},
+		{
+			label: "stamped inside the margin before the request",
+			stampMs: -1_000,
+			why: "it was modified within 2 s of the rename request",
+		},
+	])(
+		"refuses an edit from a contributor with no send record although another contributor's record matches ($label)",
+		async ({ stampMs, why }) => {
+			const recorded = makeRenameClient(
+				env.tmpDir,
+				agentImportEdit(importPath),
+			);
+			recorded.getSentContent = vi.fn(() => ({
+				hash: hashDiagnosticContent(AGENT_IMPORT),
+				changedAtMs: 0,
+			}));
+			const unrecorded = makeRenameClient(env.tmpDir, null);
+			unrecorded.willRenameFiles.mockImplementation(async () => {
+				// Computed from the old bytes; the agent's write lands meanwhile.
+				fs.writeFileSync(importPath, AGENT_IMPORT);
+				const when = new Date(Date.now() + stampMs);
+				fs.utimesSync(importPath, when, when);
+				return importEdit(importPath);
+			});
+			clientsFor = () => [
+				{ serverId: "typescript", client: recorded },
+				{ serverId: "eslint", client: unrecorded },
+			];
+			const harness = makeHarness();
+
+			try {
+				const result = await runRenameFile(env.tmpDir, true);
+
+				expect(fs.readFileSync(importPath, "utf-8")).toBe(AGENT_IMPORT);
+				expect(result.isError).toBe(true);
+				expect(resultText(result)).toContain(path.basename(importPath));
+				expect(resultText(result)).toContain(why);
+				// The refusal names the contributor that holds no record, and only it.
+				expect(resultText(result)).toContain(
+					`eslint:${normalizeMapKey(env.tmpDir)}`,
+				);
+				expect(resultText(result)).not.toContain(
+					`typescript:${normalizeMapKey(env.tmpDir)}`,
+				);
+				expect(fs.existsSync(oldPath)).toBe(true);
+				expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
+			} finally {
+				await harness.realService.shutdown();
+			}
+		},
+	);
 
 	it("an opened importer whose disk no longer holds the client's last send is refused on the hash", async () => {
 		const client = makeRenameClient(env.tmpDir, importEdit(importPath));

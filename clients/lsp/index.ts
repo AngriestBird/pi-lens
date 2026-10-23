@@ -2766,9 +2766,10 @@ export class LSPService {
 
 	/**
 	 * #3601: the fingerprint of the content a live client last sent for
-	 * `filePath`, and when a send last changed it. With source ids, returns all
-	 * records for clients that contributed the merged edit; without them,
-	 * preserves the original first-live-client lookup. In-memory only: it
+	 * `filePath`, and when a send last changed it. With source client keys,
+	 * returns the record of every contributing client that holds one, tagged
+	 * with its key so the caller can name a contributor that holds none; without
+	 * them, preserves the original first-live-client lookup. In-memory only: it
 	 * spawns, opens and stats nothing.
 	 */
 	getTrackedContent(
@@ -2793,9 +2794,9 @@ export class LSPService {
 			const sourceSet = new Set(sourceClientKeys);
 			const sends = clients
 				.filter(({ clientKey }) => sourceSet.has(clientKey))
-				.flatMap(({ client }) => {
+				.flatMap(({ clientKey, client }) => {
 					const sent = client.getSentContent?.(filePath);
-					return sent === undefined ? [] : [sent];
+					return sent === undefined ? [] : [{ ...sent, clientKey }];
 				});
 			return sends;
 		}
@@ -7884,22 +7885,23 @@ export class LSPService {
 						clientKey,
 						serverId,
 						edit: await client.willRenameFiles(oldFilePath, newFilePath),
+						failed: false,
 					};
 				} catch (err) {
 					willRenameFailures.push({
 						serverId,
 						error: err instanceof Error ? err.message : String(err),
 					});
-					return { serverId, edit: null };
+					return { clientKey, serverId, edit: null, failed: true };
 				}
 			}),
 		);
 
+		// #3734 r3: each answer carries its own outcome. A server id is not a
+		// client: another root of the same server failing must not discard this
+		// one's edit.
 		const successfulWillResults = willResults.filter(
-			(result) =>
-				!willRenameFailures.some(
-					(failure) => failure.serverId === result.serverId,
-				),
+			(result) => !result.failed,
 		);
 		if (willRenameClients.length > 0 && successfulWillResults.length === 0) {
 			throw new Error(

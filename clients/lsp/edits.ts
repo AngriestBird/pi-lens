@@ -812,6 +812,9 @@ export interface RenameTrackedSend {
 	openedAtMs?: number | undefined;
 	openedHash?: string | undefined;
 	clientStartedAtMs?: number | undefined;
+	/** The registry key of the client holding the record; set by the lookup
+	 *  that is given the edit's contributing client keys. */
+	clientKey?: string | undefined;
 }
 
 /**
@@ -848,6 +851,10 @@ export interface RenameTrackedSend {
  *   that first open, say) keeps the send check and its stamp, which refuses it:
  *   the server may hold the load-time copy, not these bytes. A client that
  *   reports no start makes no such claim.
+ * With `sourceClientKeysByPath` (the merged edit's contributors, #3734), every
+ * contributing client's record is checked, and the records bind the file only
+ * when every contributor holds a comparable one; otherwise the file also takes
+ * the unopened rule, and its refusal names the contributors that hold none.
  * The read that passed either check is the content the apply is then held to.
  * A file the edit creates, or one that cannot be read, is left out of the map,
  * matching every other `expectedContent` caller.
@@ -894,11 +901,10 @@ export function captureRenameExpectedContent(
 			expected.set(realPath, target.content);
 			continue;
 		}
-		const trackedResult = readTrackedSend(
-			diskPath,
-			cwd,
-			sourceClientKeysByPath?.get(normalizeEphemeralMapKey(realPath)),
+		const contributorKeys = sourceClientKeysByPath?.get(
+			normalizeEphemeralMapKey(realPath),
 		);
+		const trackedResult = readTrackedSend(diskPath, cwd, contributorKeys);
 		const tracked =
 			trackedResult === undefined
 				? []
@@ -912,6 +918,7 @@ export function captureRenameExpectedContent(
 		// open's bytes, then the unopened rule below applies.
 		const contentHash = hashDiagnosticContent(content);
 		let hasComparableSend = false;
+		const comparableKeys = new Set<string | undefined>();
 		for (const trackedSend of tracked) {
 			const firstOpenedAfterRequest =
 				(trackedSend.openedAtMs ?? 0) >= requestedAtMs;
@@ -924,6 +931,7 @@ export function captureRenameExpectedContent(
 					: trackedSend;
 			if (sent !== undefined) {
 				hasComparableSend = true;
+				comparableKeys.add(trackedSend.clientKey);
 				if (
 					sent.hash !== contentHash ||
 					(sent.changedAtMs ?? requestedAtMs) >= requestedAtMs
@@ -947,18 +955,29 @@ export function captureRenameExpectedContent(
 				);
 			}
 		}
-		if (!hasComparableSend && mtimeMs >= requestedAtMs) {
+		// #3734 r3: a record binds the file only when EVERY contributing client
+		// holds a comparable one. A contributor with none (never opened, or first
+		// opened after the request) answered from bytes nothing here can see, so
+		// the file takes the mtime rule and the refusal names that client.
+		const unboundKeys =
+			contributorKeys?.filter((key) => !comparableKeys.has(key)) ?? [];
+		const boundByRecord = hasComparableSend && unboundKeys.length === 0;
+		const noOpenCopy =
+			unboundKeys.length === 0
+				? "the language server has no open copy"
+				: `the language client ${unboundKeys.join(", ")} that edits it had no open copy`;
+		if (!boundByRecord && mtimeMs >= requestedAtMs) {
 			refuseStaleWorkspaceEdit(
 				diskPath,
-				"it was written after the rename was requested and the language server has no open copy, so it may not have read these bytes",
+				`it was written after the rename was requested and ${noOpenCopy}, so it may not have read these bytes`,
 			);
 		} else if (
-			!hasComparableSend &&
+			!boundByRecord &&
 			mtimeMs >= requestedAtMs - RENAME_MTIME_MARGIN_MS
 		) {
 			refuseStaleWorkspaceEdit(
 				diskPath,
-				`it was modified within ${RENAME_MTIME_MARGIN_MS / 1000} s of the rename request; retry`,
+				`it was modified within ${RENAME_MTIME_MARGIN_MS / 1000} s of the rename request${unboundKeys.length === 0 ? "" : ` and ${noOpenCopy}`}; retry`,
 			);
 		}
 		expected.set(realPath, content);

@@ -1239,8 +1239,12 @@ file-scoped worklist and receives no project-wide scanner output.
   target (nothing read the old path), so an unopened file there is best effort
   by mtime, the same remainder the `rename` path carries. The evidence a file
   is compared against the sent-content records of every client that
-  contributed a kept edit for that file; a merged edit never falls back to a
-  different client's priority record. `documentVersions` is
+  contributed a kept edit for that file, keyed by the registry client key; a
+  merged edit never falls back to a different client's priority record. The
+  records bind the file only when every contributor holds one; a contributor
+  with none leaves the file on the mtime rule, and the refusal names it. One
+  client's failed `willRenameFiles` never discards another client's answer,
+  of the same server id or not. `documentVersions` is
   the other binding axis, for a server-initiated `workspace/applyEdit`. A new
   apply site binds the content or states why it cannot.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
