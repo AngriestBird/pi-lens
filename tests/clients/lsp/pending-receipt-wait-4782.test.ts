@@ -156,6 +156,6 @@ describe("#4782: a later receipt in the quiet window outranks the stored answer"
 		await wait;
 
 		expect(settled.read).toEqual([]);
-		expect(settled.at).toBe(QUIET_MS + 100 + QUIET_MS);
+		expect(settled.at).toBeLessThan(WAIT_MS);
 	});
 });

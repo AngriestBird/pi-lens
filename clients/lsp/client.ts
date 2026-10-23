@@ -4624,7 +4624,7 @@ export async function clientWaitForDiagnostics(
 		// (superseded, or refused from a rule-less scanner), so the stored answer
 		// is the latest again and decides as it did before the receipt arrived.
 		const onReceiptDropped = (fp: string) => {
-			if (normalizeMapKey(fp) !== normalizedPath || debounceTimer) return;
+			if (normalizeMapKey(fp) !== normalizedPath) return;
 			if (settleDeferred || storedAnswerSettles()) finish();
 		};
 
