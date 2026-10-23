@@ -719,6 +719,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the global-bin and fallback arms of resolveExec are decided by the real package-manager lookup, which spawns the real which and executable stand-in managers; a doubled findGlobalBinary returns the path the case then asserts on",
 	},
+	// 2026-10-23 (#4789): a child process is the only observer of the HOME and
+	// XDG directories a spawned tool inherits from the worker.
+	"real-process-spawn:clients/worker-home-pin-hermeticity.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the claim is what a CHILD process sees of the worker's environment, the inheritance the #4780 opengrep writes into the real home depended on; an in-process read of process.env proves the worker, not the child, and the probe child only prints its environment",
+	},
 	"real-process-spawn:config/gitignore-tracked-shadow.test.ts": {
 		detector: "real-process-spawn",
 		reason:

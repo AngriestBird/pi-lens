@@ -29,6 +29,8 @@ import {
 // the mock registers (#3703 round 1: 56 files red).
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import {
+	claimScratchDir,
+	SCRATCH_DIR_ROOT,
 	SWEEP_ANY_AGE,
 	sweepScratchDirs,
 } from "../../scripts/lib/scratch-dir.mjs";
@@ -470,6 +472,7 @@ process.once("SIGTERM", () => {
 	// nested vitest run a test launched has no owner to sweep its homes.
 	try {
 		tmpRootIo.remove(TMP_HYGIENE_WORKER_HOME);
+		tmpRootIo.remove(workerPinnedHomeRoot);
 	} catch {
 		// Best effort, like the sweep above: the owner reclaims what is left.
 	}
@@ -601,6 +604,63 @@ process.env.PI_LENS_TMP_HYGIENE_FIXTURE_HOME = fixtureHomeRootIn(
 	process.env.PI_LENS_TMP_HYGIENE_RUN_ID ?? "local",
 	process.pid,
 );
+// #4789: pinning PI_LENS_HOME alone left HOME and the XDG directories at the
+// maintainer's REAL home, so every tool a test spawns that resolves its own
+// config from them wrote there (2026-10-23: the #4780 verify left
+// `$HOME/.config/.opengrep` and `$HOME/.config/.semgrep` behind). The whole set
+// is pinned here once, in the worker, so every child inherits it. `USERPROFILE`
+// is `os.homedir()`'s source on Windows. The XDG directories take the layout a
+// tool falls back to without them (`~/.config`, `~/.cache`, `~/.local/share`),
+// so a tool that reads the variable and one that reads the default agree.
+//
+// The home is the worker's own directory under the sanctioned scratch root
+// (`claimScratchDir`: owner.pid, swept when its owner is dead), NOT under the
+// checkout's `.probe-home` beside the worker home: the repo root is every
+// test's `cwd`, a home inside it makes that cwd an ANCESTOR of HOME, and the
+// home-ceiling guards (`isAtOrAboveHomeDir`) then refuse it (32 cases in
+// `ast-grep-search.test.ts` went red on exactly that). The real home sits above
+// the checkout, so the pin keeps that relation. A test that needs a project
+// file under HOME uses `pinFixtureHome`, as AGENTS.md requires: a path under a
+// `pi-*` temp directory is pi-owned housekeeping to `isPiOwnedTempPath`.
+//
+// The pinned home follows TMPDIR (`os.tmpdir()`), so on a host whose TMPDIR is
+// /tmp it is under /tmp: a suite that applies a /tmp rule to what `~` expands to
+// (tests/scripts/guard-bash-hook.test.ts) gives its classifier its own HOME.
+// A test that needs another home sets HOME itself and wins. Assigned once for
+// the process and never restored, like PI_LENS_HOME above: restoring between
+// cases would re-open the real home.
+//
+// `REAL_HOME` is the opt-out: the maintainer's real home as the passwd entry
+// names it (`os.userInfo()` does not read `HOME`), captured BEFORE the pin. A
+// test that reads it on purpose is a row in `tests/support/real-home-readers.ts`
+// with a header reason, and `tests/config/real-home-reader-registry.test.ts`
+// fails any other file that spells it, or `userInfo`.
+export const REAL_HOME: string = (() => {
+	try {
+		return os.userInfo().homedir;
+	} catch {
+		// No passwd entry for this uid (a container): the ambient value is the
+		// best answer left, and still the real one, as nothing has pinned yet.
+		return os.homedir();
+	}
+})();
+sweepScratchDirs(SCRATCH_DIR_ROOT, "vitest-home-", {
+	maxAgeMs: 6 * 60 * 60 * 1000,
+});
+const workerPinnedHomeRoot = claimScratchDir(SCRATCH_DIR_ROOT, "vitest-home");
+const workerPinnedHome = path.join(workerPinnedHomeRoot, "home");
+for (const dir of [
+	workerPinnedHome,
+	path.join(workerPinnedHome, ".config"),
+	path.join(workerPinnedHome, ".cache"),
+	path.join(workerPinnedHome, ".local", "share"),
+])
+	fs.mkdirSync(dir, { recursive: true });
+process.env.HOME = workerPinnedHome;
+process.env.USERPROFILE = workerPinnedHome;
+process.env.XDG_CONFIG_HOME = path.join(workerPinnedHome, ".config");
+process.env.XDG_CACHE_HOME = path.join(workerPinnedHome, ".cache");
+process.env.XDG_DATA_HOME = path.join(workerPinnedHome, ".local", "share");
 // #2651: scripts/warm-loader-cache.mjs appends to PI_LENS_INSTALL_LOG before
 // it falls back to PI_LENS_HOME/install.log, so an ambient value (a
 // developer's shell pointing it at the real ~/.pi-lens/install.log) would
@@ -1746,6 +1806,7 @@ afterAll(async () => {
 			// beside its own home, so they go when it does.
 			removeTempDirSync(fixtureHomeRoot());
 			removeTempDirSync(TMP_HYGIENE_WORKER_HOME);
+			removeTempDirSync(workerPinnedHomeRoot);
 		}
 	}
 });
