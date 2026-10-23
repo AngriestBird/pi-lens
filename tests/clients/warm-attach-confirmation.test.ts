@@ -22,6 +22,9 @@
  *    shape a pre-#1253 incumbent produces (safe-by-omission, no version bump).
  */
 
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	contentHash,
@@ -29,7 +32,9 @@ import {
 } from "../../clients/mcp/ipc.js";
 import type { WarmDiagnosticsResponse } from "../../clients/mcp/ipc.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
+import { ENVIRONMENT_GAP_MARKER } from "../../clients/lsp/environment-gap.js";
 import { INFERRED_PROJECT_MARKER } from "../../clients/lsp/inferred-project.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const touchFile = vi.fn();
 const projectInfo = vi.fn();
@@ -37,24 +42,30 @@ const projectInfo = vi.fn();
 const FILE = "C:/repo/notes.md";
 const CONTENT = "# hi\n";
 
-function request(file = FILE) {
+function request(
+	file = FILE,
+	deadlineAt = Date.now() + 60_000,
+	cwd = "C:/repo",
+) {
 	return {
 		route: "diagnostics" as const,
 		version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
 		file,
-		cwd: "C:/repo",
+		cwd,
 		content: CONTENT,
 		contentHash: contentHash(CONTENT),
-		// Generous: `serveRequest` rejects a request whose deadline has already
-		// passed, and drops `fresh` when it serves after it.
-		deadlineAt: Date.now() + 60_000,
+		// Generous by default: `serveRequest` rejects a request whose deadline has
+		// already passed, and drops `fresh` when it serves after it.
+		deadlineAt,
 	};
 }
 
-async function serve(file = FILE) {
+async function serve(file = FILE, deadlineAt?: number, cwd?: string) {
 	const { _serveWarmRequestForTests } =
 		await import("../../clients/warm-attach.js");
-	const served = await _serveWarmRequestForTests(request(file));
+	const served = await _serveWarmRequestForTests(
+		request(file, deadlineAt, cwd),
+	);
 	expect(served.error).toBeUndefined();
 	return served.result as WarmDiagnosticsResponse;
 }
@@ -248,14 +259,99 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 			expect(projectInfo).not.toHaveBeenCalled();
 		});
 
-		it("counts membership work against the response deadline", async () => {
+		// #4645 F1 recurrence: the membership probe used to be awaited with no bound
+		// but its own 2.5 s leaf timeout, so a slow probe made `servedAt` pass
+		// `deadlineAt`. The reply then read `fresh: false`, the client classified it
+		// `stale-answer`, and `promoteToLocal` ended warm attach for the session.
+		// The probe now shares the request's deadline and the raw rows go out.
+		it("never lets a slow membership probe push the reply past the request deadline", async () => {
+			await serve(file); // load the lazy service modules before the clock is faked
 			vi.useFakeTimers();
-			projectInfo.mockImplementation(async () => {
-				vi.setSystemTime(Date.now() + 60_001);
-				return inferred;
+			const deadlineAt = Date.now() + 1_000;
+			projectInfo.mockImplementation(
+				() => new Promise((resolve) => setTimeout(resolve, 4_000, inferred)),
+			);
+
+			const { _serveWarmRequestForTests } =
+				await import("../../clients/warm-attach.js");
+			const pending = _serveWarmRequestForTests(request(file, deadlineAt));
+			await vi.advanceTimersByTimeAsync(5_000);
+			const served = await pending;
+			const result = served.result as WarmDiagnosticsResponse;
+
+			expect(result.fresh).toBe(true);
+			expect(result.servedAt).toBeLessThanOrEqual(deadlineAt);
+			// No verdict inside the budget: the pre-#4645 answer, never a guess.
+			expect(result.diagnostics).toEqual([diagnostic]);
+			expect("demotedBlockingIndexes" in result).toBe(false);
+		});
+
+		// #4645 F4 recurrence: the incumbent called the inner membership step, so a
+		// severity-1 ambient-gap row was consumed by the inferred-project rule and
+		// told the operator to add a tsconfig glob, where the local path (the one
+		// pipeline, `demoteLanguageServerRows`) says to install dependencies.
+		it("gives an ambient-gap row the environment verdict the local path gives", async () => {
+			const dir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-warm-gap-")),
+			);
+			try {
+				const gapFile = path.join(dir, "orphan.ts");
+				touchFile.mockResolvedValue({
+					diags: [
+						{
+							...diagnostic,
+							message: "Cannot find name 'setTimeout'.",
+							code: 2304,
+						},
+					],
+					confirmation: "confirmed",
+				});
+				projectInfo.mockResolvedValue(inferred);
+
+				const [row] = (await serve(gapFile, undefined, dir)).diagnostics;
+
+				expect(row.severity).toBe(2);
+				expect(row.message).toContain(ENVIRONMENT_GAP_MARKER);
+				expect(row.message).not.toContain(INFERRED_PROJECT_MARKER);
+			} finally {
+				removeTempDirSync(dir);
+			}
+		});
+
+		// #4645 F2 recurrence: a demoted row crossed the socket at severity 2, and
+		// the attached runner selects code-action rows by severity 1, so the warm
+		// session lost the quick fix the local path keeps. The field names the rows.
+		it("names the rows it demoted from severity 1 as an enumerable field", async () => {
+			const warning = { ...diagnostic, severity: 2, code: 6133 };
+			touchFile.mockResolvedValue({
+				diags: [warning, diagnostic],
+				confirmation: "confirmed",
+			});
+			projectInfo.mockResolvedValue(inferred);
+
+			const result = JSON.parse(
+				JSON.stringify(await serve(file)),
+			) as WarmDiagnosticsResponse;
+
+			expect(result.diagnostics.map((d) => d.severity)).toEqual([2, 2]);
+			expect(result.demotedBlockingIndexes).toEqual([1]);
+		});
+
+		it("omits the field when nothing was demoted (mixed-build safe)", async () => {
+			projectInfo.mockResolvedValue({
+				executed: true,
+				result: {
+					success: true,
+					body: { configFileName: "C:/repo/tsconfig.json" },
+				},
 			});
 
-			expect((await serve(file)).fresh).toBe(false);
+			const result = await serve(file);
+
+			expect("demotedBlockingIndexes" in result).toBe(false);
+			expect(JSON.parse(JSON.stringify(result))).not.toHaveProperty(
+				"demotedBlockingIndexes",
+			);
 		});
 	});
 

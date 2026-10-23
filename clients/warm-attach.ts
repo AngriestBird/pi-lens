@@ -6,9 +6,10 @@ import {
 	selectLivePeerInstances,
 } from "./instance-registry.js";
 import { realIsPidAlive } from "./instance-reaper.js";
+import { withinRemaining } from "./deadline-utils.js";
 import { logLatency } from "./latency-logger.js";
 import { touchCoverageGap } from "./lsp/diagnostic-binding.js";
-import { demoteInferredProjectDiagnostics } from "./lsp/inferred-project.js";
+import { demoteLanguageServerRows } from "./lsp/inferred-project.js";
 import { loadLspService } from "./lsp-lazy.js";
 import {
 	contentHash,
@@ -138,9 +139,30 @@ async function serveRequest(
 		maxDiagnosticsWaitMs: Math.max(1, req.deadlineAt - Date.now()),
 		source: "warm-attach-incumbent",
 	});
-	const diagnostics = await demoteInferredProjectDiagnostics(
-		touched?.diags ?? [],
-		{ filePath: req.file, cwd: req.cwd, service },
+	// #4645: demote on the process that owns the fleet and the filesystem, through
+	// the ONE pipeline (`demoteLanguageServerRows`: environment-gap rule, then the
+	// membership probe), so an attached read gets the verdict a local one would.
+	// The probe shares the request's own deadline: a late reply is `fresh: false`,
+	// which the client classifies `stale-answer` and answers with a permanent
+	// `promoteToLocal`, so one slow probe would end warm attach for the session.
+	// Past the deadline the raw rows go out (the pre-#4645 answer) and the
+	// reader's own environment-gap rule still runs on them.
+	const raw = touched?.diags ?? [];
+	const diagnostics =
+		(
+			await withinRemaining(
+				demoteLanguageServerRows(raw, {
+					filePath: req.file,
+					cwd: req.cwd,
+					service,
+				}),
+				req.deadlineAt,
+			)
+		)?.rows ?? raw;
+	// The reader still wants a quick fix for a row that arrives demoted: it
+	// selects code-action rows by severity 1, which the wire no longer carries.
+	const demotedBlockingIndexes = raw.flatMap((row, index) =>
+		row.severity === 1 && diagnostics[index]?.severity !== 1 ? [index] : [],
 	);
 	const servedAt = Date.now();
 	// #1470: the coverage gap is read through the shared helper, never re-derived
@@ -168,6 +190,10 @@ async function serveRequest(
 			// and `inconclusive` is re-surfaced below as an EXPLICIT enumerable DTO
 			// field (no side-channel survives `JSON.stringify`).
 			diagnostics,
+			// #4645: which wire rows were severity 1 before the demotion above, as
+			// an EXPLICIT enumerable field. An incumbent built before this omits
+			// it, and the reader then keeps its severity-1-only selection.
+			...(demotedBlockingIndexes.length > 0 ? { demotedBlockingIndexes } : {}),
 			contentHash: req.contentHash,
 			servedAt,
 			fresh: servedAt <= req.deadlineAt && touched !== undefined,

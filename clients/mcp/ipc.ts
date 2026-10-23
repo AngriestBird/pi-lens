@@ -253,6 +253,15 @@ export interface WarmDiagnosticsResponse {
 	 * diagnostics array.
 	 */
 	unconfirmedServerIds?: string[];
+	/**
+	 * #4645: indexes into `diagnostics` of the rows that were severity 1 when the
+	 * incumbent's touch returned them and that its demotion pipeline then lowered
+	 * (inferred project, environment gap). The reader asks the incumbent for a
+	 * quick fix for exactly the severity-1 rows, and a demoted row no longer says
+	 * so. Optional: an incumbent built before this omits it, and the reader falls
+	 * back to severity 1 alone.
+	 */
+	demotedBlockingIndexes?: number[];
 }
 
 export interface WarmCodeActionRange {

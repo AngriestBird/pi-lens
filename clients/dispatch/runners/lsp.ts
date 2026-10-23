@@ -194,6 +194,11 @@ const lspRunner: RunnerDefinition = {
 		let unconfirmedServerIds: readonly string[] = [];
 		let deferredServerIds: readonly string[] = [];
 		let usedWarmAttach = false;
+		// #4645: rows the warm incumbent lowered from severity 1 before they
+		// crossed the socket; they still earn a quick-fix request below.
+		let incumbentDemotedRows: ReadonlySet<
+			import("../../lsp/client.js").LSPDiagnostic
+		> = new Set();
 		let failureReason = "";
 		// #3481: when the synced bytes were read, for the notify queue's order.
 		const readStamp = performance.now();
@@ -223,6 +228,13 @@ const lspRunner: RunnerDefinition = {
 				Math.max(LSP_SPAWN_BUDGET_MS, LSP_DIAGNOSTICS_WAIT_MS),
 			);
 			usedWarmAttach = attached?.available === true;
+			if (attached?.available) {
+				incumbentDemotedRows = new Set(
+					(attached.response.demotedBlockingIndexes ?? []).map(
+						(index) => attached.response.diagnostics[index],
+					),
+				);
+			}
 			// #1179 (shape-5 structural fix): both branches normalize to the
 			// `touchFile` wrapper shape. The warm-attach IPC branch resolves a plain
 			// diagnostics array — `available` no longer implies a fully confirmed
@@ -445,16 +457,20 @@ const lspRunner: RunnerDefinition = {
 		// request, and only when the file already has a TypeScript ERROR — an edit
 		// that type-checks clean pays nothing.
 		//
-		// #1645 review F2: NOT under warm attach. There, diagnostics came from an
-		// already-running remote session over IPC and no local client exists — so
-		// the probe would have to spawn a whole tsserver fleet to answer, breaking
-		// this branch's spawn-free contract (see the comment below), and the
-		// answer it spawned for would be the NEW server's project resolution, not
-		// the warm session's. A meaningless answer bought with a process is worse
-		// than no answer, so the warm-attach path keeps pre-#1640 rendering. This
-		// is a known gap, recorded on the issue rather than papered over with an
-		// "unverified" label that would fire on every warm-attach file including
-		// the properly configured majority.
+		// #1645 review F2: this runner does NOT probe under warm attach. There,
+		// diagnostics came from an already-running remote session over IPC and no
+		// local client exists — so the probe would have to spawn a whole tsserver
+		// fleet to answer, breaking this branch's spawn-free contract (see the
+		// comment below), and the answer it spawned for would be the NEW server's
+		// project resolution, not the warm session's. A meaningless answer bought
+		// with a process is worse than no answer.
+		// #4645: the membership verdict is made where the answer lives instead.
+		// The incumbent owns the live client, so it runs `demoteLanguageServerRows`
+		// before the rows cross the socket and an attached read arrives already
+		// demoted. This reader therefore still passes no `service`: re-probing
+		// here would spawn, and the rows it holds are already at their final
+		// authority. Against an incumbent built before #4645 the rows arrive
+		// un-demoted and render as they did before #1640 (the mixed-build gap).
 		// #4532: the environment-gap rule rides the same pipeline and is NOT
 		// gated on warm attach: it asks one filesystem question about the file's
 		// own directory, needs nothing from the remote session, and left behind
@@ -475,7 +491,7 @@ const lspRunner: RunnerDefinition = {
 		// whether tsserver can offer a fix. Indexes align 1:1 with `validLspDiags`.
 		const blockingDiagIndexes = rawValidLspDiags
 			.map((d, idx) => ({ d, idx }))
-			.filter(({ d }) => d.severity === 1)
+			.filter(({ d }) => d.severity === 1 || incumbentDemotedRows.has(d))
 			.slice(0, WARM_CODE_ACTION_LOOKUP_LIMIT);
 
 		if (usedWarmAttach) {

@@ -1,12 +1,18 @@
 /**
- * #1645 review F2: under warm attach the per-edit runner must NOT probe project
- * membership.
+ * #1645 review F2: the per-edit runner must NOT probe project membership under
+ * warm attach.
  *
  * Warm attach means diagnostics came from an already-running remote session over
  * IPC, with no local client for this file. Probing there forces a language-server
  * spawn to answer a render-path question, and the answer belongs to the freshly
  * spawned server rather than the warm session that produced the diagnostics.
  * Both make the probe worse than useless.
+ *
+ * #4645 split the contract across the pair: the INCUMBENT owns the live client,
+ * so it makes the membership verdict (`tests/clients/warm-attach-confirmation.
+ * test.ts` pins the producer) and this reader renders what arrives. It passes no
+ * `service`, still runs the environment-gap rule, and asks the incumbent for a
+ * quick fix on every row the incumbent reports as demoted.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -75,7 +81,7 @@ const ENVIRONMENT_GAP_ROWS = [
 	serverId: "typescript",
 }));
 
-describe("LSP dispatch runner — warm attach skips the membership probe (#1645 F2)", () => {
+describe("LSP dispatch runner — warm attach reader (#1645 F2, #4645)", () => {
 	let cwd: string;
 
 	beforeEach(() => {
@@ -120,7 +126,7 @@ describe("LSP dispatch runner — warm attach skips the membership probe (#1645 
 			pi: { getFlag: () => undefined },
 		} as never);
 
-		// The finding still renders (unchanged pre-#1640 authority on this path)…
+		// The finding still renders at the authority the incumbent sent…
 		expect(result.diagnostics.length).toBeGreaterThan(0);
 		// …but not one byte of probe traffic was spent to decide that.
 		const service = mocked.service as ReturnType<typeof makeService>;
@@ -164,5 +170,96 @@ describe("LSP dispatch runner — warm attach skips the membership probe (#1645 
 		// …and the membership probe is still skipped on this path.
 		const service = mocked.service as ReturnType<typeof makeService>;
 		expect(service.executeReadOnlyCommandOnLiveClient).not.toHaveBeenCalled();
+	});
+
+	// #4645 F2 recurrence: the incumbent now sends a demoted row at severity 2 and
+	// this reader selected code-action rows by severity 1 alone, so an attached
+	// session asked for no quick fix where the local path asks for one. The
+	// incumbent names the rows it demoted; an older incumbent omits the field.
+	describe("quick fixes for rows the incumbent demoted", () => {
+		const demotedRow = {
+			severity: 2,
+			message: "Type 'number' is not assignable to type 'string'.",
+			range: {
+				start: { line: 3, character: 2 },
+				end: { line: 3, character: 9 },
+			},
+			source: "typescript",
+			code: 2322,
+		};
+		const warningRow = {
+			...demotedRow,
+			code: 6133,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 4 },
+			},
+		};
+		let file: string;
+
+		beforeEach(() => {
+			file = path.join(cwd, "orphan.ts");
+			fs.writeFileSync(file, "export const x: string = 1;\n");
+		});
+
+		async function run() {
+			return lspRunner.run({
+				filePath: file,
+				cwd,
+				fileRole: "source",
+				pi: { getFlag: () => undefined },
+			} as never);
+		}
+
+		it("requests a code action for a demoted row and attaches the suggestion", async () => {
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [warningRow, demotedRow],
+					demotedBlockingIndexes: [1],
+				},
+			});
+			mocked.attachedCodeActions.mockResolvedValue({
+				available: true,
+				response: {
+					actions: [[{ title: "Change type to string", kind: "quickfix" }]],
+				},
+			});
+
+			const result = await run();
+
+			// Only the demoted row is asked about; the plain warning is not.
+			expect(mocked.attachedCodeActions.mock.calls[0]?.[2]).toEqual([
+				{ start: demotedRow.range.start, end: demotedRow.range.end },
+			]);
+			expect(
+				result.diagnostics.find((d) => d.line === 4)?.fixSuggestion,
+			).toContain("Change type to string");
+		});
+
+		it("asks for nothing from an older incumbent that omits the field", async () => {
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: { diagnostics: [warningRow, demotedRow] },
+			});
+
+			await run();
+
+			expect(mocked.attachedCodeActions.mock.calls[0]?.[2]).toEqual([]);
+		});
+
+		it("ignores an index that names no row", async () => {
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [warningRow],
+					demotedBlockingIndexes: [7, -1],
+				},
+			});
+
+			await run();
+
+			expect(mocked.attachedCodeActions.mock.calls[0]?.[2]).toEqual([]);
+		});
 	});
 });
