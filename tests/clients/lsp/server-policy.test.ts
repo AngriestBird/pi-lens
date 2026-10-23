@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MTIME_DRIFT_TOLERANCE_MS } from "../../../clients/freshness.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const toolNotFound = (message = "ENOENT: command not found") =>
@@ -583,6 +584,10 @@ describe("lsp server policy", () => {
 		fs.mkdirSync(src, { recursive: true });
 		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
 		fs.writeFileSync(file, "");
+		// Stamped long before the walk, or the walk would refuse to memoize it
+		// (#4756) and there would be no freshness read to wedge.
+		for (const dir of [src, tmp])
+			fs.utimesSync(dir, 1_700_000_000, 1_700_000_000);
 
 		const resolver = NearestRoot(["package.json"], undefined, tmp);
 		expect(await resolver(file)).toBe(tmp);
@@ -702,6 +707,125 @@ describe("lsp server policy", () => {
 			await expect(SwiftServer.root(main)).resolves.toBe(ws);
 		} finally {
 			cwdSpy.mockRestore();
+		}
+	});
+
+	// #4756: the memo compares a directory's mtime for EQUALITY, and a directory
+	// whose last change was stamped moments before the walk can take a second
+	// change in the SAME timestamp tick (Windows system time advances in 10-16 ms
+	// steps; FAT/HFS+ in 1-2 s). That change leaves the mtime unchanged, so
+	// "unchanged" proves nothing about it. Both directions missed on the Windows
+	// runner (a removed marker stayed memoized; a nearer `.git` did not move the
+	// root). These cases manufacture the tick the way the M-3421-01 case does:
+	// pin every probed directory to one instant, freeze the clock one millisecond
+	// after it (the walk is "inside the tick"), plant, and restore the instant.
+	// A record stamped that close to the walk must not be memoized at all.
+	const SAME_TICK_MS = 1_700_000_000_000;
+	const pinTick = (...pinned: string[]) => {
+		for (const dir of pinned)
+			fs.utimesSync(dir, SAME_TICK_MS / 1000, SAME_TICK_MS / 1000);
+	};
+	const restoreTick = (...pinned: string[]) => {
+		pinTick(...pinned);
+		for (const dir of pinned)
+			expect(fs.statSync(dir).mtimeMs, `${dir} keeps the pinned tick`).toBe(
+				SAME_TICK_MS,
+			);
+	};
+
+	it("re-resolves a marker removed inside the walk's own timestamp tick (#4756)", async () => {
+		const { SwiftServer } = await import("../../../clients/lsp/server.js");
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-tickrm-"));
+		dirs.push(ws);
+
+		const sources = path.join(ws, "Sources");
+		const feature = path.join(sources, "Feature");
+		const main = path.join(feature, "main.swift");
+		fs.mkdirSync(feature, { recursive: true });
+		fs.writeFileSync(path.join(ws, "Package.swift"), "// tools\n");
+		fs.writeFileSync(path.join(feature, "Package.swift"), "// nested\n");
+		fs.writeFileSync(main, "print(1)\n");
+		pinTick(feature, sources, ws);
+
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(SAME_TICK_MS + 1);
+		try {
+			await expect(SwiftServer.root(main)).resolves.toBe(feature);
+			fs.rmSync(path.join(feature, "Package.swift"));
+			restoreTick(feature);
+			await expect(SwiftServer.root(main)).resolves.toBe(ws);
+		} finally {
+			vi.useRealTimers();
+			cwdSpy.mockRestore();
+		}
+	});
+
+	it("moves to a marker created inside the walk's own timestamp tick (#4756)", async () => {
+		const { SwiftServer } = await import("../../../clients/lsp/server.js");
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-tickadd-"));
+		dirs.push(ws);
+
+		const sources = path.join(ws, "Sources");
+		const feature = path.join(sources, "Feature");
+		const main = path.join(feature, "main.swift");
+		fs.mkdirSync(feature, { recursive: true });
+		fs.writeFileSync(path.join(ws, "Package.swift"), "// tools\n");
+		fs.writeFileSync(main, "print(1)\n");
+		pinTick(feature, sources, ws);
+
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(SAME_TICK_MS + 1);
+		try {
+			await expect(SwiftServer.root(main)).resolves.toBe(ws);
+			fs.writeFileSync(path.join(feature, "Package.swift"), "// nested\n");
+			restoreTick(feature);
+			await expect(SwiftServer.root(main)).resolves.toBe(feature);
+		} finally {
+			vi.useRealTimers();
+			cwdSpy.mockRestore();
+		}
+	});
+
+	// The other side of the same rule, pinned in both directions so the guard
+	// cannot drift into "never memoize" (#3412's perf contract) or "memoize
+	// everything" (this issue): a record older than the tick tolerance IS served
+	// even when a later change leaves its mtime alone — that residual is the one
+	// the freshness cadence bounds — and a record inside the tolerance is not.
+	it.each([
+		{
+			label: "a record exactly one tolerance old is memoized",
+			ageMs: MTIME_DRIFT_TOLERANCE_MS,
+			memoized: true,
+		},
+		{
+			label: "a record one millisecond inside the tolerance is not memoized",
+			ageMs: MTIME_DRIFT_TOLERANCE_MS - 1,
+			memoized: false,
+		},
+	])("$label (#4756)", async ({ ageMs, memoized }) => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-age-"));
+		dirs.push(tmp);
+
+		const src = path.join(tmp, "src");
+		const file = path.join(src, "a.ts");
+		fs.mkdirSync(src, { recursive: true });
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
+		fs.writeFileSync(file, "");
+		pinTick(src, tmp);
+
+		const resolver = NearestRoot(["package.json"], undefined, tmp);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(SAME_TICK_MS + ageMs);
+		try {
+			expect(await resolver(file)).toBe(tmp);
+			fs.writeFileSync(path.join(src, "package.json"), "{}");
+			restoreTick(src);
+			expect(await resolver(file)).toBe(memoized ? tmp : src);
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 
