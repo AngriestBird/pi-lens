@@ -160,6 +160,7 @@ function sendApplyEdit(spec) {
 }
 
 const openDocuments = new Map();
+const didCreateUris = new Set();
 
 // #2824: deterministic pull/push wire controls for the LSP wait-hardening
 // matrix. These are environment-configured because the fixture is a separate
@@ -716,7 +717,13 @@ function handle(raw) {
 						? {}
 						: { resolveProvider: true };
 		const workspaceFileOperations =
-			process.env.FAKE_LSP_WILL_RENAME === "true"
+			process.env.FAKE_LSP_DID_CREATE === "true"
+				? {
+						didCreate: {
+							filters: [{ scheme: "file", pattern: { glob: "**/*" } }],
+						},
+					}
+				: process.env.FAKE_LSP_WILL_RENAME === "true"
 				? {
 						willRename: clientSupportsWillRename
 							? {
@@ -929,6 +936,24 @@ function handle(raw) {
 		return;
 	}
 	if (data.method === "textDocument/didOpen") {
+		if (process.env.FAKE_LSP_DID_CREATE_REQUIRED === "1") {
+			const uri = data.params?.textDocument?.uri;
+			send({
+				jsonrpc: "2.0",
+				method: "textDocument/publishDiagnostics",
+				params: {
+					uri,
+					diagnostics: didCreateUris.has(uri)
+						? [{
+								severity: 1,
+								code: "P4787",
+								message: "finding after didCreate",
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+							}]
+						: [],
+				},
+			});
+		}
 		openDocuments.set(
 			data.params?.textDocument?.uri,
 			data.params?.textDocument?.text ?? "",
@@ -1081,6 +1106,10 @@ function handle(raw) {
 				params: { changes: data.params?.changes ?? [] },
 			});
 		}
+		return;
+	}
+	if (data.method === "workspace/didCreateFiles") {
+		for (const file of data.params?.files ?? []) didCreateUris.add(file.uri);
 		return;
 	}
 	if (data.method === "textDocument/publishDiagnostics") return;

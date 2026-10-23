@@ -511,7 +511,7 @@ export interface LSPClientInfo {
 	getOperationSupport(): LSPOperationSupport;
 	/** File-operation registrations rejected during initialize parsing. */
 	getMalformedFileOperationRegistrations(): ReadonlySet<
-		"willRename" | "didRename"
+		"didCreate" | "willRename" | "didRename"
 	>;
 	/** Commands the server advertised for workspace/executeCommand (the allowlist) */
 	getAdvertisedCommands(): string[];
@@ -1330,11 +1330,14 @@ export interface LSPClientState {
 	 *  the server registered WHICH paths it cares about for willRename/didRename.
 	 *  Sends outside these filters are suppressed at this boundary. */
 	fileOperationFilters?: {
+		didCreate?: LSPFileOperationFilter[];
 		willRename?: LSPFileOperationFilter[];
 		didRename?: LSPFileOperationFilter[];
 	};
 	/** Static initialize-time distinction for capability-skip telemetry. */
-	fileOperationMalformedRegistrations?: Set<"willRename" | "didRename">;
+	fileOperationMalformedRegistrations?: Set<
+		"didCreate" | "willRename" | "didRename"
+	>;
 	/** Top-level keys of the raw ServerCapabilities from initialize (sorted) —
 	 *  captured once; the full advertised surface for diagnostics/documentation. */
 	rawCapabilityKeys?: string[];
@@ -4970,12 +4973,29 @@ async function handleNotifyOpenOnce(
 		// hears Created.
 		let watchedType = FILE_CREATED;
 		let onDisk = false;
+		let info: BirthStat | undefined;
 		try {
-			const info = await stat(filePath);
+			info = await stat(filePath);
 			onDisk = true;
 			watchedType = watchedTypeForExisting(state, normalizedPath, info);
 		} catch {
 			// absent: Created
+		}
+		if (
+			info &&
+			watchedType === FILE_CREATED &&
+			state.fileOperationFilters?.didCreate &&
+			(await fileOperationFiltersMatch(
+				state.fileOperationFilters.didCreate,
+				uri,
+				uri,
+				filePath,
+				filePath,
+			))
+		) {
+			await safeSendNotification(state.connection, "workspace/didCreateFiles", {
+				files: [{ uri }],
+			});
 		}
 		// #271: enqueue instead of sending now — the per-client queue coalesces a
 		// turn's file opens into a single notification, so push-diagnostics servers
@@ -6817,10 +6837,10 @@ export async function createLSPClient(options: {
 		? workspace.fileOperations
 		: undefined;
 	const malformedFileOperationRegistrations = new Set<
-		"willRename" | "didRename"
+		"didCreate" | "willRename" | "didRename"
 	>();
 	if (isCapabilityRecord(fileOperations)) {
-		for (const operation of ["willRename", "didRename"] as const) {
+		for (const operation of ["didCreate", "willRename", "didRename"] as const) {
 			if (
 				fileOperations[operation] !== undefined &&
 				parseFileOperationFilters(fileOperations[operation]) === undefined
@@ -6833,6 +6853,7 @@ export async function createLSPClient(options: {
 		malformedFileOperationRegistrations;
 	if (isCapabilityRecord(fileOperations)) {
 		state.fileOperationFilters = {
+			didCreate: parseFileOperationFilters(fileOperations.didCreate),
 			willRename: parseFileOperationFilters(fileOperations.willRename),
 			didRename: parseFileOperationFilters(fileOperations.didRename),
 		};
@@ -6932,7 +6953,7 @@ export async function createLSPClient(options: {
 				if (isClientAlive(state)) state.watchQueue.flush();
 			},
 			announceCreated(entries) {
-				handleAnnounceCreated(state, entries);
+				void handleAnnounceCreated(state, entries);
 			},
 		},
 
