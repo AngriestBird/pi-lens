@@ -32,6 +32,23 @@ import { removeTempDirSync, setupTestEnvironment } from "../test-utils.js";
 
 process.env.PI_LENS_TEST_MODE = "1";
 
+// #4788 F2: a pass-through recorder on the real `stat`, so the fallback walk's
+// filesystem probe count is observable. It records only while `recording` is set.
+const statProbes = vi.hoisted(() => ({
+	recording: false,
+	paths: [] as string[],
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs/promises")>();
+	return {
+		...actual,
+		stat: ((...args: Parameters<typeof actual.stat>) => {
+			if (statProbes.recording) statProbes.paths.push(String(args[0]));
+			return actual.stat(...args);
+		}) as typeof actual.stat,
+	};
+});
+
 type RootPolicyHarness = {
 	state: {
 		clients: Map<string, LSPClientInfo>;
@@ -69,6 +86,9 @@ const CASE_SENSITIVE_FILESYSTEM = hasCaseSensitiveFilesystem();
 afterEach(() => {
 	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
+	statProbes.recording = false;
+	statProbes.paths.length = 0;
 	resetLSPConfigStateForTests();
 });
 
@@ -126,6 +146,75 @@ describe("LSP project-root fallback (#4728)", () => {
 		}
 	});
 
+	// #4788 F1. A dotfiles checkout at $HOME that gitignores `.pi/` excludes every
+	// directory up to the extensions boundary. The bounded walk then recorded no
+	// allowed ancestor and returned the filesystem root, which two production
+	// consumers (`findOutsideProjectRoot`, `resolveLspServerCwd`) trust as a root.
+	// A bounded walk with nothing allowed inside it declines (`undefined`).
+	it("never returns the filesystem root when the extensions boundary is gitignored", async () => {
+		const env = setupTestEnvironment("pi-lens-4788-ext-excluded-");
+		try {
+			const home = env.tmpDir;
+			vi.stubEnv("HOME", home);
+			vi.stubEnv("USERPROFILE", home);
+			fs.writeFileSync(path.join(home, ".gitignore"), ".pi/\n");
+			const agentDir = path.join(home, ".pi", "agent");
+			fs.mkdirSync(path.join(agentDir, "extensions", "myext", "src"), {
+				recursive: true,
+			});
+			// The #123 setup: pi's own package.json sits above the boundary.
+			fs.writeFileSync(path.join(agentDir, "package.json"), "{}\n");
+			const file = path.join(
+				agentDir,
+				"extensions",
+				"myext",
+				"src",
+				"index.ts",
+			);
+			fs.writeFileSync(file, "export const x = 1;\n");
+			const php = path.join(agentDir, "extensions", "myext", "src", "a.php");
+			fs.writeFileSync(php, "<?php echo 1;\n");
+			const roots = [
+				await TypeScriptServer.root(file),
+				await PHPServer.root(php),
+			];
+			for (const root of roots) {
+				expect(
+					root,
+					"filesystem root escaped the extensions boundary",
+				).not.toBe(path.parse(home).root);
+				expect(root).toBeUndefined();
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4788 F2. The walk used to ask `isExcludedLspRoot` at every ancestor, and
+	// each ask re-walked to the Git boundary: O(depth^2) `.git` probes on a hook
+	// path (2.1 ms -> 11.0 ms at depth 30). One walk resolves each directory's
+	// boundary once. Depth 12 gives >100 probes unmemoised and 26 at most memoised.
+	it("probes each ancestor's Git boundary once per walk", async () => {
+		const env = setupTestEnvironment("pi-lens-4788-probes-");
+		try {
+			const depth = 12;
+			const dirs = Array.from({ length: depth }, (_, i) => `d${i}`);
+			const file = path.join(env.tmpDir, ...dirs, "a.php");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "<?php echo 1;\n");
+			statProbes.recording = true;
+			const root = await PHPServer.root(file);
+			statProbes.recording = false;
+			expect(root).toBe(env.tmpDir);
+			const gitProbes = statProbes.paths.filter(
+				(probed) => path.basename(probed) === ".git",
+			).length;
+			expect(gitProbes).toBeLessThanOrEqual(2 * (depth + 1));
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("coalesces every built-in server at the Git project or explicitly declines", async () => {
 		const env = setupTestEnvironment("pi-lens-4728-registry-");
 		try {
@@ -146,7 +235,9 @@ describe("LSP project-root fallback (#4728)", () => {
 			}
 			// These servers deliberately require their own project/config markers;
 			// unlike RootWithFallback and FileDirRoot users, they reject loose files.
-			expect([...declined].sort()).toEqual([
+			expect(
+				[...declined].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+			).toEqual([
 				"clojure",
 				"csharp",
 				"deno",
