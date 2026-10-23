@@ -75,13 +75,9 @@ vi.mock("../../clients/project-changes.js", async (importOriginal) => {
 	};
 });
 
-vi.mock("../../clients/lsp/config.js", () => ({
-	loadLSPConfig: vi.fn().mockResolvedValue({}),
-	initLSPConfig: vi.fn().mockResolvedValue(undefined),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 import { handleSessionStart } from "../../clients/runtime-session.js";
+import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import { pinFixtureHome } from "./test-utils.js";
 
 // Session start and the warmup queue project-snapshot body writes that can
 // recreate a fixture root after its `env.cleanup()`; the drain lets them land.
@@ -184,6 +180,9 @@ describe("#1162 — bounded session_start sequence read", () => {
 	let prevWarmup: boolean | undefined;
 
 	beforeEach(async () => {
+		// The real config loader walks up from the session cwd to HOME (#4709);
+		// a pinned fixture HOME keeps that read off the maintainer's home.
+		pinFixtureHome("runtime-session-sequence-read-budget");
 		await installLspServiceDouble();
 		prevArgv = process.argv;
 		prevStartupMode = process.env.PI_LENS_STARTUP_MODE;
@@ -205,6 +204,7 @@ describe("#1162 — bounded session_start sequence read", () => {
 	});
 
 	afterEach(() => {
+		resetLSPConfigStateForTests();
 		process.argv = prevArgv;
 		if (prevStartupMode === undefined) delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = prevStartupMode;

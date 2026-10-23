@@ -5,10 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
 vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient: vi.fn(),
 }));
@@ -16,8 +12,11 @@ vi.mock("../../../clients/lsp/client.js", () => ({
 describe("#1549 workspace sweep per-server verdict", () => {
 	let root: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-sweep-verdict-"));
 	});

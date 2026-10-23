@@ -13,11 +13,6 @@ const logExtension = vi.fn();
 
 vi.mock("../../../clients/extension-log.js", () => ({ logExtension }));
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
 }));
@@ -28,8 +23,11 @@ vi.mock("../../../clients/lsp/client.js", () => ({
  * exact seam that would exec a project-resolved binary.
  */
 describe("LSPService project-trust gate (#1334 S5)", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logExtension.mockReset();

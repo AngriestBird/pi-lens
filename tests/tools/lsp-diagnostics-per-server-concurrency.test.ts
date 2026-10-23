@@ -29,14 +29,6 @@ const mocked = vi.hoisted(() => ({ service: null as unknown }));
 const { getServersForFileWithConfig } = vi.hoisted(() => ({
 	getServersForFileWithConfig: vi.fn(),
 }));
-vi.mock("../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-	// #646: `primaryServerId` moved here from `tools/lsp-diagnostics.ts` — this
-	// mock's fake server list has no `role`, so every entry is non-auxiliary
-	// (matching the real getServersForFileWithConfig contract this test fakes).
-	primaryServerId: (fp: string) => getServersForFileWithConfig(fp)[0]?.id,
-}));
 
 // Real `groupFilesByPrimaryServer`/`runPerServerGroups` — only the service the
 // singleton hands out is a double (lifecycle seam). Using the real scheduling
@@ -46,8 +38,10 @@ vi.mock("../../clients/lsp/config.js", () => ({
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
 import { clearWidgetState } from "../../clients/widget-state.js";
 import { installLspService } from "../support/lsp-service-seam.js";
+import { _setServersForFileForTests } from "../../clients/lsp/config.js";
 
 beforeEach(() => {
+	_setServersForFileForTests(getServersForFileWithConfig);
 	clearWidgetState();
 });
 afterEach(() => {

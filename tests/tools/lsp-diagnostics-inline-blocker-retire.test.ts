@@ -29,27 +29,10 @@ import { normalizeMapKey } from "../../clients/path-utils.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { installLspService } from "../support/lsp-service-seam.js";
+import { _setServersForFileForTests } from "../../clients/lsp/config.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
-
-vi.mock("../../clients/lsp/config.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/config.js")
-	>("../../clients/lsp/config.js");
-	return {
-		...actual,
-		getServersForFileWithConfig: (filePath: string) =>
-			getServersForFileWithConfig(filePath),
-		getServerInitOverride: () => undefined,
-		primaryServerId: (filePath: string) =>
-			(
-				getServersForFileWithConfig(filePath) as
-					| Array<{ id: string; role?: string }>
-					| undefined
-			)?.find((server) => server.role !== "auxiliary")?.id,
-	};
-});
 
 vi.mock("../../clients/lsp/client.js", async () => {
 	const actual = await vi.importActual<
@@ -251,6 +234,7 @@ describe("#1561 lsp_diagnostics retires a stale inline blocker", () => {
 	>;
 
 	beforeEach(async () => {
+		_setServersForFileForTests(getServersForFileWithConfig);
 		const { RuntimeCoordinator } =
 			await import("../../clients/runtime-coordinator.js");
 		getServersForFileWithConfig.mockReset();

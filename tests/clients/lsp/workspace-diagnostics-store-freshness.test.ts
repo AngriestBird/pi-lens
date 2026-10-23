@@ -52,11 +52,6 @@ vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
 	logLatency.mockImplementation(actual.logLatency);
 	return { ...actual, logLatency };
 });
-vi.mock("../../../clients/lsp/config.js", async (importOriginal) => ({
-	...(await importOriginal()),
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
 vi.mock("../../../clients/lsp/client.js", async (importOriginal) => ({
 	...(await importOriginal()),
 	createLSPClient,
@@ -193,6 +188,9 @@ describe("formal/store-freshness workspace-cache replays (#3505)", () => {
 
 	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		warm.attached = false;

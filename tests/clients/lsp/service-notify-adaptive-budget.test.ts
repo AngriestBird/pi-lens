@@ -30,11 +30,6 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 	logLatency,
 }));
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
 }));
@@ -210,9 +205,12 @@ function rawService(service: unknown): RawService {
 }
 
 describe("#2358 — adaptive wedge window pricing", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();

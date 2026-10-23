@@ -39,11 +39,6 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 	logLatency,
 }));
 
-vi.mock("../../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
 }));
@@ -272,8 +267,11 @@ async function makeService() {
 }
 
 describe("#1714 — sweep notify volume must not out-run an auxiliary", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetModules();
+		(await import("../../../clients/lsp/config.js"))._setServersForFileForTests(
+			getServersForFileWithConfig,
+		);
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		logLatency.mockReset();
