@@ -15,6 +15,67 @@ const repoRoot = path.resolve(
 	"../..",
 );
 
+// #4130: enumerating three faults let parser_error and unconfirmed_output pass,
+// even when the runner never reached a verdict about the file.
+describe("tool-smoke runner verdicts (#4130)", () => {
+	it.each([
+		"timeout",
+		"exception",
+		"server_error",
+		"parser_error",
+		"unconfirmed_output",
+		"output_limit",
+		"tool_not_found",
+		"future_fault_kind",
+		undefined,
+	])("fails %s with or without synthetic diagnostics", (failureKind) => {
+		for (const diagnostics of [[], [{ message: "synthetic runner fault" }]]) {
+			expect(
+				classify({
+					result: {
+						status: "failed",
+						failureKind,
+						failureMessage: "could not evaluate output",
+						diagnostics,
+					},
+				}),
+			).toEqual({
+				state: "fail",
+				detail: `${failureKind ?? "unknown"}: could not evaluate output`,
+				diags: diagnostics.length,
+			});
+		}
+	});
+
+	it.each(["succeeded", "failed"])("passes a completed %s check", (status) => {
+		for (const diagnostics of [[], [{ message: "source error" }]]) {
+			expect(
+				classify({
+					result: {
+						status,
+						failureKind:
+							status === "failed" ? "blocking_diagnostics" : undefined,
+						diagnostics,
+					},
+				}),
+			).toEqual({
+				state: "pass",
+				detail:
+					status === "failed" ? "failed (blocking_diagnostics)" : "succeeded",
+				diags: diagnostics.length,
+			});
+		}
+	});
+
+	it("keeps a filtered runner visible as not executed", () => {
+		expect(classify(undefined)).toEqual({
+			state: "skip",
+			detail: "not executed (filtered / when-skipped)",
+			diags: 0,
+		});
+	});
+});
+
 describe("tool-smoke cwd-sensitive rows (#2697)", () => {
 	it("uses the dispatch cwd for real yamllint config discovery (#2691)", async () => {
 		const fixture = FIXTURES.find((row) => row.lang === "yaml-cwd");

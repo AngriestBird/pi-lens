@@ -2608,7 +2608,9 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// its old single `detectPythonVenv`; the second `resolveAndLaunch` arm is the
 	// fall-through when no project environment is admitted. Each await is a local
 	// filesystem probe before launch, and hook-signal threading stays #2523 AC4.
-	"clients/lsp/server.ts": 123,
+	// #4728: 123 -> 122; remove the early-return exclusion probe and use the
+	// existing loop's probe for the starting directory too.
+	"clients/lsp/server.ts": 122,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	// #4493: 10 -> 12, the `git rev-parse` in readGitHead and the `git diff`
@@ -2711,7 +2713,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/tool-definition.ts": 1,
 	"clients/tree-sitter-shared.ts": 1,
 	"clients/trivy-client.ts": 2,
-	"clients/warm-attach.ts": 9,
+	// #4645: 9 -> 10. The incumbent awaits its own membership probe (the
+	// existing non-spawning read-only probe channel) and sends the answer beside
+	// the raw rows. The probe runs under `withinRemaining(…, req.deadlineAt -
+	// WARM_REPLY_SEND_RESERVE_MS)`, so it settles before the reply's send
+	// reserve; that helper is deadline-only (no hook signal exists in this
+	// socket server to hand `bounded`), so the await counts here.
+	"clients/warm-attach.ts": 10,
 	// 3 -> 4 (#3612): the widget store's restore awaits `dropStaleFiles` for a
 	// sidecar source, the reconciliation index.ts's rehydrate block awaited.
 	"clients/widget-state.ts": 4,

@@ -1,5 +1,5 @@
 // flake-shape: real-process-spawn — a clean-tree HEAD move exists only in a real repository that git checks out, rebases or resets; a stubbed git could not rewrite the files the language server holds.
-// flake-shape: in-process-mock — a project lsp.json cannot declare an auxiliary server (its role is reserved and inert), so the catalog lookup adds the auxiliary fake for the repositories registered here, and the role lookup (getServerById) answers for it too (#4476); every server is still a real child process on a real stdio wire
+// flake-shape: in-process-mock — a project lsp.json cannot declare an auxiliary server (its role is reserved and inert), so the role lookup (getServerById) answers for the auxiliary fake the config setter's selection adds for the repositories registered here (#4476); every server is still a real child process on a real stdio wire
 // flake-shape: ungoverned-wait-for — #4528 r1 F3 joins a dependency restart that runs between real server processes and ends after the bounded tool_call hook returns; nothing in it is awaitable.
 /**
  * #4493: a clean-tree HEAD move left held documents stale on the server.
@@ -65,35 +65,40 @@ import {
  * #4493 r2: the auxiliary scanner a repository's `.ts` files also go to (the
  * ast-grep slot of the default stack). A project `lsp.json` cannot declare an
  * auxiliary (its `role` is reserved and inert, clients/lsp/config.ts), so the
- * catalog lookup adds it for the repositories registered here, the pattern the
- * #1714 real-stream suites use; every other lookup is the real one.
+ * selection (the config module's test setter) adds it for the repositories
+ * registered here, the pattern the #1714 real-stream suites use; every other
+ * lookup is the real one.
  */
 const primaryOrdering = vi.hoisted(
 	() => new Map<string, "single-task-ordered" | "threaded" | "unmeasured">(),
 );
 const auxiliaries = vi.hoisted(() => new Map<string, unknown>());
-vi.mock("../../clients/lsp/config.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("../../clients/lsp/config.js")>();
-	const { sep } = await import("node:path");
-	return {
-		...actual,
-		getServersForFileWithConfig: (filePath: string) => {
-			const servers = actual
-				.getServersForFileWithConfig(filePath)
-				.map((server) => {
-					for (const [dir, ordering] of primaryOrdering)
-						if (filePath.startsWith(`${dir}${sep}`))
-							return { ...server, replyOrdering: ordering };
-					return server;
-				});
-			for (const [dir, aux] of auxiliaries)
-				if (filePath.startsWith(`${dir}${sep}`))
-					return [...servers, aux as (typeof servers)[number]];
-			return servers;
-		},
+
+/**
+ * The selection the config module's setter answers with: the real gate's
+ * verdict (`explainServersForFile` reads the session config and is not
+ * routed through the injected list) with each registered repository's
+ * reply ordering and auxiliary added.
+ */
+function selectWithAuxiliaries(
+	explain: typeof import("../../clients/lsp/config.js").explainServersForFile,
+) {
+	return (filePath: string) => {
+		const servers = explain(filePath)
+			.filter((entry) => entry.selected)
+			.map((entry) => entry.server)
+			.map((server) => {
+				for (const [dir, ordering] of primaryOrdering)
+					if (filePath.startsWith(`${dir}${path.sep}`))
+						return { ...server, replyOrdering: ordering };
+				return server;
+			});
+		for (const [dir, aux] of auxiliaries)
+			if (filePath.startsWith(`${dir}${path.sep}`))
+				return [...servers, aux as (typeof servers)[number]];
+		return servers;
 	};
-});
+}
 
 // #4476: the role lookup the registry's restart asks (`getServerById`) knows
 // the built-in catalog only; it answers for the auxiliaries registered here too.
@@ -219,6 +224,9 @@ async function makeRepo(
 	git("checkout", "-q", "A");
 	const config = await import("../../clients/lsp/config.js");
 	await config.initLSPConfig(dir);
+	config._setServersForFileForTests(
+		selectWithAuxiliaries(config.explainServersForFile),
+	);
 	return { dir, trace, git, file: (name) => path.join(dir, name) };
 }
 
@@ -1358,6 +1366,44 @@ describe("a bash command's writes reach the primaries before its dispatches (#45
 		},
 		120_000,
 	);
+
+	// Recurrence: #4782, the #4528 r1 F1 push case under load. The primary
+	// checks a.ts against z.ts's old bytes, stores that answer, and is slow to
+	// analyze z.ts's change; its republish of a.ts arrives right before the
+	// reply that drains the phase. That newer answer was still in its quiet
+	// window when the dispatch read a.ts, so the read took the stored one,
+	// computed before z.ts's new bytes: the phantom STOP.
+	it("checks a dependent against its rewritten dependency when the dependency's answer arrives right before the drain reply (push diagnostics)", async () => {
+		const repo = await makeRepo(
+			{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+			NOTES_B,
+			[],
+			{
+				...CHECKER,
+				FAKE_LSP_SLOW_CHANGE_TEXT: "export function isChatModelConfig",
+				FAKE_LSP_SLOW_CHANGE_MS: "400",
+			},
+		);
+		await hold(repo, ["a.ts", "z.ts"]);
+		const s = session(repo, "s-4782-slow-dependency");
+		// The window is the newer answer's quiet window (150 ms): a dispatch
+		// whose first run in this process loads its modules reads a.ts later
+		// than that. One earlier edit runs the dispatch once.
+		await s.bash("sed -i s/1/2/ a.ts", () => {
+			fs.writeFileSync(repo.file("a.ts"), A0.replace("(1)", "(2)"));
+		});
+
+		const text = await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+			fs.writeFileSync(repo.file("a.ts"), A1);
+			fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+		});
+
+		expect(text).not.toContain("no exported member");
+		expect(await primaryResyncRows(repo)).toMatchObject([
+			{ result: "sent", metadata: { targets: 1, primary: 1 } },
+			{ result: "sent", metadata: { targets: 2, primary: 2 } },
+		]);
+	}, 60_000);
 
 	// Recurrence: #4528 r1 F1, the second half. A send resolves once its bytes
 	// are in the pipe, not once the server read them. This primary reads its

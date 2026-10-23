@@ -24,8 +24,10 @@ import { normalizeMapKey } from "../../clients/path-utils.js";
 import { clearWidgetState } from "../../clients/widget-state.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { installLspService } from "../support/lsp-service-seam.js";
+import { _setServersForFileForTests } from "../../clients/lsp/config.js";
 
 beforeEach(() => {
+	_setServersForFileForTests(getServersForFileWithConfig);
 	clearWidgetState();
 });
 afterEach(() => {
@@ -34,26 +36,6 @@ afterEach(() => {
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
-
-vi.mock("../../clients/lsp/config.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/config.js")
-	>("../../clients/lsp/config.js");
-	return {
-		...actual,
-		getServersForFileWithConfig: (filePath: string) =>
-			getServersForFileWithConfig(filePath),
-		getServerInitOverride: () => undefined,
-		// Mirrors the real implementation (first non-auxiliary server), reading
-		// the faked registry above rather than the module-local original.
-		primaryServerId: (filePath: string) =>
-			(
-				getServersForFileWithConfig(filePath) as
-					| Array<{ id: string; role?: string }>
-					| undefined
-			)?.find((server) => server.role !== "auxiliary")?.id,
-	};
-});
 
 vi.mock("../../clients/lsp/client.js", async () => {
 	const actual = await vi.importActual<

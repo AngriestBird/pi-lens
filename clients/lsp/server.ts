@@ -466,21 +466,45 @@ function hasAtomicStageSegment(dir: string): boolean {
 	return pathSegments(dir).some((segment) => STAGE_TMP_PATTERN.test(segment));
 }
 
-async function findGitBoundary(dir: string): Promise<string | undefined> {
+/**
+ * `memo` is one walk's record of resolved boundaries (#4788 F2): every directory
+ * a probe passes shares the boundary it finds, so an ascending caller probes each
+ * ancestor once instead of re-walking to the boundary at every step.
+ */
+async function findGitBoundary(
+	dir: string,
+	memo?: Map<string, string | undefined>,
+): Promise<string | undefined> {
 	let current = path.resolve(dir);
 	const fsRoot = path.parse(current).root;
+	const visited: string[] = [];
+	let found: string | undefined;
 	while (true) {
-		if (await markerExists(current, ".git")) return current;
-		if (current === fsRoot) return undefined;
+		const key = normalizeMapKey(current);
+		if (memo?.has(key)) {
+			found = memo.get(key);
+			break;
+		}
+		visited.push(key);
+		if (await markerExists(current, ".git")) {
+			found = current;
+			break;
+		}
+		if (current === fsRoot) break;
 		current = path.dirname(current);
 	}
+	for (const seen of visited) memo?.set(seen, found);
+	return found;
 }
 
-async function isExcludedLspRoot(dir: string): Promise<boolean> {
+async function isExcludedLspRoot(
+	dir: string,
+	gitBoundaries?: Map<string, string | undefined>,
+): Promise<boolean> {
 	const candidate = path.resolve(dir);
 	if (hasFixtureConvention(candidate) || hasAtomicStageSegment(candidate))
 		return true;
-	const gitRoot = await findGitBoundary(candidate);
+	const gitRoot = await findGitBoundary(candidate, gitBoundaries);
 	if (!gitRoot || gitRoot === candidate) return false;
 	// Avoid constructing the matcher when the project has no positive ignore rules.
 	// The matcher remains authoritative (including anchored rules and directory form).
@@ -490,21 +514,29 @@ async function isExcludedLspRoot(dir: string): Promise<boolean> {
 
 async function nearestNonExcludedFallbackRoot(
 	candidate: string,
+	stopDir?: string,
 ): Promise<string> {
-	if (!(await isExcludedLspRoot(candidate))) return path.resolve(candidate);
-	let current = path.dirname(path.resolve(candidate));
+	let current = path.resolve(candidate);
+	const startDir = current;
 	const fsRoot = path.parse(current).root;
 	let nearestAllowed: string | undefined;
+	const gitBoundaries = new Map<string, string | undefined>();
 	while (true) {
-		if (!(await isExcludedLspRoot(current))) {
+		if (!(await isExcludedLspRoot(current, gitBoundaries))) {
 			nearestAllowed ??= current;
 			for (const marker of FALLBACK_PROJECT_MARKERS) {
 				if (await markerExists(current, marker)) return current;
 			}
 		}
-		if (current === fsRoot) break;
+		if (current === fsRoot || normalizeEphemeralMapKey(current) === stopDir)
+			break;
 		current = path.dirname(current);
 	}
+	// A walk bounded by `stopDir` that met no allowed directory keeps the file's
+	// own directory: the filesystem root is above the boundary it was told to
+	// respect (#4788 F1), and declining would drop TypeScript's diagnostics for
+	// extension files (#123).
+	if (stopDir !== undefined) return nearestAllowed ?? startDir;
 	// No project marker was available. Keep the file attached to a stable,
 	// non-excluded ancestor rather than minting a client inside the fixture/stage.
 	return nearestAllowed ?? fsRoot;
@@ -1719,7 +1751,10 @@ export function PriorityRoot(
 
 export const FileDirRoot: RootFunction = async (file: string) => {
 	const candidate = path.resolve(path.dirname(file));
-	return nearestNonExcludedFallbackRoot(candidate);
+	return nearestNonExcludedFallbackRoot(
+		candidate,
+		piAgentExtensionsRootKey(file),
+	);
 };
 
 /**

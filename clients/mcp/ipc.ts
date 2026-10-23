@@ -23,6 +23,7 @@ import { writeFileAtomic } from "../atomic-write.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
 import { DEFAULT_MAX_OUTPUT_BYTES } from "../spawn-output-cap.js";
 import type { LSPCodeAction, LSPDiagnostic } from "../lsp/client.js";
+import type { TsserverProjectIdentity } from "../lsp/tsserver-sync.js";
 import type { McpAnalyzeResult } from "./analyze.js";
 
 export const WARM_DIAGNOSTICS_SCHEMA_VERSION = 1;
@@ -253,6 +254,17 @@ export interface WarmDiagnosticsResponse {
 	 * diagnostics array.
 	 */
 	unconfirmedServerIds?: string[];
+	/**
+	 * #4645: the incumbent's own tsserver answer to "which project owns this
+	 * file", asked only when a row could be demoted by it. `diagnostics` stay the
+	 * server's raw rows: the reader runs the one demotion pipeline itself with
+	 * this answer standing in for the probe it cannot send without spawning, so
+	 * its rendered rows and the form its cache stores are a local read's. Absent
+	 * when nothing was asked, the probe did not answer, or the probe did not
+	 * settle before the reply's send reserve; an incumbent built before this
+	 * omits it, and an older reader ignores it and renders the raw rows.
+	 */
+	projectIdentity?: TsserverProjectIdentity;
 }
 
 export interface WarmCodeActionRange {

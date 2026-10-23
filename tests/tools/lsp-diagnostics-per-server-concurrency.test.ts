@@ -26,17 +26,6 @@ import { removeTempDirSync } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 const mocked = vi.hoisted(() => ({ service: null as unknown }));
-const { getServersForFileWithConfig } = vi.hoisted(() => ({
-	getServersForFileWithConfig: vi.fn(),
-}));
-vi.mock("../../clients/lsp/config.js", () => ({
-	getServersForFileWithConfig,
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-	// #646: `primaryServerId` moved here from `tools/lsp-diagnostics.ts` — this
-	// mock's fake server list has no `role`, so every entry is non-auxiliary
-	// (matching the real getServersForFileWithConfig contract this test fakes).
-	primaryServerId: (fp: string) => getServersForFileWithConfig(fp)[0]?.id,
-}));
 
 // Real `groupFilesByPrimaryServer`/`runPerServerGroups` — only the service the
 // singleton hands out is a double (lifecycle seam). Using the real scheduling
@@ -71,11 +60,6 @@ describe("lsp_diagnostics batch — per-server serialization (#631)", () => {
 		tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-lsp-diag-pergroup-"),
 		);
-		getServersForFileWithConfig.mockReset();
-		getServersForFileWithConfig.mockImplementation((fp: string) => {
-			const id = serverIdForFile(fp);
-			return id === "none" ? [] : [{ id }];
-		});
 
 		live = new Map();
 		maxPerServer = new Map();

@@ -855,6 +855,11 @@ function normalizeWorkspacePath(cwd: string): string {
 type ProvenanceMap = ReadonlyMap<string, Provenance>;
 let unknownTrustNoticeGeneration = -1;
 
+type ServersForFile = (filePath: string) => LSPServerInfo[];
+
+/** The test-only selection `_setServersForFileForTests` arms (#4709). */
+let serversForFileOverride: ServersForFile | undefined;
+
 function sourceFor(
 	provenance: ProvenanceMap,
 	key: string,
@@ -1258,6 +1263,7 @@ export function explainServersForFile(
 }
 
 export function getServersForFileWithConfig(filePath: string): LSPServerInfo[] {
+	if (serversForFileOverride) return serversForFileOverride(filePath);
 	const config = getConfigForFile(filePath);
 	const { ext, base } = fileMatchKeys(filePath);
 	return registeredServers(config, LSP_SERVERS).filter(
@@ -1344,7 +1350,29 @@ export function getServerInitOverride(
 	return getConfigForFile(filePath).serverOverrides.get(serverId);
 }
 
+/**
+ * Test-only server selection (#4709). Replaces `getServersForFileWithConfig`'s
+ * answer (and so `primaryServerId`, `resolveLspCwdForFile`, which derive from
+ * it) with `select(filePath)` until `resetLSPConfigStateForTests` runs.
+ * A suite that needs a per-test server list calls this instead of
+ * `vi.mock`-ing this module, so every other export stays the real one.
+ *
+ * Product paths never reach it: nothing under `clients/`, `tools/`, `mcp/` or
+ * `index.ts` imports the name (`tests/clients/lsp/config-selection-setter.test.ts`
+ * scans for that), and the setter ignores an arm outside a Vitest process.
+ * Pass `undefined` to drop the injection without resetting the rest.
+ */
+export function _setServersForFileForTests(
+	select: ServersForFile | undefined,
+): void {
+	if (select && !process.env.VITEST) return;
+	serversForFileOverride = select;
+}
+
 export function resetLSPConfigStateForTests(): void {
+	// #4709: the injected selection is test state too; a later case that
+	// resets must see the real registry's answer, not the last case's list.
+	serversForFileOverride = undefined;
 	resetLSPCaseSensitivityState();
 	// One call clears both the served roots and their configs: since #2518 they
 	// are one store, so a reset cannot leave a cleared config store beside a

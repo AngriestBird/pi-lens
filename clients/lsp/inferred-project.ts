@@ -113,10 +113,28 @@ function isDemotableDiagnostic(d: LSPDiagnostic): boolean {
 	return d.severity === 1 && isTypeScriptSourcedDiagnostic(d);
 }
 
+/**
+ * Whether the membership verdict could change any of these rows: a file
+ * tsserver owns, carrying a TypeScript-sourced error. The probe's own
+ * precondition, so a caller that sends the probe itself (the warm incumbent,
+ * #4645) asks exactly when this module would.
+ */
+export function hasInferredProjectCandidates(
+	diagnostics: LSPDiagnostic[],
+	filePath: string,
+): boolean {
+	return isTsProjectFile(filePath) && diagnostics.some(isDemotableDiagnostic);
+}
+
 export interface InferredProjectDemotionOptions {
 	filePath: string;
 	cwd: string;
-	service: TsserverSyncCapableService;
+	/**
+	 * The service the probe asks. Omitted: no probe is sent, and only an answer
+	 * already in `identityCache` applies (#4645: a warm-attached reader seeds it
+	 * with the incumbent's own answer, since asking here would spawn).
+	 */
+	service?: TsserverSyncCapableService;
 	/**
 	 * Per-call-batch memo so one sweep probes each file once. Deliberately
 	 * caller-owned and short-lived: a module-level cache would pin turn one's
@@ -148,8 +166,7 @@ export async function demoteInferredProjectDiagnostics(
 	options: InferredProjectDemotionOptions,
 ): Promise<LSPDiagnostic[]> {
 	const { filePath, cwd, service } = options;
-	if (!isTsProjectFile(filePath)) return diagnostics;
-	if (!diagnostics.some(isDemotableDiagnostic)) return diagnostics;
+	if (!hasInferredProjectCandidates(diagnostics, filePath)) return diagnostics;
 	if (options.signal?.aborted) return diagnostics;
 
 	const fetchIdentity = options.fetchIdentity ?? fetchTsserverProjectIdentity;
@@ -157,6 +174,8 @@ export async function demoteInferredProjectDiagnostics(
 	let identity: TsserverProjectIdentity | undefined;
 	if (cache?.has(filePath)) {
 		identity = cache.get(filePath);
+	} else if (service === undefined) {
+		return diagnostics;
 	} else {
 		identity = await fetchIdentity(service, filePath);
 		cache?.set(filePath, identity);
@@ -187,6 +206,9 @@ export async function demoteInferredProjectDiagnostics(
  * `service` omitted skips the membership probe and keeps the environment rule:
  * a warm-attached session's rows came from a remote fleet this process does
  * not own, so the probe would have to spawn one to answer (#1645 review F2).
+ * The incumbent that owns that fleet asks instead and sends its answer beside
+ * the raw rows; the reader seeds `identityCache` with it, so both outputs below
+ * are what a local read of the same rows gives (#4645).
  *
  * `rows` is what a consumer renders. `replayable()` is what a cache entry
  * stores, and the two rules differ in what a replay can re-derive (#4532
@@ -211,19 +233,13 @@ export interface LanguageServerRowDemotion {
 
 export async function demoteLanguageServerRows(
 	diagnostics: LSPDiagnostic[],
-	options: Omit<InferredProjectDemotionOptions, "service"> & {
-		service?: TsserverSyncCapableService;
-	},
+	options: InferredProjectDemotionOptions,
 ): Promise<LanguageServerRowDemotion> {
 	const environmentChecked = demoteEnvironmentGapDiagnostics(diagnostics, {
 		filePath: options.filePath,
 	});
-	const { service } = options;
-	if (service === undefined)
-		return { rows: environmentChecked, replayable: async () => diagnostics };
 	const membership = {
 		...options,
-		service,
 		identityCache: options.identityCache ?? new Map(),
 	};
 	const rows = await demoteInferredProjectDiagnostics(

@@ -35,11 +35,6 @@ const mocks = vi.hoisted(() => ({
 	logLatency: vi.fn(),
 }));
 
-vi.mock("../../clients/lsp/config.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/lsp/config.js")>()),
-	getServersForFileWithConfig: mocks.getServersForFileWithConfig,
-}));
-
 vi.mock("../../clients/lsp/client.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/lsp/client.js")>()),
 	createLSPClient: mocks.createLSPClient,
@@ -137,6 +132,10 @@ beforeEach(async () => {
 	// a clean singleton (tests/support/lsp-service-seam.ts, step 1).
 	await installLspServiceDouble(null);
 	vi.resetModules();
+	// KEEP (#4709): unarmed, the real registry spawns jedi-language-server and probes npm/pnpm/yarn/bun on PATH; the arm stops both.
+	(await import("../../clients/lsp/config.js"))._setServersForFileForTests(
+		mocks.getServersForFileWithConfig,
+	);
 	mocks.getServersForFileWithConfig
 		.mockReset()
 		.mockImplementation((filePath: string) =>

@@ -23,12 +23,6 @@ vi.mock("../../clients/latency-logger.js", async (importActual) => ({
 	logLatency: (entry: LatencyEntry) => latencyEntries.push(entry),
 }));
 
-vi.mock("../../clients/lsp/config.js", () => ({
-	loadLSPConfig: vi.fn().mockResolvedValue({}),
-	initLSPConfig: vi.fn().mockResolvedValue(undefined),
-	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
 vi.mock("../../clients/safe-spawn.js", () => ({
 	safeSpawn: vi.fn(() => ({ stdout: "", stderr: "", status: 1 })),
 	safeSpawnAsync: vi.fn(async () => ({ stdout: "", stderr: "", status: 1 })),
@@ -44,6 +38,8 @@ vi.mock("../../clients/installer/index.js", () => ({
 
 import { handleSessionStart } from "../../clients/runtime-session.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
+import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
+import { pinFixtureHome } from "./test-utils.js";
 
 // The full path runs a REAL (unmocked) handleSessionStart body, same as
 // tests/index-integration.test.ts's integration cases — vitest's default
@@ -136,6 +132,9 @@ describe("quick-mode session_start skip observability (#1911)", () => {
 	let restoreStartupMode: () => void;
 
 	beforeEach(async () => {
+		// The real config loader walks up from the session cwd to HOME (#4709);
+		// a pinned fixture HOME keeps that read off the maintainer's home.
+		pinFixtureHome("runtime-session-quick-mode-observability");
 		await installLspServiceDouble();
 		vi.clearAllMocks();
 		latencyEntries.length = 0;
@@ -143,6 +142,7 @@ describe("quick-mode session_start skip observability (#1911)", () => {
 	});
 
 	afterEach(() => {
+		resetLSPConfigStateForTests();
 		restoreStartupMode?.();
 		removeTempDirSync(tmpDir);
 	});
