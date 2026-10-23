@@ -996,6 +996,26 @@ export type DegradationKind =
 	 */
 	| "lsp-scanner-coverage-gap"
 	/**
+	 * #4764: a server reported over `window/showMessage` that its own config or
+	 * rules could not be loaded (opengrep offline with `--config auto`: "Fatal
+	 * error: Failed to download config from https://semgrep.dev/c/p/default").
+	 * Subject `<serverId>:message:<digest>` is recorded ONCE per distinct message
+	 * per session (`lsp_server_message`), and `<serverId>:dropped:<file>` counts
+	 * each empty publication that was refused as evidence or retracted because of
+	 * it. Without this kind, a scanner that never evaluated a byte of the project
+	 * left no record at all while its empty publishes read as clean scans.
+	 */
+	| "lsp-server-config-load-failed"
+	/**
+	 * #4764: any other `window/showMessage` text, recorded once per distinct
+	 * message per session (`lsp_server_message`). Subject
+	 * `<serverId>:message:<digest>`, reason the message itself (truncated at the
+	 * ledger field bound). The per-client distinct-text cap
+	 * (`MAX_TRACKED_SERVER_MESSAGES`) keeps a narrating server from flooding the
+	 * sink; past it one `<serverId>:showMessage-cap` counter grows instead.
+	 */
+	| "lsp-server-message"
+	/**
 	 * A `textDocument/diagnostic` or `workspace/diagnostic` pull's per-request
 	 * `withTimeout` abandoned a GENUINELY dispatched request (#1771). Every
 	 * pull timeout emits a detailed `lsp_pull_diagnostic_timeout` latency.log

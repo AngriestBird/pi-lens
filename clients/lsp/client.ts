@@ -20,6 +20,7 @@ import { mapWithConcurrency } from "../map-with-concurrency.js";
 import {
 	incrementDegradationCount,
 	recordDegradationOnce,
+	truncateForLedger,
 } from "../degradation-ledger.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
 // vscode-jsonrpc v9 ships an `exports` map exposing the Node entry as the
@@ -77,6 +78,7 @@ import {
 import { exceedsLspSyncLimits } from "./content-limits.js";
 import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
+import { isAuxiliary, type LspServerRole } from "./server-traits.js";
 import {
 	FILE_CHANGED,
 	FILE_CREATED,
@@ -416,6 +418,12 @@ export interface LSPClientInfo {
 		): void;
 	};
 	getDiagnostics(filePath: string): LSPDiagnostic[];
+	/**
+	 * #4764: the server's own report that its config or rules failed to load
+	 * (the `window/showMessage` text, bounded), or `undefined`. A touch that
+	 * names this auxiliary uncovered carries the text as the reason.
+	 */
+	getConfigLoadFailure?(): string | undefined;
 	/**
 	 * #1095: the stored content binding for the diagnostics currently tracked
 	 * for `filePath` — {version?, contentHash?} of the document version those
@@ -1249,6 +1257,36 @@ export interface LSPClientState {
 		}
 	>;
 	readonly openDocuments: Set<string>;
+	/**
+	 * #4764: the role the client registry declared for this server, so a
+	 * server-config failure can gate the empty publications of an AUXILIARY
+	 * scanner without touching a primary's answers. Optional: a double that
+	 * predates it behaves as a non-auxiliary (no gating).
+	 */
+	serverRole?: LspServerRole;
+	/**
+	 * #4764: the first error-level `window/showMessage` in which this server
+	 * reported that its own config or rules failed to load, e.g. opengrep's
+	 * `Fatal error: Failed to download config from https://semgrep.dev/c/p/default`
+	 * when it runs offline with `--config auto`. An auxiliary in that state
+	 * never evaluated the bytes it reports on, so its EMPTY publications are the
+	 * absence of a scan and must not be read as a clean one
+	 * ({@link configFailureBlocksEmptyPublish}). Set only for an auxiliary
+	 * ({@link noteServerShowMessage} asks `isAuxiliary`, the one role
+	 * decision), so a reader never re-checks the role. Cleared by the server's
+	 * own `semgrep/rulesRefreshed` (its rules then loaded). Per client session:
+	 * a respawned server re-reports it, and the ledger record stays once per
+	 * distinct message for the whole session.
+	 */
+	configLoadFailure?: { message: string; atMs: number };
+	/**
+	 * #4764: distinct `window/showMessage` texts this client has recorded, with
+	 * their occurrence counts. The bound that keeps a chatty server from
+	 * flooding `latency.log`: past {@link MAX_TRACKED_SERVER_MESSAGES} distinct
+	 * texts only the overflow count grows, except for one slot that only a
+	 * config failure may take, so the map never holds more than MAX + 1.
+	 */
+	serverMessages?: Map<string, number>;
 	/**
 	 * #3310: whether this client's ONE-SHOT empty-first-publish hold has been
 	 * spent. Only ever set for a server the matrix measures as
@@ -2574,6 +2612,193 @@ export function resolveConfigurationSection(
 // Exported (only) so tests can invoke the publishDiagnostics notification
 // handler directly against a mock LSPClientState/connection without spawning
 // a real language server. Not part of the public client API surface.
+/**
+ * #4764: the distinct `window/showMessage` texts one client records before it
+ * stops logging new ones. Eight is the bound on a server that narrates every
+ * file it indexes; the overflow is counted in the ledger, never dropped
+ * silently (catalog shape 10).
+ */
+export const MAX_TRACKED_SERVER_MESSAGES = 8;
+
+/**
+ * #4764: does this `window/showMessage` text report that the SERVER's own
+ * config or rules could not be loaded? Written order-free because servers word
+ * it both ways (opengrep: "Fatal error: Failed to download config from …"; a
+ * sibling may say "config file failed to load"). Requires a failure word, a
+ * load/download verb, and a config/rules noun, so incidental `showMessage`
+ * traffic (a version notice, a missing optional tool) does not qualify.
+ */
+export function isConfigLoadFailureMessage(message: string): boolean {
+	return (
+		/\b(?:fail|failed|fails|failure|unable|could not|error)\b/i.test(message) &&
+		/\b(?:download|load|fetch|resolve|read|parse)\b/i.test(message) &&
+		/\b(?:config|configuration|rules?|ruleset)\b/i.test(message)
+	);
+}
+
+/**
+ * #4764: record one client's `window/showMessage` traffic, bounded.
+ *
+ * - One ledger entry per distinct message per SESSION (the identity carries a
+ *   digest of the text), counted when the same text repeats.
+ * - At most {@link MAX_TRACKED_SERVER_MESSAGES} distinct texts are tracked per
+ *   client, plus one slot only a config failure may take, so the first one is
+ *   always recorded; past that, only one overflow counter grows.
+ * - An ERROR-level message reporting a failed config/rule load marks an
+ *   AUXILIARY client's {@link LSPClientState.configLoadFailure}: from then on
+ *   its empty publications are not evidence of a clean scan
+ *   ({@link configFailureBlocksEmptyPublish}), and any empty answer already
+ *   stored is retracted, because it came from the same rule-less server. The
+ *   state is not a record, so the cap never decides it: a distinct failure
+ *   after a refresh gates again even when its text is only counted.
+ *   A language-role server is recorded but never gated: its config message can
+ *   name one optional feature while its analysis still answers, and blinding
+ *   it would turn every clean file into a permanent unconfirmed one.
+ */
+export function noteServerShowMessage(
+	state: LSPClientState,
+	params: { type?: number; message?: string } | undefined,
+): void {
+	const raw = typeof params?.message === "string" ? params.message.trim() : "";
+	if (!raw) return;
+	const text = truncateForLedger(raw.replace(/\s+/g, " "));
+	const type = typeof params?.type === "number" ? params.type : 4;
+	const digest = hashDiagnosticContent(raw).slice(0, 12);
+	const isConfigFailure = type === 1 && isConfigLoadFailureMessage(raw);
+	let retractedPaths = 0;
+	if (
+		isConfigFailure &&
+		state.configLoadFailure === undefined &&
+		isAuxiliary({ role: state.serverRole })
+	) {
+		state.configLoadFailure = { message: text, atMs: Date.now() };
+		retractedPaths = retractUnscannedEmptyPublications(state);
+	}
+	const messages = (state.serverMessages ??= new Map<string, number>());
+	const known = messages.has(digest);
+	// One slot past the cap is reserved for a config failure: the first one names
+	// why this server's scans stopped reading clean, and a server that narrated
+	// eight earlier lines must not push it out. Only a config failure may take
+	// the slot, so no refresh/error loop grows the map past MAX + 1.
+	const cap = MAX_TRACKED_SERVER_MESSAGES + (isConfigFailure ? 1 : 0);
+	if (!known && messages.size >= cap) {
+		incrementDegradationCount({
+			kind: "lsp-server-message",
+			subject: `${state.serverId}:showMessage-cap`,
+			reason: `${type}: distinct showMessage texts reached ${MAX_TRACKED_SERVER_MESSAGES}; later ones are counted, not recorded`,
+		});
+		return;
+	}
+	messages.set(digest, (messages.get(digest) ?? 0) + 1);
+	emitBounded(
+		"lsp_server_message",
+		`${state.serverId}:message:${digest}`,
+		{
+			filePath: state.root,
+			durationMs: 0,
+			metadata: {
+				serverId: state.serverId,
+				messageType: type,
+				message: text,
+				...(isConfigFailure && { configLoadFailure: true }),
+				...(retractedPaths > 0 && { retractedPaths }),
+			},
+		},
+		{
+			ledgerKind: isConfigFailure
+				? "lsp-server-config-load-failed"
+				: "lsp-server-message",
+			reason: text,
+			risingEdgePer: "identity",
+		},
+	);
+}
+
+/**
+ * #4764: an auxiliary whose own config failed cannot evaluate the documents it
+ * is sent, so an EMPTY publication from it is the absence of a scan, never
+ * evidence of a clean one. A non-empty publication still flows: a broken rule
+ * download does not erase findings the server did produce.
+ */
+function configFailureBlocksEmptyPublish(
+	state: LSPClientState,
+	filePath: string,
+): boolean {
+	const failure = state.configLoadFailure;
+	if (failure === undefined) return false;
+	// A refused publication still answers the send it was owed (#3482), as a
+	// fence-dropped or held one does; otherwise the backlog keeps one send for
+	// good and the late-auxiliary drain waits for a publication already received.
+	countPublication(state, filePath);
+	emitBounded(
+		"lsp_publish_dropped_server_config_failed",
+		`${state.serverId}:dropped:${filePath}`,
+		{
+			filePath,
+			durationMs: 0,
+			metadata: {
+				serverId: state.serverId,
+				via: "publish",
+				message: failure.message,
+			},
+		},
+		{
+			ledgerKind: "lsp-server-config-load-failed",
+			reason: `empty publish dropped: ${failure.message}`,
+			risingEdgePer: "identity",
+		},
+	);
+	return true;
+}
+
+/**
+ * #4764: the empty answers this client stored BEFORE it reported its config
+ * failure came from the same rule-less server, so they are retracted rather
+ * than left to read as a clean scan. Only EMPTY publications are retracted: a
+ * non-empty answer is a real finding, and clearing it would lose evidence.
+ *
+ * Only the STORED answer is dropped: its cache entry, stamp, version and
+ * binding. A publication still inside its debounce window is left to the
+ * store-time gate in {@link configFailureBlocksEmptyPublish}: a pending finding
+ * is stored, a pending empty is refused and counted. `clearDiagnosticsForPath`
+ * is not used here because it cancels that pending timer, and a newer finding
+ * would be lost with it.
+ */
+function retractUnscannedEmptyPublications(state: LSPClientState): number {
+	let retracted = 0;
+	const emptyStoredPaths: string[] = [];
+	for (const [normalizedPath, diags] of state.pushDiagnostics) {
+		if (diags.length === 0) emptyStoredPaths.push(normalizedPath);
+	}
+	for (const normalizedPath of emptyStoredPaths) {
+		state.pushDiagnostics.delete(normalizedPath);
+		state.pushDiagnosticTimestamps.delete(normalizedPath);
+		state.diagnosticDocVersions.delete(normalizedPath);
+		state.diagnosticBindings.delete(normalizedPath);
+		state.diagnosticsVersionsByPath.delete(normalizedPath);
+		retracted += 1;
+		emitBounded(
+			"lsp_publish_dropped_server_config_failed",
+			`${state.serverId}:dropped:${normalizedPath}`,
+			{
+				filePath: normalizedPath,
+				durationMs: 0,
+				metadata: {
+					serverId: state.serverId,
+					via: "retracted",
+					message: state.configLoadFailure?.message ?? "",
+				},
+			},
+			{
+				ledgerKind: "lsp-server-config-load-failed",
+				reason: `stored empty answer retracted: ${state.configLoadFailure?.message ?? ""}`,
+				risingEdgePer: "identity",
+			},
+		);
+	}
+	return retracted;
+}
+
 export function setupIncomingHandlers(
 	state: LSPClientState,
 	initialization: Record<string, unknown> | undefined,
@@ -2624,8 +2849,17 @@ export function setupIncomingHandlers(
 				countPublication(state, normalizedPath);
 				return;
 			}
-			onDiagnosticsPublished?.(state.serverId);
+			// #4764: a rule-less scanner's empty publication is not an answer, so it
+			// is decided BEFORE `onDiagnosticsPublished` — a refused publication must
+			// not also tell the first-publication gate this server reported.
 			const newDiags = normalizeLspDiagnostics(params.diagnostics || []);
+			if (
+				newDiags.length === 0 &&
+				configFailureBlocksEmptyPublish(state, normalizedPath)
+			) {
+				return;
+			}
+			onDiagnosticsPublished?.(state.serverId);
 			// #3484: a version-less publish received before the fence's reply may
 			// be for the content before the latest send; it cannot say which.
 			// Dropped unstored, it still answers a send (#3482's backlog).
@@ -2942,6 +3176,16 @@ export function setupIncomingHandlers(
 					countPublication(state, normalizedPath);
 					return;
 				}
+				// #4764: the config failure may have landed while this publish sat in the
+				// debounce window (opengrep publishes the empty set before the download
+				// error, in the same tick). Decide at STORE time, against the state known
+				// now, so neither arrival order can store a rule-less empty answer.
+				if (
+					newDiags.length === 0 &&
+					configFailureBlocksEmptyPublish(state, normalizedPath)
+				) {
+					return;
+				}
 				state.pushDiagnostics.set(normalizedPath, newDiags);
 				state.pushDiagnosticTimestamps.set(normalizedPath, Date.now());
 				recordDocVersion();
@@ -3113,8 +3357,22 @@ export function setupIncomingHandlers(
 		},
 	);
 	state.connection.onRequest("window/workDoneProgress/create", async () => {});
+	// #4764: every `window/showMessage` is observed, bounded, and one error-level
+	// "my config failed to load" marks an auxiliary scanner as unable to evaluate
+	// the bytes it reports on. Registered before the publish handler so the state
+	// it sets is in place for the publications that follow.
+	state.connection.onNotification(
+		"window/showMessage",
+		(params: { type?: number; message?: string }) => {
+			noteServerShowMessage(state, params);
+		},
+	);
 	state.connection.onNotification("semgrep/rulesRefreshed", () => {
 		state.rulesRefreshed = true;
+		// The notification is sent only after the rules loaded (opengrep
+		// `refresh_rules` sends it after `cache_session`), so an earlier config
+		// failure is resolved and its empty publishes are answers again.
+		delete state.configLoadFailure;
 		rebaselineForRulesRefresh(state);
 	});
 	// #1669: a server can send `workspace/diagnostic/refresh` (typically after a
@@ -6188,6 +6446,9 @@ export async function createLSPClient(options: {
 	 *  single-variant server or not yet reported; consumers must treat that as
 	 *  the classic/default behavior (fail-safe). */
 	launchVariant?: "classic" | "native-ts7";
+	/** The declared role ({@link LspServerRole}); an auxiliary's failed config
+	 *  gates its empty publications (#4764). Absent behaves as non-auxiliary. */
+	role?: LspServerRole;
 	onDiagnosticsPublished?: (serverId: string) => void;
 }): Promise<LSPClientInfo> {
 	installCrashGuard();
@@ -6200,6 +6461,7 @@ export async function createLSPClient(options: {
 		initialization,
 		initializeTimeoutMs = INITIALIZE_TIMEOUT_MS,
 		launchVariant,
+		role,
 		onDiagnosticsPublished,
 	} = options;
 
@@ -6387,6 +6649,9 @@ export async function createLSPClient(options: {
 		pullRequestSequences: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
+		// #4764: the declared role, so a config-load failure gates only an
+		// auxiliary scanner's empty publications.
+		...(role !== undefined && { serverRole: role }),
 		// #3310: one-shot, per client session.
 		emptyFirstPublishHoldSpent: false,
 		rulesRefreshed: false,
@@ -6673,6 +6938,10 @@ export async function createLSPClient(options: {
 
 		getDiagnostics(filePath) {
 			return getMergedDiagnosticsForPath(state, normalizeMapKey(filePath));
+		},
+
+		getConfigLoadFailure() {
+			return state.configLoadFailure?.message;
 		},
 
 		getDiagnosticBinding(filePath) {
