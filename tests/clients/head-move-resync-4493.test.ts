@@ -620,7 +620,10 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		);
 		repo.git("checkout", "-q", "B");
 		repo.git("rm", "-q", "lib/gone.ts");
-		repo.git("commit", "-qm", "B deletes gone");
+		// A module absent on A, added by B: it is born inside the move.
+		fs.writeFileSync(repo.file("lib/born.ts"), "export {};\n");
+		repo.git("add", "lib/born.ts");
+		repo.git("commit", "-qm", "B deletes gone and adds born");
 		repo.git("checkout", "-q", "A");
 		await hold(repo, ["lib/types.ts", "main.ts"]);
 		const s = session(repo, "s-unheld");
@@ -649,10 +652,21 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 			lines.includes(`watched ${uri("lib/unheld.ts")} 2`),
 		);
 		expect(unheldPhase).toEqual([
-			[`watched ${uri("lib/gone.ts")} 3`, `watched ${uri("lib/unheld.ts")} 2`],
+			[
+				`watched ${uri("lib/born.ts")} 2`,
+				`watched ${uri("lib/gone.ts")} 3`,
+				`watched ${uri("lib/unheld.ts")} 2`,
+			],
 		]);
+		// Recurrence: review r1 F2 on #4819. A module born inside the move was
+		// only Changed, and a server that cached its failed lookup (pyright)
+		// kept the importer's unknown-import finding; Created clears it. It goes
+		// out detached from the hook, so wait for it on the wire.
+		await expect
+			.poll(() => traceLines(repo), { timeout: 10_000 })
+			.toContain(`watched ${uri("lib/born.ts")} 1`);
 		const rows = await settledHeadMovedRows(repo, 1);
-		expect(rows[0]?.metadata).toMatchObject({ held: 1, unheld: 2 });
+		expect(rows[0]?.metadata).toMatchObject({ held: 1, unheld: 3 });
 	}, 30_000);
 
 	// Recurrence: review r1 F4's named output reads HEAD from the files git

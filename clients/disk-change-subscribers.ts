@@ -253,9 +253,13 @@ async function sendToHeldPrimaries(
  *
  * The type is read from the disk now, not from the detector: a path that is
  * gone is Deleted and a present one is Changed. The detectors' deltas carry
- * names only, so a path born inside the change is also Changed here; a
- * Created-only server cache (a cached missing import) is not addressed by
- * this slice. At most `DISK_CHANGE_MAX_RECORDED_PATHS` stats: the publisher
+ * names only, so a path born inside the change cannot be told from an edited
+ * one here: every present path is then offered to `announceCreatedFiles`, which
+ * sends Created per live client only where the path is new to that client (a
+ * Created-only server cache, a cached missing import, is cleared only by it).
+ * A git checkout rewrites an edited file too, so an edited closed module may
+ * also be announced Created once per client; the server treats it as the
+ * re-read the Changed already asked for. At most `DISK_CHANGE_MAX_RECORDED_PATHS` stats: the publisher
  * never names more in one record, and a stat error other than a missing path
  * is the failure recorded below.
  *
@@ -282,6 +286,13 @@ function notifyUnheldPaths(
 			],
 		}));
 		service.notifyOutOfBandFileChanges(events);
+		// A path born inside the change (absent on the old commit) is Changed
+		// above, and a server that cached its failed lookup keeps the failure
+		// through Changed (pyright: the importer stays "unknown import symbol");
+		// only Created clears it (#4320). Each live client decides which
+		// present paths are new to it (birth and its own announced set); an
+		// absent path is skipped there.
+		service.announceCreatedFiles(unheld);
 		return events.length;
 	} catch (cause) {
 		recordDegradationOnce({

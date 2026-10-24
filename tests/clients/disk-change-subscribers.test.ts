@@ -220,12 +220,14 @@ describe("the LSP consumer sends a publish's unheld paths as watched-files event
 	let held: string[];
 	let notifyThrows: boolean;
 	let resynced: string[][];
+	let announced: string[];
 
 	beforeEach(async () => {
 		order = [];
 		held = [];
 		notifyThrows = false;
 		resynced = [];
+		announced = [];
 		await installLspServiceDouble({
 			getOpenDocumentPaths: () => held,
 			getTrackedContent: () => undefined,
@@ -235,6 +237,10 @@ describe("the LSP consumer sends a publish's unheld paths as watched-files event
 				order.push("notify");
 				if (notifyThrows) throw new Error("service refused the events");
 				calls.notified.push(...events);
+			},
+			announceCreatedFiles: (paths: readonly string[]) => {
+				order.push("announce");
+				announced.push(...paths);
 			},
 			resyncHeldPrimaries: async (paths: readonly string[]) => {
 				order.push("primary");
@@ -284,10 +290,14 @@ describe("the LSP consumer sends a publish's unheld paths as watched-files event
 			{ filePath: gone, type: 3 },
 		]);
 		expect(answer.unheld).toBe(2);
+		// A path born inside the move needs Created, not Changed (review r1 F2):
+		// the unheld paths are offered to the clients' Created decision, the
+		// held one is not.
+		expect(announced).toEqual([unheld, gone]);
 		// The held path is a document, not an event; the events precede its
 		// send so the primary phase's drain probe covers them.
 		expect(answer.primary).toBe(1);
-		expect(order).toEqual(["notify", "primary"]);
+		expect(order).toEqual(["notify", "announce", "primary"]);
 	});
 
 	it("sends a bash write's unheld path, and sends none for the recovered-drift follow-up", async () => {
@@ -305,6 +315,7 @@ describe("the LSP consumer sends a publish's unheld paths as watched-files event
 		);
 
 		expect(calls.notified).toEqual([{ filePath: unheld, type: 2 }]);
+		expect(announced).toEqual([unheld]);
 		expect(write1.unheld).toBe(1);
 		// The follow-up carries the same population: a second event would be the
 		// same bytes sent twice.
@@ -318,6 +329,7 @@ describe("the LSP consumer sends a publish's unheld paths as watched-files event
 		const answer = await publish("settled-sweep", ["settled-sweep"], [unheld]);
 
 		expect(calls.notified).toEqual([{ filePath: unheld, type: 2 }]);
+		expect(announced).toEqual([unheld]);
 		expect(answer.unheld).toBe(1);
 	});
 
@@ -328,6 +340,7 @@ describe("the LSP consumer sends a publish's unheld paths as watched-files event
 		const answer = await publish("head-move", ["head-move"], "unknown");
 
 		expect(calls.notified).toEqual([]);
+		expect(announced).toEqual([]);
 		expect(answer.unheld).toBe(0);
 		expect(answer.primary).toBe(1);
 		// Nothing was attempted, so nothing failed: a guard that let "unknown"
