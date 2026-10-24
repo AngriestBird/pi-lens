@@ -41,3 +41,7 @@ export declare function loadTraces(
 	text: string,
 	source: { kind: "rows" | "events"; file: string },
 ): Array<{ pid: number; events: TraceEvent[]; rejected: string[] }>;
+export declare function runCli(
+	argv: string[],
+	log?: (line: string) => void,
+): Promise<number>;

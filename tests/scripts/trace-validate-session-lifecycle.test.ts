@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -10,6 +11,7 @@ import {
 	readJsonRecords,
 	renderTraceConfig,
 	renderTraceModule,
+	runCli,
 	unsupportedReason,
 	type TraceEvent,
 } from "../../scripts/trace-validate-session-lifecycle.mjs";
@@ -312,6 +314,46 @@ describe("trace validation inputs fail closed (#3533 round 2)", () => {
 		expect(trace?.rejected.join(" ")).toMatch(/unknown event kind/);
 	});
 
+	// Recurrence prevented: F1 and F6 at the exit-code level. The CLI exited 0
+	// for an empty population and 1 (the "not producible" code) for unparseable
+	// input. None of these paths reaches the JVM, so no jar is needed.
+	describe("the CLI exits 2 before any JVM is started", () => {
+		const run = async (text: string | undefined, ...flags: string[]) => {
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "trace-cli-"));
+			try {
+				const file = path.join(dir, "input.json");
+				if (text !== undefined) fs.writeFileSync(file, text);
+				const lines: string[] = [];
+				const code = await runCli(["--rows", file, ...flags], (l) =>
+					lines.push(l),
+				);
+				return { code, out: lines.join("\n").replaceAll(dir, "<dir>") };
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		};
+		it.each([
+			["producible", "[]"],
+			["not-producible", "[]"],
+			["not-producible", JSON.stringify([{ phase: "other", pid: 1 }])],
+		])("--expect %s over zero traces: %s", async (expectation, text) => {
+			const { code, out } = await run(text, "--expect", expectation);
+			expect(code).toBe(2);
+			expect(out).toBe(
+				"UNCHECKED <dir>/input.json: no session_scope_transition rows",
+			);
+		});
+		it("unparseable JSON and a missing file are unchecked, not an uncaught error", async () => {
+			expect((await run("{not json")).code).toBe(2);
+			expect((await run(undefined)).out).toMatch(/^UNCHECKED .*ENOENT/);
+		});
+		it("an unknown flag is a usage error", async () => {
+			const lines: string[] = [];
+			expect(await runCli(["--bogus"], (l) => lines.push(l))).toBe(2);
+			expect(lines.join("\n")).toMatch(/usage: --rows/);
+		});
+	});
+
 	// Recurrence prevented: F3 / CR2. A start row that lost `handoffSource` or
 	// `parentScopeId` was coerced to `other` / parent 0 and then compared.
 	it.each([
@@ -331,6 +373,21 @@ describe("trace validation inputs fail closed (#3533 round 2)", () => {
 		],
 	])("refuses a start row whose %s", (_name, build) => {
 		expect(extractTraces(build())[0]?.rejected).not.toEqual([]);
+	});
+	// Recurrence prevented: a membership check alone admits a parent id that
+	// is not an integer when the construction row carried the same value.
+	it("refuses a non-integer parentScopeId even when a construction row carried it", () => {
+		const rows = forkProcess().map((r) => ({
+			...r,
+			metadata: { ...r.metadata },
+		}));
+		rows[0].metadata.scopeId = "x";
+		rows[1].metadata.parentScopeId = "x";
+		rows[1].metadata.scopeId = "y";
+		rows[2].metadata.scopeId = "y";
+		rows[3].metadata.parentScopeId = "y";
+		const trace = extractTraces(rows)[0];
+		expect(trace?.rejected.join(" ")).toMatch(/parentScopeId/);
 	});
 	it.each([
 		["slot", "slot"],

@@ -398,25 +398,41 @@ export function loadTraces(text, { kind, file }) {
 	return traces;
 }
 
-async function main() {
-	const { values } = parseArgs({
-		options: {
-			rows: { type: "string" },
-			events: { type: "string" },
-			jar: { type: "string" },
-			expect: { type: "string", default: "producible" },
-		},
-		strict: true,
-		allowPositionals: false,
-	});
+const USAGE =
+	"usage: --rows <file> | --events <file> [--jar <jar>] [--expect producible|not-producible]";
+
+/**
+ * The CLI as a function: prints through `log`, returns the exit code
+ * (0 as expected, 1 a trace is not as expected, 2 unchecked, unreadable or
+ * unusable input).
+ *
+ * @param {string[]} argv
+ * @param {(line: string) => void} log
+ */
+export async function runCli(argv, log = console.log) {
+	let values;
+	try {
+		({ values } = parseArgs({
+			args: argv,
+			options: {
+				rows: { type: "string" },
+				events: { type: "string" },
+				jar: { type: "string" },
+				expect: { type: "string", default: "producible" },
+			},
+			strict: true,
+			allowPositionals: false,
+		}));
+	} catch (error) {
+		log(`${error.message}\n${USAGE}`);
+		return 2;
+	}
 	if (
 		!values.rows === !values.events ||
 		!["producible", "not-producible"].includes(values.expect)
 	) {
-		console.error(
-			"usage: --rows <file> | --events <file> [--jar <jar>] [--expect producible|not-producible]",
-		);
-		process.exit(2);
+		log(USAGE);
+		return 2;
 	}
 	const file = values.rows ?? values.events;
 	let traces;
@@ -426,23 +442,24 @@ async function main() {
 			file,
 		});
 	} catch (error) {
-		console.log(`UNCHECKED ${error.message}`);
-		process.exit(2);
+		log(`UNCHECKED ${error.message}`);
+		return 2;
 	}
-	const jar = await ensureJar(values.jar, ROOT);
 	let exit = 0;
+	let jar;
 	for (const trace of traces) {
 		const label = `${file} pid ${trace.pid}`;
 		if (trace.rejected.length > 0) {
-			console.log(`UNCHECKED ${label}: ${trace.rejected.join("; ")}`);
+			log(`UNCHECKED ${label}: ${trace.rejected.join("; ")}`);
 			exit = 2;
 			continue;
 		}
 		let verdict;
 		try {
+			jar ??= await ensureJar(values.jar, ROOT);
 			verdict = await checkTrace(trace.events, { jar });
 		} catch (error) {
-			console.log(`UNCHECKED ${label}: ${error.message}`);
+			log(`UNCHECKED ${label}: ${error.message}`);
 			exit = 2;
 			continue;
 		}
@@ -457,13 +474,14 @@ async function main() {
 					? ` (${verdict.detail})`
 					: "";
 		const met = verdict.status === values.expect;
-		console.log(
+		log(
 			`${met ? "ok" : "FAIL"} ${label}: ${verdict.status}${detail}, ${trace.events.length} events, ${verdict.seconds.toFixed(2)}s`,
 		);
 		if (verdict.status === "error") exit = 2;
 		else if (!met && exit === 0) exit = 1;
 	}
-	process.exit(exit);
+	return exit;
 }
 
-if (isMainModule(import.meta.url)) await main();
+if (isMainModule(import.meta.url))
+	process.exit(await runCli(process.argv.slice(2)));
