@@ -111,6 +111,13 @@ let pendingExec = null;
 // message-arrival timing.
 let deferredApplyEdit = null;
 
+// #4801: "FAKE_LSP_HANG_PROJECT_INFO" hangs the tsserver `projectInfo` request
+// (see the advertised commands and the executeCommand branch below).
+const HANG_PROJECT_INFO = ["1", "cancel"].includes(
+	process.env.FAKE_LSP_HANG_PROJECT_INFO ?? "",
+);
+let hungProjectInfoId = null;
+
 // #2450 review round 2 (F2): the target line/columns/replacement text are
 // overridable via a second `arguments[1]` object so callers can exercise a real
 // non-{1,1} range - a fixed line-0 edit made every caller's "real range" collide
@@ -618,12 +625,6 @@ process.stdin.on("data", (chunk) => {
 function send(msg) {
 	process.stdout.write(encode(msg));
 }
-
-// #4801: see "FAKE_LSP_HANG_PROJECT_INFO" in the advertised commands below.
-const HANG_PROJECT_INFO = ["1", "cancel"].includes(
-	process.env.FAKE_LSP_HANG_PROJECT_INFO ?? "",
-);
-let hungProjectInfoId = null;
 
 function handle(raw) {
 	let data;
