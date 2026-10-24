@@ -140,7 +140,7 @@ export declare function lintTlaCoverage(
 ): { errors: string[]; advisories: string[] };
 export declare function lintWorkflowRunEvidence(
 	body?: string,
-	options?: { diff?: string; cwd?: string },
+	options?: { diff?: string; cwd?: string; repository?: string },
 ): string[];
 export declare function fetchLivePrBody(
 	payloadPr: { number: number; body?: string | null },
