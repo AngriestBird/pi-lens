@@ -434,6 +434,20 @@ function censuses(source: string): Census[] {
 	return found;
 }
 
+/** One file's census count and the censuses whose budget the gate refuses. */
+function flagCensuses(
+	rel: string,
+	source: string,
+): { census: number; flagged: string[] } {
+	const found = censuses(source);
+	return {
+		census: found.length,
+		flagged: found
+			.filter((entry) => entry.refused)
+			.map((entry) => `${rel}: ${entry.title}`),
+	};
+}
+
 describe("tree census timeout (#4828)", () => {
 	// Recurrence (#4828 review r1 F1, F6): the first detector listed `it.each`
 	// and an array-element `ls-files`, so an `it.skipIf` census, an aliased
@@ -585,6 +599,16 @@ describe("tree census timeout (#4828)", () => {
 		expect(defaultBudget(source)).toEqual(['"c"']);
 	});
 
+	it("plants: reports a refused budget with its file and title", () => {
+		// Recurrence (#4828 verify r3 F8): the gate that the real-tree test calls
+		// must name the file and the census, or a refusal reads as a pass.
+		const source = `${VITEST}${KIT}it("c", () => { listSourceFiles(ROOT); }, 5000);`;
+		expect(flagCensuses("tests/config/x.test.ts", source)).toEqual({
+			census: 1,
+			flagged: ['tests/config/x.test.ts: "c"'],
+		});
+	});
+
 	it.each([
 		["the shared constant", "TREE_WALK_TIMEOUT_MS"],
 		["a scaled call with a reason", "scaledTestTimeout(60_000)"],
@@ -637,10 +661,9 @@ describe("tree census timeout (#4828)", () => {
 			let census = 0;
 			for (const { file, source } of readWalkedFiles(files)) {
 				const rel = relativePosix(ROOT, file);
-				for (const found of censuses(source)) {
-					census += 1;
-					if (found.refused) flagged.push(`${rel}: ${found.title}`);
-				}
+				const scanned = flagCensuses(rel, source);
+				census += scanned.census;
+				flagged.push(...scanned.flagged);
 				// Shape 81: turn the loop once per file so each parsed native tree is
 				// freed before the next file is parsed.
 				await new Promise<void>((resolve) => setImmediate(resolve));
