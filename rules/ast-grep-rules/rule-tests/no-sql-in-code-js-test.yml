@@ -21,6 +21,9 @@ valid:
   - 'ui.execute("Item " + n + " selected from list")'
   - 'job.execute("update " + id, { set: true })'
   - 'menu.execute("select " + item, { from: x })'
+  - 'job.execute("selected from " + source)'
+  - 'ui.execute("Within the select list " + id)'
+  - 'ui.execute("Item " + n + " select from list")'
 invalid:
   - 'db.query("SELECT * FROM users WHERE id = " + id)'
   - 'db.query("DELETE FROM sessions WHERE token = " + token, [])'
@@ -55,6 +58,10 @@ invalid:
   - "db.execute('SELECT * FROM t WHERE id = ' + id)"
   - 'db?.execute("SELECT * FROM t WHERE id = " + id)'
   - 'db?.execute("DELETE FROM t WHERE id = " + id, [])'
+  # Escape sequences as written in source, not real whitespace.
+  - 'db.execute("\nSELECT * FROM users WHERE id = " + id)'
+  - 'db.execute("\tDELETE FROM t WHERE id = " + id)'
+  - 'db.execute("\r\nUPDATE users SET a = " + a)'
   # Not SQL, but it matches the sibling's `SELECT ... ${` arm;
   # ts_sql_injection_sink flags the same template.
   - 'queue.execute(`select ${id}`)'
