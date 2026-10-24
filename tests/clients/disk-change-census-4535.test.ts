@@ -227,11 +227,20 @@ describe("the consumer census", () => {
 			'publisher.subscribeDiskChange("x", () => undefined);',
 		].join("\n");
 		const reExport = 'export { subscribeDiskChange } from "./disk-changes.js";';
+		// The one plant the specifier refusal alone catches: a barrel re-export
+		// never spells the identifier, so without it the file reads as zero
+		// registrations while a consumer of the barrel registers through it.
+		const barrelExport = 'export * from "./disk-changes.js";';
 		const dynamicImport = [
 			'const publisher = await import("./disk-changes.js");',
 			'publisher.subscribeDiskChange("x", () => undefined);',
 		].join("\n");
-		for (const planted of [namespaceImport, reExport, dynamicImport]) {
+		for (const planted of [
+			namespaceImport,
+			reExport,
+			barrelExport,
+			dynamicImport,
+		]) {
 			const uses = registrationUses(planted);
 			expect(uses.unknown).toBeGreaterThan(0);
 			expect(uses.calls).toBe(0);
