@@ -1509,7 +1509,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/credo.ts": 2,
 		"clients/dispatch/runners/cue-vet.ts": 8,
 		"clients/dispatch/runners/dart-analyze.ts": 1,
-		"clients/dispatch/runners/detekt.ts": 5,
+		"clients/dispatch/runners/detekt.ts": 6,
 		"clients/dispatch/runners/dotnet-build.ts": 4,
 		"clients/dispatch/runners/elixir-check.ts": 2,
 		"clients/dispatch/runners/eslint.ts": 3,

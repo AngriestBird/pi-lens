@@ -388,6 +388,7 @@ describe("#3801 docs-only pull requests skip only the heavy advisory jobs", () =
 		for (const files of [
 			["formal/file-locks/FileLock.tla"],
 			["scripts/check-tla-models.mjs"],
+			["scripts/tla-model-costs.json"],
 			[".github/workflows/ci.yml"],
 		]) {
 			const ran = names("pull_request", files);

@@ -22,6 +22,8 @@ export const REAL_HOME_READERS: Readonly<Record<string, string>> = {
 		"read-only PATH probe for the maintainer's managed knip (`~/.pi-lens/tools/node_modules/.bin`); the pinned home has no managed tools tree, and the suite skips where neither that nor a PATH knip exists",
 	"tests/clients/turn-scenarios.test.ts":
 		"read-only PATH probe for the maintainer's managed knip (`~/.pi-lens/tools/node_modules/.bin`); the pinned home has no managed tools tree, and the scenario skips where neither that nor a PATH knip exists",
+	"tests/clients/lsp/unheld-module-pyright-4742.integration.test.ts":
+		"read-only path probe for the maintainer's managed pyright (`~/.pi-lens/tools/node_modules/.bin/pyright-langserver`); the pinned home has no managed tools tree, so without the real home this suite skips on the one host that has pyright",
 	"tests/clients/lsp/pyright-settings-effect-4758.integration.test.ts":
 		"read-only path probe for the maintainer's managed pyright (`~/.pi-lens/tools/node_modules/.bin/pyright-langserver`); the pinned home has no managed tools tree, so without the real home the effect case skips on the one host that has pyright",
 	"tests/clients/lsp/opengrep-offline-findings-4765.integration.test.ts":

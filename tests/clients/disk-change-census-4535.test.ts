@@ -302,7 +302,7 @@ describe("the consumer census", () => {
 			}),
 		);
 		expect(pendingByConsumer).toEqual({
-			"lsp-unheld-modules": 4,
+			"lsp-unheld-modules": 1,
 			"dispatch-delta-baseline": 4,
 			"inline-blocker-records": 4,
 			"record-carry-position-stale": 3,

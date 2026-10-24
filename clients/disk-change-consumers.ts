@@ -60,6 +60,8 @@ const NO_SWEEP_SEQUENCE =
 const NO_HEARTBEAT_PUBLISH = `${REMAINDER}: the drift heartbeat publishes nothing yet`;
 const NO_HEAD_SEQUENCE =
 	"a HEAD move allocates no sequence (#4493: it records no mutation)";
+const UNHELD_BY_LSP_CONSUMER =
+	"the LSP consumer's held-document phase (resyncHeldDocuments) sends the publish's paths no server holds as exact-URI watched-files events, so a closed module reaches a live primary (#4742)";
 const INSTALL_ALLOCATES_NOTHING =
 	"a dependency install is unenumerable and allocates no sequence";
 const SEQUENCE_BY_PUBLISHER =
@@ -121,15 +123,9 @@ export const DISK_CHANGE_CONSUMERS: readonly DiskChangeConsumer[] = [
 			"out-of-band": pending(
 				`${REMAINDER}: only declaration files are forwarded to a server; a closed module changed on disk keeps its old bytes in a live primary (#4742)`,
 			),
-			"bash-recovery": pending(
-				`${REMAINDER}: the resync reaches held documents only, so an unheld module the command rewrote keeps its old bytes (#4742)`,
-			),
-			"head-move": pending(
-				`${REMAINDER}: the resync reaches held documents only, so an unheld module the move changed keeps its old bytes (#4742)`,
-			),
-			"settled-sweep": pending(
-				`${REMAINDER}: the resync reaches held documents only, so an unheld module the sweep found keeps its old bytes (#4742)`,
-			),
+			"bash-recovery": fed(UNHELD_BY_LSP_CONSUMER),
+			"head-move": fed(UNHELD_BY_LSP_CONSUMER),
+			"settled-sweep": fed(UNHELD_BY_LSP_CONSUMER),
 			"drift-heartbeat": na(
 				"the heartbeat resyncs the held document it found drifted and has no unheld population",
 			),
