@@ -32,6 +32,7 @@ import {
 	mkdtempSync,
 	openSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 	unlinkSync,
@@ -4158,6 +4159,13 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 		const AMBIENT_OFF = "/home/dev/guard-bash-4057-ambient";
 		const INLINE_TMP = "/tmp/guard-bash-4057-inline";
 		const INLINE_OFF = "/home/dev/guard-bash-4057-inline";
+		// mktemp's own /tmp fallback lands in /tmp itself, which exists. Where
+		// /tmp is a real directory (Linux, CI) the rule denies it. On macOS /tmp
+		// resolves to /private/tmp, which the rule does not count as /tmp
+		// (Accepted residual), so there the same rows pin the allow, as the bare
+		// `mktemp -d` row above shows by failing.
+		const TMP_FALLBACK_RULE: DenyRule | null =
+			realpathSync("/tmp") === "/tmp" ? "tmpCheckout" : null;
 		const ROWS: Array<{
 			label: string;
 			command: string;
@@ -4349,6 +4357,53 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 				label: '-p "$X$D" with X off /tmp is never empty',
 				command: 'X=/home/dev/guard-bash-4057-x; mktemp -d -p "$X$D" x.XXXXXX',
 				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			// GNU mktemp reads TMPDIR only when it is set and non-empty, else
+			// /tmp (coreutils mktemp.c: `env && *env`), so an empty TMPDIR in
+			// mktemp's own env, from the prefix or the ambient env, is /tmp for its
+			// default directory (TMP_FALLBACK_RULE).
+			{
+				label: "an empty TMPDIR= with no template falls back to /tmp",
+				command: "TMPDIR= mktemp -d",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: "an empty TMPDIR= with -t falls back to /tmp",
+				command: "TMPDIR= mktemp -d -t x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: "an empty TMPDIR= with bare --tmpdir falls back to /tmp",
+				command: "TMPDIR= mktemp -d --tmpdir x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: 'an empty TMPDIR= with -p "" falls back to /tmp',
+				command: 'TMPDIR= mktemp -d -p "" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: "an empty TMPDIR (ambient) with no template falls back to /tmp",
+				command: "mktemp -d",
+				ambient: { TMPDIR: "" },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: "an empty TMPDIR from TMPDIR=$X, X unset, falls back to /tmp",
+				command: "TMPDIR=$X mktemp -d",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label:
+					"a non-empty prefix over an empty TMPDIR (ambient) follows the prefix",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d`,
+				ambient: { TMPDIR: "" },
 				rule: null,
 			},
 			{

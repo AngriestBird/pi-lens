@@ -2016,7 +2016,8 @@ function classifyNpm(cmd, args, cwd, env) {
  *
  * The `$TMPDIR` sentinel (no template, `-t` with a relative template, bare
  * `--tmpdir`) is GNU mktemp's own env read, so it expands with the inline
- * `TMPDIR=` prefix. Every word the command typed (a template, a
+ * `TMPDIR=` prefix, and an empty TMPDIR falls back to /tmp as an unset one
+ * does ({@link mktempDefaultDir}). Every word the command typed (a template, a
  * `-p`/`--tmpdir=` value) was expanded by bash before that prefix applied, so
  * it expands without it (#4057).
  *
@@ -2073,6 +2074,24 @@ const MAY_EXPAND_TO_NOTHING =
 	/^(?:\$(?:\{(?:[A-Za-z_][A-Za-z0-9_]*|[1-9][0-9]*|[@*!])\}|[A-Za-z_][A-Za-z0-9_]*|[1-9@*!]))*$/;
 
 /**
+ * GNU mktemp's own default directory, as the word {@link classifyMktemp}
+ * resolves with mktemp's env: the `$TMPDIR` sentinel, or TMP_ROOT when TMPDIR
+ * may expand to nothing ({@link MAY_EXPAND_TO_NOTHING}). coreutils mktemp.c
+ * reads TMPDIR only when `env && *env` and otherwise uses "/tmp", so an empty
+ * TMPDIR, inline or ambient, lands where an unset one does, never under the
+ * cwd (#4057).
+ *
+ * @param {string | undefined} cwd
+ * @param {Record<string, string>} env mktemp's own env
+ * @returns {string}
+ */
+function mktempDefaultDir(cwd, env) {
+	return MAY_EXPAND_TO_NOTHING.test(expandShellWord("$TMPDIR", cwd, env).text)
+		? TMP_ROOT
+		: "$TMPDIR";
+}
+
+/**
  * Classify an `mktemp` invocation's args for #3526's `tmpCheckout` rule.
  * File-mode (no `-d`/`--directory`, bundled or not) always allows.
  *
@@ -2084,6 +2103,7 @@ const MAY_EXPAND_TO_NOTHING =
  */
 function classifyMktemp(args, cwd, env, expansionEnv = env) {
 	let isDir = false;
+	const defaultDir = mktempDefaultDir(cwd, env);
 	// The `-p`/`--tmpdir` directory and the variables it expands with: a typed
 	// value is a word bash expanded, and bare `--tmpdir` is GNU mktemp's own
 	// `$TMPDIR`, read from its own env (#4057).
@@ -2102,7 +2122,7 @@ function classifyMktemp(args, cwd, env, expansionEnv = env) {
 		const a = args[i];
 		if (a === "--tmpdir") {
 			// Bare form (no "="): GNU mktemp's own "use $TMPDIR" spelling.
-			tmpdirOverride = { dir: "$TMPDIR", env };
+			tmpdirOverride = { dir: defaultDir, env };
 			i++;
 			continue;
 		}
@@ -2179,7 +2199,7 @@ function classifyMktemp(args, cwd, env, expansionEnv = env) {
 		targetDir = dirname(template);
 	else if (template === undefined || forceTmpdirRelative) {
 		// GNU mktemp's own default, `$TMPDIR` from its own env (#4057).
-		targetDir = "$TMPDIR";
+		targetDir = defaultDir;
 		targetEnv = env;
 	} else targetDir = cwd ?? process.cwd();
 	const landsUnderTmp = (
@@ -2187,7 +2207,7 @@ function classifyMktemp(args, cwd, env, expansionEnv = env) {
 		/** @type {Record<string, string>} */ dirEnv,
 	) => isUnderTmpRoot(resolveShellPath(dir, cwd, dirEnv).path);
 	return landsUnderTmp(targetDir, targetEnv) ||
-		(emptyReading && landsUnderTmp("$TMPDIR", env))
+		(emptyReading && landsUnderTmp(defaultDir, env))
 		? "tmpCheckout"
 		: null;
 }
