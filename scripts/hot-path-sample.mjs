@@ -46,6 +46,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
+import { scratchHomeEnv } from "./lib/scratch-home-env.mjs";
 
 const SMALL_LINES = 40;
 const LARGE_LINES = 4000;
@@ -244,7 +245,7 @@ if (!tree || !scratch) {
 }
 const home = path.join(path.resolve(scratch), "home");
 fs.mkdirSync(home, { recursive: true });
-process.env.PI_LENS_HOME = home;
+Object.assign(process.env, scratchHomeEnv(home));
 process.env.PILENS_DATA_DIR = home;
 process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1";
 const result = await sample(path.resolve(tree), path.resolve(scratch));
