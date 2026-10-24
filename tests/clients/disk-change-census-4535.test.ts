@@ -23,7 +23,12 @@ import {
 	diskChangeSubscriberOrigins,
 } from "../../clients/disk-changes.js";
 import { stripCommentsAndStrings } from "../support/session-state-scan.js";
-import { assertNonEmptyScan, listSourceFiles } from "../support/sweep-kit.js";
+import {
+	assertNonEmptyScan,
+	escapeRegExp,
+	listSourceFiles,
+	stripSource,
+} from "../support/sweep-kit.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 
@@ -41,24 +46,78 @@ function productionSources(): string[] {
 	return sources;
 }
 
+/** The publisher's registration export, and the module that declares it. */
+const PUBLISHER_EXPORT = "subscribeDiskChange";
+const PUBLISHER_SPECIFIER = /["'][^"']*disk-changes\.js["']/g;
+const PUBLISHER_NAMED_IMPORT =
+	/\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*(["'][^"']*disk-changes\.js["'])/g;
+
+/** The local binding each named-import clause gives the registration export. */
+function registrationBindings(clause: string): string[] {
+	return clause.split(",").flatMap((item) => {
+		const named = item.trim().replace(/^type\s+/, "");
+		if (named.length === 0) return [];
+		const [imported, local] = named
+			.split(/\s+as\s+/)
+			.map((part) => part.trim());
+		return imported === PUBLISHER_EXPORT ? [local ?? imported] : [];
+	});
+}
+
 /**
- * How one source file reaches `subscribeDiskChange`. The scan admits two forms
- * and refuses the rest: a named import, and a direct call. Any other mention of
- * the identifier (an alias, a value passed on, a property, a re-export) is an
- * `unknown` use, because a registration the scan cannot read is a subscriber
- * the census cannot see.
+ * How one source file reaches `subscribeDiskChange`. The registration bindings
+ * are DERIVED from every import whose specifier ends `disk-changes.js`, so an
+ * aliased clause counts; the one use admitted is a call of such a binding.
+ * Everything else the scan cannot read is an `unknown` use, and it refuses
+ * rather than reports zero: a specifier no named-import clause consumed
+ * (`import * as`, an `export … from`, a dynamic import) and every other mention
+ * of the identifier (a value passed on, a property, a re-export). A
+ * registration the scan cannot read is a subscriber the census cannot see.
+ *
+ * Recurrence: round 2's scan blanked `import … { … } from …;` and counted the
+ * literal name, so `import { subscribeDiskChange as onDiskChange }` registered a
+ * live subscriber the census stayed green on (F2 of that round).
  */
 function registrationUses(source: string): {
 	calls: number;
 	unknown: number;
 } {
-	const code = stripCommentsAndStrings(source).replace(
-		/\bimport\s+(?:type\s+)?\{[^}]*\}\s*from\s*[^;]*;/g,
-		(clause) => clause.replace(/\bsubscribeDiskChange\b/g, ""),
+	// Comments blanked and strings KEPT: the publisher path is a string literal
+	// and the clause around it is code. Both strip policies preserve length and
+	// line breaks, so a match index is the same offset in the string-blanked copy.
+	const readable = stripSource(source, { strings: "keep" });
+	const imports = [...readable.matchAll(PUBLISHER_NAMED_IMPORT)];
+	const bindings = new Set(
+		imports.flatMap((match) => registrationBindings(match[1])),
 	);
-	const calls = [...code.matchAll(/\bsubscribeDiskChange\s*\(/g)].length;
-	const all = [...code.matchAll(/\bsubscribeDiskChange\b/g)].length;
-	return { calls, unknown: all - calls };
+	// Every publisher specifier must be consumed by a named-import clause; the
+	// remainder is a form this scan cannot follow.
+	let unknown =
+		[...readable.matchAll(PUBLISHER_SPECIFIER)].length - imports.length;
+	// Blank the admitted import statements before counting, so the clause's own
+	// mention of the export is not read as a use.
+	const code = [...stripSource(source, { strings: "blank" })];
+	for (const match of imports)
+		for (
+			let index = match.index;
+			index < match.index + match[0].length;
+			index++
+		)
+			if (code[index] !== "\n") code[index] = " ";
+	const body = code.join("");
+	let calls = 0;
+	for (const name of new Set([...bindings, PUBLISHER_EXPORT])) {
+		const called = [
+			...body.matchAll(
+				new RegExp(`(?<![\\w$.])${escapeRegExp(name)}\\s*\\(`, "g"),
+			),
+		].length;
+		calls += called;
+		unknown +=
+			[...body.matchAll(new RegExp(`\\b${escapeRegExp(name)}\\b`, "g"))]
+				.length - called;
+	}
+	return { calls, unknown };
 }
 
 function reasonOf(
@@ -140,10 +199,10 @@ describe("the consumer census", () => {
 		expect(family).toEqual([]);
 	});
 
-	it("reads three spellings the scan was not designed around as unknown, not as zero", () => {
+	it("derives the registration bindings from the import, and refuses every form it cannot follow", () => {
 		// Recurrence: an enumerated gate admits the forms its author thought of
 		// and passes the next spelling. Each plant below would register a
-		// subscriber the census never sees if the scan counted only
+		// subscriber the census never sees if the scan counted only the literal
 		// `subscribeDiskChange(`.
 		const alias = [
 			'import { subscribeDiskChange } from "./disk-changes.js";',
@@ -161,12 +220,46 @@ describe("the consumer census", () => {
 		].join("\n");
 		for (const planted of [alias, indirect, throughBinding])
 			expect(registrationUses(planted).unknown).toBeGreaterThan(0);
-		// And the two admitted forms stay readable: an import plus a call.
+		// A specifier no named import clause consumed is a form the scan cannot
+		// follow, so it refuses rather than reporting zero registrations.
+		const namespaceImport = [
+			'import * as publisher from "./disk-changes.js";',
+			'publisher.subscribeDiskChange("x", () => undefined);',
+		].join("\n");
+		const reExport = 'export { subscribeDiskChange } from "./disk-changes.js";';
+		const dynamicImport = [
+			'const publisher = await import("./disk-changes.js");',
+			'publisher.subscribeDiskChange("x", () => undefined);',
+		].join("\n");
+		for (const planted of [namespaceImport, reExport, dynamicImport]) {
+			const uses = registrationUses(planted);
+			expect(uses.unknown).toBeGreaterThan(0);
+			expect(uses.calls).toBe(0);
+		}
+		// The admitted forms stay readable: a plain import plus a call, and an
+		// aliased import plus a call of the alias (F2 of review round 2, which the
+		// literal-name scan read as zero).
+		for (const admitted of [
+			[
+				'import { subscribeDiskChange } from "./disk-changes.js";',
+				'subscribeDiskChange("x", () => undefined);',
+			].join("\n"),
+			[
+				'import { subscribeDiskChange as onDiskChange } from "./disk-changes.js";',
+				'onDiskChange("x", () => undefined);',
+			].join("\n"),
+			[
+				'import { type DiskChange, subscribeDiskChange as on } from "./disk-changes.js";',
+				'on("x", () => undefined);',
+			].join("\n"),
+		])
+			expect(registrationUses(admitted)).toEqual({ calls: 1, unknown: 0 });
+		// A sibling import from the same module is not a registration binding.
 		expect(
 			registrationUses(
-				'import { subscribeDiskChange } from "./disk-changes.js";\nsubscribeDiskChange("x", () => undefined);',
+				'import { DISK_CHANGE_ORIGINS } from "./disk-changes.js";\nconst all = [...DISK_CHANGE_ORIGINS];',
 			),
-		).toEqual({ calls: 1, unknown: 0 });
+		).toEqual({ calls: 0, unknown: 0 });
 		// A comment or a string naming the call is neither a call nor a use.
 		expect(
 			registrationUses(
@@ -207,13 +300,14 @@ describe("the consumer census", () => {
 			"widget-rows": 1,
 			"widget-dependency-demotion": 4,
 			"advisory-and-project-diagnostics": 1,
-			"actionable-warnings-merge": 2,
-			"cascade-carry-over-supersede": 2,
+			"actionable-warnings-merge": 3,
+			"cascade-carry-over-supersede": 3,
 			"review-graph-and-reverse-deps": 4,
 			"review-graph-answers-trust-note": 3,
 			"word-index": 4,
-			"project-snapshot": 3,
+			"project-snapshot": 4,
 			"call-graph-and-codebase-model": 5,
+			"knip-analysis-memo": 4,
 			"formatter-detection-cache": 4,
 			"workspace-modules-cache": 1,
 		});

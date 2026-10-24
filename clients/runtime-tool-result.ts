@@ -553,9 +553,9 @@ const RECOVERED_DRIFT_PASS = {
  *
  * `observed` only when every path was hash-proven. An `unverifiable` file (its
  * stat moved, no hashed baseline could confirm a change) is published too,
- * labelled `inferred`: a consumer compares the bytes itself (the LSP consumer
- * reads the disk against the server's copy), so the extra path costs a read, and
- * leaving it out would be the one direction that serves a stale view.
+ * labelled `inferred`: the LSP consumer compares the bytes itself and pays a
+ * read, while the diagnostics cache refuses the path's entries without reading
+ * one, so an unproven path costs one recompute; leaving it out serves stale views.
  *
  * The caller `void`s this: `agent_settled` never waits on a server, and the
  * chain records its own failures (see {@link publishDriftPass}).

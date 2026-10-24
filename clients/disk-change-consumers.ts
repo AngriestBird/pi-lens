@@ -55,8 +55,8 @@ const REMAINDER = "#4535 slice 3 remainder";
 
 const SYNTHETIC_WRITE =
 	"the bash recovery dispatches a synthetic write, which runs the pi edit path";
-const BRIDGE_REPLAY =
-	"the settled sweep replays through the mutation bridge, which records the sequence";
+const NO_SWEEP_SEQUENCE =
+	"the settled sweep replays only the drifted half through the mutation bridge (an unverifiable path is never replayed, and a rejected replay records nothing), so no sequence moves for those paths";
 const NO_HEARTBEAT_PUBLISH = `${REMAINDER}: the drift heartbeat publishes nothing yet`;
 const NO_HEAD_SEQUENCE =
 	"a HEAD move allocates no sequence (#4493: it records no mutation)";
@@ -300,7 +300,9 @@ export const DISK_CHANGE_CONSUMERS: readonly DiskChangeConsumer[] = [
 			"head-move": pending(
 				`${REMAINDER}: ${NO_HEAD_SEQUENCE}, so a fileSeq compares equal`,
 			),
-			"settled-sweep": fed(BRIDGE_REPLAY),
+			"settled-sweep": pending(
+				`${REMAINDER}: ${NO_SWEEP_SEQUENCE}, so a fileSeq compares equal`,
+			),
 			"drift-heartbeat": pending(NO_HEARTBEAT_PUBLISH),
 		},
 	},
@@ -314,7 +316,9 @@ export const DISK_CHANGE_CONSUMERS: readonly DiskChangeConsumer[] = [
 			"head-move": pending(
 				`${REMAINDER}: ${NO_HEAD_SEQUENCE}, so a carried cascade run is never superseded`,
 			),
-			"settled-sweep": fed(BRIDGE_REPLAY),
+			"settled-sweep": pending(
+				`${REMAINDER}: ${NO_SWEEP_SEQUENCE}, so a carried cascade run is never superseded`,
+			),
 			"drift-heartbeat": pending(NO_HEARTBEAT_PUBLISH),
 		},
 	},
@@ -386,7 +390,9 @@ export const DISK_CHANGE_CONSUMERS: readonly DiskChangeConsumer[] = [
 			"head-move": pending(
 				`${REMAINDER}: ${NO_HEAD_SEQUENCE}, so a snapshot stamp reads fresh`,
 			),
-			"settled-sweep": fed(BRIDGE_REPLAY),
+			"settled-sweep": pending(
+				`${REMAINDER}: ${NO_SWEEP_SEQUENCE}, so a snapshot stamp reads fresh`,
+			),
 			"drift-heartbeat": pending(NO_HEARTBEAT_PUBLISH),
 		},
 	},
@@ -401,6 +407,24 @@ export const DISK_CHANGE_CONSUMERS: readonly DiskChangeConsumer[] = [
 			),
 			"head-move": pending(`${REMAINDER}: built at session start only`),
 			"settled-sweep": pending(`${REMAINDER}: built at session start only`),
+			"drift-heartbeat": pending(NO_HEARTBEAT_PUBLISH),
+		},
+	},
+	{
+		id: "knip-analysis-memo",
+		anchor: { file: "clients/knip-client.ts", symbol: "matchesMemoSignal" },
+		kind: "refresher",
+		cells: {
+			"out-of-band": pending(
+				`${REMAINDER}: ${INSTALL_ALLOCATES_NOTHING}, so a memo hit serves analysis of the pre-install tree`,
+			),
+			"bash-recovery": fed(SYNTHETIC_WRITE),
+			"head-move": pending(
+				`${REMAINDER}: ${NO_HEAD_SEQUENCE}, so a memo hit serves analysis of the pre-move tree`,
+			),
+			"settled-sweep": pending(
+				`${REMAINDER}: ${NO_SWEEP_SEQUENCE}, and the memo revalidates package.json and the knip config only`,
+			),
 			"drift-heartbeat": pending(NO_HEARTBEAT_PUBLISH),
 		},
 	},
