@@ -35,9 +35,9 @@ note: |
   ast-grep rule has no receiver test. `acl.execute("grant " + role)`,
   `search.execute("create index " + field)`,
   `config.execute("merge into " + base)`, `"delete from " + cacheKey` and
-  `"select " + label + " from the list"` all flag. The first three are
-  pinned as `invalid:` rows so a later narrowing has a red row to work
-  against. Nothing here blocks an edit: this body measures 20 against
+  `"select " + label + " from the list"` all flag. All five are pinned as
+  `invalid:` rows, so a later narrowing has a red row to work against.
+  Nothing here blocks an edit: this body measures 22 against
   `MAX_BLOCKING_RULE_COMPLEXITY` (8) in
   clients/dispatch/runners/yaml-rule-parser.ts, as master's `.query` body
   already did at 15, so a per-edit dispatch skips the rule. These findings
@@ -67,7 +67,9 @@ note: |
   admitted by the literal prefilter, and 0.46 s to 11.7 s for a
   full-tree scan. The per-file cost does not depend on file size, so it is
   rule compilation per `findAll` call, not traversal; #4807 tracks it and
-  does not block this rule.
+  does not block this rule. A re-measurement of this split reproduces both
+  facts (0.9 to 1.6 ms per file for the `.query` rule, 11 to 12 ms for
+  this one, at 28 KiB and 155 KiB).
 
   The sibling's other test is out of reach for an ast-grep rule: when the
   prefix test fails, it still flags a template whose receiver it follows

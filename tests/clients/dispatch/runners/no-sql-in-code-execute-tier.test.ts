@@ -119,7 +119,7 @@ describe("the .execute arms are advisory and the .query arms still block", () =>
 	it("leaves both rules off the per-edit pass, where the complexity cap skips them", () => {
 		// Neither rule is a per-edit blocker to begin with: the cap is 8
 		// (MAX_BLOCKING_RULE_COMPLEXITY), master's `.query`-only body measures
-		// 15 and this PR's `.execute` body measures 20, so `blockingOnly: true`
+		// 15 and this PR's `.execute` body measures 22, so `blockingOnly: true`
 		// skipped both before and after the split. The split changes what the
 		// full-analysis surfaces deliver, not what stops an edit.
 		for (const snippet of [
