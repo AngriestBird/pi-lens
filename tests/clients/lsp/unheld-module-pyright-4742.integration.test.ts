@@ -114,7 +114,7 @@ afterAll(async () => {
 describe.skipIf(!CAN_RUN)(
 	"a closed module changed by a HEAD move reaches a live pyright (#4742)",
 	() => {
-		it("clears the unknown-attribute findings on the importer after `git checkout` fills the module", async () => {
+		it("clears the unknown-attribute findings on the importer after git checkout fills the module", async () => {
 			resetOpaqueMutationState();
 			const root = path.join(env.tmpDir, "repo");
 			for (const [name, content] of Object.entries({
