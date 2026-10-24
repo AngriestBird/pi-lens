@@ -1463,83 +1463,90 @@ describe("LSP Client Integration — mutation-bridge fallback for server-initiat
 // are `executeReadOnlyCommand` callers only: the tsserver `projectInfo`
 // membership probe (`fetchTsserverProjectIdentity`) and the didOpen
 // project-identity probe (`probeTsserverProjectIdentity`).
-describe("LSP Client Integration — a timed-out read-only command is cancelled and released (#4801)", () => {
-	// "1": the server ignores the cancel and never answers (the wedged server
-	// the issue names). "cancel": it answers the cancel with RequestCancelled
-	// after the client already released the request, a late rejection that must
-	// not surface as an unhandled one.
-	it.each([
-		["1", "never answers and ignores the cancel"],
-		["cancel", "answers the cancel with RequestCancelled"],
-	])(
-		"sends $/cancelRequest and drops the busy count for a projectInfo (mode %s: the server %s)",
-		async (mode) => {
-			const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ro-cancel-"));
-			const trace = path.join(tmp, "trace.log");
-			const proc = await spawnFakeLspServer({
-				cwd: tmp,
-				env: {
-					...process.env,
-					FAKE_LSP_HANG_PROJECT_INFO: mode,
-					FAKE_LSP_TRACE_FILE: trace,
-				},
-			});
-			const client = await createLSPClient({
-				serverId: "fake",
-				process: proc,
-				root: tmp,
-			});
-			try {
-				expect(client.isBusy?.()).toBe(false);
-
-				// The request `fetchTsserverProjectIdentity` sends for the warm-attach
-				// membership probe, which the server never answers.
-				const res = await client.executeReadOnlyCommand(
-					"typescript.tsserverRequest",
-					[
-						"projectInfo",
-						{ file: path.join(tmp, "a.ts"), needFileNameList: false },
-					],
-				);
-
-				expect(res.executed).toBe(false);
-				expect(res.reason).toContain("timed out");
-				// The client no longer counts the abandoned request, so the registry's
-				// eviction predicate reads it as idle. The server never answered the
-				// cancel, so this is a local release, not a reply, and it is final
-				// before the caller sees the timeout: no waiting, no polling.
-				expect(client.isBusy?.()).toBe(false);
-				// The connection is still usable after the local release. Its answer
-				// also orders the trace: the server reads stdio in order, so it has
-				// read the cancel before it answers a request sent after it.
-				const next = await client.executeReadOnlyCommand(
-					"typescript.tsserverRequest",
-					["version"],
-				);
-				expect(next.executed).toBe(true);
-				expect(client.isBusy?.()).toBe(false);
-				// The server saw the cancel on the wire, and an answered command is
-				// never cancelled: exactly one cancel.
-				expect(
-					fs
-						.readFileSync(trace, "utf-8")
-						.split("\n")
-						.filter((line) => line === "recv $/cancelRequest"),
-				).toHaveLength(1);
-			} finally {
-				try {
-					await client.shutdown();
-				} catch {
-					/* ignore */
-				}
-				try {
-					await stopLSP(proc);
-				} catch {
-					/* ignore */
-				}
-				removeTempDirSync(tmp);
-			}
+// "1": the server ignores the cancel and never answers (the wedged server the
+// issue names). "cancel": it answers the cancel with RequestCancelled after
+// the client already released the request, a late rejection that must not
+// surface as an unhandled one.
+async function expectTimedOutProjectInfoReleased(
+	mode: "1" | "cancel",
+): Promise<void> {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ro-cancel-"));
+	const trace = path.join(tmp, "trace.log");
+	const proc = await spawnFakeLspServer({
+		cwd: tmp,
+		env: {
+			...process.env,
+			FAKE_LSP_HANG_PROJECT_INFO: mode,
+			FAKE_LSP_TRACE_FILE: trace,
 		},
+	});
+	const client = await createLSPClient({
+		serverId: "fake",
+		process: proc,
+		root: tmp,
+	});
+	try {
+		expect(client.isBusy?.()).toBe(false);
+
+		// The request `fetchTsserverProjectIdentity` sends for the warm-attach
+		// membership probe, which the server never answers.
+		const res = await client.executeReadOnlyCommand(
+			"typescript.tsserverRequest",
+			[
+				"projectInfo",
+				{ file: path.join(tmp, "a.ts"), needFileNameList: false },
+			],
+		);
+
+		expect(res.executed).toBe(false);
+		expect(res.reason).toContain("timed out");
+		// The client no longer counts the abandoned request, so the registry's
+		// eviction predicate reads it as idle. The server never answered the
+		// cancel, so this is a local release, not a reply, and it is final
+		// before the caller sees the timeout: no waiting, no polling.
+		expect(client.isBusy?.()).toBe(false);
+		// The connection is still usable after the local release. Its answer
+		// also orders the trace: the server reads stdio in order, so it has
+		// read the cancel before it answers a request sent after it.
+		const next = await client.executeReadOnlyCommand(
+			"typescript.tsserverRequest",
+			["version"],
+		);
+		expect(next.executed).toBe(true);
+		expect(client.isBusy?.()).toBe(false);
+		// The server saw the cancel on the wire, and an answered command is
+		// never cancelled: exactly one cancel.
+		expect(
+			fs
+				.readFileSync(trace, "utf-8")
+				.split("\n")
+				.filter((line) => line === "recv $/cancelRequest"),
+		).toHaveLength(1);
+	} finally {
+		try {
+			await client.shutdown();
+		} catch {
+			/* ignore */
+		}
+		try {
+			await stopLSP(proc);
+		} catch {
+			/* ignore */
+		}
+		removeTempDirSync(tmp);
+	}
+}
+
+describe("LSP Client Integration — a timed-out read-only command is cancelled and released (#4801)", () => {
+	it(
+		"sends $/cancelRequest and drops the busy count for a projectInfo the server never answers",
+		() => expectTimedOutProjectInfoReleased("1"),
+		15_000,
+	);
+
+	it(
+		"sends $/cancelRequest and drops the busy count for a projectInfo the server answers with RequestCancelled",
+		() => expectTimedOutProjectInfoReleased("cancel"),
 		15_000,
 	);
 });
