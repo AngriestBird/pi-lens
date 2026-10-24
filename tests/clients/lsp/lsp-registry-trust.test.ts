@@ -286,4 +286,47 @@ describe("compiled LSP registry trust boundary (#2372)", () => {
 		// override still answers rust-analyzer's `rust-analyzer` pull.
 		expect(byId.get("rust")?.settingsSection).toBe("rust-analyzer");
 	});
+
+	// #4829 review r1 F3: `resendRecheck: "rechecks"` was measured on the
+	// catalog's binaries. A command override runs another binary, and one that
+	// publishes nothing for unchanged bytes would lose every re-sent dependent's
+	// answer with none coming. The copy falls back to the fail-safe default; the
+	// catalog row keeps its measurement.
+	it("drops the measured re-send trait from a command override's copy", async () => {
+		const project = tempDir();
+		fs.writeFileSync(
+			path.join(project, ".pi-lens.json"),
+			JSON.stringify({
+				lsp: {
+					serverOverrides: {
+						python: { command: "other-python-lsp" },
+						typescript: { command: ["other-ts-lsp", "--stdio"] },
+					},
+				},
+			}),
+		);
+		const trust = await import("../../../clients/project-trust.js");
+		trust.setProjectTrustState("trusted");
+		const { loadLSPConfig, compileLspRegistry } =
+			await import("../../../clients/lsp/config.js");
+		const { getServerById } = await import("../../../clients/lsp/server.js");
+		const { serverTraits } =
+			await import("../../../clients/lsp/server-traits.js");
+		const config = await loadLSPConfig(project);
+		const compiled = compileLspRegistry(
+			config,
+			config.__provenance,
+		).registeredServers;
+		const byId = new Map(compiled.map((entry) => [entry.id, entry]));
+
+		for (const id of ["python", "typescript"]) {
+			const copy = byId.get(id);
+			expect(copy, id).toBeDefined();
+			expect(copy, id).not.toBe(getServerById(id));
+			expect(serverTraits(copy!).resendRecheck, id).toBe("unmeasured");
+			expect(serverTraits(getServerById(id)!).resendRecheck, id).toBe(
+				"rechecks",
+			);
+		}
+	});
 });

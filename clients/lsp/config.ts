@@ -1072,8 +1072,12 @@ export function compileLspRegistry(
 		const argv = Array.isArray(override.command)
 			? override.command
 			: [override.command, "--stdio"];
+		// #4782: `resendRecheck` was measured on the catalog's binaries, not on
+		// this one, so the copy takes the fail-safe default (no re-send).
+		const { resendRecheck: measuredOnCatalogBinary, ...catalog } = server;
+		void measuredOnCatalogBinary;
 		return {
-			...server,
+			...catalog,
 			trustAllowed: true,
 			async spawn(
 				root: string,

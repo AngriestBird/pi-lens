@@ -3063,9 +3063,12 @@ export const PythonServer: LSPServerInfo = {
 	id: "python",
 	idleEviction: "transparent",
 	role: "language",
-	// #4782: pyright 1.1.414 answers an unchanged-bytes didChange for its new
-	// version (measured; see LspResendRecheck). basedpyright is its fork; ty is
-	// unmeasured.
+	// #4782: every binary this row launches answers an unchanged-bytes
+	// didChange for its new version (measured; see LspResendRecheck): pyright
+	// 1.1.414, basedpyright 1.40.2 (idle 3/3, burst under load 6/6) and ty
+	// 0.0.91 (idle 3/3, burst 6/6, burst under load 6/6). ty never re-checks a
+	// dependent on its own after the dependency changes, so it needs the re-send
+	// most.
 	resendRecheck: "rechecks",
 	name: "Pyright Language Server",
 	extensions: KIND_EXTENSIONS["python"],

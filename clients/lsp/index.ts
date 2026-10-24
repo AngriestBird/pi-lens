@@ -3653,7 +3653,12 @@ export class LSPService {
 	 * server `rechecks` unchanged bytes is therefore sent each document again,
 	 * after the last one it was sent, before the drain: the server's latest check
 	 * of each follows every change of this pass, and the re-send's version bump
-	 * lets a versioned server's older answer be dropped as superseded.
+	 * lets a versioned server's older answer be dropped as superseded. The
+	 * re-send clears the path's stored answer, so the dispatch read waits for
+	 * the answer to it; the drain below runs only for `single-task-ordered`
+	 * clients, and no row declared `rechecks` is one. Both sends carry the stamp
+	 * taken before the read (#3481): a parallel tool's newer read of the same
+	 * path, sent in between, makes the queue drop this pass's older bytes.
 	 */
 	async resyncHeldPrimaries(
 		filePaths: readonly string[],
@@ -3666,7 +3671,11 @@ export class LSPService {
 				client: LSPClientInfo;
 				ordered: boolean;
 				rechecks: boolean;
-				documents: Array<{ filePath: string; content: string }>;
+				documents: Array<{
+					filePath: string;
+					content: string;
+					readStamp: number;
+				}>;
 			}
 		>();
 		for (const filePath of filePaths) {
@@ -3676,6 +3685,7 @@ export class LSPService {
 			for (const server of servers)
 				if (isAuxiliary(server)) exclude.add(server.id);
 			if (servers.every((server) => exclude.has(server.id))) continue;
+			const readStamp = performance.now();
 			let content: string;
 			try {
 				content = await fs.readFile(filePath, "utf8");
@@ -3688,6 +3698,7 @@ export class LSPService {
 				source: "head_move_primary",
 				clientScope: "all",
 				excludeServerIds: exclude,
+				readStamp,
 			});
 			sent += 1;
 			for (const server of servers) {
@@ -3701,7 +3712,7 @@ export class LSPService {
 				if (key && client) {
 					const traits = serverTraits(server);
 					const documents = sentTo.get(key)?.documents ?? [];
-					documents.push({ filePath, content });
+					documents.push({ filePath, content, readStamp });
 					sentTo.set(key, {
 						client,
 						ordered: traits.replyOrdering === "single-task-ordered",
@@ -3716,11 +3727,15 @@ export class LSPService {
 			[...sentTo.values()].flatMap(({ client, rechecks, documents }) =>
 				(rechecks ? documents : [])
 					.slice(0, -1)
-					.map(({ filePath, content }) =>
+					.map(({ filePath, content, readStamp }) =>
 						client.notify.open(
 							filePath,
 							content,
 							getLanguageId(filePath) ?? "plaintext",
+							undefined,
+							undefined,
+							undefined,
+							readStamp,
 						),
 					),
 			),

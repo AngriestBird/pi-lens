@@ -208,6 +208,24 @@ describe("#1756 stage 1 — declared server trait table", () => {
 		);
 	});
 
+	// #4829 review r1 F1: the whole #4782 re-send is dark unless these rows say
+	// "rechecks", and a flipped or deleted declaration left every test green.
+	// Each was measured against its binaries (server.ts); a new row joins here
+	// with its measurement, never by omission.
+	it("declares the unchanged-bytes re-check on exactly the measured rows", () => {
+		const rechecks = LSP_SERVERS.filter(
+			(server) => serverTraits(server).resendRecheck === "rechecks",
+		)
+			.map((server) => server.id)
+			.sort();
+		assertNonEmptyScan(
+			"registry rows projected for resendRecheck",
+			LSP_SERVERS.length,
+			30,
+		);
+		expect(rechecks).toEqual(["python", "typescript"]);
+	});
+
 	it("orders the notify-inflight trait declaration, then environment, then default", () => {
 		const previous = process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT;
 		try {

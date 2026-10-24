@@ -1573,6 +1573,71 @@ describe("a bash command's writes reach the primaries before its dispatches (#45
 		expect(sent).toEqual([textLine(repo, "a.ts"), textLine(repo, "z.ts")]);
 	}, 60_000);
 
+	// Recurrence: #4829 CodeRabbit 4368747618, measured on the r1 head (wire
+	// a.ts = A1, A2, A1, A2). pi runs one message's tool calls in parallel by
+	// default, so another tool's post-write sync can send a.ts's newer bytes
+	// (stamped with their read, #3481) while the phase runs. An unstamped send
+	// of the phase's older read then put those older bytes back on the server
+	// until the next sync. Both phase sends carry the stamp taken before their
+	// read, so the queue drops each one a newer read already superseded. The
+	// touch spy only interleaves that other tool's real send at the point the
+	// phase reaches `at`; every send runs through the real service.
+	it.each([
+		["between the phase's send of a.ts and its re-send", "z.ts", ["A1", "A2"]],
+		["before the phase's first send of a.ts", "a.ts", ["A2"]],
+	] as const)(
+		"keeps a parallel tool's newer bytes that land %s",
+		async (_when, at, expected) => {
+			const repo = await makeRepo(
+				{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+				NOTES_B,
+				[],
+				CHECKER,
+			);
+			primaryResend.set(repo.dir, "rechecks");
+			await hold(repo, ["a.ts", "z.ts"]);
+			const s = session(repo, `s-4782-parallel-edit-${at}`);
+			const service = await lspService();
+			const bytes = { A1, A2: `${A1}export const w = 2;\n` };
+			const real = service.touchFile.bind(service);
+			const spy = vi
+				.spyOn(service, "touchFile")
+				.mockImplementation(async (filePath, content, options) => {
+					if (
+						options?.source === "head_move_primary" &&
+						filePath === repo.file(at)
+					) {
+						fs.writeFileSync(repo.file("a.ts"), bytes.A2);
+						await real(repo.file("a.ts"), bytes.A2, {
+							diagnostics: "none",
+							clientScope: "primary",
+							source: "lsp_sync",
+							readStamp: performance.now(),
+						});
+					}
+					return real(filePath, content, options);
+				});
+			const mark = (await wire(repo, "z.ts")).length;
+			try {
+				await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+					fs.writeFileSync(repo.file("a.ts"), A1);
+					fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+				});
+			} finally {
+				spy.mockRestore();
+			}
+
+			const aUri = pathToFileURL(repo.file("a.ts")).href;
+			const sent = (await wire(repo, "z.ts"))
+				.slice(mark)
+				.filter((line) => line.startsWith(`text ${aUri} `));
+			expect(sent).toEqual(
+				expected.map((name) => `text ${aUri} ${sha(bytes[name])}`),
+			);
+		},
+		60_000,
+	);
+
 	// Recurrence: #4528 r1 F1, the second half. A send resolves once its bytes
 	// are in the pipe, not once the server read them. This primary reads its
 	// input at once and works through it slowly (150 ms a change), republishing
