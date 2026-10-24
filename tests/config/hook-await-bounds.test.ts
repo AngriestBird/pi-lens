@@ -1489,13 +1489,14 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4493",
 	},
-	"clients/runtime-tool-result.ts#publishRecoveredDrift:02371281~d6bd7169": {
+	"clients/runtime-tool-result.ts#publishDriftPass:02371281~d0ca4f7e": {
 		family: "hook-await",
 		site: "tool_result_edit",
 		reason:
-			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2, " +
+			"Inside `publishDriftPass` (#4535 slice 2, review round 2 F2, " +
 			"round 3 p3-3; #4612 r4 moved its chunk loop onto " +
-			"`publishDiskChangeChunked`): the bash tool_result hands the recovered set to this " +
+			"`publishDiskChangeChunked`; slice 3 runs the settled sweep's drift " +
+			"through the same chain with `void` at `agent_settled`): the bash tool_result hands the recovered set to this " +
 			"chain with `void`, after its own bounded primary phase, exactly as " +
 			"the base branch `void`ed the detached `resyncGitChangedFiles` " +
 			"pass. Nothing awaits the chain, so it holds no hook and must not be " +
@@ -1504,11 +1505,11 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"does await.",
 		owner: "#4535",
 	},
-	"clients/runtime-tool-result.ts#publishRecoveredDrift:832d990f~51c52f98": {
+	"clients/runtime-tool-result.ts#publishDriftPass:832d990f~51c52f98": {
 		family: "hook-await",
 		site: "tool_result_edit",
 		reason:
-			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2, " +
+			"Inside `publishDriftPass` (#4535 slice 2, review round 2 F2, " +
 			"round 3 p3-3): the same detached chain, awaiting one chunk's drift " +
 			"pass before publishing the next chunk, so the chunks resync in " +
 			"order instead of racing each other, and a rejection records the " +
@@ -1988,7 +1989,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"request; no pi hook budget applies.",
 		owner: "#2523 slice 2",
 	},
-	"mcp/server.ts#callTool:73e6f55a~b6e340bc": {
+	"mcp/server.ts#callTool:73e6f55a~f86001c7": {
 		family: "hook-await",
 		site: "off-hook",
 		reason:
@@ -2615,7 +2616,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// filesystem probe before launch, and hook-signal threading stays #2523 AC4.
 	// #4728: 123 -> 122; remove the early-return exclusion probe and use the
 	// existing loop's probe for the starting directory too.
-	"clients/lsp/server.ts": 122,
+	// #4806: 122 -> 124. `declinesProjectlessRoot` awaits `markerExists` and the
+	// shared directory reader once per directory of its bounded (128) search.
+	// Both are local reads on the spawn-policy path of `spawnClient`, which no
+	// hook awaits; hook-signal threading stays #2523 AC4.
+	"clients/lsp/server.ts": 124,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	// #4493: 10 -> 12, the `git rev-parse` in readGitHead and the `git diff`

@@ -1041,8 +1041,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realpathOrResolve`,
 		// not a `path.resolve` of the spelling it was given. 2 -> 3 (#4675 F2):
-		// the widget row keeps the caller's spelling, a `path.resolve` again.
-		"clients/format-service.ts": 3,
+		// the widget row kept the caller's spelling, a `path.resolve` again;
+		// 3 -> 2 (#4689 item 3): the row is written under the identity.
+		"clients/format-service.ts": 2,
 		"clients/formatters.ts": 15,
 		"clients/generated-artifacts.ts": 4,
 		"clients/generation-lock.ts": 7,
@@ -1126,7 +1127,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// real paths through `realpathOrResolve`, so both uses are gone.
 		// #4728: 125 -> 123; the fallback walk starts at the candidate itself,
 		// removing the early-return resolve and the parent-directory lookup.
-		"clients/lsp/server.ts": 123,
+		// 123 -> 124 (#4806): the bounded project-file search joins each
+		// subdirectory with `path.join`, a filesystem path call.
+		"clients/lsp/server.ts": 124,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
@@ -1183,7 +1186,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// two callers split, join and normalize with the OS `path` namespace.
 		// 40 -> 38 (#4689 r2): `realpathOrResolve` hands a relative spelling to
 		// the kernel as it is, with no `path.isAbsolute`/`path.resolve` first.
-		"clients/path-utils.ts": 38,
+		// 38 -> 34 (#4689 item 6): the two marker walks start at
+		// `realpathOrResolve(startDir)` and `realpathOrResolve(homeDir)`.
+		"clients/path-utils.ts": 34,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		// 10 -> 12 (#4530): machineStateDir moved here from file-utils.ts.
@@ -1313,7 +1318,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// and `path.resolve` — six more `path` operations, same sense
 		// (a path operation).
 		"clients/tool-agreement.ts": 10,
-		"clients/tool-cwd.ts": 13,
+		// 13 -> 12 (#4689 item 6): the file is resolved by `realpathOrResolve`.
+		"clients/tool-cwd.ts": 12,
 		"clients/tool-policy.ts": 64,
 		"clients/tree-sitter-client.ts": 19,
 		"clients/tree-sitter-logger.ts": 2,

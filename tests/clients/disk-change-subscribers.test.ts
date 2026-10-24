@@ -30,9 +30,12 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { ensureDiskChangeSubscribers } from "../../clients/disk-change-subscribers.js";
 import {
 	type DiskChange,
 	DISK_CHANGE_MAX_RECORDED_PATHS,
+	DISK_CHANGE_ORIGINS,
+	publishDiskChange,
 	subscribeDiskChange,
 } from "../../clients/disk-changes.js";
 import {
@@ -196,4 +199,56 @@ describe("one look that holds an install and declaration changes", () => {
 		expect(calls.restartRoots).toEqual([]);
 		expect(calls.notified).toEqual([{ filePath: declaration, type: 2 }]);
 	});
+});
+
+describe("the diagnostics cache hears every detector", () => {
+	// Recurrence: slice 2 filtered to `out-of-band` inside the handler, so a
+	// HEAD move, a bash-recovered rewrite and a settled-sweep drift refused only
+	// the entries whose own file moved, and the cached finding of an unchanged
+	// importer kept serving.
+	it.each(DISK_CHANGE_ORIGINS)(
+		"refuses the entries that depend on a path a %s publish names",
+		async (origin) => {
+			ensureDiskChangeSubscribers();
+			const changed = path.join(tmp, "src", "changed.ts");
+			const key = normalizeMapKey(changed);
+			const pathRefusedAt = () =>
+				workspaceFileCreatedAtFor(
+					() => false,
+					() => true,
+					(creation) => creation.path === key,
+				);
+			expect(pathRefusedAt()).toBe(0);
+
+			const { change } = await publishDiskChange({
+				root: tmp,
+				origin,
+				paths: [changed],
+			});
+
+			expect(change.paths).toEqual([key]);
+			expect(pathRefusedAt()).toBe(change.at);
+		},
+	);
+
+	it.each(DISK_CHANGE_ORIGINS)(
+		"refuses every entry scanned before a %s publish it could not enumerate",
+		async (origin) => {
+			ensureDiskChangeSubscribers();
+			const clock = () =>
+				workspaceFileCreatedAtFor(
+					() => false,
+					() => false,
+				);
+			expect(clock()).toBe(0);
+
+			const { change } = await publishDiskChange({
+				root: tmp,
+				origin,
+				paths: "unknown",
+			});
+
+			expect(clock()).toBe(change.at);
+		},
+	);
 });
