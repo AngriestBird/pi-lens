@@ -20,10 +20,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // magnitude-independent.
 vi.hoisted(() => {
 	process.env.PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS = "150";
-	// #4801: the read-only command ceiling is also read at module load. The
-	// hang test below waits it out for real; every other read-only call in
-	// this file is answered at once by the fixture.
-	process.env.PI_LENS_LSP_PROJECT_IDENTITY_PROBE_TIMEOUT_MS = "300";
 });
 import { createLSPClient } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
@@ -1491,26 +1487,19 @@ describe("LSP Client Integration — a timed-out read-only command is cancelled 
 
 			expect(res.executed).toBe(false);
 			expect(res.reason).toContain("timed out");
-			// Final before the caller sees the timeout: no waiting, no polling.
+			// The client no longer counts the abandoned request, so the registry's
+			// eviction predicate reads it as idle. The server never answered the
+			// cancel, so this is a local release, not a reply, and it is final
+			// before the caller sees the timeout: no waiting, no polling.
 			expect(client.isBusy?.()).toBe(false);
-			// The server sees the cancel on the wire...
-			await vi.waitFor(
-				() => {
-					expect(fs.readFileSync(trace, "utf-8")).toContain(
-						"recv $/cancelRequest",
-					);
-				},
-				{ timeout: 2000 },
-			);
-			// ...and the client no longer counts the abandoned request, so the
-			// registry's eviction predicate reads it as idle. The server never
-			// answered the cancel, so this is a local release, not a reply.
-			expect(client.isBusy?.()).toBe(false);
-			// The connection is still usable after the local release.
+			// The connection is still usable after the local release. Its answer
+			// also orders the trace: the server reads stdio in order, so it has
+			// read the cancel before it answers a request sent after it.
 			const next = await client.executeReadOnlyCommand("fake.doThing");
 			expect(next.executed).toBe(true);
 			expect(client.isBusy?.()).toBe(false);
-			// An answered command is never cancelled: still exactly one cancel.
+			// The server saw the cancel on the wire, and an answered command is
+			// never cancelled: exactly one cancel.
 			expect(
 				fs
 					.readFileSync(trace, "utf-8")
