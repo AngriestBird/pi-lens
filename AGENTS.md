@@ -506,6 +506,16 @@ file-scoped worklist and receives no project-wide scanner output.
     `tests/clients/prompt-cache-prefix-writers.test.ts` (one tier-2 cell per
     writer: registration, session-start plan, activation, injection).
 
+84. **Tool-state prose blind to a posture:** model-facing text (orientation,
+    tool descriptions, nudges) that names a tool as active, inactive, available
+    or needing activation must hold under every posture the renderer cannot see:
+    each `tools.<name>.enabled` value, each `tools.lazy` value (true, false,
+    auto) and each host (pi, MCP, which can call only the tools it has a name
+    for). Derive the named set from the registry, never a hand list. Screen:
+    render the prose under each posture combination and each host, and assert
+    every clause is true (#4293, #4294 enabled axis; #4682 lazy axis and the
+    hand list that dropped two tools).
+
 </important>
 
 <important if="a runner outcome or tool execution">
@@ -628,6 +638,19 @@ file-scoped worklist and receives no project-wide scanner output.
     subject can write in. Then show that each root gets its own verdict, or that
     one root provably covers them. Census: not countable yet. Instance and
     dates: `HISTORY.md`.
+
+83. **Rule re-derived beside its owner:** a consumer rebuilds a rule that a
+    shared seam already owns (a marker list, a glob-to-RegExp matcher, a case
+    fold) instead of calling the owner, so the copy drifts from it on
+    spelling, anchoring, case and file-versus-directory. The copy is always
+    plausible beside the owner, and a fix of one consumer leaves its siblings.
+    Screen: before writing a marker, pattern, bound or normaliser, grep the
+    tree for its literal and for the matcher that applies it; does a module
+    already own it, and does this caller route through that module? Then list
+    the other callers that hold their own copy and fold them or say why not.
+    Census: not countable yet. Enforcer: none: judgment-only. A scan cannot
+    tell a copied rule from a coincidental literal without reading what the
+    value feeds. Instances and dates: `HISTORY.md`.
 
 </important>
 
