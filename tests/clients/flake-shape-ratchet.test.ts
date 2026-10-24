@@ -326,6 +326,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"createLSPClient wraps the language-server child process; the registry's spawn bookkeeping is the subject",
 		},
+	// 2026-10-24 (#1712 slice 2): the same real classic TypeScript server, now
+	// driven through the rename and watched-files paths; the stub is the same
+	// tool-installation boundary as its cascade sibling above.
+	"in-process-mock:clients/lsp/crossfile-classic-ts-live.test.ts::clients/installer/index":
+		{
+			detector: "in-process-mock",
+			reason:
+				"tool installation and discovery are the host boundary; the stub hands the real typescript-language-server wrapper and a classic compiler to the real launcher, service, client and rename/watched-files paths",
+		},
 	// 2026-10-14 (#4346): the ast-grep native addon's load is the host
 	// boundary, and `loadAstGrepNapiSync` is its only seam; no host lane
 	// lacks the addon, so the fail-closed record has no real driver.

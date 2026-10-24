@@ -111,11 +111,24 @@ vi.mock("../clients/observed-mutation-sources.js", async (importOriginal) => {
 });
 
 import { CacheManager } from "../clients/cache-manager.js";
+import {
+	type DiskChange,
+	subscribeDiskChange,
+} from "../clients/disk-changes.js";
+import { HOOK_WALL_BUDGET_MS } from "../clients/hook-budgets.js";
 import extension from "../index.js";
+import { getLSPService, resetLSPService } from "../clients/lsp/capabilities.js";
+import { configureLspServiceLifecycle } from "../clients/lsp/service-singleton.js";
+import {
+	resetWorkspaceDiagnosticsCacheSession,
+	workspaceFileCreatedAtFor,
+} from "../clients/lsp/workspace-diagnostics-session.js";
 import { resetObservedMutationNet } from "../clients/observed-mutation.js";
-import { normalizeFilePath } from "../clients/path-utils.js";
+import { normalizeFilePath, normalizeMapKey } from "../clients/path-utils.js";
+import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { readChangesSince } from "../clients/project-changes.js";
 import { ReadGuard } from "../clients/read-guard.js";
+import { makeLspServiceDouble } from "./support/lsp-service-double.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
@@ -216,5 +229,126 @@ describe("#2465 round 2: the observed-mutation settled sweep runs under --no-rea
 				.filter((entry) => entry.epoch !== undefined)
 				.every((entry) => entry.hasLineage),
 		).toBe(true);
+	});
+});
+
+/**
+ * #4535 slice 3: the same sweep is the settled-sweep detector (D4). Before it
+ * published, a swept change reached the mutation bridge only: the language
+ * servers kept the pre-change bytes and the diagnostics cache kept serving the
+ * findings that depended on the file. The recurrence is the audit's "the settled
+ * sweep's replays never reach LSP, dispatch or the graph" (#4535, first
+ * comment), which no test could see because no consumer was listed against the
+ * detector.
+ */
+describe("#4535 slice 3: the settled sweep publishes what it finds", () => {
+	let tmp: string;
+	let prevDataDir: string | undefined;
+	const cleanups: Array<() => void> = [];
+	const primaries: Array<{ paths: string[]; drainMs: number }> = [];
+	// The publish is detached from the settle; the language server's primary
+	// send is its last observable step, so the case waits on that, not on a timer.
+	let primarySent: () => void = () => undefined;
+	let primaryReached: Promise<void>;
+
+	beforeEach(async () => {
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4535-sweep-"));
+		prevDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(tmp, "data");
+		resetObservedMutationNet();
+		replayedProducerEntries.length = 0;
+		primaries.length = 0;
+		primaryReached = new Promise<void>((resolve) => {
+			primarySent = resolve;
+		});
+		// The case before this one left its session registered as the primary, so
+		// this case's session would be classified a concurrent secondary and its
+		// `agent_settled` skipped.
+		_resetSessionLifecycleForTests();
+		resetWorkspaceDiagnosticsCacheSession(0);
+		resetLSPService();
+		const service = makeLspServiceDouble({
+			getOpenDocumentPaths: () => [normalizeMapKey(path.join(tmp, "swept.ts"))],
+			getTrackedContent: () => ({ hash: "the-bytes-the-server-holds" }),
+			resyncHeldPrimaries: async (
+				paths: readonly string[],
+				drainMs: number,
+			) => {
+				primaries.push({ paths: [...paths], drainMs });
+				primarySent();
+				return { sent: paths.length, drained: true };
+			},
+			resyncGitChangedFiles: async () => new Map<string, string>(),
+		});
+		configureLspServiceLifecycle<Record<string, unknown>>({
+			create: () => service,
+			beforeReset: () => undefined,
+			destroy: async () => undefined,
+		});
+		getLSPService();
+	});
+
+	afterEach(() => {
+		for (const cleanup of cleanups.splice(0)) cleanup();
+		resetLSPService();
+		_resetSessionLifecycleForTests();
+		if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+		else process.env.PILENS_DATA_DIR = prevDataDir;
+		resetObservedMutationNet();
+		removeTempDirSync(tmp);
+	});
+
+	it("tells the language server and the diagnostics cache about a file nothing explains", async () => {
+		const published: DiskChange[] = [];
+		cleanups.push(
+			subscribeDiskChange("sweep-4535-observer", (change) => {
+				published.push(change);
+			}),
+		);
+		const pi = createPiMock({ "no-read-guard": true, "no-lsp": true });
+		extension(pi.asExtensionAPI());
+		const ctx = makeCtx({ cwd: tmp, sessionId: "s-4535-sweep" });
+		await pi.emit("session_start", { reason: "startup" }, ctx);
+		const filePath = path.join(tmp, "swept.ts");
+		fs.writeFileSync(filePath, "export const a = 1;\n");
+		await pi.emit(
+			"tool_call",
+			{ toolName: "read", input: { path: filePath } },
+			ctx,
+		);
+
+		// The first settle only seeds the baseline: nothing drifted, nothing to say.
+		await pi.emit("agent_settled", {}, ctx);
+		expect(published.filter((c) => c.origin === "settled-sweep")).toEqual([]);
+
+		fs.writeFileSync(filePath, "export const a = 2;\nexport const b = 3;\n");
+		await pi.emit("agent_settled", {}, ctx);
+		await primaryReached;
+		expect(published.filter((c) => c.origin === "settled-sweep")).toHaveLength(
+			1,
+		);
+
+		const [change] = published.filter((c) => c.origin === "settled-sweep");
+		const key = normalizeMapKey(filePath);
+		expect(change).toMatchObject({
+			root: normalizeMapKey(tmp),
+			kind: "observed",
+			// The mutation bridge already recorded this path; a second allocation
+			// would bump it twice.
+			seq: 0,
+			paths: [key],
+		});
+		// The language server consumer sent the stale held document to a primary.
+		expect(primaries).toEqual([
+			{ paths: [key], drainMs: HOOK_WALL_BUDGET_MS.agent_settled },
+		]);
+		// The diagnostics cache refuses the entries that depend on the path.
+		expect(
+			workspaceFileCreatedAtFor(
+				() => false,
+				() => true,
+				(creation) => creation.path === key,
+			),
+		).toBe(change.at);
 	});
 });

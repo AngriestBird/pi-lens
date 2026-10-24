@@ -111,6 +111,13 @@ let pendingExec = null;
 // message-arrival timing.
 let deferredApplyEdit = null;
 
+// #4801: "FAKE_LSP_HANG_PROJECT_INFO" hangs the tsserver `projectInfo` request
+// (see the advertised commands and the executeCommand branch below).
+const HANG_PROJECT_INFO = ["1", "cancel"].includes(
+	process.env.FAKE_LSP_HANG_PROJECT_INFO ?? "",
+);
+let hungProjectInfoId = null;
+
 // #2450 review round 2 (F2): the target line/columns/replacement text are
 // overridable via a second `arguments[1]` object so callers can exercise a real
 // non-{1,1} range - a fixed line-0 edit made every caller's "real range" collide
@@ -619,12 +626,38 @@ function send(msg) {
 	process.stdout.write(encode(msg));
 }
 
+// #4758: the settings a client delivers, read off the wire. With
+// FAKE_LSP_TRACE_CONFIG=1 the trace file gets one line each for the
+// initializationOptions, a didChangeConfiguration payload, and (when
+// FAKE_LSP_PULL_SECTIONS is a JSON array of section names) the client's answer
+// to a `workspace/configuration` request the server sends after `initialized`.
+const CONFIG_PULL_ID = "fake-config-pull";
+function traceConfig(what) {
+	if (process.env.FAKE_LSP_TRACE_CONFIG !== "1") return;
+	if (!process.env.FAKE_LSP_TRACE_FILE) return;
+	try {
+		fs.appendFileSync(process.env.FAKE_LSP_TRACE_FILE, `${what}\n`);
+	} catch {}
+}
+
 function handle(raw) {
 	let data;
 	try {
 		data = JSON.parse(raw);
 	} catch {
 		return;
+	}
+	if (data.id === CONFIG_PULL_ID && data.method === undefined) {
+		traceConfig(`config-pull-answer ${JSON.stringify(data.result ?? null)}`);
+		return;
+	}
+	if (data.method === "initialize") {
+		traceConfig(
+			`init-options ${JSON.stringify(data.params?.initializationOptions ?? null)}`,
+		);
+	}
+	if (data.method === "workspace/didChangeConfiguration") {
+		traceConfig(`config-push ${JSON.stringify(data.params?.settings ?? null)}`);
 	}
 	if (process.env.FAKE_LSP_TRACE_FILE) {
 		const trace = (what) => {
@@ -680,6 +713,21 @@ function handle(raw) {
 		) {
 			trace(`echo-eligible ${data.method}`);
 		}
+	}
+
+	if (
+		process.env.FAKE_LSP_HANG_PROJECT_INFO === "cancel" &&
+		data.method === "$/cancelRequest" &&
+		hungProjectInfoId !== null &&
+		data.params?.id === hungProjectInfoId
+	) {
+		send({
+			jsonrpc: "2.0",
+			id: hungProjectInfoId,
+			error: { code: -32800, message: "cancelled" },
+		});
+		hungProjectInfoId = null;
+		return;
 	}
 
 	// Initialize handshake. FAKE_LSP_IGNORE_INITIALIZE simulates a hung server
@@ -835,6 +883,12 @@ function handle(raw) {
 							"fake.applyEdit",
 							"fake.applyEditDeferred",
 							"fake.releaseDeferredApplyEdit",
+							// #4801: the tsserver escape hatch, whose `projectInfo` request
+							// the server accepts and never answers. "1" ignores a cancel for
+							// it; "cancel" answers the cancel with RequestCancelled. Off by
+							// default so the advertised list the other suites pin does not
+							// move.
+							...(HANG_PROJECT_INFO ? ["typescript.tsserverRequest"] : []),
 						],
 					},
 					// #3310: `FAKE_LSP_NO_DIAGNOSTIC_PROVIDER=1` advertises NO pull
@@ -885,6 +939,18 @@ function handle(raw) {
 
 	// Ignore notifications without id
 	if (data.method === "initialized") {
+		if (process.env.FAKE_LSP_PULL_SECTIONS) {
+			send({
+				jsonrpc: "2.0",
+				id: CONFIG_PULL_ID,
+				method: "workspace/configuration",
+				params: {
+					items: JSON.parse(process.env.FAKE_LSP_PULL_SECTIONS).map(
+						(section) => ({ section }),
+					),
+				},
+			});
+		}
 		if (SHOW_MESSAGES.length > 0 && !SHOW_MESSAGES_AFTER_FIRST_PUBLISH) {
 			scheduleShowMessages();
 		}
@@ -1454,6 +1520,16 @@ function handle(raw) {
 	// result once the client has responded (so tests are race-free).
 	if (data.method === "workspace/executeCommand") {
 		const cmd = data.params?.command;
+		// #4801: accepted, never answered; a `$/cancelRequest` for it is
+		// ignored, like a wedged server. The trace file shows the cancel.
+		if (
+			HANG_PROJECT_INFO &&
+			cmd === "typescript.tsserverRequest" &&
+			data.params?.arguments?.[0] === "projectInfo"
+		) {
+			hungProjectInfoId = data.id;
+			return;
+		}
 		if (cmd === "fake.applyEdit" || cmd === "fake.applyEditDeferred") {
 			const spec = buildApplyEditSpec(data.params?.arguments);
 			pendingExec = { execId: data.id, command: cmd };

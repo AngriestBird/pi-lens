@@ -9,6 +9,11 @@ import {
 	isDeferredThisSession,
 } from "../../clients/diagnostic-dispositions.js";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
+	__testing,
 	clearWidgetState,
 	markWidgetFileBlockersStale,
 	recordDiagnostics,
@@ -317,6 +322,53 @@ describe("lens_diagnostic_mark tool — line verification/reanchoring (#802)", (
 			/reanchored from line 2 to 3/,
 		);
 		expect((result.details as { line: number }).line).toBe(3);
+	});
+
+	// #4689 item 3: the tool is an entry point, so the path it hands the stores
+	// is the file's identity. The widget keys a record syntactically (#1020) and
+	// the pipeline recorded this finding under the identity; a mark typed with
+	// the link's spelling reached the store as that spelling, found no record,
+	// and left the footer row untagged (a recorded
+	// `widget-disposition-reconcile-fallback`).
+	// RECURRENCE GUARDED: a mark through the other spelling of a file the
+	// pipeline recorded never retired the widget row.
+	it("a mark typed through a link retires the widget row recorded under the file's identity", async (ctx) => {
+		const real = writeFile("real.ts", "const a = 1;\nconst target = bad();\n");
+		try {
+			fs.symlinkSync("real.ts", path.join(tmpDir, "link.ts"));
+		} catch (err) {
+			return ctx.skip(`cannot create symlinks here: ${String(err)}`);
+		}
+		resetDegradationLedger();
+		recordDiagnostics(fs.realpathSync(real), [
+			{
+				tool: "eslint",
+				rule: "no-bad",
+				message: "bad call",
+				line: 2,
+				severity: "error",
+				semantic: "blocking",
+			},
+		]);
+
+		const result = await run({
+			filePath: "link.ts",
+			line: 2,
+			message: "bad call",
+			rule: "no-bad",
+			tool: "eslint",
+			disposition: "false-positive",
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(__testing.getWidgetStateSnapshot().files).toHaveLength(1);
+		expect(__testing.getWidgetStateSnapshot().files[0]).toMatchObject({
+			blocking: 0,
+			errors: 0,
+		});
+		expect(getDegradationSummary().map((row) => row.kind)).not.toContain(
+			"widget-disposition-reconcile-fallback",
+		);
 	});
 
 	it("suppress with reanchor writes the comment above the CURRENT line, not the stale caller line", async () => {

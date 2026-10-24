@@ -3429,6 +3429,30 @@ describe("lens_diagnostics mode=full", () => {
 		expect(text).not.toMatch(/(?<![A-Za-z0-9_])lens_diagnostics/);
 	});
 
+	// #4682 F4 (PR #4809 verify round 2): `pi` registers this tool with no
+	// `host` in ctx, so `host: ctx.host ?? "pi"` decides which names a pi agent
+	// reads. Recurrence: flipping that default to "mcp" left the whole file
+	// green (165 passed), so nothing pinned the pi half of the same seam the
+	// MCP case above pins.
+	it("mode=full without refreshRunners names the pi tool when the caller names no host (#4682 F4)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		const tool = makeTool({}, lspService);
+		const result = await tool.execute(
+			"1",
+			{ mode: "full" },
+			new AbortController().signal,
+			null,
+			{ cwd: "/proj" },
+		);
+		const text = String(result.content[0].text);
+		expect(text).toContain("not run this call (quick mode)");
+		expect(text).toContain("lens_diagnostics mode=full");
+		expect(text).not.toContain("pilens_");
+	});
+
 	it("mode=full refreshRunners=cached triggers the analyzer fresh-fetch for the resolved cwd (#585)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {

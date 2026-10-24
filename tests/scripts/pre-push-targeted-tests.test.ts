@@ -745,6 +745,8 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		// These literal populations are independently reviewed against the live
 		// census; exercise the production selector on the real checkout inventory.
 		const productionScanners = [
+			// #4535: walks the production trees for every disk-change subscriber.
+			"tests/clients/disk-change-census-4535.test.ts",
 			"tests/clients/mutation-bridge-lineage-epoch-sweep.test.ts",
 			"tests/clients/session-state-conformance.test.ts",
 			"tests/config/glossary-synonym-sweep.test.ts",

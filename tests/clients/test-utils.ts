@@ -462,6 +462,68 @@ export function createPathIdentityFixture(
 	return fixture;
 }
 
+/** The cross-package link {@link plantPackageLink} adds to a fixture repo. */
+export interface PackageLinkFixture {
+	/** `repo/pkg-a`, a package with its own `package.json`. */
+	pkgA: string;
+	/** `repo/pkg-b`, a package with its own `package.json`. */
+	pkgB: string;
+	/** `repo/pkg-b/b.ts`, a regular file. */
+	realFile: string;
+	/** `repo/pkg-a/src/blink.ts` -> `../../pkg-b/b.ts`: a file in package A that is package B's. */
+	fileLink: string;
+	/** `repo/pkg-b/lib/lib.ts`, a regular file in a directory of package B. */
+	libFile: string;
+	/** `repo/pkg-a/lib` -> `../pkg-b/lib`: a directory in package A that is package B's. */
+	dirLink: string;
+	/** Set when this host cannot create symlinks; the cell must skip visibly. */
+	skipReason?: string;
+}
+
+/**
+ * The #4689 item 6 member of the symlinked-fixture family: a file link from
+ * one package into another. Walking up from the link's SPELLING reaches
+ * `pkg-a`'s markers, walking up from the file's identity reaches `pkg-b`'s,
+ * so a marker walk or a child cwd chosen from the spelling runs the wrong
+ * package's tool config (shape 1, divergent path keys). Kept out of
+ * {@link createPathIdentityFixture} so the cells that count the repo's files
+ * do not see two more packages.
+ */
+export function plantPackageLink(repo: string): PackageLinkFixture {
+	const pkgA = path.join(repo, "pkg-a");
+	const pkgB = path.join(repo, "pkg-b");
+	fs.mkdirSync(path.join(pkgA, "src"), { recursive: true });
+	fs.mkdirSync(pkgB, { recursive: true });
+	fs.writeFileSync(path.join(pkgA, "package.json"), "{}\n");
+	fs.writeFileSync(path.join(pkgB, "package.json"), "{}\n");
+	const realFile = path.join(pkgB, "b.ts");
+	fs.writeFileSync(realFile, "export const b = 1;\n");
+	const libFile = path.join(pkgB, "lib", "lib.ts");
+	fs.mkdirSync(path.dirname(libFile), { recursive: true });
+	fs.writeFileSync(libFile, "export const lib = 1;\n");
+	const fixture: PackageLinkFixture = {
+		pkgA,
+		pkgB,
+		realFile,
+		fileLink: path.join(pkgA, "src", "blink.ts"),
+		libFile,
+		dirLink: path.join(pkgA, "lib"),
+	};
+	try {
+		fs.symlinkSync(
+			path.join("..", "..", "pkg-b", "b.ts"),
+			fixture.fileLink,
+			"file",
+		);
+		fs.symlinkSync(path.join("..", "pkg-b", "lib"), fixture.dirLink, "dir");
+	} catch (err) {
+		fixture.skipReason = `cannot create symlinks here: ${
+			err instanceof Error ? err.message : String(err)
+		}`;
+	}
+	return fixture;
+}
+
 export function createTempFile(
 	baseDir: string,
 	relativePath: string,

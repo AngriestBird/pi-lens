@@ -844,9 +844,12 @@ export function findNearestMarkerRoot(
 	options: FindNearestMarkerRootOptions = {},
 ): string | null {
 	const boundaries = options.boundaries ?? [];
-	const homeDir = path.resolve(options.homeDir ?? os.homedir());
+	// #4689 item 6: both ends of the climb are path identities, so a directory
+	// reached through a link walks up its target's parents and a home that is
+	// itself a link still stops the walk.
+	const homeDir = realpathOrResolve(options.homeDir ?? os.homedir());
 	const markerPredicate = options.markerPredicate ?? (() => true);
-	let current = path.resolve(startDir);
+	let current = realpathOrResolve(startDir);
 	for (let depth = 0; depth < 64; depth++) {
 		if (isAtOrAboveHomeDir(current, homeDir)) return null;
 		if (
@@ -880,8 +883,9 @@ export function findNearestMarkerRootDetailed(
 	markers: readonly string[],
 	options: FindNearestMarkerRootDetailedOptions,
 ): MarkerRootResult {
-	const homeDir = path.resolve(options.homeDir ?? os.homedir());
-	let current = path.resolve(startDir);
+	// #4689 item 6: identities at both ends, as in `findNearestMarkerRoot`.
+	const homeDir = realpathOrResolve(options.homeDir ?? os.homedir());
+	let current = realpathOrResolve(startDir);
 	for (let depth = 0; depth < 64; depth++) {
 		if (isAtOrAboveHomeDir(current, homeDir))
 			return { kind: "not-found", reason: "home-ceiling" };
