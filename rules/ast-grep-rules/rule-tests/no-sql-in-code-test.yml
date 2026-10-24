@@ -27,6 +27,8 @@ valid:
   # \N is not an escape; JavaScript reads it as N.
   - 'runner.execute("\NSELECT * FROM " + source)'
   - 'runner.execute("-- note\NSELECT * FROM " + source)'
+  # A template with no substitution is constant SQL.
+  - 'db.execute(`SELECT * FROM users`)'
 invalid:
   - 'db.query("SELECT * FROM users WHERE id = " + id)'
   - 'db.query("DELETE FROM sessions WHERE token = " + token, [])'
@@ -66,6 +68,13 @@ invalid:
   - 'db.execute("\tDELETE FROM t WHERE id = " + id)'
   - 'db.execute("\r\nUPDATE users SET a = " + a)'
   - 'db.execute("-- user lookup\nSELECT * FROM users WHERE id = " + id)'
+  - 'db.execute("-- c\rSELECT * FROM t WHERE id = " + id)'
+  # A comment before the first argument is a named child of `arguments`.
+  - |-
+    db.execute(
+      // by id
+      `SELECT * FROM users WHERE id = ${id}`)
+  - 'db.execute(/* by id */ "SELECT * FROM users WHERE id = " + id)'
   # Not SQL, but it matches the sibling's `SELECT ... ${` arm;
   # ts_sql_injection_sink flags the same template.
   - 'queue.execute(`select ${id}`)'
