@@ -6431,9 +6431,6 @@ export async function runReadOnlyServerCommand(
 	} catch (err) {
 		if (err instanceof Error && err.message.startsWith("Timeout after")) {
 			abandon.abort();
-			// Settled by the abort itself, so this wait is bounded; it makes the
-			// busy count final before the caller sees the timeout.
-			await request;
 			return {
 				executed: false,
 				reason: `workspace/executeCommand timed out after ${timeoutMs}ms`,
