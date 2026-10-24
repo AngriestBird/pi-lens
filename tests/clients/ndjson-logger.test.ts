@@ -156,7 +156,12 @@ describe("createNdjsonLogger", () => {
 	});
 
 	it("bounds a wedged shutdown drain and records one degradation", async () => {
+		// Earlier cases call vi.resetModules(), so the static ledger import is a
+		// different module instance from the one index.js records into. Read the
+		// ledger through the same dynamic import as the code under test.
 		const { default: registerExtension } = await import("../../index.js");
+		const { getDegradationSummary: summaryNow } =
+			await import("../../clients/degradation-ledger.js");
 		const mock = createPiMock({ "lens-lsp": false });
 		registerExtension(mock.asExtensionAPI());
 		vi.spyOn(fs.promises, "appendFile").mockImplementation(
@@ -169,7 +174,7 @@ describe("createNdjsonLogger", () => {
 			{ type: "session_shutdown", reason: "quit" },
 			makeCtx({ cwd: tmpDir, sessionId: "shutdown-timeout-witness" }),
 		);
-		const rows = getDegradationSummary().filter(
+		const rows = summaryNow().filter(
 			(row) => row.kind === "hook-await-exceeded",
 		);
 		expect(rows).toHaveLength(1);
