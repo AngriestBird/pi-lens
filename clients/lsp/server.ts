@@ -154,6 +154,12 @@ export type LspRootFallback = {
 	requiresProjectRoot: boolean;
 	cause: "failed" | "unselected" | "none";
 	marker?: string;
+	/**
+	 * #4806: set for a server whose spawn is declined by a bounded search below
+	 * its root ({@link declinesProjectlessRoot}); the directory bound that
+	 * search stops at, so a reason about an absence can name the limit.
+	 */
+	searchBound?: number;
 };
 
 /**
@@ -173,7 +179,12 @@ export function describeRootFallback(
 	if (fallback.cause === "unselected") {
 		return `${fallback.serverName}: found ${fallback.marker} for this file but pi-lens did not select it as the project root (a test-fixture or git-ignored directory is never used as one), ${tail}`;
 	}
-	const none = `${fallback.serverName}: no project root found for this file (looked for ${fallback.rootMarkers.join(" / ")})`;
+	// #4806: only a declined spawn (`!hosted`) rests on the bounded search.
+	const bound =
+		!hosted && fallback.searchBound !== undefined
+			? `, including a bounded search of ${fallback.searchBound} directories below it`
+			: "";
+	const none = `${fallback.serverName}: no project root found for this file (looked for ${fallback.rootMarkers.join(" / ")}${bound})`;
 	return hosted
 		? `${none}; the server was started at the file's directory and may not have analysed it`
 		: none;
@@ -182,7 +193,12 @@ export function describeRootFallback(
 /** Resolve a server identity cwd through the shared tool-cwd seam. */
 export async function resolveLspServerCwd(
 	server: Pick<LSPServerInfo, "id" | "root" | "rootMarkers"> &
-		Partial<Pick<LSPServerInfo, "name" | "requiresProjectRoot">>,
+		Partial<
+			Pick<
+				LSPServerInfo,
+				"name" | "requiresProjectRoot" | "spawnNeedsProjectFile"
+			>
+		>,
 	filePath: string,
 	sessionCwd: string,
 	onRootFailure?: (reason: string) => void,
@@ -253,6 +269,9 @@ export async function resolveLspServerCwd(
 						? "unselected"
 						: "none",
 				...(refusedMarker !== undefined && { marker: refusedMarker }),
+				...(server.spawnNeedsProjectFile === true && {
+					searchBound: PROJECT_FILE_SEARCH_MAX_DIRS,
+				}),
 			});
 		}
 		return fallbackCwd?.cwd;
