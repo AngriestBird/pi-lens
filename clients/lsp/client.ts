@@ -7796,10 +7796,7 @@ async function safeSendRequest<T>(
 			try {
 				if (!released) return (await send()) as T;
 				const reply = await Promise.race([send(), released]);
-				if (reply === RELEASED_ON_ABORT) {
-					if (settlement) settlement.cancelled = true;
-					return undefined;
-				}
+				if (reply === RELEASED_ON_ABORT) return undefined;
 				return reply as T;
 			} catch (err) {
 				if (isCancellationError(err)) {
