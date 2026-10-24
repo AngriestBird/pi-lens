@@ -251,6 +251,13 @@ export function resolveToolCwd(
 	file: string,
 	ctx: ToolCwdContext,
 ): ToolCwdResolution {
+	if (ctx.serverRoot) {
+		const rootPath = isWindowsPath(ctx.serverRoot) ? path.win32 : path;
+		const serverRoot = rootPath.resolve(ctx.serverRoot);
+		if (!ctx.suppressTelemetry)
+			emitResolution(kind, tool, serverRoot, "server-root");
+		return { cwd: serverRoot };
+	}
 	const dispatchRoot = path.resolve(ctx.cwd ?? process.cwd());
 	// #4689 item 6: the child's project is the one the file LIVES in. A link
 	// spelling (`pkg-a/src/blink.ts` -> `pkg-b/b.ts`) climbs `pkg-a`'s parents
@@ -262,13 +269,6 @@ export function resolveToolCwd(
 	const homeDir = ctx.homeDir ?? os.homedir();
 	const homeCeiling = realpathOrResolve(homeDir);
 	const insideDispatch = isUnderDir(absoluteFile, dispatchRoot);
-	if (ctx.serverRoot) {
-		const rootPath = isWindowsPath(ctx.serverRoot) ? path.win32 : path;
-		const serverRoot = rootPath.resolve(ctx.serverRoot);
-		if (!ctx.suppressTelemetry)
-			emitResolution(kind, tool, serverRoot, "server-root");
-		return { cwd: serverRoot };
-	}
 	const markers = markersFor(kind, tool, absoluteFile, ctx);
 	const markerResult = markers.length
 		? findMarkerRoot(
