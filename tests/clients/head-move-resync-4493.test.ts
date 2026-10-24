@@ -315,6 +315,33 @@ async function textSince(
 		.filter((line) => line.startsWith("text "));
 }
 
+/**
+ * Send everything waiting on `repo`'s client watch queue now, so a later
+ * window starts empty. The round trip first lets the announcements a touch
+ * started (promise chains, no timers) enqueue; the out-of-band notify then
+ * flushes the queue synchronously and clears its debounce timer.
+ */
+async function drainWatchQueue(repo: Repo): Promise<void> {
+	await wire(repo, "main.ts");
+	(await lspService()).notifyOutOfBandFileChanges([
+		{ filePath: repo.file("lib/drain-marker.ts"), type: 2 },
+	]);
+	await wire(repo, "main.ts");
+}
+
+/**
+ * The `watched <uri> <type>` lines of each didChangeWatchedFiles notification
+ * in `lines`, one array per notification, in wire order.
+ */
+function watchedNotifications(lines: string[]): string[][] {
+	const batches: string[][] = [];
+	for (const line of lines) {
+		if (line === "recv workspace/didChangeWatchedFiles") batches.push([]);
+		else if (line.startsWith("watched ")) batches.at(-1)?.push(line);
+	}
+	return batches;
+}
+
 const textLine = (repo: Repo, name: string) =>
 	`text ${pathToFileURL(repo.file(name)).href} ${sha(fs.readFileSync(repo.file(name), "utf8"))}`;
 
@@ -597,19 +624,33 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		repo.git("checkout", "-q", "A");
 		await hold(repo, ["lib/types.ts", "main.ts"]);
 		const s = session(repo, "s-unheld");
+		const uri = (name: string) => pathToFileURL(repo.file(name)).href;
+		// hold()'s opens queue watched events on the client's watch queue,
+		// flushed after WATCH_DEBOUNCE_MS; the move's notification flushes the
+		// same queue and would carry them. Send them now, before the mark, so
+		// the window holds only the move's own events (review r1 F1, seed 202).
+		await drainWatchQueue(repo);
 		const mark = (await wire(repo, "main.ts")).length;
 
 		await s.bash("git checkout B", () => repo.git("checkout", "-q", "B"));
 
 		const sent = (await wire(repo, "main.ts")).slice(mark);
-		const uri = (name: string) => pathToFileURL(repo.file(name)).href;
 		expect(sent).toContain(`watched ${uri("lib/unheld.ts")} 2`);
 		expect(sent).toContain(`watched ${uri("lib/gone.ts")} 3`);
-		// The held document goes out as its bytes, never as a watched event too.
+		// The held document goes out as its bytes, never inside the unheld
+		// phase's watched-files notification. Only that notification is judged:
+		// the earlier hold()'s debounced announce flush (WATCH_DEBOUNCE_MS) and
+		// the resync's own Created for the held file are separate notifications
+		// that land inside this window depending on test order (review r1 F1,
+		// seed 202).
 		expect(sent).toContain(textLine(repo, "lib/types.ts"));
-		expect(
-			sent.filter((line) => line.startsWith(`watched ${uri("lib/types.ts")}`)),
-		).toEqual([]);
+		const notifications = watchedNotifications(sent);
+		const unheldPhase = notifications.filter((lines) =>
+			lines.includes(`watched ${uri("lib/unheld.ts")} 2`),
+		);
+		expect(unheldPhase).toEqual([
+			[`watched ${uri("lib/gone.ts")} 3`, `watched ${uri("lib/unheld.ts")} 2`],
+		]);
 		const rows = await settledHeadMovedRows(repo, 1);
 		expect(rows[0]?.metadata).toMatchObject({ held: 1, unheld: 2 });
 	}, 30_000);
