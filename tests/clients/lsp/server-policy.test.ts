@@ -37,8 +37,6 @@ vi.mock("../../../clients/lsp/launch.js", () => ({
 	admitProjectSuppliedTsserver: (tsserverPath: string) => tsserverPath,
 }));
 
-// Suppress sync disk I/O from logLatency — prevents timeout under full-suite load
-
 vi.mock("../../../clients/sessionstart-logger.js", () => ({
 	logSessionStart,
 }));
