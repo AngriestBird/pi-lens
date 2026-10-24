@@ -77,6 +77,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import { scratchHomeEnv } from "./lib/scratch-home-env.mjs";
 import { McpStdioClient } from "./lib/mcp-stdio-client.mjs";
 import { parseTable } from "./lib/md-matrix.mjs";
 import { parseNdjsonEntries } from "./lib/latency-log-phases.mjs";
@@ -1917,9 +1918,7 @@ export function scratchEnv(scratchRoot, extra = {}) {
 				.filter((key) => process.env[key] !== undefined)
 				.map((key) => [key, process.env[key]]),
 		),
-		HOME: home,
-		USERPROFILE: home,
-		PI_LENS_HOME: path.join(home, ".pi-lens"),
+		...scratchHomeEnv(home, path.join(home, ".pi-lens")),
 		PILENS_DATA_DIR: path.join(home, ".pilens-data"),
 		PI_LENS_INSTALL_LOG: path.join(home, ".pi-lens", "install.log"),
 		npm_config_cache: path.join(scratchRoot, "npm-cache"),
@@ -1999,6 +1998,9 @@ export async function awaitWarmLog(
 export const PINNED_ENV_KEYS = Object.freeze([
 	"HOME",
 	"USERPROFILE",
+	"XDG_CONFIG_HOME",
+	"XDG_CACHE_HOME",
+	"XDG_DATA_HOME",
 	"PI_LENS_HOME",
 	"PILENS_DATA_DIR",
 	"PI_LENS_INSTALL_LOG",
