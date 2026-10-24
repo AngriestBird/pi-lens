@@ -2920,6 +2920,23 @@ export const DenoServer: LSPServerInfo = {
 	},
 };
 
+/**
+ * The settings pi-lens hands pyright and basedpyright.
+ *
+ * openFilesOnly: true — analyse only open files rather than the full workspace.
+ * Avoids the 5–14 s cold-start on large projects caused by workspace-wide
+ * analysis on startup. Deep type checking is still available via the standalone
+ * pyright CLI runner that runs in parallel.
+ */
+export function pyrightInitialization(
+	pythonPath?: string,
+): Record<string, unknown> {
+	return {
+		...(pythonPath ? { pythonPath } : {}),
+		openFilesOnly: true,
+	};
+}
+
 export const PythonServer: LSPServerInfo = {
 	id: "python",
 	idleEviction: "transparent",
@@ -2942,15 +2959,6 @@ export const PythonServer: LSPServerInfo = {
 		const toolEnvironment = await getToolEnvironment();
 		const env = augmentPythonEnvironment(toolEnvironment, pythonEnvironment);
 		let source: "direct" | "managed" | "package-manager" = "direct";
-
-		// openFilesOnly: true — analyse only open files rather than the full workspace.
-		// Avoids the 5–14 s cold-start on large projects caused by workspace-wide
-		// analysis on startup. Deep type checking is still available via the standalone
-		// pyright CLI runner that runs in parallel.
-		const pyrightInit = (pythonPath?: string): Record<string, unknown> => ({
-			...(pythonPath ? { pythonPath } : {}),
-			openFilesOnly: true,
-		});
 
 		// Project ownership outranks checker preference: exhaust explicit project
 		// candidates before a bare command can resolve to pi-lens's managed bin or
@@ -2980,7 +2988,7 @@ export const PythonServer: LSPServerInfo = {
 			return {
 				process: projectPyright.process,
 				source: projectPyright.source,
-				initialization: pyrightInit(pythonEnvironment?.pythonPath),
+				initialization: pyrightInitialization(pythonEnvironment?.pythonPath),
 			};
 		}
 
@@ -3017,7 +3025,7 @@ export const PythonServer: LSPServerInfo = {
 			return {
 				process: pathPyright.process,
 				source: pathPyright.source,
-				initialization: pyrightInit(pythonEnvironment?.pythonPath),
+				initialization: pyrightInitialization(pythonEnvironment?.pythonPath),
 			};
 		}
 
@@ -3061,7 +3069,7 @@ export const PythonServer: LSPServerInfo = {
 		return {
 			process: resolved.process,
 			source,
-			initialization: pyrightInit(pythonEnvironment?.pythonPath),
+			initialization: pyrightInitialization(pythonEnvironment?.pythonPath),
 		};
 	},
 };
