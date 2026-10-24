@@ -23,11 +23,18 @@
 //
 // WHAT COUNTS AS THE QUOTED BRANCH RUN. An edited existing file: a quoted
 // `gh workflow run <file> --ref <branch>` with a run id within
-// RUN_ID_WINDOW_LINES. An ADDED file (no merge-base image): that form, or a
-// line naming the file plus a run URL (`.../actions/runs/<id>`) or
-// `gh run view <id>` in the window. GitHub registers `workflow_dispatch` only
-// from the default branch, so the dispatch of a new file answers 404 and its
-// branch run can only come from a temporary push trigger (#4756).
+// RUN_ID_WINDOW_LINES. An ADDED file (the base image is `null`: the reader
+// confirmed the file is absent on the base): that form, or ONE line that names
+// the file and carries a run of THIS repository, either a
+// `https://github.com/<owner>/<repo>/actions/runs/<id>` URL or
+// `gh run view <id>` (with no `-R`/`--repo`, or one naming this repository).
+// GitHub registers `workflow_dispatch` only from the default branch, so the
+// dispatch of a new file answers 404 and its branch run can only come from a
+// temporary push trigger (#4756). The added form binds name and run on one
+// line because it has no command to bind them: a window would let any nearby
+// run URL, another workflow's or another repository's, vouch for the file.
+// `repository` is the `owner/repo` the caller knows (origin locally, the base
+// repository on the event path); without it the added form is not accepted.
 //
 // The reader is dependency-free on purpose: the PR-body lane runs
 // `node scripts/check-pr-body.mjs` with no `npm install` (it installs only
@@ -268,16 +275,23 @@ const namesToken = (line, name) => {
 // hidden even though the reader sees the text after it.
 const blankComments = (body) => blankHtmlComments(body);
 
-// An ADDED dispatch-only workflow cannot be dispatched from its branch: GitHub
-// registers `workflow_dispatch` only for a file on the default branch, so
-// `gh workflow run <file> --ref <branch>` answers 404 (#4756). Its branch run
-// can only come from a temporary push trigger, so for an added file (no base
-// image) a line naming the file plus a run URL or `gh run view <id>` in the
-// window counts too. An edited existing file keeps the dispatch rule: there the
-// dispatch works and the stricter form is available.
-const ADDED_RUN_ID = /(?:\/actions\/runs\/|\bgh\s+run\s+view\s+)(\d{8,})/i;
+// The added-file form (see the header): one line, this repository's run.
+const RUN_URL =
+	/https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/actions\/runs\/\d{8,}/gi;
+const GH_RUN_VIEW = /\bgh\s+run\s+view\b[^\n]*?\b\d{8,}\b/i;
+const REPO_FLAG = /(?:^|\s)(?:-R|--repo)(?:=|\s+)(\S+)/;
 
-function quotesRunId(lines, file, added) {
+function quotesRepositoryRun(line, repository) {
+	if (!repository) return false;
+	const want = repository.toLowerCase();
+	for (const match of line.matchAll(RUN_URL))
+		if (`${match[1]}/${match[2]}`.toLowerCase() === want) return true;
+	if (!GH_RUN_VIEW.test(line)) return false;
+	const flag = REPO_FLAG.exec(line)?.[1];
+	return flag === undefined || unquote(flag).toLowerCase() === want;
+}
+
+function quotesRunId(lines, file, added, repository) {
 	const names = namesOf(file);
 	return lines.some((line, index) => {
 		const argument = /\bgh\s+workflow\s+run\s+(\S+)/.exec(line)?.[1];
@@ -285,16 +299,17 @@ function quotesRunId(lines, file, added) {
 			argument !== undefined &&
 			names.includes(unquote(argument)) &&
 			/--ref\b/.test(line);
-		const runId = dispatched
-			? RUN_ID
-			: added && names.some((name) => namesToken(line, name))
-				? ADDED_RUN_ID
-				: null;
-		return (
-			runId !== null &&
+		if (
+			dispatched &&
 			lines
 				.slice(index, index + RUN_ID_WINDOW_LINES)
-				.some((candidate) => runId.test(candidate))
+				.some((candidate) => RUN_ID.test(candidate))
+		)
+			return true;
+		return (
+			added &&
+			names.some((name) => namesToken(line, name)) &&
+			quotesRepositoryRun(line, repository)
 		);
 	});
 }
@@ -361,13 +376,17 @@ export function isCommentOrWhitespaceOnlyEdit(before, after) {
  * workflow has no `workflow_dispatch` trigger (it cannot be run on a branch at
  * all), or the edit is comments and blank lines only. `readWorkflow(file)`
  * returns the post-image text, or `null` for a file the PR deleted;
- * `readBaseWorkflow(file)` the merge-base image, or `null` for an added file.
+ * `readBaseWorkflow(file)` the merge-base image, `null` ONLY for a reader that
+ * confirmed the file is absent on the base (an added file), and `""` when the
+ * base is unknown; the default is unknown, which is strict. `repository` is
+ * `owner/repo`, which scopes an added file's run URL.
  */
 export function evaluateWorkflowRunEvidence({
 	changedFiles = [],
 	body = "",
 	readWorkflow,
-	readBaseWorkflow = () => null,
+	readBaseWorkflow = () => "",
+	repository,
 }) {
 	const lines = blankComments(body).split(/\r?\n/);
 	const errors = [];
@@ -377,7 +396,8 @@ export function evaluateWorkflowRunEvidence({
 		if (text === null) continue;
 		const verdict = classifyWorkflowEdit(text, file);
 		if (verdict.executes) continue;
-		if (quotesRunId(lines, file, readBaseWorkflow(file) === null)) continue;
+		if (quotesRunId(lines, file, readBaseWorkflow(file) === null, repository))
+			continue;
 		const name = file.slice(file.lastIndexOf("/") + 1);
 		const evidence = `run \`gh workflow run ${name} --ref <branch>\` and quote the command with its run id`;
 		const declared = declaresUnaffected(lines, file);

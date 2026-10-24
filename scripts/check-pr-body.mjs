@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import { parseOwnerRepoFromGitRemote } from "./ci-verdict.mjs";
 import {
 	blankMarkdown,
 	blankHtmlComments,
@@ -3138,9 +3139,13 @@ export function resolvePrBase(cwd = process.cwd(), git = gitExecFileSync) {
 }
 
 /**
- * The `existsOnBase` reader for `lintDetectionSection`: `true` when the path is
- * a file on the PR's base, `false` when it is not, `null` when the base cannot
- * be resolved. The base resolves once, on first use.
+ * The `existsOnBase` reader for `lintDetectionSection` and the workflow
+ * run-evidence rule: `true` when the path is a file on the PR's base, `false`
+ * only when `git ls-tree` CONFIRMS it is absent (empty output) or not a file,
+ * `null` when the base cannot be resolved or the read fails. A failed read is
+ * unknown, never absent (#4756 F1): the workflow rule relaxes for an absent
+ * file, and both consumers read `null` as unresolved, which is an error. The
+ * base resolves once, on first use.
  */
 export function baseFileReader(cwd = process.cwd(), git = gitExecFileSync) {
 	let base;
@@ -3148,17 +3153,22 @@ export function baseFileReader(cwd = process.cwd(), git = gitExecFileSync) {
 		base ??= resolvePrBase(cwd, git) ?? false;
 		if (!base) return null;
 		try {
-			return (
-				String(
-					git(["cat-file", "-t", `${base}:${path}`], {
-						cwd,
-						encoding: "utf8",
-						stdio: ["ignore", "pipe", "ignore"],
-					}),
-				).trim() === "blob"
-			);
+			// `ls-tree <base> -- dir/` lists the directory's entries, so the entry
+			// must be the queried path itself and a blob.
+			return String(
+				git(["ls-tree", "-z", base, "--", path], {
+					cwd,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				}),
+			)
+				.split("\0")
+				.some((entry) => {
+					const match = /^\d+ blob \S+\t([\s\S]*)$/.exec(entry);
+					return match !== null && match[1] === path;
+				});
 		} catch {
-			return false;
+			return null;
 		}
 	};
 }
@@ -4492,7 +4502,10 @@ export async function lintPullRequestEvent(
 	if (coverage.errors.length) result.valid = false;
 	for (const advisory of coverage.advisories)
 		console.warn(`::notice::${advisory}`);
-	const workflowEvidence = lintWorkflowRunEvidence(body, { diff });
+	const workflowEvidence = lintWorkflowRunEvidence(body, {
+		diff,
+		repository: process.env.GITHUB_REPOSITORY,
+	});
 	result.errors.push(...workflowEvidence);
 	if (workflowEvidence.length) result.valid = false;
 	if (result.valid) {
@@ -4593,6 +4606,24 @@ function hookAnchorsFromDiff(diff, map, options) {
 	return { fired, notes };
 }
 
+// `owner/repo` of the checkout's `origin`, or `undefined` when it has none or
+// it is not a GitHub URL. The local twin of GITHUB_REPOSITORY on the event path.
+function originRepository(cwd) {
+	try {
+		return (
+			parseOwnerRepoFromGitRemote(
+				gitExecFileSync(["remote", "get-url", "origin"], {
+					cwd,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				}),
+			) ?? undefined
+		);
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * #3085 gap 1: a PR that edits a workflow no pull request executes must quote
  * the branch run (`gh workflow run <file> --ref <branch>`) with its run id.
@@ -4604,7 +4635,7 @@ function hookAnchorsFromDiff(diff, map, options) {
  */
 export function lintWorkflowRunEvidence(
 	body,
-	{ diff, cwd = process.cwd() } = {},
+	{ diff, cwd = process.cwd(), repository } = {},
 ) {
 	if (!diff) return [];
 	const unreadable = [];
@@ -4618,6 +4649,7 @@ export function lintWorkflowRunEvidence(
 	const errors = evaluateWorkflowRunEvidence({
 		changedFiles: parseChangedFiles(diff),
 		body,
+		repository: repository ?? originRepository(cwd),
 		readBaseWorkflow: (file) => {
 			if (!mergeBase) return "";
 			if (existsOnBase(file) === false) return null;
