@@ -576,6 +576,44 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		});
 	}, 30_000);
 
+	// Recurrence: #4742. The move's delta named lib/unheld.ts and lib/gone.ts,
+	// no server held either, and the resync skipped both: a server that had read
+	// lib/unheld.ts for an importer kept its old bytes for the server's life
+	// (pyright flagged every attribute of the filled module as unknown). A
+	// closed file reaches a server only as an exact-URI watched-files event.
+	it("sends the delta's unheld paths as watched-files events (Changed, or Deleted when gone) and the held one as a document (#4742)", async () => {
+		const repo = await makeRepo(
+			{
+				"lib/types.ts": TYPES_A,
+				"main.ts": MAIN,
+				"lib/unheld.ts": "",
+				"lib/gone.ts": "export {};\n",
+			},
+			{ "lib/types.ts": TYPES_B, "lib/unheld.ts": "export {};\n" },
+		);
+		repo.git("checkout", "-q", "B");
+		repo.git("rm", "-q", "lib/gone.ts");
+		repo.git("commit", "-qm", "B deletes gone");
+		repo.git("checkout", "-q", "A");
+		await hold(repo, ["lib/types.ts", "main.ts"]);
+		const s = session(repo, "s-unheld");
+		const mark = (await wire(repo, "main.ts")).length;
+
+		await s.bash("git checkout B", () => repo.git("checkout", "-q", "B"));
+
+		const sent = (await wire(repo, "main.ts")).slice(mark);
+		const uri = (name: string) => pathToFileURL(repo.file(name)).href;
+		expect(sent).toContain(`watched ${uri("lib/unheld.ts")} 2`);
+		expect(sent).toContain(`watched ${uri("lib/gone.ts")} 3`);
+		// The held document goes out as its bytes, never as a watched event too.
+		expect(sent).toContain(textLine(repo, "lib/types.ts"));
+		expect(
+			sent.filter((line) => line.startsWith(`watched ${uri("lib/types.ts")}`)),
+		).toEqual([]);
+		const rows = await settledHeadMovedRows(repo, 1);
+		expect(rows[0]?.metadata).toMatchObject({ held: 1, unheld: 2 });
+	}, 30_000);
+
 	// Recurrence: review r1 F4's named output reads HEAD from the files git
 	// keeps. A reftable ref store (git 2.45+) keeps no loose or packed ref, so
 	// that read cannot answer; without the `git rev-parse` fallback the
