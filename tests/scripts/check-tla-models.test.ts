@@ -611,15 +611,17 @@ describe("entry guard order (#3920)", () => {
 });
 
 describe("main() caller wiring (#3927)", () => {
-	// Runs the real entry module over the real `formal/` corpus, with only the
-	// external `java` child and the jar checksum doubled. Returns what the run
-	// printed and set. #4714 F1: the caller-wiring cases pin the state-count
-	// gate's wiring (exit code, jump line, table load), which no unit test reaches.
+	// Runs the real entry module with only the external `java` child and the
+	// jar checksum doubled. `root` is the tree the entry is run from: the real
+	// repo for the pool-size case, and a temp copy (see `makeEntryRoot`) for the
+	// gate cases, so they never read the committed cost table (#4714 F7).
 	async function runEntry({
+		root = REPO_ROOT,
 		shard,
 		total,
 		tlcOutput = "",
 	}: {
+		root?: string;
 		shard: number;
 		total: number;
 		tlcOutput?: string;
@@ -631,7 +633,7 @@ describe("main() caller wiring (#3927)", () => {
 		fs.writeFileSync(stubJar, "stub jar; the checksum is doubled below");
 		cryptoState.digest = TLA_TOOLS.sha256;
 		tlcState.output = tlcOutput;
-		const scriptPath = path.join(REPO_ROOT, "scripts", "check-tla-models.mjs");
+		const scriptPath = path.join(root, "scripts", "check-tla-models.mjs");
 		const savedArgv = process.argv;
 		const savedExitCode = process.exitCode;
 		let exitCode: number | undefined;
@@ -658,7 +660,7 @@ describe("main() caller wiring (#3927)", () => {
 		process.exitCode = undefined;
 		try {
 			// A unique query re-evaluates the module body, so the production
-			// entry guard runs its private `main` over the real corpus.
+			// entry guard runs its private `main` over this root's corpus.
 			await import(
 				`${pathToFileURL(scriptPath).href}?caller-wiring=${Date.now()}-${Math.random()}`
 			);
@@ -685,15 +687,46 @@ describe("main() caller wiring (#3927)", () => {
 		return { logged, errors, exitCode };
 	}
 
+	// A temp tree with the checker's own script and its one import, two stub
+	// configs, and a fixture table: EditDuringGrace recorded at 136 and
+	// CarryOwed absent. Nothing here reads the committed table or corpus.
+	const RECORDED = "formal/late-aux-drain/EditDuringGrace.cfg";
+	const UNRECORDED = "formal/blocker-pending/CarryOwed.cfg";
+	function makeEntryRoot() {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-tla-root-"));
+		fs.mkdirSync(path.join(root, "scripts", "lib"), { recursive: true });
+		for (const rel of [
+			"scripts/check-tla-models.mjs",
+			"scripts/lib/test-shard-assignment.mjs",
+		]) {
+			fs.copyFileSync(path.join(REPO_ROOT, rel), path.join(root, rel));
+		}
+		for (const rel of [RECORDED, UNRECORDED]) {
+			const file = path.join(root, rel);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "\\* expect: pass\n\\* module: M\n");
+		}
+		fs.writeFileSync(
+			path.join(root, MODEL_COSTS_FILE),
+			JSON.stringify({
+				files: { [RECORDED]: 1.4, [UNRECORDED]: 5 },
+				states: { [RECORDED]: 136 },
+			}),
+		);
+		return {
+			root,
+			done: () => fs.rmSync(root, { recursive: true, force: true }),
+		};
+	}
+
 	// The shard that `--shard i/N` gives this one config. The cost table packs
 	// by LPT (`selectShard`), not by sorted position, so the index is searched
 	// with the same function `main` calls.
-	const configIndex = (rel: string) => {
-		const all = listModelConfigs(REPO_ROOT);
-		const costs = { root: REPO_ROOT, ...loadModelCosts(REPO_ROOT) };
+	function configIndex(root: string, rel: string) {
+		const all = listModelConfigs(root);
+		const costs = { root, ...loadModelCosts(root) };
 		const abs = all.find(
-			(config) =>
-				path.relative(REPO_ROOT, config).split(path.sep).join("/") === rel,
+			(config) => path.relative(root, config).split(path.sep).join("/") === rel,
 		);
 		if (abs === undefined) throw new Error(`${rel} is not under formal/`);
 		for (let index = 1; index <= all.length; index++) {
@@ -701,11 +734,8 @@ describe("main() caller wiring (#3927)", () => {
 				return { shard: index, total: all.length };
 		}
 		throw new Error(`no shard selects ${rel}`);
-	};
-	// Recorded in scripts/tla-model-costs.json with a count of 136.
-	const RECORDED = "formal/late-aux-drain/EditDuringGrace.cfg";
-	// Not in the recorded table, and expected to pass.
-	const UNRECORDED = "formal/blocker-pending/CarryOwed.cfg";
+	}
+
 	const PASS = "Model checking completed. No error has been found.\n";
 	const stats = (distinct: number) =>
 		`${distinct * 2} states generated, ${distinct} distinct states found, 0 states left on queue.\n`;
@@ -731,57 +761,75 @@ describe("main() caller wiring (#3927)", () => {
 	// Recurrence: #4714 F1. A count past 2x the recorded 136 must fail the run,
 	// name the config with its old and new counts, and set exit code 1.
 	it("fails the run and names the config when its distinct states pass 2x the recorded count", async () => {
-		const { logged, errors, exitCode } = await runEntry({
-			...configIndex(RECORDED),
-			tlcOutput: PASS + stats(300),
-		});
-		expect(errors, errors.join("\n")).toEqual([]);
-		expect(
-			logged.some(
-				(line) =>
-					line.startsWith(`ok   ${RECORDED}: `) &&
-					line.endsWith(", 300 distinct states)"),
-			),
-		).toBe(true);
-		expect(
-			logged.filter((line) => line.startsWith("STATE-COUNT JUMP")),
-		).toEqual([
-			expect.stringContaining(`STATE-COUNT JUMP ${RECORDED}: old count 136 `),
-		]);
-		expect(logged.find((l) => l.startsWith("STATE-COUNT JUMP"))).toContain(
-			"new count 300 ",
-		);
-		expect(exitCode).toBe(1);
+		const tree = makeEntryRoot();
+		try {
+			const { logged, errors, exitCode } = await runEntry({
+				root: tree.root,
+				...configIndex(tree.root, RECORDED),
+				tlcOutput: PASS + stats(300),
+			});
+			expect(errors, errors.join("\n")).toEqual([]);
+			expect(
+				logged.some(
+					(line) =>
+						line.startsWith(`ok   ${RECORDED}: `) &&
+						line.endsWith(", 300 distinct states)"),
+				),
+			).toBe(true);
+			expect(
+				logged.filter((line) => line.startsWith("STATE-COUNT JUMP")),
+			).toEqual([
+				expect.stringContaining(`STATE-COUNT JUMP ${RECORDED}: old count 136 `),
+			]);
+			expect(logged.find((l) => l.startsWith("STATE-COUNT JUMP"))).toContain(
+				"new count 300 ",
+			);
+			expect(exitCode).toBe(1);
+		} finally {
+			tree.done();
+		}
 	});
 
 	// The factor is inclusive: 272 is exactly 2x 136, so it passes.
 	it("passes a count exactly at the factor, with the exit code unset", async () => {
-		const { logged, exitCode } = await runEntry({
-			...configIndex(RECORDED),
-			tlcOutput: PASS + stats(272),
-		});
-		expect(logged.some((line) => line.startsWith("STATE-COUNT JUMP"))).toBe(
-			false,
-		);
-		expect(exitCode).toBeUndefined();
+		const tree = makeEntryRoot();
+		try {
+			const { logged, exitCode } = await runEntry({
+				root: tree.root,
+				...configIndex(tree.root, RECORDED),
+				tlcOutput: PASS + stats(272),
+			});
+			expect(logged.some((line) => line.startsWith("STATE-COUNT JUMP"))).toBe(
+				false,
+			);
+			expect(exitCode).toBeUndefined();
+		} finally {
+			tree.done();
+		}
 	});
 
 	// Recurrence: #4714 F1. A config with no recorded count only reports; the
 	// run stays green however large its count is.
 	it("reports an unrecorded config's count without failing the run", async () => {
-		const { logged, exitCode } = await runEntry({
-			...configIndex(UNRECORDED),
-			tlcOutput: PASS + stats(1e9),
-		});
-		expect(logged.some((line) => line.startsWith("STATE-COUNT JUMP"))).toBe(
-			false,
-		);
-		expect(
-			logged.some((line) =>
-				line.includes("ran with no recorded distinct-state count"),
-			),
-		).toBe(true);
-		expect(exitCode).toBeUndefined();
+		const tree = makeEntryRoot();
+		try {
+			const { logged, exitCode } = await runEntry({
+				root: tree.root,
+				...configIndex(tree.root, UNRECORDED),
+				tlcOutput: PASS + stats(1e9),
+			});
+			expect(logged.some((line) => line.startsWith("STATE-COUNT JUMP"))).toBe(
+				false,
+			);
+			expect(
+				logged.some((line) =>
+					line.includes("ran with no recorded distinct-state count"),
+				),
+			).toBe(true);
+			expect(exitCode).toBeUndefined();
+		} finally {
+			tree.done();
+		}
 	});
 });
 
