@@ -13,6 +13,7 @@ import {
 	KNOWN_FIXTURE_EMAILS,
 	KNOWN_FIXTURE_NAMES,
 } from "../support/git-config-guard.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const directGitSpawn =
 	/\b(execSync|execFileSync|spawnSync|spawn|execFile|safeSpawnAsync)\s*\(\s*["'`]git\b/g;
@@ -482,21 +483,25 @@ describe("real Git fixture governance", () => {
 		REPOSITORY_SCAN_TEST_TIMEOUT_MS,
 	);
 
-	it("routes every direct Git spawn in scripts/**/*.mjs through git-fixture-env", () => {
-		const offenders = findGitSpawnOffenders(
-			scriptFiles(path.resolve(__dirname, "../../scripts")),
-		);
-		const REMAINING_OFFENDERS: string[] = [];
-		const unexpected = offenders.filter(
-			(file) =>
-				!REMAINING_OFFENDERS.includes(repoRelative(file)) &&
-				!isExpectedScriptExemption(file),
-		);
-		expect(
-			unexpected,
-			`Unexpected bare Git spawns found:\n${unexpected.join("\n")}`,
-		).toEqual([]);
-	});
+	it(
+		"routes every direct Git spawn in scripts/**/*.mjs through git-fixture-env",
+		() => {
+			const offenders = findGitSpawnOffenders(
+				scriptFiles(path.resolve(__dirname, "../../scripts")),
+			);
+			const REMAINING_OFFENDERS: string[] = [];
+			const unexpected = offenders.filter(
+				(file) =>
+					!REMAINING_OFFENDERS.includes(repoRelative(file)) &&
+					!isExpectedScriptExemption(file),
+			);
+			expect(
+				unexpected,
+				`Unexpected bare Git spawns found:\n${unexpected.join("\n")}`,
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("anchors script exemptions to the repository-relative path", () => {
 		expect(
@@ -507,24 +512,28 @@ describe("real Git fixture governance", () => {
 		).toBe(false);
 	});
 
-	it("keeps every literal fixture Git identity in the guard sets", () => {
-		const files = [
-			...walkFiles(
-				path.resolve(__dirname, ".."),
-				(name) => name.endsWith(".ts") || name.endsWith(".mts"),
-			),
-			...walkFiles(path.resolve(__dirname, "../../scripts"), (name) =>
-				name.endsWith(".mjs"),
-			),
-		];
-		const unknown = fixtureIdentityWrites(files).filter(
-			({ kind, value }) =>
-				(kind === "name" ? KNOWN_FIXTURE_NAMES : KNOWN_FIXTURE_EMAILS).has(
-					value,
-				) === false,
-		);
-		expect(unknown).toEqual([]);
-	});
+	it(
+		"keeps every literal fixture Git identity in the guard sets",
+		() => {
+			const files = [
+				...walkFiles(
+					path.resolve(__dirname, ".."),
+					(name) => name.endsWith(".ts") || name.endsWith(".mts"),
+				),
+				...walkFiles(path.resolve(__dirname, "../../scripts"), (name) =>
+					name.endsWith(".mjs"),
+				),
+			];
+			const unknown = fixtureIdentityWrites(files).filter(
+				({ kind, value }) =>
+					(kind === "name" ? KNOWN_FIXTURE_NAMES : KNOWN_FIXTURE_EMAILS).has(
+						value,
+					) === false,
+			);
+			expect(unknown).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("detects a synthetic bare Git offender", () => {
 		expect(
@@ -914,35 +923,47 @@ describe("real Git fixture governance", () => {
 		).toEqual([]);
 	});
 
-	it("scans a non-empty tests/**/*.ts population, helpers included", () => {
-		const files = testTypeScriptFiles(path.resolve(__dirname, "..")).map(
-			({ file }) => repoRelative(file),
-		);
-		// Calibration: 400 is the same documented floor the *.test.ts walk
-		// below uses; this population is a superset of it (#3050).
-		assertNonEmptyScan("historical commit-ish sweep", files.length, 400);
-		// The superset is the point, not an accident: a module-scope spawn in
-		// a tests/support helper takes every file that imports it down with
-		// it, so the walk must reach past the collected *.test.ts files.
-		expect(files).toContain("tests/support/git-fixture-env.ts");
-	});
+	it(
+		"scans a non-empty tests/**/*.ts population, helpers included",
+		() => {
+			const files = testTypeScriptFiles(path.resolve(__dirname, "..")).map(
+				({ file }) => repoRelative(file),
+			);
+			// Calibration: 400 is the same documented floor the *.test.ts walk
+			// below uses; this population is a superset of it (#3050).
+			assertNonEmptyScan("historical commit-ish sweep", files.length, 400);
+			// The superset is the point, not an accident: a module-scope spawn in
+			// a tests/support helper takes every file that imports it down with
+			// it, so the walk must reach past the collected *.test.ts files.
+			expect(files).toContain("tests/support/git-fixture-env.ts");
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("scans a non-empty source population", () => {
-		const files = testFiles(path.resolve(__dirname, ".."));
-		// Calibration: 807 *.test.ts files under tests/ on 2026-08-26 (fix round
-		// 2). Half is 403.5; 400 is the documented floor so the walk still fails
-		// loud if the tests/ tree collapses, without pinning to the exact count.
-		assertNonEmptyScan("git fixture governance sweep", files.length, 400);
-	});
+	it(
+		"scans a non-empty source population",
+		() => {
+			const files = testFiles(path.resolve(__dirname, ".."));
+			// Calibration: 807 *.test.ts files under tests/ on 2026-08-26 (fix round
+			// 2). Half is 403.5; 400 is the documented floor so the walk still fails
+			// loud if the tests/ tree collapses, without pinning to the exact count.
+			assertNonEmptyScan("git fixture governance sweep", files.length, 400);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("scans a non-empty scripts/**/*.mjs population", () => {
-		const files = scriptFiles(path.resolve(__dirname, "../../scripts"));
-		// Calibration: 60+ *.mjs files under scripts/ on 2026-08-26 (fix round
-		// 2); 30 is a floor well below that, well above zero.
-		assertNonEmptyScan(
-			"git fixture governance scripts sweep",
-			files.length,
-			30,
-		);
-	});
+	it(
+		"scans a non-empty scripts/**/*.mjs population",
+		() => {
+			const files = scriptFiles(path.resolve(__dirname, "../../scripts"));
+			// Calibration: 60+ *.mjs files under scripts/ on 2026-08-26 (fix round
+			// 2); 30 is a floor well below that, well above zero.
+			assertNonEmptyScan(
+				"git fixture governance scripts sweep",
+				files.length,
+				30,
+			);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 });

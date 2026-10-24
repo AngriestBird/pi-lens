@@ -58,6 +58,7 @@ import {
 	stripSource,
 } from "../support/sweep-kit.js";
 import { vitestCollects } from "../support/vitest-collection.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -202,51 +203,57 @@ describe("lsp-spawn-heavy Vitest project coverage", () => {
 		},
 	);
 
-	it("phases or documents every test that spawns a real LSP child", () => {
-		const included = lspSpawnHeavyInclude();
-		// Fixture projects carry *.test.ts inputs belonging to the fixture's
-		// own toolchain; vitest never runs them, so the sweep must not count
-		// them either. vitestCollects reads that from vitest.config.ts: the
-		// hand-written `tests/fixtures/` exclude it replaces never matched,
-		// because listSourceFiles passes paths relative to `tests/` (#4399).
-		const files = listSourceFiles(path.join(repoRoot, "tests"), {
-			extensions: [".ts"],
-		}).filter((file) => vitestCollects(relativePosix(repoRoot, file)));
+	it(
+		"phases or documents every test that spawns a real LSP child",
+		() => {
+			const included = lspSpawnHeavyInclude();
+			// Fixture projects carry *.test.ts inputs belonging to the fixture's
+			// own toolchain; vitest never runs them, so the sweep must not count
+			// them either. vitestCollects reads that from vitest.config.ts: the
+			// hand-written `tests/fixtures/` exclude it replaces never matched,
+			// because listSourceFiles passes paths relative to `tests/` (#4399).
+			const files = listSourceFiles(path.join(repoRoot, "tests"), {
+				extensions: [".ts"],
+			}).filter((file) => vitestCollects(relativePosix(repoRoot, file)));
 
-		// readWalkedFiles: a path that vanished between the walk and the read is
-		// out of the population, not a finding (#3082 — this scan was one of the
-		// four rotating ENOENT victims).
-		const candidates = readWalkedFiles(files)
-			.filter(({ source }) => isLspSpawnHeavy(source))
-			.map(({ file }) => relativePosix(repoRoot, file));
+			// readWalkedFiles: a path that vanished between the walk and the read is
+			// out of the population, not a finding (#3082 — this scan was one of the
+			// four rotating ENOENT victims).
+			const candidates = readWalkedFiles(files)
+				.filter(({ source }) => isLspSpawnHeavy(source))
+				.map(({ file }) => relativePosix(repoRoot, file));
 
-		const audit = auditRegistry({
-			sweepName: "lsp-spawn-heavy lane coverage",
-			flagged: candidates,
-			registered: included,
-			exemptions: SPAWN_EXEMPTIONS,
-			minReasonLength: 20,
-			// Calibration: 858 test files scanned on 2026-08-29 (tests/fixtures
-			// excluded); half rounded up is 429, documented floor 430.
-			scannedCount: files.length,
-			minScanned: 430,
-			// Calibration: 20 spawning-test candidates on 2026-09-09 (5 phased,
-			// 15 exempted); half rounded up is 10.
-			minFlagged: 10,
-			remediation:
-				"A test that spawns a real LSP child must run in the lsp-spawn-heavy " +
-				"lane (vitest.config.ts lspSpawnHeavyInclude) or carry a documented " +
-				"exemption in this file, or it shares the default project's fork storm " +
-				"and can starve its own handshake/diagnostics budget without any gate.",
-		});
+			const audit = auditRegistry({
+				sweepName: "lsp-spawn-heavy lane coverage",
+				flagged: candidates,
+				registered: included,
+				exemptions: SPAWN_EXEMPTIONS,
+				minReasonLength: 20,
+				// Calibration: 858 test files scanned on 2026-08-29 (tests/fixtures
+				// excluded); half rounded up is 429, documented floor 430.
+				scannedCount: files.length,
+				minScanned: 430,
+				// Calibration: 20 spawning-test candidates on 2026-09-09 (5 phased,
+				// 15 exempted); half rounded up is 10.
+				minFlagged: 10,
+				remediation:
+					"A test that spawns a real LSP child must run in the lsp-spawn-heavy " +
+					"lane (vitest.config.ts lspSpawnHeavyInclude) or carry a documented " +
+					"exemption in this file, or it shares the default project's fork storm " +
+					"and can starve its own handshake/diagnostics budget without any gate.",
+			});
 
-		expect(audit.problems, audit.problems.join("\n")).toEqual([]);
+			expect(audit.problems, audit.problems.join("\n")).toEqual([]);
 
-		// Reverse check: a renamed or deleted member must not leave a dead glob
-		// behind — the lane silently stops phasing anything at all.
-		const dead = included.filter(
-			(file) => !fs.existsSync(path.join(repoRoot, file)),
-		);
-		expect(dead, "lspSpawnHeavyInclude entries must exist on disk").toEqual([]);
-	});
+			// Reverse check: a renamed or deleted member must not leave a dead glob
+			// behind — the lane silently stops phasing anything at all.
+			const dead = included.filter(
+				(file) => !fs.existsSync(path.join(repoRoot, file)),
+			);
+			expect(dead, "lspSpawnHeavyInclude entries must exist on disk").toEqual(
+				[],
+			);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 });

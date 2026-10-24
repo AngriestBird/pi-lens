@@ -18,6 +18,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const TESTS_ROOT = resolve(ROOT, "tests");
@@ -101,35 +102,40 @@ function detectedWin32GateFiles(): string[] {
 }
 
 describe("win32 gate lane governance (#2536)", () => {
-	it("names the lane for every Windows-only declarative gate", () => {
-		const missing: string[] = [];
-		let gateCount = 0;
+	it(
+		"names the lane for every Windows-only declarative gate",
+		() => {
+			const missing: string[] = [];
+			let gateCount = 0;
 
-		for (const { file: absolute, source: raw } of walkedTestSources()) {
-			const stripped = stripSource(raw);
-			for (const match of stripped.matchAll(windowsGatePattern())) {
-				const offset = match.index ?? 0;
-				if (
-					!isWindowsOnlyGate(
-						match[0],
-						raw.slice(offset, offset + match[0].length),
+			for (const { file: absolute, source: raw } of walkedTestSources()) {
+				const stripped = stripSource(raw);
+				for (const match of stripped.matchAll(windowsGatePattern())) {
+					const offset = match.index ?? 0;
+					if (
+						!isWindowsOnlyGate(
+							match[0],
+							raw.slice(offset, offset + match[0].length),
+						)
 					)
-				)
-					continue;
-				gateCount++;
-				const line = raw.slice(0, offset).split("\n").length;
-				const previousLine = raw.split("\n")[line - 2] ?? "";
-				if (!previousLine.trim().startsWith(LANE_HEADER)) {
-					missing.push(`${relativePosix(ROOT, absolute)}:${line}`);
+						continue;
+					gateCount++;
+					const line = raw.slice(0, offset).split("\n").length;
+					const previousLine = raw.split("\n")[line - 2] ?? "";
+					if (!previousLine.trim().startsWith(LANE_HEADER)) {
+						missing.push(`${relativePosix(ROOT, absolute)}:${line}`);
+					}
 				}
 			}
-		}
 
-		assertNonEmptyScan("win32 gate detection", gateCount, 1);
-		expect(missing, "every Windows-only gate must name windows-vitest").toEqual(
-			[],
-		);
-	});
+			assertNonEmptyScan("win32 gate detection", gateCount, 1);
+			expect(
+				missing,
+				"every Windows-only gate must name windows-vitest",
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("keeps the workflow population and execution filter wired", () => {
 		const steps = windowsJobSteps();

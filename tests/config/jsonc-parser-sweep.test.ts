@@ -15,6 +15,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const ROOTS = ["clients", "tools"].map((dir) => path.join(REPO_ROOT, dir));
@@ -75,23 +76,27 @@ function scan(pattern: RegExp, strings: "blank" | "keep" = "blank"): LineHit[] {
 }
 
 describe("the JSONC reader has one owner (#4638 F8)", () => {
-	it("defines parseJsonc exactly once, exported, and no second reader", () => {
-		const scannedFiles = ROOTS.flatMap((root) => listSourceFiles(root));
-		assertNonEmptyScan(
-			"JSONC reader sweep (clients + tools)",
-			scannedFiles.length,
-			50,
-		);
+	it(
+		"defines parseJsonc exactly once, exported, and no second reader",
+		() => {
+			const scannedFiles = ROOTS.flatMap((root) => listSourceFiles(root));
+			assertNonEmptyScan(
+				"JSONC reader sweep (clients + tools)",
+				scannedFiles.length,
+				50,
+			);
 
-		expect(scan(DEFINITION).map((hit) => hit.file)).toEqual([
-			"clients/review-graph/tsconfig-paths.ts",
-		]);
-		expect(scan(EXPORTED_DEFINITION).map((hit) => hit.file)).toEqual([
-			"clients/review-graph/tsconfig-paths.ts",
-		]);
-		expect(scan(SECOND_READER)).toEqual([]);
-		expect(scan(TRAILING_COMMA_STRIP, "keep")).toEqual([]);
-	});
+			expect(scan(DEFINITION).map((hit) => hit.file)).toEqual([
+				"clients/review-graph/tsconfig-paths.ts",
+			]);
+			expect(scan(EXPORTED_DEFINITION).map((hit) => hit.file)).toEqual([
+				"clients/review-graph/tsconfig-paths.ts",
+			]);
+			expect(scan(SECOND_READER)).toEqual([]);
+			expect(scan(TRAILING_COMMA_STRIP, "keep")).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	// Recurrence (#4638 r3 N6): the first form of this sweep matched the owner's
 	// name only, so a second reader as an arrow binding or under another name

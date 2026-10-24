@@ -13,6 +13,7 @@ import {
 	relativePosix,
 	stableOccurrenceKey,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const registry = new RunnerRegistry();
@@ -89,32 +90,36 @@ function census(
 }
 
 describe("RunnerGroup literal id census (#4312)", () => {
-	it("resolves every literal runnerIds member against the runner registry", () => {
-		const files = censusSourceFiles(
-			["clients", "tools", "mcp", "scripts", "index.ts"].map((dir) =>
-				path.join(ROOT, dir),
-			),
-			{ extensions: [".ts", ".mjs", ".js", ".cjs"], skipTests: true },
-		);
-		assertNonEmptyScan("production sources", files.length, 600);
-		assertNonEmptyScan("registered runners", registry.list().length, 40);
-		const problems: Problem[] = [];
-		let references = 0;
-		for (const { file, source } of readWalkedFiles(files)) {
-			const result = census(source, relativePosix(ROOT, file));
-			references += result.ids.length;
-			problems.push(...result.problems);
-		}
-		assertNonEmptyScan("literal runner id references", references, 100);
-		expect(
-			auditRegistry({
-				sweepName: "runner-group-id-census",
-				flagged: problems,
-				registered: [],
-				exemptions: DYNAMIC_SITES,
-			}).problems,
-		).toEqual([]);
-	});
+	it(
+		"resolves every literal runnerIds member against the runner registry",
+		() => {
+			const files = censusSourceFiles(
+				["clients", "tools", "mcp", "scripts", "index.ts"].map((dir) =>
+					path.join(ROOT, dir),
+				),
+				{ extensions: [".ts", ".mjs", ".js", ".cjs"], skipTests: true },
+			);
+			assertNonEmptyScan("production sources", files.length, 600);
+			assertNonEmptyScan("registered runners", registry.list().length, 40);
+			const problems: Problem[] = [];
+			let references = 0;
+			for (const { file, source } of readWalkedFiles(files)) {
+				const result = census(source, relativePosix(ROOT, file));
+				references += result.ids.length;
+				problems.push(...result.problems);
+			}
+			assertNonEmptyScan("literal runner id references", references, 100);
+			expect(
+				auditRegistry({
+					sweepName: "runner-group-id-census",
+					flagged: problems,
+					registered: [],
+					exemptions: DYNAMIC_SITES,
+				}).problems,
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("checks quoted and computed literal keys without counting prose", () => {
 		const result = census(`

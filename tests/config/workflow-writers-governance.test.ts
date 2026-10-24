@@ -29,6 +29,7 @@ import {
 	stripSource,
 } from "../support/sweep-kit.js";
 import { siblingPin } from "../support/sibling-pin.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOWS = resolve(ROOT, ".github/workflows");
@@ -1120,94 +1121,120 @@ describe("workflow writer governance (#4053)", () => {
 	describe("the real workflows", () => {
 		const real = () => workflowFiles().map(readWorkflow);
 
-		it("guards every dispatchable writer, bar the registered exceptions", () => {
-			const writers = real().flatMap(({ source, path }) =>
-				workflowWriters(source, path),
-			);
-			const unguarded = writers
-				.filter((record) => !record.guard.guarded)
-				.map((record) => record.id);
-			// No exception is registered since #4105, so a clean tree flags 0: the
-			// floor moves from "matched something" to "walked the writers" (the
-			// detector itself is pinned by the fixture rows above).
-			const audit = auditRegistry({
-				sweepName: "unguarded dispatchable writers",
-				flagged: unguarded,
-				registered: [],
-				exemptions: REGISTERED_EXCEPTIONS,
-				minReasonLength: 30,
-				minFlagged: 0,
-				scannedCount: writers.length,
-				minScanned: 10,
-			});
-			expect(audit.problems).toEqual([]);
-		});
+		it(
+			"guards every dispatchable writer, bar the registered exceptions",
+			() => {
+				const writers = real().flatMap(({ source, path }) =>
+					workflowWriters(source, path),
+				);
+				const unguarded = writers
+					.filter((record) => !record.guard.guarded)
+					.map((record) => record.id);
+				// No exception is registered since #4105, so a clean tree flags 0: the
+				// floor moves from "matched something" to "walked the writers" (the
+				// detector itself is pinned by the fixture rows above).
+				const audit = auditRegistry({
+					sweepName: "unguarded dispatchable writers",
+					flagged: unguarded,
+					registered: [],
+					exemptions: REGISTERED_EXCEPTIONS,
+					minReasonLength: 30,
+					minFlagged: 0,
+					scannedCount: writers.length,
+					minScanned: 10,
+				});
+				expect(audit.problems).toEqual([]);
+			},
+			TREE_WALK_TIMEOUT_MS,
+		);
 
-		it("guards every dispatchable job with an effective write token", () => {
-			const unguarded = real().flatMap(({ source, path }) =>
-				writeScopedJobFindings(source, path),
-			);
-			const writeScoped = real().flatMap(({ source, path }) =>
-				dispatchableJobs(source, path).filter(hasWriteToken),
-			);
-			const audit = auditRegistry({
-				sweepName: "unguarded write-scoped dispatchable jobs",
-				flagged: unguarded,
-				registered: [],
-				exemptions: REGISTERED_EXCEPTIONS,
-				minReasonLength: 30,
-				minFlagged: 0,
-				scannedCount: writeScoped.length,
-				minScanned: 10,
-			});
-			expect(audit.problems).toEqual([]);
-		});
+		it(
+			"guards every dispatchable job with an effective write token",
+			() => {
+				const unguarded = real().flatMap(({ source, path }) =>
+					writeScopedJobFindings(source, path),
+				);
+				const writeScoped = real().flatMap(({ source, path }) =>
+					dispatchableJobs(source, path).filter(hasWriteToken),
+				);
+				const audit = auditRegistry({
+					sweepName: "unguarded write-scoped dispatchable jobs",
+					flagged: unguarded,
+					registered: [],
+					exemptions: REGISTERED_EXCEPTIONS,
+					minReasonLength: 30,
+					minFlagged: 0,
+					scannedCount: writeScoped.length,
+					minScanned: 10,
+				});
+				expect(audit.problems).toEqual([]);
+			},
+			TREE_WALK_TIMEOUT_MS,
+		);
 
 		// Recurrence: #4077, a write scope back on a job that runs branch code (the
 		// guard census above catches it only when the job is also unguarded), or a
 		// writer quietly widened (`contents: write` beside `issues: write`).
-		it("pins every write-scoped dispatchable job and the scopes it holds", () => {
-			const actual: Record<string, string> = {};
-			for (const { source, path } of real())
-				for (const job of dispatchableJobs(source, path))
-					if (hasWriteToken(job)) actual[job.id] = job.writeScopes.join(", ");
-			expect(
-				actual,
-				`re-pin to:\nconst WRITE_SCOPED_JOBS = ${JSON.stringify(actual, null, "\t")};`,
-			).toEqual(WRITE_SCOPED_JOBS);
-		});
+		it(
+			"pins every write-scoped dispatchable job and the scopes it holds",
+			() => {
+				const actual: Record<string, string> = {};
+				for (const { source, path } of real())
+					for (const job of dispatchableJobs(source, path))
+						if (hasWriteToken(job)) actual[job.id] = job.writeScopes.join(", ");
+				expect(
+					actual,
+					`re-pin to:\nconst WRITE_SCOPED_JOBS = ${JSON.stringify(actual, null, "\t")};`,
+				).toEqual(WRITE_SCOPED_JOBS);
+			},
+			TREE_WALK_TIMEOUT_MS,
+		);
 
-		it("pins the census", () => {
-			const writers: Record<string, number> = {};
-			let dispatchable = 0;
-			for (const { source, path } of real()) {
-				if (workflowTriggers(load(source).on).includes("workflow_dispatch"))
-					dispatchable += 1;
-				const count = workflowWriters(source, path).length;
-				if (count > 0) writers[path] = count;
-			}
-			expect(
-				{ dispatchable, writers },
-				`re-pin to:\nconst DISPATCHABLE_WORKFLOWS = ${dispatchable};\nconst WRITER_STEPS = ${JSON.stringify(writers, null, "\t")};`,
-			).toEqual({
-				dispatchable: DISPATCHABLE_WORKFLOWS,
-				writers: WRITER_STEPS,
-			});
-		});
+		it(
+			"pins the census",
+			() => {
+				const writers: Record<string, number> = {};
+				let dispatchable = 0;
+				for (const { source, path } of real()) {
+					if (workflowTriggers(load(source).on).includes("workflow_dispatch"))
+						dispatchable += 1;
+					const count = workflowWriters(source, path).length;
+					if (count > 0) writers[path] = count;
+				}
+				expect(
+					{ dispatchable, writers },
+					`re-pin to:\nconst DISPATCHABLE_WORKFLOWS = ${dispatchable};\nconst WRITER_STEPS = ${JSON.stringify(writers, null, "\t")};`,
+				).toEqual({
+					dispatchable: DISPATCHABLE_WORKFLOWS,
+					writers: WRITER_STEPS,
+				});
+			},
+			TREE_WALK_TIMEOUT_MS,
+		);
 
-		it("classifies every action a dispatchable workflow uses", () => {
-			expect(
-				real().flatMap(({ source, path }) => unclassifiedActions(source, path)),
-			).toEqual([]);
-		});
+		it(
+			"classifies every action a dispatchable workflow uses",
+			() => {
+				expect(
+					real().flatMap(({ source, path }) =>
+						unclassifiedActions(source, path),
+					),
+				).toEqual([]);
+			},
+			TREE_WALK_TIMEOUT_MS,
+		);
 
-		it("rejects a shell variable in a real action input", () => {
-			expect(
-				real().flatMap(({ source, path }) =>
-					withVariableFindings(source, path),
-				),
-			).toEqual([]);
-		});
+		it(
+			"rejects a shell variable in a real action input",
+			() => {
+				expect(
+					real().flatMap(({ source, path }) =>
+						withVariableFindings(source, path),
+					),
+				).toEqual([]);
+			},
+			TREE_WALK_TIMEOUT_MS,
+		);
 	});
 
 	describe("the writer-script registry", () => {
@@ -1280,25 +1307,29 @@ describe("workflow writer governance (#4053)", () => {
 			return [...new Set([...direct, ...invoked.filter(importsWriter)])];
 		}
 
-		it("registers every script that writes GitHub state", () => {
-			const flagged = detectedWriters();
-			const audit = auditRegistry({
-				sweepName: "writer scripts",
-				flagged,
-				registered: Object.keys(SCRIPT_WRITERS),
-				exemptions: SCRIPT_NON_WRITERS,
-				minScanned: 50,
-				scannedCount: files.length,
-				minFlagged: 10,
-				remediation:
-					"add the file to SCRIPT_WRITERS (it writes) or SCRIPT_NON_WRITERS with a reason",
-			});
-			expect(audit.problems).toEqual([]);
-			// Registered-but-undetected is a stale claim the kit tolerates for other
-			// registries; here the registry IS the detector's output.
-			expect(
-				Object.keys(SCRIPT_WRITERS).filter((path) => !flagged.includes(path)),
-			).toEqual([]);
-		});
+		it(
+			"registers every script that writes GitHub state",
+			() => {
+				const flagged = detectedWriters();
+				const audit = auditRegistry({
+					sweepName: "writer scripts",
+					flagged,
+					registered: Object.keys(SCRIPT_WRITERS),
+					exemptions: SCRIPT_NON_WRITERS,
+					minScanned: 50,
+					scannedCount: files.length,
+					minFlagged: 10,
+					remediation:
+						"add the file to SCRIPT_WRITERS (it writes) or SCRIPT_NON_WRITERS with a reason",
+				});
+				expect(audit.problems).toEqual([]);
+				// Registered-but-undetected is a stale claim the kit tolerates for other
+				// registries; here the registry IS the detector's output.
+				expect(
+					Object.keys(SCRIPT_WRITERS).filter((path) => !flagged.includes(path)),
+				).toEqual([]);
+			},
+			TREE_WALK_TIMEOUT_MS,
+		);
 	});
 });

@@ -54,6 +54,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -1754,47 +1755,51 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 };
 
 describe("glossary synonym-retirement sweep (#3259)", () => {
-	it("parses the complete glossary and pins its identifier population", () => {
-		const glossary = parseGlossary();
-		expect([...glossary.keys()]).toEqual(EXPECTED_GLOSSARY_TERMS);
-		const terms = identifierTerms(glossary);
-		expect(terms).toEqual(EXPECTED_IDENTIFIER_TERMS);
-		expect(terms).toHaveLength(24);
-		const counts = census(terms);
-		expect(Object.keys(counts)).toHaveLength(18);
-		expect(terms.filter((term) => !(term in counts))).toHaveLength(6);
-		for (const term of terms) {
-			const live = counts[term] ?? {};
-			const pinned = PINS[term] ?? {};
-			// GROW arm: every live `file@count` must be pinned.
-			const grow = auditSymbolCounts({
-				sweepName: `glossary retired identifier ${term} — UNPINNED live uses (#3259)`,
-				counts: live,
-				pinned,
-				remediation: `A new or changed use of retired glossary identifier ${term} is not pinned. Rename or route it; only then raise its per-file pin. Refs #3259.`,
-			});
-			// SHRINK arm: the same call with the roles SWAPPED, because
-			// `auditRegistry` deliberately permits a registered id the scan no
-			// longer flags. Feeding the PINS as the flagged population and the
-			// live census as the registry turns a vanished row into an ordinary
-			// unaccounted item, so the two key sets must be equal for both arms
-			// to be clean (#3279 G-3279-4, the #3256 M3c shape).
-			const shrink = auditSymbolCounts({
-				sweepName: `glossary retired identifier ${term} — STALE pins (#3259)`,
-				counts: pinned,
-				pinned: live,
-				remediation: `A pinned use of retired glossary identifier ${term} is gone from the live census. SHRINK the pin to the live count (or delete the row) so the inventory cannot hold a retired use that no longer exists. Refs #3259.`,
-			});
-			// Asserted TOGETHER, never one arm at a time: a count that MOVED
-			// (rather than appeared or vanished) is unaccounted in both arms, and
-			// a short-circuit on the grow assertion would report only the
-			// `UNPINNED live uses` half and mislabel a shrink as a new use.
-			expect({ grow: grow.problems, shrink: shrink.problems }, term).toEqual({
-				grow: [],
-				shrink: [],
-			});
-		}
-	});
+	it(
+		"parses the complete glossary and pins its identifier population",
+		() => {
+			const glossary = parseGlossary();
+			expect([...glossary.keys()]).toEqual(EXPECTED_GLOSSARY_TERMS);
+			const terms = identifierTerms(glossary);
+			expect(terms).toEqual(EXPECTED_IDENTIFIER_TERMS);
+			expect(terms).toHaveLength(24);
+			const counts = census(terms);
+			expect(Object.keys(counts)).toHaveLength(18);
+			expect(terms.filter((term) => !(term in counts))).toHaveLength(6);
+			for (const term of terms) {
+				const live = counts[term] ?? {};
+				const pinned = PINS[term] ?? {};
+				// GROW arm: every live `file@count` must be pinned.
+				const grow = auditSymbolCounts({
+					sweepName: `glossary retired identifier ${term} — UNPINNED live uses (#3259)`,
+					counts: live,
+					pinned,
+					remediation: `A new or changed use of retired glossary identifier ${term} is not pinned. Rename or route it; only then raise its per-file pin. Refs #3259.`,
+				});
+				// SHRINK arm: the same call with the roles SWAPPED, because
+				// `auditRegistry` deliberately permits a registered id the scan no
+				// longer flags. Feeding the PINS as the flagged population and the
+				// live census as the registry turns a vanished row into an ordinary
+				// unaccounted item, so the two key sets must be equal for both arms
+				// to be clean (#3279 G-3279-4, the #3256 M3c shape).
+				const shrink = auditSymbolCounts({
+					sweepName: `glossary retired identifier ${term} — STALE pins (#3259)`,
+					counts: pinned,
+					pinned: live,
+					remediation: `A pinned use of retired glossary identifier ${term} is gone from the live census. SHRINK the pin to the live count (or delete the row) so the inventory cannot hold a retired use that no longer exists. Refs #3259.`,
+				});
+				// Asserted TOGETHER, never one arm at a time: a count that MOVED
+				// (rather than appeared or vanished) is unaccounted in both arms, and
+				// a short-circuit on the grow assertion would report only the
+				// `UNPINNED live uses` half and mislabel a shrink as a new use.
+				expect({ grow: grow.problems, shrink: shrink.problems }, term).toEqual({
+					grow: [],
+					shrink: [],
+				});
+			}
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("pins the retired-in-one-sense terms with their glossary owners", () => {
 		// Prevents #3279 G-3279-2: the canonical-collision exclusion is the

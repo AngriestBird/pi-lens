@@ -89,6 +89,7 @@ import {
 	scanSilentCatches,
 } from "../support/silent-catch-scan.js";
 import { currentPeakRssMb, reportPeakRss } from "../support/worker-peak-rss.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -1577,9 +1578,13 @@ function admitted(count = 1): Admission {
 const ADMITTED: Admission = admitted();
 
 describe("silent-catch sweep", () => {
-	it("scans the shipped trees", () => {
-		assertNonEmptyScan("silent-catch sweep", census.scannedFiles, 300);
-	});
+	it(
+		"scans the shipped trees",
+		() => {
+			assertNonEmptyScan("silent-catch sweep", census.scannedFiles, 300);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	// Recurrence (#4736): the walk parsed ~530 files in one synchronous loop, so
 	// `@ast-grep/napi` kept every native tree until the file ended and the
@@ -1604,68 +1609,95 @@ describe("silent-catch sweep", () => {
 		).not.toThrow();
 	});
 
-	it("pins existing unresolved delegations and refuses every new one", () => {
-		expect(
-			census.unclassified.map(({ file, site }) => `${file}:${site.identity}`),
-		).toEqual([
-			// Pre-#4596 delegation sites, formerly silent: reject/release is
-			// supplied by another owner. Exact identities admit no new site.
-			"clients/file-mutation-queue.ts:02b17661",
-			"clients/file-mutation-queue.ts:1e574bad",
-			"clients/lsp/index.ts:5c031860",
-			"clients/mcp/session.ts:b686230d",
-			"clients/runtime-tool-result.ts:ed3d6e88",
-			"clients/runtime-tool-result.ts:6e0f90a7",
-			"clients/runtime-tool-result.ts:ed3d6e88",
-		]);
-	});
+	it(
+		"pins existing unresolved delegations and refuses every new one",
+		() => {
+			expect(
+				census.unclassified.map(({ file, site }) => `${file}:${site.identity}`),
+			).toEqual([
+				// Pre-#4596 delegation sites, formerly silent: reject/release is
+				// supplied by another owner. Exact identities admit no new site.
+				"clients/file-mutation-queue.ts:02b17661",
+				"clients/file-mutation-queue.ts:1e574bad",
+				"clients/lsp/index.ts:5c031860",
+				"clients/mcp/session.ts:b686230d",
+				"clients/runtime-tool-result.ts:ed3d6e88",
+				"clients/runtime-tool-result.ts:6e0f90a7",
+				"clients/runtime-tool-result.ts:ed3d6e88",
+			]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("derives the verdicts this sweep claims to distinguish", () => {
-		// Floors, not constants: the point is that every detector still finds a
-		// population, so a broken seam regex, rethrow reader or `none:` reader
-		// reds here instead of quietly reclassifying the tree.
-		assertNonEmptyScan("recorded handlers", census.recorded, 100);
-		assertNonEmptyScan("rethrow-only handlers", census.rethrows, 1);
-		assertNonEmptyScan("declared-none handlers", census.declaredNone, 1);
-	});
+	it(
+		"derives the verdicts this sweep claims to distinguish",
+		() => {
+			// Floors, not constants: the point is that every detector still finds a
+			// population, so a broken seam regex, rethrow reader or `none:` reader
+			// reds here instead of quietly reclassifying the tree.
+			assertNonEmptyScan("recorded handlers", census.recorded, 100);
+			assertNonEmptyScan("rethrow-only handlers", census.rethrows, 1);
+			assertNonEmptyScan("declared-none handlers", census.declaredNone, 1);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("admits no silent handler outside the pinned population", () => {
-		const audit = auditSilentCatches(census);
-		expect({ unlisted: audit.unlisted, mismatched: audit.mismatched }).toEqual({
-			unlisted: [],
-			mismatched: [],
-		});
-	});
+	it(
+		"admits no silent handler outside the pinned population",
+		() => {
+			const audit = auditSilentCatches(census);
+			expect({
+				unlisted: audit.unlisted,
+				mismatched: audit.mismatched,
+			}).toEqual({
+				unlisted: [],
+				mismatched: [],
+			});
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("keeps every pinned row alive and every admission reasoned", () => {
-		const audit = auditSilentCatches(census);
-		expect({ dead: audit.dead, unreasoned: audit.unreasoned }).toEqual({
-			dead: [],
-			unreasoned: [],
-		});
-	});
+	it(
+		"keeps every pinned row alive and every admission reasoned",
+		() => {
+			const audit = auditSilentCatches(census);
+			expect({ dead: audit.dead, unreasoned: audit.unreasoned }).toEqual({
+				dead: [],
+				unreasoned: [],
+			});
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("holds the pinned total, which only shrinks", () => {
-		// A row deleted while another grew keeps the per-file check honest only if
-		// the total is also pinned: this is the one number a reviewer reads.
-		expect(auditSilentCatches(census).overTotal).toBe(false);
-		expect(census.byFile.size).toBe(Object.keys(BASELINE).length);
-	});
+	it(
+		"holds the pinned total, which only shrinks",
+		() => {
+			// A row deleted while another grew keeps the per-file check honest only if
+			// the total is also pinned: this is the one number a reviewer reads.
+			expect(auditSilentCatches(census).overTotal).toBe(false);
+			expect(census.byFile.size).toBe(Object.keys(BASELINE).length);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("prints the census a future round re-derives", () => {
-		const report = {
-			scannedFiles: census.scannedFiles,
-			recorded: census.recorded,
-			rethrows: census.rethrows,
-			declaredNone: census.declaredNone,
-			silent: census.silent,
-			files: census.byFile.size,
-			unclassified: census.unclassified.length,
-		};
-		if (printPins)
-			console.log(`${JSON.stringify(report)}\n${pins(census).join("\n")}`);
-		expect(report.silent).toBeLessThanOrEqual(PINNED_TOTAL);
-	});
+	it(
+		"prints the census a future round re-derives",
+		() => {
+			const report = {
+				scannedFiles: census.scannedFiles,
+				recorded: census.recorded,
+				rethrows: census.rethrows,
+				declaredNone: census.declaredNone,
+				silent: census.silent,
+				files: census.byFile.size,
+				unclassified: census.unclassified.length,
+			};
+			if (printPins)
+				console.log(`${JSON.stringify(report)}\n${pins(census).join("\n")}`);
+			expect(report.silent).toBeLessThanOrEqual(PINNED_TOTAL);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 });
 
 /** One case per branch of {@link auditSilentCatches}, each planting its own

@@ -30,6 +30,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const TESTS_ROOT = path.resolve(import.meta.dirname, "..");
 const REPO_ROOT = path.resolve(TESTS_ROOT, "..");
@@ -70,42 +71,50 @@ describe("a test that reads the real home is a named opt-out (#4789)", () => {
 		source,
 	}));
 
-	it("every file that spells the real home has a registry row, and every row still spells it", () => {
-		const flagged = walked
-			.filter(
-				({ rel, source }) => !SCAN_OWNERS.has(rel) && spellsRealHome(source),
-			)
-			.map(({ rel }) => rel);
-		const audit = auditRegistry({
-			sweepName: "#4789 real-home readers",
-			flagged,
-			registered: [],
-			exemptions: REAL_HOME_READERS,
-			minFlagged: 1,
-			scannedCount: walked.length,
-			minScanned: 1400,
-			remediation:
-				"Use the pinned home (`pinFixtureHome` for a project under HOME). A read of the real home is an opt-out: add a row to tests/support/real-home-readers.ts and a `// real-home: <reason>` header.",
-		});
-		expect(audit.problems).toEqual([]);
-	});
+	it(
+		"every file that spells the real home has a registry row, and every row still spells it",
+		() => {
+			const flagged = walked
+				.filter(
+					({ rel, source }) => !SCAN_OWNERS.has(rel) && spellsRealHome(source),
+				)
+				.map(({ rel }) => rel);
+			const audit = auditRegistry({
+				sweepName: "#4789 real-home readers",
+				flagged,
+				registered: [],
+				exemptions: REAL_HOME_READERS,
+				minFlagged: 1,
+				scannedCount: walked.length,
+				minScanned: 1400,
+				remediation:
+					"Use the pinned home (`pinFixtureHome` for a project under HOME). A read of the real home is an opt-out: add a row to tests/support/real-home-readers.ts and a `// real-home: <reason>` header.",
+			});
+			expect(audit.problems).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("every registered reader carries the same reason as a header in its first lines", () => {
-		const bySource = new Map(walked.map(({ rel, source }) => [rel, source]));
-		// Compared as text, not just present: a header rewritten to a different
-		// reason must red (#4789 review F2). A trailing period is the header's
-		// sentence end, not part of the reason.
-		const trim = (reason: string | undefined) => reason?.replace(/\.$/, "");
-		const disagree = Object.entries(REAL_HOME_READERS)
-			.filter(([rel, reason]) => {
-				const source = bySource.get(rel);
-				const header =
-					source === undefined ? undefined : realHomeHeader(source);
-				return trim(header) !== trim(reason);
-			})
-			.map(([rel]) => rel);
-		expect(disagree).toEqual([]);
-	});
+	it(
+		"every registered reader carries the same reason as a header in its first lines",
+		() => {
+			const bySource = new Map(walked.map(({ rel, source }) => [rel, source]));
+			// Compared as text, not just present: a header rewritten to a different
+			// reason must red (#4789 review F2). A trailing period is the header's
+			// sentence end, not part of the reason.
+			const trim = (reason: string | undefined) => reason?.replace(/\.$/, "");
+			const disagree = Object.entries(REAL_HOME_READERS)
+				.filter(([rel, reason]) => {
+					const source = bySource.get(rel);
+					const header =
+						source === undefined ? undefined : realHomeHeader(source);
+					return trim(header) !== trim(reason);
+				})
+				.map(([rel]) => rel);
+			expect(disagree).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("plants: the detector refuses an alias, a renamed destructure and a bracket literal, and admits clean code and prose", () => {
 		// Spellings the author did not design the detector around.

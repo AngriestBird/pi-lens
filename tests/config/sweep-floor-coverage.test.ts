@@ -10,6 +10,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -251,38 +252,42 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 };
 
 describe("registered-or-fail sweep floors", () => {
-	it("every sweep-shaped test uses sweep-kit or declares a reason", () => {
-		const shaped = sweepShapeFiles();
-		const files = shaped.map(({ file }) => relativePosix(REPO_ROOT, file));
-		const registered = shaped
-			.filter(({ source }) => isRegisteredFloorSource(source))
-			.map(({ file }) => relativePosix(REPO_ROOT, file));
-		const scannedCount = listSourceFiles(TESTS_ROOT, {
-			extensions: [".ts"],
-		}).filter((file) => file.endsWith(".test.ts")).length;
-		const audit = auditRegistry({
-			sweepName: "sweep-floor meta-sweep",
-			flagged: files,
-			registered,
-			exemptions: DECLARED_EXCEPTIONS,
-			// Calibration: 831 test files walked on 2026-08-27 (fix round 3, #2088
-			// R1: the `.length).toBe(0)` alternation added above pulled 3 more
-			// already-registered sweep files into the census); half is 416,
-			// rounded up to the documented 420 floor.
-			scannedCount,
-			minScanned: 420,
-			// Calibration: this census flags 58 sweep-shaped files on 2026-08-27
-			// (fix round 3) -- 13 registered via assertNonEmptyScan/minScanned, 45
-			// declared exceptions. Half of 58 rounded up is 29. Earlier figures (28
-			// for a census of 55) were accurate as of round 2 but went stale the
-			// moment the R1 regex fix changed what counts as sweep-shaped.
-			// Recalibrate by reading this test's OWN measured numbers, not by
-			// copying a figure from a comment or a PR body.
-			minFlagged: 29,
-			minReasonLength: 20,
-		});
-		expect(audit.problems, audit.problems.join("\n")).toEqual([]);
-	});
+	it(
+		"every sweep-shaped test uses sweep-kit or declares a reason",
+		() => {
+			const shaped = sweepShapeFiles();
+			const files = shaped.map(({ file }) => relativePosix(REPO_ROOT, file));
+			const registered = shaped
+				.filter(({ source }) => isRegisteredFloorSource(source))
+				.map(({ file }) => relativePosix(REPO_ROOT, file));
+			const scannedCount = listSourceFiles(TESTS_ROOT, {
+				extensions: [".ts"],
+			}).filter((file) => file.endsWith(".test.ts")).length;
+			const audit = auditRegistry({
+				sweepName: "sweep-floor meta-sweep",
+				flagged: files,
+				registered,
+				exemptions: DECLARED_EXCEPTIONS,
+				// Calibration: 831 test files walked on 2026-08-27 (fix round 3, #2088
+				// R1: the `.length).toBe(0)` alternation added above pulled 3 more
+				// already-registered sweep files into the census); half is 416,
+				// rounded up to the documented 420 floor.
+				scannedCount,
+				minScanned: 420,
+				// Calibration: this census flags 58 sweep-shaped files on 2026-08-27
+				// (fix round 3) -- 13 registered via assertNonEmptyScan/minScanned, 45
+				// declared exceptions. Half of 58 rounded up is 29. Earlier figures (28
+				// for a census of 55) were accurate as of round 2 but went stale the
+				// moment the R1 regex fix changed what counts as sweep-shaped.
+				// Recalibrate by reading this test's OWN measured numbers, not by
+				// copying a figure from a comment or a PR body.
+				minFlagged: 29,
+				minReasonLength: 20,
+			});
+			expect(audit.problems, audit.problems.join("\n")).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 });
 
 describe("looksSweepShaped emptiness detection (#2088 fix round 3, R1)", () => {
@@ -386,35 +391,40 @@ describe("floor-call registration over blanked source (#2710)", () => {
 		).toBe(true);
 	});
 
-	it("reports a prose-only fixture sweep file uncovered and passes a real call", () => {
-		const root = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-sweep-floor-2710-"),
-		);
-		try {
-			fs.writeFileSync(
-				path.join(root, "comment-only.test.ts"),
-				commentOnlyFixture,
+	it(
+		"reports a prose-only fixture sweep file uncovered and passes a real call",
+		() => {
+			const root = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-sweep-floor-2710-"),
 			);
-			fs.writeFileSync(path.join(root, "real-call.test.ts"), realCallFixture);
-			const flagged = listSourceFiles(root, { extensions: [".ts"] }).filter(
-				(file) => looksSweepShaped(stripSource(fs.readFileSync(file, "utf8"))),
-			);
-			expect(flagged.map((file) => relativePosix(root, file))).toEqual([
-				"comment-only.test.ts",
-				"real-call.test.ts",
-			]);
-			const registered = flagged.filter((file) =>
-				isRegisteredFloorSource(fs.readFileSync(file, "utf8")),
-			);
-			const audit = auditRegistry({
-				sweepName: "#2710 fixture sweep",
-				flagged: flagged.map((file) => relativePosix(root, file)),
-				registered: registered.map((file) => relativePosix(root, file)),
-				exemptions: {},
-			});
-			expect(audit.unaccounted).toEqual(["comment-only.test.ts"]);
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
+			try {
+				fs.writeFileSync(
+					path.join(root, "comment-only.test.ts"),
+					commentOnlyFixture,
+				);
+				fs.writeFileSync(path.join(root, "real-call.test.ts"), realCallFixture);
+				const flagged = listSourceFiles(root, { extensions: [".ts"] }).filter(
+					(file) =>
+						looksSweepShaped(stripSource(fs.readFileSync(file, "utf8"))),
+				);
+				expect(flagged.map((file) => relativePosix(root, file))).toEqual([
+					"comment-only.test.ts",
+					"real-call.test.ts",
+				]);
+				const registered = flagged.filter((file) =>
+					isRegisteredFloorSource(fs.readFileSync(file, "utf8")),
+				);
+				const audit = auditRegistry({
+					sweepName: "#2710 fixture sweep",
+					flagged: flagged.map((file) => relativePosix(root, file)),
+					registered: registered.map((file) => relativePosix(root, file)),
+					exemptions: {},
+				});
+				expect(audit.unaccounted).toEqual(["comment-only.test.ts"]);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 });

@@ -57,6 +57,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -199,36 +200,48 @@ function scanPopulation(): PopulationScan {
 describe("#3518 — handleToolCall is called through the swallowed-throw check", () => {
 	const population = scanPopulation();
 
-	it("scans a real population (floor)", () => {
-		assertNonEmptyScan(
-			"handler-verdict sweep: test files",
-			population.scannedFiles,
-			400,
-		);
-		// 14 migrated files held 135 call sites (130 checked, 5 registered raw) when this sweep landed.
-		assertNonEmptyScan(
-			"handler-verdict sweep: checked call sites",
-			population.checked,
-			120,
-		);
-	});
+	it(
+		"scans a real population (floor)",
+		() => {
+			assertNonEmptyScan(
+				"handler-verdict sweep: test files",
+				population.scannedFiles,
+				400,
+			);
+			// 14 migrated files held 135 call sites (130 checked, 5 registered raw) when this sweep landed.
+			assertNonEmptyScan(
+				"handler-verdict sweep: checked call sites",
+				population.checked,
+				120,
+			);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("has no raw handleToolCall call outside the registered intentional-degradation tests", () => {
-		const audit = auditRegistry({
-			sweepName: "handler-verdict sweep",
-			flagged: population.flagged,
-			registered: [],
-			exemptions: INTENTIONAL_DEGRADATION,
-			requireUniqueFlagged: false,
-			minFlagged: 1,
-			remediation: `Wrap the call: await ${HELPER}(() => handleToolCall(deps)) from tests/support/handler-verdict.ts. handleToolCall swallows every throw as "no opinion", so an unchecked verdict can pass on a crashed handler (#4182). A test that makes the handler throw on purpose is registered in INTENTIONAL_DEGRADATION with its reason.`,
-		});
-		expect(audit.problems).toEqual([]);
-	});
+	it(
+		"has no raw handleToolCall call outside the registered intentional-degradation tests",
+		() => {
+			const audit = auditRegistry({
+				sweepName: "handler-verdict sweep",
+				flagged: population.flagged,
+				registered: [],
+				exemptions: INTENTIONAL_DEGRADATION,
+				requireUniqueFlagged: false,
+				minFlagged: 1,
+				remediation: `Wrap the call: await ${HELPER}(() => handleToolCall(deps)) from tests/support/handler-verdict.ts. handleToolCall swallows every throw as "no opinion", so an unchecked verdict can pass on a crashed handler (#4182). A test that makes the handler throw on purpose is registered in INTENTIONAL_DEGRADATION with its reason.`,
+			});
+			expect(audit.problems).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("has no handleToolCall reference that evades the call-shaped check", () => {
-		expect(population.escapes).toEqual([]);
-	});
+	it(
+		"has no handleToolCall reference that evades the call-shaped check",
+		() => {
+			expect(population.escapes).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("pins the pi mock wrapping every tool_call registration in the helper", () => {
 		const source = fs.readFileSync(

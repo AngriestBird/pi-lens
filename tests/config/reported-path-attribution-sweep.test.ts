@@ -51,6 +51,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -734,31 +735,35 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 		).toEqual([]);
 	}, 30_000);
 
-	it("has no unpinned location parser without pathsEqual (#3295)", () => {
-		const counts: Record<string, number> = {};
-		const files = [
-			...listSourceFiles(RUNNERS_ROOT, { extensions: [".ts"] }),
-			...listSourceFiles(CLIENTS_ROOT, {
-				extensions: [TOOL_CLIENT_SUFFIX],
-				exclude: (relative) => relative.includes("/"),
-			}),
-		];
-		for (const { file, source } of readWalkedFiles(files)) {
-			const count = countLocationParsersWithoutPathsEqual(source);
-			if (count > 0) counts[relativePosix(REPO_ROOT, file)] = count;
-		}
-		const audit = auditSymbolCounts({
-			sweepName: "location parser without reported-path predicate (#3295)",
-			counts,
-			pinned: NO_PREDICATE_PINS,
-			remediation: REMEDIATION,
-		});
-		expect(audit.problems).toEqual([]);
-		expect(
-			stalePins(counts, NO_PREDICATE_PINS),
-			"a pinned non-member grew a predicate or stopped parsing — shrink the pin",
-		).toEqual([]);
-	});
+	it(
+		"has no unpinned location parser without pathsEqual (#3295)",
+		() => {
+			const counts: Record<string, number> = {};
+			const files = [
+				...listSourceFiles(RUNNERS_ROOT, { extensions: [".ts"] }),
+				...listSourceFiles(CLIENTS_ROOT, {
+					extensions: [TOOL_CLIENT_SUFFIX],
+					exclude: (relative) => relative.includes("/"),
+				}),
+			];
+			for (const { file, source } of readWalkedFiles(files)) {
+				const count = countLocationParsersWithoutPathsEqual(source);
+				if (count > 0) counts[relativePosix(REPO_ROOT, file)] = count;
+			}
+			const audit = auditSymbolCounts({
+				sweepName: "location parser without reported-path predicate (#3295)",
+				counts,
+				pinned: NO_PREDICATE_PINS,
+				remediation: REMEDIATION,
+			});
+			expect(audit.problems).toEqual([]);
+			expect(
+				stalePins(counts, NO_PREDICATE_PINS),
+				"a pinned non-member grew a predicate or stopped parsing — shrink the pin",
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	// The detector's own teeth, in both directions, on synthetic source: without
 	// these the sweep could silently stop matching and read as "family clean".
@@ -1011,9 +1016,13 @@ describe("runner reported-path attribution single-source-of-truth (#3278)", () =
 	 * is registered — the failure mode that let three shapes through in rounds
 	 * 1-3 was exactly a hand-maintained list of names.
 	 */
-	it("pins every diagnostic-producing helper the utils modules export", () => {
-		expect(diagnosticProducingUtilExports()).toEqual([...SANCTIONED_HELPERS]);
-	});
+	it(
+		"pins every diagnostic-producing helper the utils modules export",
+		() => {
+			expect(diagnosticProducingUtilExports()).toEqual([...SANCTIONED_HELPERS]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("cannot see through a pathsEqual call on unrelated operands (named limit)", () => {
 		expect(

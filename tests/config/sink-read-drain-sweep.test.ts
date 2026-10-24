@@ -148,6 +148,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -1142,30 +1143,38 @@ describe("sink reads drain first (#4381)", () => {
 		).toEqual([]);
 	}, 120_000);
 
-	it("every sink module roots its path in LOG_ROOT_SYMBOLS (drift pin)", () => {
-		// A sink that moves to another root would make the basename evidence
-		// above silently stop matching its in-process reads.
-		const unrooted = discoverSinkModules()
-			.filter(
-				({ source }) =>
-					!LOG_ROOT_SYMBOLS.some((symbol) =>
-						nameNeedle(symbol, true).test(stripSource(source)),
-					),
-			)
-			.map(({ module }) => module);
-		expect(unrooted).toEqual([]);
-	});
+	it(
+		"every sink module roots its path in LOG_ROOT_SYMBOLS (drift pin)",
+		() => {
+			// A sink that moves to another root would make the basename evidence
+			// above silently stop matching its in-process reads.
+			const unrooted = discoverSinkModules()
+				.filter(
+					({ source }) =>
+						!LOG_ROOT_SYMBOLS.some((symbol) =>
+							nameNeedle(symbol, true).test(stripSource(source)),
+						),
+				)
+				.map(({ module }) => module);
+			expect(unrooted).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("every blind sink is named (no path symbol, no basename)", () => {
-		// Recurrence: review r1 of #4384 F1. diagnostic-logger.ts matched
-		// nothing, the drift pin above still passed, and its one undrained
-		// offset read (index-3190 witness) was in neither sweep table.
-		const blind = discoverSinkModules()
-			.filter((s) => s.pathSymbols.length === 0 && s.basenames.length === 0)
-			.map(({ module }) => module)
-			.sort();
-		expect(blind).toEqual(Object.keys(BLIND_SINKS).sort());
-	});
+	it(
+		"every blind sink is named (no path symbol, no basename)",
+		() => {
+			// Recurrence: review r1 of #4384 F1. diagnostic-logger.ts matched
+			// nothing, the drift pin above still passed, and its one undrained
+			// offset read (index-3190 witness) was in neither sweep table.
+			const blind = discoverSinkModules()
+				.filter((s) => s.pathSymbols.length === 0 && s.basenames.length === 0)
+				.map(({ module }) => module)
+				.sort();
+			expect(blind).toEqual(Object.keys(BLIND_SINKS).sort());
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	describe("sink discovery", () => {
 		it("reads path symbols, drains and basenames from a sink module", () => {

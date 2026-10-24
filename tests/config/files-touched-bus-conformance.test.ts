@@ -8,6 +8,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const EVENT = "pilens:files:touched";
 
@@ -133,35 +134,46 @@ function busSubscriberFiles(
 }
 
 describe("pilens:files:touched bus surface (#1966)", () => {
-	it("keeps the event constant and declared publisher list in conformance", () => {
-		const files = sourceFiles();
-		const sources = new Map(files.map((file) => [file, read(file)]));
-		const eventFiles = files.filter((file) => read(file).includes(EVENT));
-		expect(eventFiles).toContain("clients/bus-publish.ts");
-		expect(eventFiles).toContain("clients/agent-nudge.ts");
+	it(
+		"keeps the event constant and declared publisher list in conformance",
+		() => {
+			const files = sourceFiles();
+			const sources = new Map(files.map((file) => [file, read(file)]));
+			const eventFiles = files.filter((file) => read(file).includes(EVENT));
+			expect(eventFiles).toContain("clients/bus-publish.ts");
+			expect(eventFiles).toContain("clients/agent-nudge.ts");
 
-		const actual = busPublisherFiles(files, sources).sort((a, b) =>
-			a < b ? -1 : a > b ? 1 : 0,
-		);
-		expect(actual, "new publisher: update PUBLISHERS and AGENTS.md").toEqual(
-			PUBLISHERS.map((entry) => entry.file).sort((a, b) =>
+			const actual = busPublisherFiles(files, sources).sort((a, b) =>
 				a < b ? -1 : a > b ? 1 : 0,
-			),
-		);
-	});
+			);
+			expect(actual, "new publisher: update PUBLISHERS and AGENTS.md").toEqual(
+				PUBLISHERS.map((entry) => entry.file).sort((a, b) =>
+					a < b ? -1 : a > b ? 1 : 0,
+				),
+			);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("keeps the event subscriber list in conformance", () => {
-		const files = sourceFiles();
-		const sources = new Map(files.map((file) => [file, read(file)]));
-		const actual = busSubscriberFiles(files, sources).sort((a, b) =>
-			a < b ? -1 : a > b ? 1 : 0,
-		);
-		expect(actual, "new subscriber: update SUBSCRIBERS and AGENTS.md").toEqual(
-			SUBSCRIBERS.map((entry) => entry.file).sort((a, b) =>
+	it(
+		"keeps the event subscriber list in conformance",
+		() => {
+			const files = sourceFiles();
+			const sources = new Map(files.map((file) => [file, read(file)]));
+			const actual = busSubscriberFiles(files, sources).sort((a, b) =>
 				a < b ? -1 : a > b ? 1 : 0,
-			),
-		);
-	});
+			);
+			expect(
+				actual,
+				"new subscriber: update SUBSCRIBERS and AGENTS.md",
+			).toEqual(
+				SUBSCRIBERS.map((entry) => entry.file).sort((a, b) =>
+					a < b ? -1 : a > b ? 1 : 0,
+				),
+			);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("handles the review probes without text-scan false positives", () => {
 		const files = [

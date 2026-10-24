@@ -84,6 +84,7 @@ const CONSUMERS = [
 	"tests/config/bounded-eviction-idiom-sweep.test.ts",
 	"tests/config/runner-group-id-census.test.ts",
 	"tests/config/spawn-chokepoint-sweep.test.ts",
+	"tests/config/tree-census-timeout.test.ts",
 	"tests/support/eviction-programs.ts",
 	"tests/support/silent-catch-scan.ts",
 	"tests/support/worker-message-scan.ts",
@@ -210,6 +211,13 @@ const ADMITTED_ACCESSOR_SITES: readonly AccessorAdmission[] = [
 		text: '(value.field("arguments")?.namedChildren().length ?? 0) >= 2',
 		count: 1,
 		reason: "measures a call's argument count; nothing is visited",
+	},
+	{
+		file: "tests/config/tree-census-timeout.test.ts",
+		text: "const named = args.children().filter((node) => node.isNamed());",
+		count: 1,
+		reason:
+			"enumerates one call's direct argument nodes to find its callback and budget; no recursive traversal",
 	},
 	{
 		file: "tests/config/runner-group-id-census.test.ts",
