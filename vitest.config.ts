@@ -347,6 +347,11 @@ const lspSpawnHeavyInclude = [
 	// #4322: the production LSPService over two real stdio fake-server children
 	// (a JSON primary and a typos auxiliary); waits on real handshakes and a
 	// diagnostics round, the same #1022/#2332 shape as its lane siblings.
+	// #1712 slice 2: the cross-file live twins over the same real classic
+	// TypeScript server (opt-in, PI_LENS_INTEGRATION=1); each case waits on the
+	// wrapper's handshake, its willRenameFiles answer and one diagnostics round
+	// trip, the same contention class as the cascade twin above.
+	"tests/clients/lsp/crossfile-classic-ts-live.test.ts",
 	"tests/clients/lsp/diagnostics-health-unavailable-primary-4322.test.ts",
 	// #3405: its last describe spawns two real fake-server children through
 	// `spawnFakeLspServer` and waits on a real initialize handshake before
