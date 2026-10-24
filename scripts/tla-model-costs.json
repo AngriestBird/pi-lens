@@ -280,6 +280,8 @@
 		"formal/lsp-crash/WarmupColdNoClient.cfg": 2,
 		"formal/lsp-diagnostics-freshness/DependencyFix.cfg": 1.8,
 		"formal/lsp-diagnostics-freshness/DependencyLateRepublish.cfg": 1.8,
+		"formal/lsp-diagnostics-freshness/DependencyMutAnswerGuard.cfg": 1.8,
+		"formal/lsp-diagnostics-freshness/DependencyMutAnswerGuardNoClear.cfg": 1.8,
 		"formal/lsp-diagnostics-freshness/DependencyMutSettleGuard.cfg": 1.8,
 		"formal/lsp-diagnostics-freshness/DependencyPreFix.cfg": 2.1,
 		"formal/lsp-diagnostics-freshness/FenceAsyncServer.cfg": 1.9,

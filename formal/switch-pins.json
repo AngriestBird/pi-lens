@@ -1012,7 +1012,8 @@
 					"constants": [
 						"SkippedWait",
 						"Preserve",
-						"MaxPubs"
+						"MaxPubs",
+						"MaxClears"
 					]
 				},
 				{

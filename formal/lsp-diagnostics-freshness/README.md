@@ -271,17 +271,35 @@ settle takes the cache while the slot holds a later receipt. `Republish`
 is a server property: having read `z.ts`'s change, the server publishes
 `a.ts`'s re-check before it reads its next message (the fake checker does).
 
+`Clear` (`MaxClears`, #4785 F4) is a clear of `a.ts`'s stored state while its
+wait is open: `clearDiagnosticsForPath` (`clients/lsp/client.ts:2169`) empties
+the stored answer and cancels the receipt in the slot in one tick. Production
+reaches it from a `workspace/diagnostic/refresh`
+(`clients/lsp/client.ts:3587`) and from a later `didChange`
+(`clients/lsp/client.ts:5050`); `tests/clients/lsp/touch-cleared-deferred-wait-4785.test.ts`
+drives it mid-wait. The wait's own state is untouched, so the quiet window
+fires on an emptied cache, and the answer guard (`answerStored`,
+`clients/lsp/client.ts:4689`) makes it keep waiting instead of resolving. The
+touch reads "no answer" only from a wait that ran to its budget, so an early
+resolve on an emptied cache reads as a confirmed clean. `MaxClears = 0` is the
+model before this action: nothing empties the cache after a store.
+
 Invariants:
 - `NewestAtSettle`: when the wait settles, no later receipt is pending.
 - `NoPhantomFinding`: a settled read of `a.ts` was computed against `z.ts`'s
   new bytes.
+- `SettleNeedsAnswer`: when the wait settles, an answer is stored. `Clear`
+  fires only while the wait is open, so a settled wait's cache never empties
+  afterwards.
 
 | Config | Expect | Verdict | Distinct states | s |
 |---|---|---|---|---|
-| `DependencyFix` | pass | pass | 266 | 0 |
+| `DependencyFix` | pass | pass | 423 | 0 |
 | `DependencyPreFix` | violated NoPhantomFinding | violated NoPhantomFinding | 196 | 0 |
-| `DependencyMutSettleGuard` | violated NewestAtSettle | violated NewestAtSettle | 189 | 0 |
-| `DependencyLateRepublish` | violated NoPhantomFinding (residual) | violated NoPhantomFinding | 196 | 0 |
+| `DependencyMutSettleGuard` | violated NewestAtSettle | violated NewestAtSettle | 279 | 0 |
+| `DependencyLateRepublish` | violated NoPhantomFinding (residual) | violated NoPhantomFinding | 253 | 0 |
+| `DependencyMutAnswerGuard` | violated SettleNeedsAnswer | violated SettleNeedsAnswer | 234 | 0 |
+| `DependencyMutAnswerGuardNoClear` | pass (vacuity) | pass | 266 | 0 |
 
 **`DependencyPreFix`** is the measured trace:
 1. The server reads `a.ts`'s change and publishes the pre-`z.ts` STOP.
@@ -308,6 +326,28 @@ request before it republishes `a.ts` (an asynchronous re-check) leaves the
 pre-`z.ts` answer as the newest one. No publication names the dependency's
 version, so no client-side read can tell. The guard does not help there,
 and the model says so.
+
+**`DependencyMutAnswerGuard`**: the answer guard dropped from the quiet
+window (`Mutant = "noAnswerGuard"`), 11 states:
+1. The server publishes; the client receives the receipt, and the wait starts
+   (`listen`).
+2. The slot fires: the answer is stored and the window is armed.
+3. A clear empties the cache.
+4. The window fires on the emptied cache and resolves the wait with
+   `how = "settled"` and no stored answer.
+
+**`DependencyMutAnswerGuardNoClear`** is the vacuity ratchet for it: the same
+mutant with `MaxClears = 0` passes (266 states, the count the model had before
+`Clear`), because nothing ever empties the cache after a store. Before the
+clear action, `SettleNeedsAnswer` held for any guard. If this config reds, the
+clear no longer reaches the guard and the mutant config above checks nothing.
+
+The drop exit (the `PENDING_RECEIPT_DROPPED` listener,
+`clients/lsp/client.ts:4742`) carries the same `answerStored` guard and has no
+action here: a dropped receipt in a version-less model would have to be limited
+to the superseded and refused ones, which it cannot name. The #4785 tests pin
+that site. A clear after the wait resolved (`touchFile` reads a few awaits
+later) is not modelled either.
 
 Not modelled here: a publish computed before the server read `a.ts`'s own
 change (the #3484 shape above), versioned publishes, the slot's two
