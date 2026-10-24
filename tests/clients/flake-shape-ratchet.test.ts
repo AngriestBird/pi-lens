@@ -1120,6 +1120,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the smoke's exit code is the contract; an in-process call of the classifier cannot prove that a pi child that exits, or a signal on its stdout, turns the exit code red",
 	},
+	// 2026-10-24 (#4789): the child-report cases read the HOME and XDG dirs a
+	// REAL child inherits from the shared scratch home pin; an in-process read of
+	// the env object cannot show what the child process sees.
+	"real-process-spawn:scripts/scratch-home-env.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"what a spawned child inherits (HOME, USERPROFILE, XDG dirs) is only observable in the child process",
+	},
 	// #3401: the seed script's default git argv (depth-2 fetch, refspec, blob
 	// specs) only means something against a real repo and a depth-1 clone.
 	"real-process-spawn:scripts/seed-matrix-from-bot-branch-real-git.test.ts": {

@@ -225,6 +225,20 @@ describe("host-provided packages are not vendored (#1926)", () => {
 		expect(selftest).toContain("lib/host-provided-deps.mjs");
 	});
 
+	it("ships scripts/lib/scratch-home-env.mjs, because the shipped rpc-load-check.mjs imports it (#4789)", () => {
+		// Recurrence: PR #4821 round 1 shipped rpc-load-check.mjs, which imports the
+		// shared home pin, without the helper in files[]. The installed package's
+		// check-extensions then reported "imports './lib/scratch-home-env.mjs' → NOT FOUND"
+		// (CI Install test, ubuntu and macos).
+		const files = pkg.files ?? [];
+		expect(files).toContain("scripts/lib/scratch-home-env.mjs");
+		const rpc = fs.readFileSync(
+			path.join(root, "scripts", "rpc-load-check.mjs"),
+			"utf8",
+		);
+		expect(rpc).toContain("./lib/scratch-home-env.mjs");
+	});
+
 	it("ships scripts/lib/skills-predicate.mjs, because install-selftest.mjs imports it too (#2626)", () => {
 		// Same shape as host-provided-deps.mjs above, one module later: the
 		// shared skill-discovery predicate (#2626 review round 2, F2) folds
