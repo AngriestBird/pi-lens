@@ -75,6 +75,26 @@ describe.skipIf(process.platform === "win32")(
 			);
 		});
 
+		it("reads the required set from the branch object when the protection endpoint is forbidden to the Actions token", () => {
+			// Recurrence: dispatch run 40136156459 of round 2 (HTTP 403 on
+			// branches/master/protection) measured the fallback pair, so the nightly
+			// still skipped 7 of the 9 required contexts in production.
+			const forbidden = join(dir, "forbidden.json");
+			writeFileSync(
+				forbidden,
+				JSON.stringify({
+					...JSON.parse(readFileSync(RECORDED, "utf8")),
+					protectionForbidden: true,
+				}),
+			);
+			const result = run(["--runs", "20"], forbidden);
+			expect(result.status).toBe(0);
+			expect(result.stdout).not.toContain("branch protection unreadable");
+			expect(result.stdout).toContain(
+				"ci-job-p90: 8 of 9 required contexts measured",
+			);
+		});
+
 		it("falls back to the constant required list and says so when branch protection is unreadable", () => {
 			// Recurrence: a silent fallback reads as a clean population (AGENTS shape 10).
 			const unreadable = join(dir, "unprotected.json");

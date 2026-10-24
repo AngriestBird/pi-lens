@@ -22,6 +22,7 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+	extractRequiredCheckNames,
 	readJobTimeCaps,
 	resolveRepository,
 	resolveRequiredCheckNames,
@@ -101,10 +102,32 @@ function listMasterRuns(workflow, count) {
 	}));
 }
 
+/**
+ * The branch-protection required contexts: ci-verdict's `resolveRequiredCheckNames`
+ * (the /protection endpoint), else the branch object's `protection` block. The
+ * first needs administration, which the Actions token lacks (dispatch run
+ * 40136156459: HTTP 403); the second lists the same contexts to any reader.
+ * Null when neither answers.
+ */
+function readRequiredChecks(repository) {
+	const viaProtection = resolveRequiredCheckNames(repository, gh);
+	if (viaProtection) return viaProtection;
+	try {
+		const branch = JSON.parse(
+			gh(["api", `repos/${repository}/branches/master`]),
+		);
+		return extractRequiredCheckNames(
+			branch?.protection?.required_status_checks,
+		);
+	} catch {
+		return null;
+	}
+}
+
 async function main() {
 	const { runs: runCount } = parseArgs(process.argv.slice(2));
 	const repository = process.env.GH_REPO || resolveRepository(gh);
-	const live = resolveRequiredCheckNames(repository, gh);
+	const live = readRequiredChecks(repository);
 	const requiredChecks = live ?? REQUIRED_CHECKS;
 	if (live === null) {
 		console.log(

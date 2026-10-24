@@ -12,12 +12,30 @@ if (fixture.failRead) {
 	console.error("HTTP 500: recorded failure");
 	process.exit(1);
 }
+// The branch-protection endpoint needs administration; the Actions token has
+// none (run 40136156459: HTTP 403), so `protectionForbidden` models it. The
+// branch object lists the same contexts to any reader.
 if (/branches\/master\/protection/.test(args)) {
-	if (!fixture.required) process.exit(1);
+	if (!fixture.required || fixture.protectionForbidden) {
+		console.error("HTTP 403: Resource not accessible by integration");
+		process.exit(1);
+	}
 	console.log(
 		JSON.stringify({
 			required_status_checks: {
 				checks: fixture.required.map((context) => ({ context })),
+			},
+		}),
+	);
+	process.exit(0);
+}
+if (args.endsWith("branches/master")) {
+	if (!fixture.required) process.exit(1);
+	console.log(
+		JSON.stringify({
+			protection: {
+				enabled: true,
+				required_status_checks: { contexts: fixture.required },
 			},
 		}),
 	);
