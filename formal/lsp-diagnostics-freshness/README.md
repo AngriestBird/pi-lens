@@ -27,8 +27,10 @@ Issue: #3484.
 - **`clientWaitForDiagnostics`** (`clients/lsp/client.ts`):
   - the early return: fresh, not `isVersionStale`, and a non-empty cache;
   - otherwise it registers a listener. `onDiagnostics` re-checks those
-    conditions and (re)arms a quiet-window timer, which resolves the wait
-    without checking again;
+    conditions and (re)arms a quiet-window timer. In `DiagnosticsFreshness.tla`
+    the timer resolves the wait without checking again. The code checks again
+    when it fires (a pending later receipt, `laterReceiptPending`, and a stored
+    answer, `answerStored`); `DependencyAnswer.tla` models both checks;
   - a timeout also resolves the wait;
   - `touchFile` reads `getDiagnostics` later, after more awaits.
 - **The `publishDiagnostics` handler** (`clients/lsp/client.ts` `setupIncomingHandlers`):
@@ -288,9 +290,20 @@ Invariants:
 - `NewestAtSettle`: when the wait settles, no later receipt is pending.
 - `NoPhantomFinding`: a settled read of `a.ts` was computed against `z.ts`'s
   new bytes.
-- `SettleNeedsAnswer`: when the wait settles, an answer is stored. `Clear`
-  fires only while the wait is open, so a settled wait's cache never empties
-  afterwards.
+- `SettleNeedsAnswer`: when the wait settles, an answer is stored. In this
+  model `Clear` fires only while the wait is open, so a settled wait's cache
+  never empties afterwards. The code has no such restriction (see the
+  post-settle clear below).
+- `NoDroppedAnswer` (`how = "timeout" => ~dropped`): a quiet window that fires
+  on a stored answer with no later receipt pending must not leave the wait to
+  run out its budget. `dropped` is a ghost, set from the outcome of
+  `WaitSettle` (the window fired on a stored answer, nothing was pending, and
+  the wait is still open) and cleared by `Clear`. `SettleNeedsAnswer` cannot
+  see this: a window that rejects the only answer never settles.
+
+`DependencyFix` is the exhaustive check of all four invariants.
+`DependencyLateRepublish` carries them too, but TLC stops at its own expected
+`NoPhantomFinding` counterexample, so it explores 253 of its 640 states.
 
 | Config | Expect | Verdict | Distinct states | s |
 |---|---|---|---|---|
@@ -300,6 +313,8 @@ Invariants:
 | `DependencyLateRepublish` | violated NoPhantomFinding (residual) | violated NoPhantomFinding | 253 | 0 |
 | `DependencyMutAnswerGuard` | violated SettleNeedsAnswer | violated SettleNeedsAnswer | 234 | 0 |
 | `DependencyMutAnswerGuardNoClear` | pass (vacuity) | pass | 266 | 0 |
+| `DependencyMutDropAnswer` | violated NoDroppedAnswer | violated NoDroppedAnswer | 233 | 0 |
+| `DependencyMutDropAnswerBlind` | pass (blindness) | pass | 442 | 0 |
 
 **`DependencyPreFix`** is the measured trace:
 1. The server reads `a.ts`'s change and publishes the pre-`z.ts` STOP.
@@ -342,12 +357,38 @@ mutant with `MaxClears = 0` passes (266 states, the count the model had before
 clear action, `SettleNeedsAnswer` held for any guard. If this config reds, the
 clear no longer reaches the guard and the mutant config above checks nothing.
 
+**`DependencyMutDropAnswer`**: the hand mutant for `NoDroppedAnswer`
+(`Mutant = "dropAnswer"`). The quiet window fires on a stored answer with no
+later receipt pending and returns to `listen`, so only the deadline can end the
+wait. 11 states:
+1. The server publishes; the client receives the receipt; the wait starts
+   (`listen`).
+2. The slot fires: the answer is stored and the window is armed.
+3. `WaitSettle` finds the answer and nothing pending, and goes back to
+   `listen` (`dropped = TRUE`).
+4. `WaitTimeout` ends the wait with `how = "timeout"`.
+
+**`DependencyMutDropAnswerBlind`** is its blindness ratchet: the same mutant
+with only the three older invariants passes (442 states), because a wait that
+never settles breaks none of them. If it reds, an older invariant now sees the
+drop and `NoDroppedAnswer` is no longer the property that catches it. The
+property passes trivially only if no run reaches the drop; the mutant config
+shows one does. Neutering the ghost (`dropped' = FALSE`) turns the mutant
+config green.
+
 The drop exit (the `PENDING_RECEIPT_DROPPED` listener,
 `clients/lsp/client.ts:4742`) carries the same `answerStored` guard and has no
 action here: a dropped receipt in a version-less model would have to be limited
 to the superseded and refused ones, which it cannot name. The #4785 tests pin
-that site. A clear after the wait resolved (`touchFile` reads a few awaits
-later) is not modelled either.
+that site.
+
+A clear after the wait resolved (`touchFile` reads a few awaits later) is not
+modelled, and `Clear` is restricted to an open wait. In the code the window is
+open on a touch with auxiliaries: the primary's wait resolves, the aux waits
+run (`clients/lsp/index.ts:5431-5434`), and a refresh handled in that gap
+empties the primary's cache before the merge. `SettleNeedsAnswer` cannot
+express it, because it needs a read-time ghost on the cache `touchFile` reads.
+Unreproduced.
 
 Not modelled here: a publish computed before the server read `a.ts`'s own
 change (the #3484 shape above), versioned publishes, the slot's two
