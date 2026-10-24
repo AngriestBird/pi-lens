@@ -645,6 +645,12 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real Lean elaboration and diagnostic publication require Lake and elan across the child-process boundary; the serialized wall-clock lane isolates the handshake and diagnostic wait",
 	},
+	"real-process-spawn:clients/lsp/unheld-module-pyright-4742.integration.test.ts":
+		{
+			detector: "real-process-spawn",
+			reason:
+				"a clean-tree HEAD move needs a real git checkout and a closed module's stale bytes live only in a real pyright-langserver child; no double reproduces what the server kept",
+		},
 	"real-process-spawn:clients/mcp/review-rebuild.test.ts": {
 		detector: "real-process-spawn",
 		reason:

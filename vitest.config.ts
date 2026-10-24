@@ -623,6 +623,11 @@ export const wallClockBudgetInclude = [
 	// window. Keep child-process CPU sampling and this wall-clock lower bound in
 	// the fully serialized, dead-last phase.
 	"tests/clients/lsp/service-notify-cpu-liveness.test.ts",
+	// #4742: a real git checkout and a real pyright-langserver child (skipped,
+	// with a named reason, when none is installed): the stale bytes live only in
+	// the server, so the handshake and two diagnostics waits of up to 30 s run
+	// in the serialized lane (flake-shape admission).
+	"tests/clients/lsp/unheld-module-pyright-4742.integration.test.ts",
 	// #4709 slice 3b: the resolver verdict `runRebuild` acts on comes from the
 	// real package-manager lookup spawning executable stand-in managers on PATH
 	// (flake-shape admission).
