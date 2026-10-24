@@ -4298,6 +4298,59 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 				ambient: { TMPDIR: AMBIENT_OFF },
 				rule: "tmpCheckout",
 			},
+			// The same holds for any word made only of references the hook cannot
+			// resolve and bash can expand to empty: a positional parameter (the
+			// hook's command has none), `$*`, `$!` before any background job, and a
+			// concatenation of unset variables. `$0` is always set, and a resolved
+			// part keeps the word non-empty, so neither gets the empty reading.
+			{
+				label: '-p "$1", no parameters: mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "$1" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "${1}", no parameters: mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "${1}" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "$*", no parameters: mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "$*" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "$!", no background job: mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "$!" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "--tmpdir=$D$E, both unset: mktemp's TMPDIR under /tmp",
+				command: "mktemp -d --tmpdir=$D$E x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a $D$E template, both unset: mktemp's TMPDIR under /tmp",
+				command: "mktemp -d $D$E",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "$0" is never empty: it stays relative to the cwd',
+				command: 'mktemp -d -p "$0" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			{
+				label: '-p "$X$D" with X off /tmp is never empty',
+				command: 'X=/home/dev/guard-bash-4057-x; mktemp -d -p "$X$D" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
 			{
 				label: "no template lands in the prefix's TMPDIR under /tmp",
 				command: `TMPDIR=${INLINE_TMP} mktemp -d`,

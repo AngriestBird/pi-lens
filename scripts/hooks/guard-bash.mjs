@@ -2058,10 +2058,19 @@ function forEachBundledMktempFlag(a, handlers) {
 	return needsTmpdirValue;
 }
 
-/** One whole `$NAME`/`${NAME}` reference: what {@link expandShellWord} leaves
- *  of a word whose only variable has no known value (#4057). */
-const LONE_VARIABLE_REFERENCE =
-	/^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$/;
+/**
+ * A word, after {@link expandShellWord}, that bash may still expand to nothing
+ * (#4057): empty, or made only of references this scan leaves unexpanded and
+ * bash can expand to the empty string, in any concatenation. Those are a
+ * variable with no known value (`$D`, `${D}`), a positional parameter
+ * (`$1`-`$9`, `${N}`), `$@`, `$*` (empty with no parameters), and `$!` (empty
+ * before any background job; measured with /bin/bash 3.2.57). Not `$0`, `$#`,
+ * `$$`, `$?` or `$-`, which bash always sets to a non-empty value, and not a
+ * word with any resolved text. A `${D:-x}`-style expansion is not matched: the
+ * expander leaves it as written.
+ */
+const MAY_EXPAND_TO_NOTHING =
+	/^(?:\$(?:\{(?:[A-Za-z_][A-Za-z0-9_]*|[1-9][0-9]*|[@*!])\}|[A-Za-z_][A-Za-z0-9_]*|[1-9@*!]))*$/;
 
 /**
  * Classify an `mktemp` invocation's args for #3526's `tmpCheckout` rule.
@@ -2145,14 +2154,15 @@ function classifyMktemp(args, cwd, env, expansionEnv = env) {
 	if (template !== undefined)
 		template = expandShellWord(template, cwd, expansionEnv).text;
 	// #4057: a `-p`/`--tmpdir=` value or a template that bash may expand to
-	// nothing (empty, or one whole reference to a variable this scan has no
-	// value for) is read twice, as #3997 reads a substitution: as written, and
-	// as empty. GNU mktemp takes an empty `-p ''`/`--tmpdir=` as its own
-	// `$TMPDIR`, else /tmp, and a template word that vanishes leaves no
-	// template, which defaults there too. Quotes are gone by now, so `-p "$D"`
-	// and `-p $D` read alike; the first reading that lands under /tmp denies.
+	// nothing ({@link MAY_EXPAND_TO_NOTHING}: empty once expanded, or only
+	// references this scan cannot resolve and bash can expand to empty) is
+	// read twice, as #3997 reads a substitution: as written, and as empty. GNU
+	// mktemp takes an empty `-p ''`/`--tmpdir=` as its own `$TMPDIR`, else
+	// /tmp, and a template word that vanishes leaves no template, which
+	// defaults there too. Quotes are gone by now, so `-p "$D"` and `-p $D` read
+	// alike; the first reading that lands under /tmp denies.
 	const mayBeEmpty = (/** @type {string} */ text) =>
-		text === "" || LONE_VARIABLE_REFERENCE.test(text);
+		MAY_EXPAND_TO_NOTHING.test(text);
 	const emptyReading =
 		tmpdirOverride?.dir !== undefined
 			? mayBeEmpty(
