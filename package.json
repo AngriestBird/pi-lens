@@ -116,6 +116,7 @@
 		"scripts/lib/host-provided-deps.mjs",
 		"scripts/lib/is-main-module.mjs",
 		"scripts/lib/latency-log-phases.mjs",
+		"scripts/lib/scratch-home-env.mjs",
 		"scripts/lib/skills-predicate.mjs",
 		"scripts/lib/web-tree-sitter-dir.mjs",
 		"scripts/lib/warm-loader-cache.mjs",
