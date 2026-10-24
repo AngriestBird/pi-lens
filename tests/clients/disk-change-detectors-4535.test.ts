@@ -33,6 +33,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import {
+	DISK_CHANGE_MAX_RECORDED_PATHS,
 	type DiskChange,
 	publishDiskChange,
 	subscribeDiskChange,
@@ -68,6 +69,7 @@ import { resetSessionScopedState } from "../../clients/runtime-session.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import {
 	handleToolResult,
+	publishSettledSweepDrift,
 	resyncHeadMove,
 } from "../../clients/runtime-tool-result.js";
 import { execFileSync } from "../support/git-fixture-env.js";
@@ -1314,4 +1316,59 @@ describe("the pre-command dirty set is bounded and says when it is cut", () => {
 		);
 		expect(row?.latestReasons[0]?.subject).toBe(normalizeMapKey(dir));
 	}, 30_000);
+});
+
+/**
+ * #4535 slice 3: the settled sweep (D4) publishes the paths it found. The wiring
+ * from `agent_settled` is driven in `tests/index-observed-sweep-no-read-guard.
+ * test.ts`; these cases pin what the publish itself carries, which that case's
+ * one hash-proven file cannot: the unverifiable half, the cap, and silence.
+ */
+describe("the settled sweep's publish", () => {
+	it("labels a publish that holds an unverifiable path inferred and names both halves", async () => {
+		const dir = path.join(tmp, "sweep-unverifiable");
+		const proven = path.join(dir, "proven.ts");
+		const unproven = path.join(dir, "unproven.ts");
+		const h = harness("sweep-unverifiable", []);
+
+		await publishSettledSweepDrift(h.root, {
+			drifted: [proven],
+			unverifiable: [unproven],
+		});
+
+		const swept = h.publishes.filter((c) => c.origin === "settled-sweep");
+		expect(swept).toHaveLength(1);
+		// A stat that moved with no hashed baseline is not a proven change: the
+		// label says so, and a consumer reads the bytes itself.
+		expect(swept[0]).toMatchObject({ kind: "inferred", seq: 0 });
+		expect([...(swept[0]?.paths ?? [])].sort()).toEqual(
+			[normalizeMapKey(proven), normalizeMapKey(unproven)].sort(),
+		);
+	});
+
+	it("publishes nothing for a sweep that found nothing", async () => {
+		const h = harness("sweep-quiet", []);
+
+		await publishSettledSweepDrift(h.root, { drifted: [], unverifiable: [] });
+
+		expect(h.publishes).toEqual([]);
+	});
+
+	it("keeps every path of a sweep over the publisher's cap, in listed chunks", async () => {
+		const h = harness("sweep-capped", []);
+		const drifted = Array.from(
+			{ length: DISK_CHANGE_MAX_RECORDED_PATHS + 6 },
+			(_, i) => path.join(h.root, `s${i}.ts`),
+		);
+
+		await publishSettledSweepDrift(h.root, { drifted, unverifiable: [] });
+
+		const swept = h.publishes.filter((c) => c.origin === "settled-sweep");
+		// One publish over the cap would read as "unknown" and cost every held
+		// document; chunks keep the listing.
+		expect(
+			swept.map((c) => (c.paths === "unknown" ? -1 : c.paths.length)),
+		).toEqual([DISK_CHANGE_MAX_RECORDED_PATHS, 6]);
+		expect(swept.every((c) => c.kind === "observed")).toBe(true);
+	});
 });

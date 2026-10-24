@@ -142,6 +142,7 @@ import { requestBootstrapClients } from "./bootstrap.js";
 import { bounded } from "./deadline-utils.js";
 import type { DiskChangeRuntime } from "./disk-changes.js";
 import {
+	type ChunkableDiskChangeInput,
 	DISK_CHANGE_MAX_RECORDED_PATHS,
 	publishDiskChangeChunked,
 } from "./disk-changes.js";
@@ -473,7 +474,10 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 
 /**
  * #4535 slice 2: the recovered set's detached follow-up, one publish per
- * `DISK_CHANGE_MAX_RECORDED_PATHS` chunk of the recovered population.
+ * `DISK_CHANGE_MAX_RECORDED_PATHS` chunk of the recovered population. Slice 3's
+ * settled sweep runs the same pass over its own origin ({@link
+ * publishSettledSweepDrift}): the chunking, the per-chunk drift await and the
+ * failure record are one chain, not one per detector.
  *
  * The spacing matters. A single publish over a longer population is reported
  * as `paths: "unknown"`, and the consumer's only honest reading of that is
@@ -496,23 +500,17 @@ async function lookAtHead(args: HeadLook): Promise<void> {
  * one row per chunk (review round 3, p3-3: the base branch dropped the whole
  * set with a `dbg` line, which for a detached chain is no record at all).
  */
-async function publishRecoveredDrift(
+async function publishDriftPass(
 	root: string,
 	paths: readonly string[],
+	detector: Pick<ChunkableDiskChangeInput, "origin" | "sources" | "kind"> & {
+		/** What the record calls this chunk's paths. */
+		noun: string;
+	},
 ): Promise<void> {
+	const { noun, ...origin } = detector;
 	await publishDiskChangeChunked(
-		{
-			root,
-			origin: "bash-recovery",
-			sources: [BASH_RECOVERY_DRIFT_SOURCE],
-			// `inferred`, the conservative label: the stat-diff strategy hashed
-			// the bytes, but the git strategy reported a status pair and an mtime
-			// window without reading them. A marker that wants to confirm "not
-			// reproduced" reads the bytes itself; the drift pass does exactly
-			// that.
-			kind: "inferred",
-			paths,
-		},
+		{ root, ...origin, paths },
 		undefined,
 		undefined,
 		async ({ results, failedSubscribers }, { index, total }) => {
@@ -528,11 +526,55 @@ async function publishRecoveredDrift(
 				incrementDegradationCount({
 					kind: "disk-change-recovered-drift-failed",
 					subject: root,
-					reason: `chunk ${index + 1} of ${total} rejected, so its ${dropped} recovered path(s) were never republished to a server: ${cause instanceof Error ? cause.message : String(cause)}`,
+					reason: `chunk ${index + 1} of ${total} rejected, so its ${dropped} ${noun} path(s) were never republished to a server: ${cause instanceof Error ? cause.message : String(cause)}`,
 				});
 			}
 		},
 	);
+}
+
+/**
+ * The recovered set's drift pass. `inferred`, the conservative label: the
+ * stat-diff strategy hashed the bytes, but the git strategy reported a status
+ * pair and an mtime window without reading them. A marker that wants to confirm
+ * "not reproduced" reads the bytes itself; the drift pass does exactly that.
+ */
+const RECOVERED_DRIFT_PASS = {
+	origin: "bash-recovery",
+	sources: [BASH_RECOVERY_DRIFT_SOURCE],
+	kind: "inferred",
+	noun: "recovered",
+} as const;
+
+/**
+ * #4535 slice 3: the settled sweep's drift (D4). The sweep finds a tracked file
+ * whose bytes moved with no tool call to explain it and replays it through the
+ * mutation bridge, which allocates the project sequence per path. The bridge
+ * never reached the language servers or the diagnostics cache, so the sweep now
+ * publishes what it found. No runtime is passed: the bridge already allocated
+ * the sequence, and a second allocation would bump every path twice.
+ *
+ * `observed` only when every path was hash-proven. An `unverifiable` file (its
+ * stat moved, no hashed baseline could confirm a change) is published too,
+ * labelled `inferred`: the LSP consumer compares the bytes itself and pays a
+ * read, while the diagnostics cache refuses the path's entries without reading
+ * one, so an unproven path costs one recompute; leaving it out serves stale views.
+ *
+ * The caller `void`s this: `agent_settled` never waits on a server, and the
+ * chain records its own failures (see {@link publishDriftPass}).
+ */
+export function publishSettledSweepDrift(
+	root: string,
+	found: { drifted: readonly string[]; unverifiable: readonly string[] },
+): Promise<void> {
+	const paths = [...new Set([...found.drifted, ...found.unverifiable])];
+	if (paths.length === 0) return Promise.resolve();
+	ensureDiskChangeSubscribers();
+	return publishDriftPass(root, paths, {
+		origin: "settled-sweep",
+		kind: found.unverifiable.length > 0 ? "inferred" : "observed",
+		noun: "settled-sweep",
+	});
 }
 
 /**
@@ -2764,14 +2806,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					.then(() =>
 						Promise.all(
 							[...driftByRoot].map(([root, paths]) =>
-								publishRecoveredDrift(root, paths),
+								publishDriftPass(root, paths, RECOVERED_DRIFT_PASS),
 							),
 						),
 					)
 					.catch((err) => {
 						// The one handler the base branch had for this detached chain.
 						// The publisher never rejects (see `publishDiskChange`'s contract)
-						// and a drift rejection is recorded by `publishRecoveredDrift`
+						// and a drift rejection is recorded by `publishDriftPass`
 						// chunk by chunk (review round 3, p3-3; #4612 r4 lets the chain
 						// go on), so only a programming error reaches here.
 						// none: the two failure paths this chain owns record themselves, so

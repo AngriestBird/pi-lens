@@ -40,6 +40,7 @@ import {
 import {
 	type DiskChange,
 	DISK_CHANGE_MAX_RECORDED_PATHS,
+	DISK_CHANGE_ORIGINS,
 	publishDiskChange,
 	subscribeDiskChange,
 } from "../../clients/disk-changes.js";
@@ -311,6 +312,15 @@ describe("the LSP consumer sends a publish's unheld paths as watched-files event
 		expect(resynced).toEqual([[unheld]]);
 	});
 
+	it("sends a settled sweep's unheld path as Changed", async () => {
+		const unheld = write("swept.py", "X = 4\n");
+
+		const answer = await publish("settled-sweep", ["settled-sweep"], [unheld]);
+
+		expect(calls.notified).toEqual([{ filePath: unheld, type: 2 }]);
+		expect(answer.unheld).toBe(1);
+	});
+
 	it("names no path for an unenumerable publish, and still resyncs the held set", async () => {
 		const heldPath = write("held.py", "Y = 2\n");
 		held = [heldPath];
@@ -351,4 +361,56 @@ describe("the LSP consumer sends a publish's unheld paths as watched-files event
 		);
 		expect(rows).toHaveLength(1);
 	});
+});
+
+describe("the diagnostics cache hears every detector", () => {
+	// Recurrence: slice 2 filtered to `out-of-band` inside the handler, so a
+	// HEAD move, a bash-recovered rewrite and a settled-sweep drift refused only
+	// the entries whose own file moved, and the cached finding of an unchanged
+	// importer kept serving.
+	it.each(DISK_CHANGE_ORIGINS)(
+		"refuses the entries that depend on a path a %s publish names",
+		async (origin) => {
+			ensureDiskChangeSubscribers();
+			const changed = path.join(tmp, "src", "changed.ts");
+			const key = normalizeMapKey(changed);
+			const pathRefusedAt = () =>
+				workspaceFileCreatedAtFor(
+					() => false,
+					() => true,
+					(creation) => creation.path === key,
+				);
+			expect(pathRefusedAt()).toBe(0);
+
+			const { change } = await publishDiskChange({
+				root: tmp,
+				origin,
+				paths: [changed],
+			});
+
+			expect(change.paths).toEqual([key]);
+			expect(pathRefusedAt()).toBe(change.at);
+		},
+	);
+
+	it.each(DISK_CHANGE_ORIGINS)(
+		"refuses every entry scanned before a %s publish it could not enumerate",
+		async (origin) => {
+			ensureDiskChangeSubscribers();
+			const clock = () =>
+				workspaceFileCreatedAtFor(
+					() => false,
+					() => false,
+				);
+			expect(clock()).toBe(0);
+
+			const { change } = await publishDiskChange({
+				root: tmp,
+				origin,
+				paths: "unknown",
+			});
+
+			expect(clock()).toBe(change.at);
+		},
+	);
 });

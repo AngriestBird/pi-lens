@@ -265,6 +265,7 @@ import {
 	flushDebouncedToolResults,
 	handleToolExecutionEnd,
 	handleToolResult,
+	publishSettledSweepDrift,
 } from "./clients/runtime-tool-result.js";
 import { cancelLSPIdleReset, handleTurnEnd } from "./clients/runtime-turn.js";
 import {
@@ -3499,6 +3500,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 					`observed_settled_sweep: ${result.drifted.length} drifted file(s), ${result.replayed} replayed, ` +
 						`${result.unverifiable.length} unverifiable; scanned ${result.scanned}, ${result.notReachedThisPass} not reached this pass (cursor ${result.cursor})`,
 				);
+				// #4535 slice 3: the replay above reaches the mutation bridge only.
+				// The same finding is also a disk change no tool explains, so the
+				// language servers and the diagnostics cache hear it too. Detached:
+				// `agent_settled` never waits on a server; the chain records its own
+				// failures (`publishSettledSweepDrift`).
+				void publishSettledSweepDrift(cwd, result).catch((publishErr) => {
+					// none: the chain records its own failures per chunk
+					// (`disk-change-recovered-drift-failed`) and the publisher never
+					// rejects, so only a programming error reaches here and `dbg` names it.
+					dbg(`observed_settled_sweep: publish failed: ${publishErr}`);
+				});
 			}
 		} catch (sweepErr) {
 			surfaceHandlerCrash("observed_settled_sweep", sweepErr, { dbg });
