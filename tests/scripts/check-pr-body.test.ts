@@ -1,5 +1,6 @@
 // flake-shape: real-process-spawn — the exact local CLI, shallow checkout and gh label read are the subject; an in-process call cannot prove any of those command boundaries.
 import {
+	appendFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -24,6 +25,8 @@ import {
 	detectFlattenedBody,
 	lintPullRequestEvent,
 	lintLocalPrBody,
+	lintWorkflowRunEvidence,
+	baseFileReader,
 	localDiff,
 	lintPrBody,
 	testCorpus,
@@ -5347,6 +5350,163 @@ describe("Workflow run unaffected declaration is verified (#3085 round 2)", () =
 			rows(["    steps:", "      - run: echo changed"], false),
 		);
 		expect(errorsFor(declared)).not.toContain("Changed workflow");
+	});
+});
+
+// #4756. Recurrence: an ADDED dispatch-only workflow cannot be dispatched from
+// its branch, so the run-evidence rule accepts a push-run URL naming the file
+// for an added file only. The merge-base read decides added vs edited: a file
+// absent on the base is added; a base that cannot be resolved must NOT read as
+// added (a shallow checkout would otherwise relax the rule for every edit).
+describe("added workflow accepts a push-run URL, through the real merge-base read (#4756)", () => {
+	const WORKFLOW = ".github/workflows/windows-repeat-probe.yml";
+	const pushRun = `${body}\n\nRun: https://github.com/o/r/actions/runs/40131910781 (windows-repeat-probe.yml, push trigger)`;
+	let fixtureCwd = "";
+	afterEach(() => {
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+	const addOrigin = (url = "https://github.com/o/r.git") =>
+		appendFileSync(
+			join(fixtureCwd, ".git", "config"),
+			`[remote "origin"]\n\turl = ${url}\n`,
+		);
+	const errorsFor = (text = pushRun) =>
+		lintLocalPrBody(text, fixtureCwd).errors.join("\n");
+	const editedFixture = () => {
+		const rows = ["name: probe", "on:", "  workflow_dispatch:"];
+		fixtureCwd = createOriginMasterFixture(undefined, {
+			path: WORKFLOW,
+			pre: rows,
+			post: [...rows, "# edit"],
+			dirty: [...rows, "# edit"],
+		});
+		addOrigin();
+	};
+
+	it("accepts it for a file the base does not have", () => {
+		fixtureCwd = createOriginMasterFixture(WORKFLOW);
+		addOrigin();
+		expect(errorsFor()).not.toContain("Changed workflow");
+	});
+
+	// Recurrence (review of #4827, F2): the repository scope comes from origin
+	// locally; with none, or with another repository's run, the added form fails.
+	it("refuses it when origin is missing or the run URL is another repository's", () => {
+		fixtureCwd = createOriginMasterFixture(WORKFLOW);
+		expect(errorsFor()).toContain("Changed workflow");
+		addOrigin();
+		expect(
+			errorsFor(pushRun.replace("github.com/o/r/", "github.com/other/repo/")),
+		).toContain("Changed workflow");
+	});
+
+	it("refuses it for a file the base has (an edit)", () => {
+		editedFixture();
+		expect(errorsFor()).toContain("Changed workflow");
+	});
+
+	// Recurrence (review of #4827, F1): baseFileReader folded every read error
+	// into "absent", so an edited workflow read as ADDED whenever the base read
+	// failed. A git on PATH that fails only the base-object reads drives the
+	// production reader; the real tree and the real git still call it an edit.
+	it.skipIf(process.platform === "win32")(
+		"refuses it for an edit when the base-object read fails",
+		() => {
+			editedFixture();
+			const shim = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-gitshim-"));
+			try {
+				const real = (process.env.PATH ?? "")
+					.split(delimiter)
+					.map((directory) => join(directory, "git"))
+					.find((candidate) => existsSync(candidate));
+				expect(real).toBeDefined();
+				writeFileSync(
+					join(shim, "git"),
+					`#!/bin/sh\nfor a in "$@"; do case "$a" in cat-file|ls-tree) exit 128;; esac; done\nexec '${real}' "$@"\n`,
+					{ mode: 0o755 },
+				);
+				vi.stubEnv("PATH", `${shim}${delimiter}${process.env.PATH ?? ""}`);
+				expect(errorsFor()).toContain("Changed workflow");
+			} finally {
+				vi.unstubAllEnvs();
+				rmSync(shim, { recursive: true, force: true });
+			}
+		},
+	);
+
+	// The CI event entry scopes the run URL to GITHUB_REPOSITORY (the base
+	// repository, also for fork PRs), not to a remote the runner may not have.
+	it("scopes the run URL to GITHUB_REPOSITORY on the event path", async () => {
+		fixtureCwd = createOriginMasterFixture(WORKFLOW);
+		const previousCwd = process.cwd();
+		process.chdir(fixtureCwd);
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			for (const [text, refused] of [
+				[pushRun, false],
+				[pushRun.replace("github.com/o/r/", "github.com/other/repo/"), true],
+			] as const) {
+				errors.mockClear();
+				await lintPullRequestEvent(fetchForEvent(text, []), {
+					pull_request: { number: 4827, body: text },
+				});
+				expect(
+					errors.mock.calls.flat().join("\n").includes("Changed workflow"),
+				).toBe(refused);
+			}
+		} finally {
+			errors.mockRestore();
+			vi.unstubAllEnvs();
+			process.chdir(previousCwd);
+		}
+	});
+
+	it("refuses it when no base resolves (not a git checkout)", () => {
+		fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-nobase-"));
+		mkdirSync(join(fixtureCwd, ".github/workflows"), { recursive: true });
+		writeFileSync(
+			join(fixtureCwd, WORKFLOW),
+			"name: probe\non:\n  workflow_dispatch:\n",
+		);
+		const diff = `diff --git a/${WORKFLOW} b/${WORKFLOW}\n`;
+		expect(
+			lintWorkflowRunEvidence(pushRun, {
+				diff,
+				cwd: fixtureCwd,
+				repository: "o/r",
+			}).join("\n"),
+		).toContain("Changed workflow");
+	});
+});
+
+// Recurrence (review of #4827, F1): `baseFileReader` is `true` (a file on the
+// base), `false` (CONFIRMED absent or not a file) or `null` (unknown). Its
+// `catch` answered `false`, so every read failure looked like an absence.
+describe("baseFileReader separates absence from a failed read (#4756)", () => {
+	const reader = (ls: (args: string[]) => string) =>
+		baseFileReader("/repo", (args: string[]) =>
+			args[0] === "merge-base" ? "abc123\n" : ls(args),
+		);
+	it("answers true for a blob, false for confirmed absence and for a tree", () => {
+		expect(reader(() => "100644 blob e69de29\tf.yml\0")("f.yml")).toBe(true);
+		expect(reader(() => "")("f.yml")).toBe(false);
+		expect(reader(() => "100644 blob e69de29\td/f.yml\0")("d/")).toBe(false);
+		expect(reader(() => "040000 tree e69de29\td\0")("d")).toBe(false);
+	});
+	it("answers null when the read fails or the base does not resolve", () => {
+		expect(
+			reader(() => {
+				throw new Error("fatal: bad object");
+			})("f.yml"),
+		).toBeNull();
+		expect(
+			baseFileReader("/repo", () => {
+				throw new Error("no merge base");
+			})("f.yml"),
+		).toBeNull();
 	});
 });
 
