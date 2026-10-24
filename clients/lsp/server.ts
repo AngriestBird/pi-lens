@@ -2909,6 +2909,11 @@ export const TypeScriptServer: LSPServerInfo = {
 	id: "typescript",
 	idleEviction: "transparent",
 	role: "language",
+	// #4782: typescript-language-server 5.3.0 (tsserver 5.9.3) answered every
+	// unchanged-bytes re-send after a delayed dependency 10/10 (measured; see
+	// LspResendRecheck). The native TS 7.0.2 launch is read by pull, which
+	// answers in stream order: 20/20 fresh with the re-send, none inconclusive.
+	resendRecheck: "rechecks",
 	name: "TypeScript Language Server",
 	projectLocalCommand: "typescript-language-server",
 	extensions: JS_TS_LSP_EXTENSIONS,
