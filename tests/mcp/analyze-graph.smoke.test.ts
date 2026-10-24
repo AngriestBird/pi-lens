@@ -110,17 +110,16 @@ describe("pilens_analyze (warm) maintains the review graph over MCP", () => {
 		}
 	});
 
-	it("has no who-uses-this data for a.ts before any analyze call (cold graph)", async () => {
+	it("has no who-uses-this data for a.ts before analyze, then gains usedBy(b.ts) after warm-analyzing the importer", async () => {
+		// Cold first, inside this one case: a sibling case that analyzes would warm
+		// the shared server, and shuffle runs cases in any order (#4561 census row).
 		const res = await harness.request(10, "tools/call", {
 			name: "pilens_module_report",
 			arguments: { file: path.join(projectDir, "a.ts") },
 		});
-		const report = parseReport(res);
-		expect(report.available).toBe(true);
-		expect(report.semantic.source).toBe("none");
-	}, 30_000);
-
-	it("gains a.ts's usedBy(b.ts) after warm-analyzing the importer", async () => {
+		const coldReport = parseReport(res);
+		expect(coldReport.available).toBe(true);
+		expect(coldReport.semantic.source).toBe("none");
 		const analyzeRes = await harness.request(11, "tools/call", {
 			name: "pilens_analyze",
 			arguments: {
