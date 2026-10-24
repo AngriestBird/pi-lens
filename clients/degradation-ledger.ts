@@ -999,8 +999,9 @@ export type DegradationKind =
 	 * This is deliberately NOT `warm-attach-membership-probe-abandoned`: that
 	 * one fires when the CALLER's remaining budget abandons the wait
 	 * (`clients/warm-attach.ts`'s `withinRemaining`), not when the request's own
-	 * ceiling wins, so a regression that stopped releasing the request would
-	 * leave the busy count regrowing with no record anywhere.
+	 * ceiling wins, so before this row a release left no record anywhere. The
+	 * row marks a release that happened; a regression that stopped releasing
+	 * never reaches it, so the wire test of the ceiling pins that case.
 	 */
 	| "lsp-readonly-command-released"
 	/** A config registry decision dropped or admitted executable project data. */
