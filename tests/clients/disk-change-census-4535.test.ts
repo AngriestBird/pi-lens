@@ -23,6 +23,7 @@ import {
 	diskChangeSubscriberOrigins,
 } from "../../clients/disk-changes.js";
 import { stripCommentsAndStrings } from "../support/session-state-scan.js";
+import { listSourceFiles } from "../support/sweep-kit.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 
@@ -30,18 +31,32 @@ const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 const PRODUCTION_ROOTS = ["clients", "tools", "mcp", "scripts"] as const;
 
 function productionSources(): string[] {
-	const out: string[] = [path.join(repoRoot, "index.ts")];
-	const walk = (dir: string): void => {
-		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-			if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
-			const full = path.join(dir, entry.name);
-			if (entry.isDirectory()) walk(full);
-			else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts"))
-				out.push(full);
-		}
-	};
-	for (const root of PRODUCTION_ROOTS) walk(path.join(repoRoot, root));
-	return out;
+	return [
+		path.join(repoRoot, "index.ts"),
+		...PRODUCTION_ROOTS.flatMap((root) =>
+			listSourceFiles(path.join(repoRoot, root), { skipTests: true }),
+		),
+	];
+}
+
+/**
+ * How one source file reaches `subscribeDiskChange`. The scan admits two forms
+ * and refuses the rest: a named import, and a direct call. Any other mention of
+ * the identifier (an alias, a value passed on, a property, a re-export) is an
+ * `unknown` use, because a registration the scan cannot read is a subscriber
+ * the census cannot see.
+ */
+function registrationUses(source: string): {
+	calls: number;
+	unknown: number;
+} {
+	const code = stripCommentsAndStrings(source).replace(
+		/\bimport\s+(?:type\s+)?\{[^}]*\}\s*from\s*[^;]*;/g,
+		(clause) => clause.replace(/\bsubscribeDiskChange\b/g, ""),
+	);
+	const calls = [...code.matchAll(/\bsubscribeDiskChange\s*\(/g)].length;
+	const all = [...code.matchAll(/\bsubscribeDiskChange\b/g)].length;
+	return { calls, unknown: all - calls };
 }
 
 function reasonOf(
@@ -101,16 +116,61 @@ describe("the consumer census", () => {
 				consumer.subscriberId === undefined ? [] : [consumer.subscriberId],
 			),
 		);
-		// A production registration site per row: a subscriber added elsewhere
-		// has no row, and the count differs.
-		const sites = productionSources().flatMap((file) => {
-			if (file.endsWith(path.join("clients", "disk-changes.ts"))) return [];
-			const text = stripCommentsAndStrings(fs.readFileSync(file, "utf8"));
-			return [...text.matchAll(/\bsubscribeDiskChange\s*\(/g)].map(() =>
-				path.relative(repoRoot, file),
-			);
-		});
-		expect(sites).toHaveLength(rowIds.size);
+		// One production registration site per row. The publisher's own file
+		// defines the function; every other file may only import it and call it.
+		let calls = 0;
+		const unreadable: string[] = [];
+		for (const file of productionSources()) {
+			if (file.endsWith(path.join("clients", "disk-changes.ts"))) continue;
+			const uses = registrationUses(fs.readFileSync(file, "utf8"));
+			calls += uses.calls;
+			if (uses.unknown > 0) unreadable.push(path.relative(repoRoot, file));
+		}
+		expect(unreadable, "a use the scan cannot read").toEqual([]);
+		expect(calls).toBe(rowIds.size);
+		// The registry cell itself is a second way in: nothing but the publisher
+		// names its family.
+		const family = productionSources().filter(
+			(file) =>
+				!file.endsWith(path.join("clients", "disk-changes.ts")) &&
+				fs.readFileSync(file, "utf8").includes("disk-changes.subscribers"),
+		);
+		expect(family).toEqual([]);
+	});
+
+	it("reads three spellings the scan was not designed around as unknown, not as zero", () => {
+		// Recurrence: an enumerated gate admits the forms its author thought of
+		// and passes the next spelling. Each plant below would register a
+		// subscriber the census never sees if the scan counted only
+		// `subscribeDiskChange(`.
+		const alias = [
+			'import { subscribeDiskChange } from "./disk-changes.js";',
+			"const on = subscribeDiskChange;",
+			'on("x", () => undefined);',
+		].join("\n");
+		const indirect = [
+			'import { subscribeDiskChange } from "./disk-changes.js";',
+			'[subscribeDiskChange].forEach((register) => register("x", () => undefined));',
+		].join("\n");
+		const throughBinding = [
+			'import { subscribeDiskChange } from "./disk-changes.js";',
+			"const bus = { on: subscribeDiskChange };",
+			'bus.on("x", () => undefined);',
+		].join("\n");
+		for (const planted of [alias, indirect, throughBinding])
+			expect(registrationUses(planted).unknown).toBeGreaterThan(0);
+		// And the two admitted forms stay readable: an import plus a call.
+		expect(
+			registrationUses(
+				'import { subscribeDiskChange } from "./disk-changes.js";\nsubscribeDiskChange("x", () => undefined);',
+			),
+		).toEqual({ calls: 1, unknown: 0 });
+		// A comment or a string naming the call is neither a call nor a use.
+		expect(
+			registrationUses(
+				'// subscribeDiskChange("x", fn)\nconst s = "subscribeDiskChange(";',
+			),
+		).toEqual({ calls: 0, unknown: 0 });
 	});
 
 	it("keeps each row's anchor in the file it names", () => {
