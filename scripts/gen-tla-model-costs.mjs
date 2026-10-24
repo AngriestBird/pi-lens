@@ -43,9 +43,10 @@ import { median } from "./lib/test-shard-assignment.mjs";
 import { listModelConfigs } from "./check-tla-models.mjs";
 
 /** One `ok`/`FAIL` line the checker prints per config. Group 1 is the config's
- * repo-relative path, group 2 its TLC seconds. */
+ * repo-relative path, group 2 its TLC seconds, group 3 its TLC distinct-state
+ * count when the line carries one (#4714; older logs do not). */
 const CONFIG_LINE =
-	/(?:ok  |FAIL) (formal\/\S+\.cfg): expected .+?, got .+? \(([0-9.]+)s\)/g;
+	/(?:ok  |FAIL) (formal\/\S+\.cfg): expected .+?, got .+? \(([0-9.]+)s(?:, ([0-9]+) distinct states)?\)/g;
 
 /**
  * Per-config seconds from one log's text.
@@ -64,14 +65,33 @@ export function costsFromLog(text) {
 }
 
 /**
- * The table itself: one median per config over every log that ran it.
+ * Per-config TLC distinct-state counts from one log's text (#4714). A config
+ * whose line carries no count is absent, never zero.
+ *
+ * @param {string} text a raw `gh run view --log --job <id>` capture
+ * @returns {Map<string, number>}
+ */
+export function statesFromLog(text) {
+	const states = new Map();
+	for (const match of String(text ?? "").matchAll(CONFIG_LINE)) {
+		if (match[3] === undefined) continue;
+		states.set(match[1], Number(match[3]));
+	}
+	return states;
+}
+
+/**
+ * The table itself: one median per config over every log that ran it, for
+ * seconds and, where the logs carry one, for the distinct-state count.
  *
  * @param {Array<{ source: string, text: string }>} logs
- * @returns {{ files: Record<string, number>, sources: string[], perShardShares: Record<string, number> }}
+ * @returns {{ files: Record<string, number>, states: Record<string, number>, sources: string[], perShardShares: Record<string, number> }}
  */
 export function buildModelCosts(logs) {
 	/** @type {Map<string, number[]>} */
 	const samples = new Map();
+	/** @type {Map<string, number[]>} */
+	const stateSamples = new Map();
 	/** @type {Map<string, number>} */
 	const shardTotals = new Map();
 	for (const { source, text } of logs) {
@@ -82,6 +102,11 @@ export function buildModelCosts(logs) {
 			samples.set(config, list);
 			total += seconds;
 		}
+		for (const [config, count] of statesFromLog(text)) {
+			const list = stateSamples.get(config) ?? [];
+			list.push(count);
+			stateSamples.set(config, list);
+		}
 		shardTotals.set(source, Math.round(total * 10) / 10);
 	}
 	const files = {};
@@ -90,8 +115,15 @@ export function buildModelCosts(logs) {
 	)) {
 		files[config] = Math.round(median(samples.get(config)) * 10) / 10;
 	}
+	const states = {};
+	for (const config of [...stateSamples.keys()].sort((a, b) =>
+		a < b ? -1 : a > b ? 1 : 0,
+	)) {
+		states[config] = Math.round(median(stateSamples.get(config)));
+	}
 	return {
 		files,
+		states,
 		sources: logs.map((entry) => entry.source),
 		perShardShares: Object.fromEntries(shardTotals),
 	};
@@ -170,7 +202,7 @@ export function main(
 		source: parsed.sources[parsed.logs.indexOf(file)] ?? path.basename(file),
 		text: fs.readFileSync(file, "utf8"),
 	}));
-	const { files, sources } = buildModelCosts(logs);
+	const { files, states, sources } = buildModelCosts(logs);
 	// A table that prices almost nothing is worse than no table: `loadModelCosts`
 	// would accept it, every lookup would fall back to the (now zero) max, and
 	// `selectShard` would leave the whole corpus in shard 1 (V4). Refuse before
@@ -191,6 +223,10 @@ export function main(
 		sources,
 		note: "Per-config TLC seconds (median over the source runs), read from `ok|FAIL formal/<family>/<Model>.cfg: ... (Ns)` lines the checker prints. scripts/tla-model-costs.json packs the TLA+ shards with these; a config with no row costs the table's MAX so an unmeasured config can never quietly become the tail.",
 		files,
+		// #4714: the TLC distinct-state count per config (median over the runs
+		// that printed one). `check-tla-models.mjs` fails a config whose count
+		// grows past this by more than its factor; a config with no row reports.
+		states,
 	};
 	fs.writeFileSync(parsed.out, `${JSON.stringify(payload, null, "\t")}\n`);
 	console.log(

@@ -829,5 +829,11 @@
 		"formal/turn-end-late-scan/SettledNeverTaken.cfg": 3,
 		"formal/turn-end-late-scan/StampAtTurn.cfg": 1.9,
 		"formal/turn-end-late-scan/TakeUnblocked.cfg": 2.2
+	},
+	"states": {
+		"formal/lsp-document-lifecycle/RenameOpenDocument.cfg": 20,
+		"formal/lsp-idle-reset/SweepNoHoldCheck.cfg": 6,
+		"formal/snapshot-freshness/RefuseAllMutant.cfg": 6,
+		"formal/late-aux-drain/EditDuringGrace.cfg": 136
 	}
 }

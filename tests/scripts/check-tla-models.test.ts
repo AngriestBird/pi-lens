@@ -15,15 +15,27 @@ import {
 	loadModelCosts,
 	parseCliArgs,
 	parseConcurrencyArg,
+	parseDistinctStates,
 	parseModelHeader,
 	parseShardArg,
 	resolveConcurrency,
 	resolveJarPath,
 	runPool,
 	selectConfigs,
+	STATE_COUNT_FACTOR,
 	selectShard,
+	stateCountJumps,
+	formatStateJump,
+	unrecordedStateCounts,
 	verdictMatches,
 } from "../../scripts/check-tla-models.mjs";
+
+const FIXTURES_TLA_COSTS = path.join(
+	import.meta.dirname,
+	"..",
+	"fixtures",
+	"tla-model-costs",
+);
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 // The two doubles below stand in for the only two things `main` cannot run in
@@ -773,6 +785,104 @@ describe("runPool (#3572)", () => {
 		const task = vi.fn(async (item: number) => `r${item}`);
 		const results = await runPool([0, 1], 10, task);
 		expect(results).toEqual(["r0", "r1"]);
+	});
+});
+
+// #4714: TLC's distinct-state count is recorded per config, and a config whose
+// count grows past the recorded one by more than the factor fails the checker.
+// Recurrence: #3836, where three processes at MaxGen=5 reached 30.8M distinct
+// states at 3.95 GB without finishing, and the seconds-only table showed
+// nothing until the shard hit its cap.
+describe("distinct-state ratchet (#4714)", () => {
+	const TLC_COUNTS =
+		"Model checking completed. No error has been found.\n" +
+		"  Finished computing initial states: 1 distinct state generated at 2026-10-24 10:00:00.\n" +
+		"3130444 states generated, 3130444 distinct states found, 0 states left on queue.\n" +
+		"The depth of the complete state graph search is 41.\n";
+
+	it("reads TLC's own distinct-state count from its statistics line", () => {
+		expect(parseDistinctStates(TLC_COUNTS)).toBe(3130444);
+		// No statistics line (a parse error) is no count, not zero.
+		expect(
+			parseDistinctStates("Error: Parsing or semantic analysis failed."),
+		).toBe(null);
+	});
+
+	// Recurrence: #4714 itself. The fixture grows GROW.cfg from its recorded
+	// 1000 states to 2001 (past 2x) and STAY.cfg from 1000 to 2000 (at 2x).
+	it("fails a config whose distinct states exceed its recorded count by the factor", () => {
+		const states = { "formal/x/Grow.cfg": 1000, "formal/x/Stay.cfg": 1000 };
+		const outcomes = [
+			{ id: "formal/x/Grow.cfg", distinctStates: 2001 },
+			{ id: "formal/x/Stay.cfg", distinctStates: 2000 },
+		];
+		expect(stateCountJumps(outcomes, states)).toEqual([
+			{ id: "formal/x/Grow.cfg", recorded: 1000, observed: 2001 },
+		]);
+	});
+
+	// Recurrence: a config added after the table was recorded has no count; the
+	// ratchet reports it, it never fails the run for lacking a number.
+	it("reports a config with no recorded count instead of failing it", () => {
+		expect(
+			stateCountJumps(
+				[
+					{ id: "formal/x/New.cfg", distinctStates: 1e9 },
+					{ id: "formal/x/Old.cfg", distinctStates: null },
+				],
+				{ "formal/x/Old.cfg": 1 },
+			),
+		).toEqual([]);
+		expect(
+			unrecordedStateCounts(
+				[
+					{ id: "formal/x/New.cfg", distinctStates: 5 },
+					{ id: "formal/x/Old.cfg", distinctStates: 5 },
+				],
+				{ "formal/x/Old.cfg": 5 },
+			),
+		).toEqual(["formal/x/New.cfg"]);
+	});
+
+	it("names the config, the old count and the new count in the message", () => {
+		const line = formatStateJump({
+			id: "formal/x/Grow.cfg",
+			recorded: 1000,
+			observed: 2001,
+		});
+		expect(line).toContain("formal/x/Grow.cfg");
+		expect(line).toContain("old count 1000");
+		expect(line).toContain("new count 2001");
+		expect(STATE_COUNT_FACTOR).toBe(2);
+	});
+
+	// Recurrence: #4714 non-goal guard. A table written before this change has
+	// no `states` key and must still load, with an empty count map.
+	it("loads a pre-#4714 cost table (no states key) and refuses a malformed count", () => {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-check-tla-states-"),
+		);
+		try {
+			fs.mkdirSync(path.join(dir, "scripts"));
+			const file = path.join(dir, MODEL_COSTS_FILE);
+			fs.copyFileSync(
+				path.join(FIXTURES_TLA_COSTS, "pre-4714-table.json"),
+				file,
+			);
+			const old = loadModelCosts(dir);
+			expect(Object.keys(old.files).length).toBe(823);
+			expect(old.states).toEqual({});
+			fs.writeFileSync(
+				file,
+				JSON.stringify({
+					files: { "formal/x/a.cfg": 1 },
+					states: { "formal/x/a.cfg": -3 },
+				}),
+			);
+			expect(() => loadModelCosts(dir)).toThrow(/states/);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

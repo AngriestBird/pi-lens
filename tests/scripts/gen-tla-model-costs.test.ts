@@ -32,6 +32,7 @@ import {
 	costsFromLog,
 	incompleteTableReason,
 	main,
+	statesFromLog,
 	MIN_TABLE_COVERAGE,
 } from "../../scripts/gen-tla-model-costs.mjs";
 import {
@@ -362,5 +363,46 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 		}
 		expect(exitCode).toBe(2);
 		expect(errors.lines.join("\n")).toContain("at least one --log is required");
+	});
+});
+
+// #4714: the checker prints each config's TLC distinct-state count on its
+// result line, and the generator stores the median count beside the seconds.
+// Recurrence: a count that the generator drops would leave the ratchet with
+// nothing to compare, and the table would silently stop recording states.
+describe("#4714 distinct-state counts in the cost table", () => {
+	it("reads the seconds and the count from a line that carries both, and still reads the old line", () => {
+		const text = [
+			"ok   formal/x/New.cfg: expected pass, got pass (5.0s, 1234 distinct states)",
+			"ok   formal/x/Old.cfg: expected pass, got pass (2.5s)",
+		].join("\n");
+		expect(costsFromLog(text)).toEqual(
+			new Map([
+				["formal/x/New.cfg", 5],
+				["formal/x/Old.cfg", 2.5],
+			]),
+		);
+		expect(statesFromLog(text)).toEqual(new Map([["formal/x/New.cfg", 1234]]));
+	});
+
+	it("stores the median count per config, sorted, beside the seconds", () => {
+		const row = (states: number) =>
+			`ok   formal/y/M.cfg: expected pass, got pass (1.0s, ${states} distinct states)`;
+		const table = buildModelCosts([
+			{ source: "1", text: row(100) },
+			{ source: "2", text: row(900) },
+			{ source: "3", text: row(120) },
+		]);
+		expect(table.states).toEqual({ "formal/y/M.cfg": 120 });
+	});
+
+	it("stores no counts from logs that predate the count", () => {
+		const table = buildModelCosts([
+			{
+				source: "1",
+				text: "ok   formal/y/M.cfg: expected pass, got pass (1.0s)",
+			},
+		]);
+		expect(table.states).toEqual({});
 	});
 });
