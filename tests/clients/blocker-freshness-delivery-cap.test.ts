@@ -21,14 +21,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-const logLatency = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("../../clients/latency-logger.js")>();
-	return { ...actual, logLatency };
-});
+import { afterEach, describe, expect, it } from "vitest";
 
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
@@ -132,7 +125,6 @@ function driveTurn(
 afterEach(() => {
 	cancelLSPIdleReset();
 	resetDegradationLedger();
-	logLatency.mockClear();
 });
 
 describe("dependency-drift delivery cap (#1950)", () => {

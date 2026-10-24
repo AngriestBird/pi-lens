@@ -26,13 +26,6 @@ vi.mock("../../../clients/cascade-logger.js", () => ({
 	logCascade,
 }));
 
-vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
-	...(await importActual<
-		typeof import("../../../clients/latency-logger.js")
-	>()),
-	logLatency: vi.fn(),
-}));
-
 const FILE = "C:/repo/neighbor.ts";
 
 // #1899: the registry now bounds how OLD an outstanding touch may be

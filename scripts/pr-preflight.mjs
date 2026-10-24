@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CI_JOB_NAMES } from "./lib/ci-checks.mjs";
+import { scratchHomeEnv } from "./lib/scratch-home-env.mjs";
 
 export const GATES = [
 	["build", ["npm", "run", "build"], CI_JOB_NAMES.LINT_AND_TYPECHECK],
@@ -187,9 +188,10 @@ export function runPreflight({
 	env = process.env,
 } = {}) {
 	const { only, skip } = parseArgs(argv);
+	const lensHome = env.PI_LENS_HOME ?? resolve(cwd, ".probe-home");
 	const childEnv = {
 		...env,
-		PI_LENS_HOME: env.PI_LENS_HOME ?? resolve(cwd, ".probe-home"),
+		...scratchHomeEnv(resolve(lensHome, "home"), lensHome),
 	};
 	const gates = GATES.map(([name, command, job]) => ({
 		name,
