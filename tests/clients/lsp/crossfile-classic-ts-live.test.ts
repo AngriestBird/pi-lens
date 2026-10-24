@@ -35,8 +35,17 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { removeTempDirSync } from "../test-utils.js";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
+import { pinFixtureHome, removeTempDirSync } from "../test-utils.js";
 import { withEnv } from "../../support/with-env.js";
 import { CLIENT_CAPABILITIES } from "../../../clients/lsp/client.js";
 
@@ -79,25 +88,36 @@ const IMPORTER = 'import { foo } from "./a";\nexport const v: number = foo;\n';
 const BYSTANDER = 'export const unrelated: string = "c";\n';
 const STALE_IMPORTER = /Cannot find module '\.\/a'|is not a module/;
 /**
- * The deletion case needs a client that claims relative-pattern support: that
- * claim is what makes a classic wrapper request client-side watching at all.
- * Without it the wrapper falls back to tsserver's own polling and drops every
- * `workspace/didChangeWatchedFiles` pi-lens sends, so a type-3 delete reaches
- * no server. Derived from the production capability, never a constant that
- * would outlive the gap.
+ * The deletion case needs BOTH halves of its enablement, and the gate reads
+ * both or stays skipped:
  *
- * The claim is half of the enablement: the classic `TypeScriptServer.spawn`
- * initialization must also ask for watcher events
- * (`tsserver.useClientFileWatcher`), or the wrapper keeps polling. That
- * second half is deliberately NOT derived here — a claim without it turns
- * this case red, which is exactly the signal wanted.
+ *  - the client claims relative-pattern support, derived from the production
+ *    capability. The claim makes a classic wrapper request client-side
+ *    watching at all; without it the wrapper falls back to tsserver's own
+ *    polling and drops every `workspace/didChangeWatchedFiles` pi-lens sends.
+ *  - the classic `TypeScriptServer.spawn` initialization asks for watcher
+ *    events (`tsserver.useClientFileWatcher`). That stops tsserver's own disk
+ *    polling. Without it the claim alone changes nothing observable: the
+ *    server still answers from polling about two seconds after the delete, so
+ *    a muted send would stay green and name no cause.
+ *
+ * The second half has no production surface today: the classic spawn returns
+ * `{ tsserver: { path } }` only (`clients/lsp/server.ts`), and the spawn
+ * launches a process, so the test cannot read it at collection time. It is
+ * therefore a closed `false` here. That fails closed: the case stays skipped
+ * in every state until the spawn sets the flag AND this constant is flipped in
+ * the same change. Forgetting the flip leaves the case skipped, never green on
+ * polling.
  */
-const WATCHED_FILES_DELIVERABLE =
+const CLASSIC_SPAWN_ASKS_CLIENT_WATCHING = false;
+const WATCHED_FILES_CLAIMED =
 	(
 		CLIENT_CAPABILITIES.workspace.didChangeWatchedFiles as {
 			relativePatternSupport?: boolean;
 		}
 	).relativePatternSupport === true;
+const WATCHED_FILES_DELIVERABLE =
+	WATCHED_FILES_CLAIMED && CLASSIC_SPAWN_ASKS_CLIENT_WATCHING;
 
 let tmp = "";
 let restoreEnv: () => void = () => {};
@@ -123,13 +143,14 @@ function writeProject(proj: string): { a: string; b: string; c: string } {
 describe.skipIf(SKIP_REASON !== "")(
 	`cross-file behaviour over a real classic TypeScript server (#1712, #1621, #1668, #1677)${SKIP_REASON ? ` [skipped: ${SKIP_REASON}]` : ""}`,
 	() => {
+		let restoreHome: () => void = () => {};
+
 		beforeAll(() => {
 			classicTsc.value = TSC ?? "";
 			tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-crossfile-live-"));
 			const childTmp = path.join(tmp, "os-temp");
 			fs.mkdirSync(childTmp);
 			restoreEnv = withEnv({
-				HOME: path.join(tmp, "home"),
 				TMPDIR: childTmp,
 				TEMP: childTmp,
 				TMP: childTmp,
@@ -139,6 +160,18 @@ describe.skipIf(SKIP_REASON !== "")(
 				PI_LENS_DISABLE_TOOL_INSTALL: "1",
 				PI_LENS_DISABLE_LSP_INSTALL: "1",
 			});
+		});
+
+		// HOME lives in the worker's scratch root beside its worker home, never
+		// under `tmp`, which afterAll deletes (AGENTS "Test requirements": #2912,
+		// #4591). A child that writes to its inherited HOME after teardown would
+		// re-create the deleted tree.
+		beforeEach(() => {
+			restoreHome = pinFixtureHome("1712-crossfile-live").restore;
+		});
+
+		afterEach(() => {
+			restoreHome();
 		});
 
 		afterAll(async () => {
@@ -257,7 +290,7 @@ describe.skipIf(SKIP_REASON !== "")(
 		}, 120_000);
 
 		it.skipIf(!WATCHED_FILES_DELIVERABLE)(
-			`reports a deleted dependency as a missing module after the type-3 watched-files event${WATCHED_FILES_DELIVERABLE ? "" : " [skipped: pi-lens advertises no relative-pattern support, so a classic wrapper asks for no client-side watching and drops every watched-files event pi-lens sends (#1712)]"}`,
+			`reports a deleted dependency as a missing module after the type-3 watched-files event${WATCHED_FILES_DELIVERABLE ? "" : " [skipped: needs the client's relative-pattern claim AND tsserver.useClientFileWatcher from the classic spawn; without the claim a classic wrapper drops every watched-files event pi-lens sends, and without the flag tsserver's own polling answers (#1712)]"}`,
 			async () => {
 				const proj = path.join(tmp, "project-delete");
 				const { a, b } = writeProject(proj);
