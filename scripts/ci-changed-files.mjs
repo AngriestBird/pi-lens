@@ -100,6 +100,9 @@ export const PR_SMOKE_PATHS = [
 const FORMAL_TRIGGERS = [
 	(path) => path.startsWith("formal/"),
 	(path) => path === "scripts/check-tla-models.mjs",
+	// #4714: the recorded state counts decide the verdict, so a table-only
+	// (regeneration) diff runs the model shards too.
+	(path) => path === "scripts/tla-model-costs.json",
 	(path) => path === ".github/workflows/ci.yml",
 ];
 
