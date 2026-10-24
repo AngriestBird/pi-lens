@@ -2077,15 +2077,25 @@ function normalizeDiagnosticFilePath(
  * The `failureKind` of a failed run, for the latency.log runner row (#3796).
  * Inline and collect-later rows share it, so the log analyzer reads one place.
  */
-function failureRowMetadata(
-	result: RunnerResult,
-): { failureKind: string; failureMessage: string | undefined } | undefined {
-	return result.status === "failed" && result.failureKind
-		? {
-				failureKind: result.failureKind,
-				failureMessage: result.failureMessage,
-			}
-		: undefined;
+function failureRowMetadata(result: RunnerResult):
+	| Partial<{
+			failureKind: string;
+			failureMessage: string | undefined;
+			inconclusive: true;
+	  }>
+	| undefined {
+	// #4522 T3: an inconclusive run says so on its row even when it succeeded
+	// (detekt exit 1 with warning findings), so latency.log shows a partial read.
+	const inconclusive =
+		result.inconclusive === true ? { inconclusive: true as const } : {};
+	if (result.status === "failed" && result.failureKind) {
+		return {
+			failureKind: result.failureKind,
+			failureMessage: result.failureMessage,
+			...inconclusive,
+		};
+	}
+	return result.inconclusive === true ? inconclusive : undefined;
 }
 
 async function runRunner(

@@ -520,7 +520,8 @@ const MEMBERS: Member[] = [
 			);
 		},
 		output: (reported) => ({
-			status: 1,
+			// #4522: detekt's measured findings exit is 2 (captured real.captured.json).
+			status: 2,
 			stdout: `${reported}:4:5: error: This expression contains a magic number (${MARKER}) [MagicNumber]\n`,
 		}),
 	},
