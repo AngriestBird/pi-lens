@@ -987,6 +987,22 @@ export type DegradationKind =
 	 * "hung" server is truly hung or just answering late.
 	 */
 	| "lsp-pull-unconfirmed"
+	/**
+	 * #4801: a read-only command (`runReadOnlyServerCommand`, reached from the
+	 * warm-attach membership probe and the didOpen project-identity probe) hit
+	 * `PROBE_COMMAND_TIMEOUT_MS` and gave up on the answer for good, so its
+	 * request was cancelled on the wire and released locally instead of being
+	 * left pending. Subject is the server id and `recordDegradationOnce` keeps
+	 * it at one row per server per session — never one per probe, which on a
+	 * wedged server would be one row per attach.
+	 *
+	 * This is deliberately NOT `warm-attach-membership-probe-abandoned`: that
+	 * one fires when the CALLER's remaining budget abandons the wait
+	 * (`clients/warm-attach.ts`'s `withinRemaining`), not when the request's own
+	 * ceiling wins, so a regression that stopped releasing the request would
+	 * leave the busy count regrowing with no record anywhere.
+	 */
+	| "lsp-readonly-command-released"
 	/** A config registry decision dropped or admitted executable project data. */
 	| "lsp-registry-decision"
 	/** A host-created pi-agent staging root was declined as an LSP root. */

@@ -26,6 +26,7 @@ import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { spawnFakeLspServer } from "../../support/fake-lsp-server.js";
 import { removeTempDirSync } from "../test-utils.js";
 import { CacheManager } from "../../../clients/cache-manager.js";
+import { getDegradationSummary } from "../../../clients/degradation-ledger.js";
 import { registerMutationBridge } from "../../../clients/mutation-bridge.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { readChangesSince } from "../../../clients/project-changes.js";
@@ -1502,9 +1503,18 @@ async function expectTimedOutProjectInfoReleased(
 		expect(res.reason).toContain("timed out");
 		// The client no longer counts the abandoned request, so the registry's
 		// eviction predicate reads it as idle. The server never answered the
-		// cancel, so this is a local release, not a reply, and it is final
-		// before the caller sees the timeout: no waiting, no polling.
+		// cancel, so this is a local release, not a reply. `runReadOnlyServerCommand`
+		// awaits the released request before it returns, so the count is already
+		// down when this promise resolves — no polling, and no dependence on how
+		// many `async` hops sit between the release and the caller (review F1).
 		expect(client.isBusy?.()).toBe(false);
+		// #4801: the release is a production-visible fact, not only a test one.
+		// Its own record is once per server per session, so a wedged server
+		// cannot storm it; a regression of the release leaves this row absent.
+		const released = getDegradationSummary().find(
+			(group) => group.kind === "lsp-readonly-command-released",
+		);
+		expect(released?.latestReasons.map((row) => row.subject)).toContain("fake");
 		// The connection is still usable after the local release. Its answer
 		// also orders the trace: the server reads stdio in order, so it has
 		// read the cancel before it answers a request sent after it.

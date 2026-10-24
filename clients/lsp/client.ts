@@ -6431,6 +6431,26 @@ export async function runReadOnlyServerCommand(
 	} catch (err) {
 		if (err instanceof Error && err.message.startsWith("Timeout after")) {
 			abandon.abort();
+			// The abort only SCHEDULES the release: it cancels the token (the wire
+			// `$/cancelRequest`) and resolves the sentinel that wins the race, and
+			// the count itself drops in `safeSendRequest`'s `finally`. Awaiting the
+			// raced request here is what makes "the client is idle when the caller
+			// resumes" a guarantee instead of a property of the current `async`
+			// hop count: without it one behaviour-preserving hop removal leaves
+			// `isBusy()` true for a tick after the caller sees the timeout. It is
+			// bounded — the abort is exactly what settles the race, so this cannot
+			// wait on the server.
+			await request;
+			// #4801: a regression of the release is otherwise invisible in
+			// production. The request ceiling is not the caller-deadline abandon
+			// `warm-attach-membership-probe-abandoned` records, and the caller only
+			// sees a `timed out after ...ms` reason either way. One row per server
+			// per session: a wedged server is probed once per attach.
+			recordDegradationOnce({
+				kind: "lsp-readonly-command-released",
+				subject: state.serverId,
+				reason: `${command} timed out after ${timeoutMs}ms; the request was cancelled and released locally`,
+			});
 			return {
 				executed: false,
 				reason: `workspace/executeCommand timed out after ${timeoutMs}ms`,
