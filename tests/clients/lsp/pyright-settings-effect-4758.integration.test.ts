@@ -47,7 +47,7 @@ import {
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { pyrightInitialization } from "../../../clients/lsp/server.js";
 import { waitFor } from "../interleaving-kit.js";
-import { setupTestEnvironment } from "../test-utils.js";
+import { pinFixtureHome, setupTestEnvironment } from "../test-utils.js";
 
 function executableOnPath(name: string): string | undefined {
 	for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
@@ -88,11 +88,16 @@ const WAIT_MS = 30_000;
 
 describe.skipIf(!CAN_RUN)("pyright applies pi-lens settings (#4758)", () => {
 	let env: ReturnType<typeof setupTestEnvironment>;
+	let pinned: ReturnType<typeof pinFixtureHome> | undefined;
 	let proc: Awaited<ReturnType<typeof launchLSP>> | undefined;
 	let client: Awaited<ReturnType<typeof createLSPClient>> | undefined;
 
 	beforeEach(() => {
 		env = setupTestEnvironment("pi-lens-pyright-4758-");
+		// The child's HOME must not live under `env.tmpDir` (#4789/#4591): teardown
+		// deletes that root, and a pyright process that outlives the case would
+		// re-create it. `pinFixtureHome` puts it in the worker's scratch root.
+		pinned = pinFixtureHome("pyright-4758");
 	});
 
 	afterEach(async () => {
@@ -112,6 +117,8 @@ describe.skipIf(!CAN_RUN)("pyright applies pi-lens settings (#4758)", () => {
 			}
 			proc = undefined;
 		}
+		pinned?.restore();
+		pinned = undefined;
 		env.cleanup();
 	});
 
@@ -138,9 +145,10 @@ describe.skipIf(!CAN_RUN)("pyright applies pi-lens settings (#4758)", () => {
 		initialization: Record<string, unknown> | undefined,
 	) {
 		if (PYRIGHT === undefined) throw new Error("pyright unavailable");
+		if (pinned === undefined) throw new Error("no pinned home");
 		proc = await launchLSP(PYRIGHT, ["--stdio"], {
 			cwd: root,
-			env: { HOME: path.join(root, "home") },
+			env: { HOME: pinned.home },
 		});
 		client = await createLSPClient({
 			serverId: "python",
