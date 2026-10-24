@@ -5430,6 +5430,36 @@ describe("added workflow accepts a push-run URL, through the real merge-base rea
 		},
 	);
 
+	// The CI event entry scopes the run URL to GITHUB_REPOSITORY (the base
+	// repository, also for fork PRs), not to a remote the runner may not have.
+	it("scopes the run URL to GITHUB_REPOSITORY on the event path", async () => {
+		fixtureCwd = createOriginMasterFixture(WORKFLOW);
+		const previousCwd = process.cwd();
+		process.chdir(fixtureCwd);
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			for (const [text, refused] of [
+				[pushRun, false],
+				[pushRun.replace("github.com/o/r/", "github.com/other/repo/"), true],
+			] as const) {
+				errors.mockClear();
+				await lintPullRequestEvent(fetchForEvent(text, []), {
+					pull_request: { number: 4827, body: text },
+				});
+				expect(
+					errors.mock.calls.flat().join("\n").includes("Changed workflow"),
+				).toBe(refused);
+			}
+		} finally {
+			errors.mockRestore();
+			vi.unstubAllEnvs();
+			process.chdir(previousCwd);
+		}
+	});
+
 	it("refuses it when no base resolves (not a git checkout)", () => {
 		fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-nobase-"));
 		mkdirSync(join(fixtureCwd, ".github/workflows"), { recursive: true });
