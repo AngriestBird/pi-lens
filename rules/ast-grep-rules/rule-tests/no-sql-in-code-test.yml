@@ -24,6 +24,9 @@ valid:
   - 'job.execute("selected from " + source)'
   - 'ui.execute("Within the select list " + id)'
   - 'ui.execute("Item " + n + " select from list")'
+  # \N is not an escape; JavaScript reads it as N.
+  - 'runner.execute("\NSELECT * FROM " + source)'
+  - 'runner.execute("-- note\NSELECT * FROM " + source)'
 invalid:
   - 'db.query("SELECT * FROM users WHERE id = " + id)'
   - 'db.query("DELETE FROM sessions WHERE token = " + token, [])'
@@ -62,6 +65,7 @@ invalid:
   - 'db.execute("\nSELECT * FROM users WHERE id = " + id)'
   - 'db.execute("\tDELETE FROM t WHERE id = " + id)'
   - 'db.execute("\r\nUPDATE users SET a = " + a)'
+  - 'db.execute("-- user lookup\nSELECT * FROM users WHERE id = " + id)'
   # Not SQL, but it matches the sibling's `SELECT ... ${` arm;
   # ts_sql_injection_sink flags the same template.
   - 'queue.execute(`select ${id}`)'

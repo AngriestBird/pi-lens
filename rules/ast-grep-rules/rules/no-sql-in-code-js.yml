@@ -46,26 +46,30 @@ note: |
   instead (`ts_sql_injection_sink` in clients/tree-sitter-client.ts).
   The first argument's text must start with a quote or backtick, then
   optional whitespace and SQL comments, then a statement from the
-  sibling's alternation. Two edits diverge from the sibling's text
+  sibling's alternation. Three edits diverge from the sibling's text
   (clients/tree-sitter-client.ts:4703): a `\b` after `SELECT` and after
   `WITH`, so `"selected from "` and `"Within the select list "` do not
-  open a statement; and the skip also accepts the `\n`, `\r` and `\t`
-  escapes as written in source, so `"\nSELECT ..."` is caught. The
-  sibling has the same two gaps; fixing it there is a follow-up, not
-  part of this change. The rest of the skip and the alternation is
-  copied unchanged. The test reads the first argument only, as the
-  sibling reads only the template, so a later `{ set: ... }` or `from`
-  cannot complete an `UPDATE` or `SELECT`. The `query` arms keep their
-  keyword check as it was. The sibling's other test is out of reach for
-  an ast-grep rule: when the prefix test fails, it still flags a
-  template whose receiver it follows through same-file declarations to
-  an import from a known SQL package, so that is a second way to flag,
-  not a filter. Not caught through `execute`: a statement split between
-  its first two tokens (`"DELETE " + "FROM t ..."`), SQL text that opens
-  with `${...}`, a parenthesized argument or one that starts with a
-  variable, a `--` comment ended by an escaped `\n`, a FROM-less SELECT
-  built by concatenation (`"SELECT pg_sleep(" + n + ")"`), and
-  statements the alternation does not list (`INSERT IGNORE INTO`).
+  open a statement; the skip also accepts exactly the `\n`, `\r` and
+  `\t` escapes as written in source, case-sensitively so that `\N` does
+  not count, which catches `"\nSELECT ..."`; and a `--` comment also
+  ends at an escaped `\n`, so `"-- c\nSELECT ..."` is caught (the
+  comment may also run on to a later escaped `\n`). The sibling has the
+  same gaps; fixing it there is a follow-up, not part of this change.
+  The rest of the skip and the alternation is copied unchanged. The test
+  reads the first argument only, as the sibling reads only the template,
+  so a later `{ set: ... }` or `from` cannot complete an `UPDATE` or
+  `SELECT`. The `query` arms keep their keyword check as it was. The
+  sibling's other test is out of reach for an ast-grep rule: when the
+  prefix test fails, it still flags a template whose receiver it follows
+  through same-file declarations to an import from a known SQL package,
+  so that is a second way to flag, not a filter. Not caught through
+  `execute`: a statement split between its first two tokens
+  (`"DELETE " + "FROM t ..."`), SQL text that opens with `${...}`, a
+  parenthesized argument or one that starts with a variable, whitespace
+  written as `\u000a`, `\x0a` or a backslash line continuation, a
+  FROM-less SELECT built by concatenation
+  (`"SELECT pg_sleep(" + n + ")"`), and statements the alternation does
+  not list (`INSERT IGNORE INTO`).
 rule:
   any:
     - all:
@@ -88,7 +92,7 @@ rule:
             has:
               nthChild: 1
               regex: >-
-                (?i)^["'`](?:\s|\\[nrt]|/\*[\s\S]*?\*/|--[^\n]*(?:\n|$))*(?:SELECT\b[\s\S]*(?:\bFROM\b|\$\{)|INSERT\s+INTO\b|UPDATE\s+[\s\S]*\bSET\b|DELETE\s+FROM\b|CREATE\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|DROP\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|ALTER\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|GRANT\b|REVOKE\b|WITH\b[\s\S]*\bSELECT\b|MERGE\s+INTO\b|TRUNCATE\s+TABLE\b|REPLACE\s+INTO\b)
+                (?i)^["'`](?:\s|(?-i:\\[nrt])|/\*[\s\S]*?\*/|--[^\n]*(?:\n|(?-i:\\n)|$))*(?:SELECT\b[\s\S]*(?:\bFROM\b|\$\{)|INSERT\s+INTO\b|UPDATE\s+[\s\S]*\bSET\b|DELETE\s+FROM\b|CREATE\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|DROP\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|ALTER\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|GRANT\b|REVOKE\b|WITH\b[\s\S]*\bSELECT\b|MERGE\s+INTO\b|TRUNCATE\s+TABLE\b|REPLACE\s+INTO\b)
 constraints:
   SQL:
     any:
