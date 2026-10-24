@@ -111,6 +111,31 @@ export const DISK_CHANGE_CONSUMERS: readonly DiskChangeConsumer[] = [
 		},
 	},
 	{
+		id: "lsp-unheld-modules",
+		anchor: {
+			file: "clients/disk-change-subscribers.ts",
+			symbol: "resyncHeldDocuments",
+		},
+		kind: "refresher",
+		cells: {
+			"out-of-band": pending(
+				`${REMAINDER}: only declaration files are forwarded to a server; a closed module changed on disk keeps its old bytes in a live primary (#4742)`,
+			),
+			"bash-recovery": pending(
+				`${REMAINDER}: the resync reaches held documents only, so an unheld module the command rewrote keeps its old bytes (#4742)`,
+			),
+			"head-move": pending(
+				`${REMAINDER}: the resync reaches held documents only, so an unheld module the move changed keeps its old bytes (#4742)`,
+			),
+			"settled-sweep": pending(
+				`${REMAINDER}: the resync reaches held documents only, so an unheld module the sweep found keeps its old bytes (#4742)`,
+			),
+			"drift-heartbeat": na(
+				"the heartbeat resyncs the held document it found drifted and has no unheld population",
+			),
+		},
+	},
+	{
 		id: "read-guard",
 		anchor: {
 			file: "clients/read-guard.ts",
