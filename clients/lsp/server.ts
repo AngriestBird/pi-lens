@@ -3611,6 +3611,17 @@ export const PowerShellServer: LSPServerInfo = {
 	},
 };
 
+/** Whether `dir` itself holds a solution/project file csharp-ls can load. */
+async function dirHasDotnetProjectFile(dir: string): Promise<boolean> {
+	try {
+		return (await readdir(dir)).some((name) =>
+			/\.(?:sln|slnx|csproj|fsproj)$/i.test(name),
+		);
+	} catch {
+		return false;
+	}
+}
+
 export const CSharpServer: LSPServerInfo = {
 	id: "csharp",
 	idleEviction: "unmeasured",
@@ -3626,6 +3637,12 @@ export const CSharpServer: LSPServerInfo = {
 	// (shared marker list — see file-kinds.ts, refs #895).
 	root: createRootDetector([...DOTNET_CSHARP_ROOT_MARKERS]),
 	async spawn(root, options) {
+		// csharp-ls throws "no .csproj/.fsproj or sln files found" on a worker
+		// thread when its cwd holds none, and the .NET runtime aborts the whole
+		// process (SIGABRT, core dump). The root fallback in `resolveLspServerCwd`
+		// can still hand it the file's own directory (Unity `Assets/**` has no
+		// solution), so decline here instead of spawning a guaranteed crash.
+		if (!(await dirHasDotnetProjectFile(root))) return undefined;
 		const candidates = dotnetToolCandidates("csharp-ls");
 
 		return resolveAndLaunch(
