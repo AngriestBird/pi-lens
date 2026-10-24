@@ -46,6 +46,9 @@ import { assertNonEmptyScan } from "../support/sweep-kit.js";
 // pinned digest; the default empty string leaves every other `createHash`
 // caller untouched.
 const cryptoState = vi.hoisted(() => ({ digest: "" }));
+// #4714 F1: the TLC stdout the doubled `java` child emits. Empty means the
+// default pass line, so the unchanged caller-wiring case sees no count.
+const tlcState = vi.hoisted(() => ({ output: "" }));
 
 vi.mock("node:child_process", async () => {
 	const { makeFakeChild } = await import("../support/fake-child.js");
@@ -55,7 +58,8 @@ vi.mock("node:child_process", async () => {
 			queueMicrotask(() => {
 				child.stdout.emit(
 					"data",
-					"Model checking completed. No error has been found.\n",
+					tlcState.output ||
+						"Model checking completed. No error has been found.\n",
 				);
 				child.emit("close", 0);
 			});
@@ -607,26 +611,30 @@ describe("entry guard order (#3920)", () => {
 });
 
 describe("main() caller wiring (#3927)", () => {
-	// The extracted helpers are pinned by the cases above, but a passing helper
-	// does not prove `main` calls it: the pre-#3927 inline expressions sat
-	// behind `ensureJar`, so a caller-side change to the pool size or the
-	// summary line had no witness. Run the real entry module over the real
-	// `formal/` corpus with only the external `java`/jar boundary doubled, and
-	// read the run's own summary back. `--shard 1/<count>` selects exactly one
-	// real config, and `--concurrency 99` is a value `computeConcurrency` can
-	// never return for one config, so a `main` that inlines either expression
-	// instead of calling the helper cannot produce the observed summary.
-	it("runs the real entry and reports the pool size and summary through the extracted helpers", async () => {
+	// Runs the real entry module over the real `formal/` corpus, with only the
+	// external `java` child and the jar checksum doubled. Returns what the run
+	// printed and set. #4714 F1: the caller-wiring cases pin the state-count
+	// gate's wiring (exit code, jump line, table load), which no unit test reaches.
+	async function runEntry({
+		shard,
+		total,
+		tlcOutput = "",
+	}: {
+		shard: number;
+		total: number;
+		tlcOutput?: string;
+	}) {
 		const stubDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-tla-entry-"),
 		);
 		const stubJar = path.join(stubDir, "tla2tools.jar");
 		fs.writeFileSync(stubJar, "stub jar; the checksum is doubled below");
 		cryptoState.digest = TLA_TOOLS.sha256;
-		const total = listModelConfigs(REPO_ROOT).length;
+		tlcState.output = tlcOutput;
 		const scriptPath = path.join(REPO_ROOT, "scripts", "check-tla-models.mjs");
 		const savedArgv = process.argv;
 		const savedExitCode = process.exitCode;
+		let exitCode: number | undefined;
 		const logged: string[] = [];
 		const errors: string[] = [];
 		const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
@@ -645,17 +653,22 @@ describe("main() caller wiring (#3927)", () => {
 			"--concurrency",
 			"99",
 			"--shard",
-			`1/${total}`,
+			`${shard}/${total}`,
 		];
 		process.exitCode = undefined;
-		const isSummary = (line: string) => line.includes("wall (concurrency=");
 		try {
 			// A unique query re-evaluates the module body, so the production
 			// entry guard runs its private `main` over the real corpus.
 			await import(
-				`${pathToFileURL(scriptPath).href}?caller-wiring=${Date.now()}`
+				`${pathToFileURL(scriptPath).href}?caller-wiring=${Date.now()}-${Math.random()}`
 			);
-			for (let i = 0; i < 1000 && !logged.some(isSummary); i++) {
+			// `Per-directory` is the last line `main` prints before its failure and
+			// jump reports, and those print synchronously after it.
+			for (
+				let i = 0;
+				i < 1000 && !logged.some((line) => line.startsWith("Per-directory"));
+				i++
+			) {
 				await flushMicrotasks();
 			}
 			await flushMicrotasks();
@@ -663,18 +676,49 @@ describe("main() caller wiring (#3927)", () => {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
 			process.argv = savedArgv;
+			exitCode = process.exitCode;
 			process.exitCode = savedExitCode;
 			cryptoState.digest = "";
+			tlcState.output = "";
 			fs.rmSync(stubDir, { recursive: true, force: true });
 		}
-		// The run's own per-config result lines are the independent oracle:
-		// the summary must account for exactly the configs that ran, name the
-		// shard `main` passed, and carry the pool size `main` resolved. The
-		// expected string is built from that observation and literals, not by
-		// calling `formatSummary` (which would let a caller mutation and a
-		// helper mutation cancel out).
+		return { logged, errors, exitCode };
+	}
+
+	// The shard that `--shard i/N` gives this one config. The cost table packs
+	// by LPT (`selectShard`), not by sorted position, so the index is searched
+	// with the same function `main` calls.
+	const configIndex = (rel: string) => {
+		const all = listModelConfigs(REPO_ROOT);
+		const costs = { root: REPO_ROOT, ...loadModelCosts(REPO_ROOT) };
+		const abs = all.find(
+			(config) =>
+				path.relative(REPO_ROOT, config).split(path.sep).join("/") === rel,
+		);
+		if (abs === undefined) throw new Error(`${rel} is not under formal/`);
+		for (let index = 1; index <= all.length; index++) {
+			if (selectShard(all, { index, total: all.length }, costs).includes(abs))
+				return { shard: index, total: all.length };
+		}
+		throw new Error(`no shard selects ${rel}`);
+	};
+	// Recorded in scripts/tla-model-costs.json with a count of 136.
+	const RECORDED = "formal/late-aux-drain/EditDuringGrace.cfg";
+	// Not in the recorded table, and expected to pass.
+	const UNRECORDED = "formal/blocker-pending/CarryOwed.cfg";
+	const PASS = "Model checking completed. No error has been found.\n";
+	const stats = (distinct: number) =>
+		`${distinct * 2} states generated, ${distinct} distinct states found, 0 states left on queue.\n`;
+
+	it("runs the real entry and reports the pool size and summary through the extracted helpers", async () => {
+		const total = listModelConfigs(REPO_ROOT).length;
+		const { logged, errors } = await runEntry({ shard: 1, total });
+		const isSummary = (line: string) => line.includes("wall (concurrency=");
 		const resultLines = logged.filter((line) => /^(?:ok  |FAIL) /.test(line));
 		const summary = logged.find(isSummary);
+		// The run's own per-config result lines are the independent oracle:
+		// the summary must account for exactly the configs that ran, name the
+		// shard `main` passed, and carry the pool size `main` resolved.
 		expect(errors, errors.join("\n")).toEqual([]);
 		expect(resultLines).toHaveLength(1);
 		expect(summary, errors.join("\n")).toMatch(
@@ -682,6 +726,62 @@ describe("main() caller wiring (#3927)", () => {
 				`^1 configs \\(shard 1/${total}\\), \\d+\\.\\ds wall \\(concurrency=99, 1 TLC worker/config\\)\\.$`,
 			),
 		);
+	});
+
+	// Recurrence: #4714 F1. A count past 2x the recorded 136 must fail the run,
+	// name the config with its old and new counts, and set exit code 1.
+	it("fails the run and names the config when its distinct states pass 2x the recorded count", async () => {
+		const { logged, errors, exitCode } = await runEntry({
+			...configIndex(RECORDED),
+			tlcOutput: PASS + stats(300),
+		});
+		expect(errors, errors.join("\n")).toEqual([]);
+		expect(
+			logged.some(
+				(line) =>
+					line.startsWith(`ok   ${RECORDED}: `) &&
+					line.endsWith(", 300 distinct states)"),
+			),
+		).toBe(true);
+		expect(
+			logged.filter((line) => line.startsWith("STATE-COUNT JUMP")),
+		).toEqual([
+			expect.stringContaining(`STATE-COUNT JUMP ${RECORDED}: old count 136 `),
+		]);
+		expect(logged.find((l) => l.startsWith("STATE-COUNT JUMP"))).toContain(
+			"new count 300 ",
+		);
+		expect(exitCode).toBe(1);
+	});
+
+	// The factor is inclusive: 272 is exactly 2x 136, so it passes.
+	it("passes a count exactly at the factor, with the exit code unset", async () => {
+		const { logged, exitCode } = await runEntry({
+			...configIndex(RECORDED),
+			tlcOutput: PASS + stats(272),
+		});
+		expect(logged.some((line) => line.startsWith("STATE-COUNT JUMP"))).toBe(
+			false,
+		);
+		expect(exitCode).toBeUndefined();
+	});
+
+	// Recurrence: #4714 F1. A config with no recorded count only reports; the
+	// run stays green however large its count is.
+	it("reports an unrecorded config's count without failing the run", async () => {
+		const { logged, exitCode } = await runEntry({
+			...configIndex(UNRECORDED),
+			tlcOutput: PASS + stats(1e9),
+		});
+		expect(logged.some((line) => line.startsWith("STATE-COUNT JUMP"))).toBe(
+			false,
+		);
+		expect(
+			logged.some((line) =>
+				line.includes("ran with no recorded distinct-state count"),
+			),
+		).toBe(true);
+		expect(exitCode).toBeUndefined();
 	});
 });
 

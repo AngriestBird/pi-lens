@@ -214,6 +214,20 @@ export function main(
 		console.error(refusal);
 		return 2;
 	}
+	// #4714 F4: a regeneration from logs that predate the count keeps the counts
+	// the file already records; a count measured this run replaces the old one.
+	let recorded = {};
+	if (fs.existsSync(parsed.out)) {
+		try {
+			recorded = JSON.parse(fs.readFileSync(parsed.out, "utf8"))?.states ?? {};
+		} catch (error) {
+			console.error(
+				`cannot read the recorded counts in ${parsed.out}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return 2;
+		}
+	}
+	const kept = { ...recorded, ...states };
 	const payload = {
 		generatedBy:
 			"node scripts/gen-tla-model-costs.mjs --source <run-id> ... --log <job-log> ... (logs from `gh run view <run-id> --log --job <shard-job-id>`)",
@@ -224,13 +238,16 @@ export function main(
 		note: "Per-config TLC seconds (median over the source runs), read from `ok|FAIL formal/<family>/<Model>.cfg: ... (Ns)` lines the checker prints. scripts/tla-model-costs.json packs the TLA+ shards with these; a config with no row costs the table's MAX so an unmeasured config can never quietly become the tail.",
 		files,
 		// #4714: the TLC distinct-state count per config (median over the runs
-		// that printed one). `check-tla-models.mjs` fails a config whose count
-		// grows past this by more than its factor; a config with no row reports.
-		states,
+		// that printed one, kept from the file when the logs predate it).
+		// `check-tla-models.mjs` fails a config whose count grows past this by
+		// more than its factor; a config with no row reports. To re-record a
+		// count, regenerate from a shard log that prints it, or edit it in the PR.
+		states: kept,
 	};
 	fs.writeFileSync(parsed.out, `${JSON.stringify(payload, null, "\t")}\n`);
+	const measured = Object.keys(states).length;
 	console.log(
-		`wrote ${parsed.out}: ${Object.keys(files).length} configs from ${logs.length} log(s)`,
+		`wrote ${parsed.out}: ${Object.keys(files).length} configs from ${logs.length} log(s); ${Object.keys(kept).length} distinct-state count(s) (${measured} measured this run, ${Object.keys(kept).length - measured} kept from the file)`,
 	);
 	return 0;
 }

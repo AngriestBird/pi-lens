@@ -406,3 +406,83 @@ describe("#4714 distinct-state counts in the cost table", () => {
 		expect(table.states).toEqual({});
 	});
 });
+
+// #4714 F1/F4: `main` is the only writer of the table. Two cases pin it: the
+// payload carries the counts a run printed (a dropped `states` key reds), and a
+// regeneration from old-format logs keeps the counts the file already records
+// (a rewrite to `states: {}` loses every count with no warning).
+// Recurrence: the first regeneration from old logs wrote `states: {}`.
+describe("#4714 main() writes the state counts", () => {
+	function fakeRepo(dir: string) {
+		for (const name of ["A", "B"]) {
+			const family = join(dir, "formal", "fam");
+			mkdirSync(family, { recursive: true });
+			writeFileSync(
+				join(family, `${name}.cfg`),
+				"\\* expect: pass\n\\* module: M\n",
+			);
+		}
+	}
+
+	it("writes the printed count beside the seconds", () => {
+		const { dir, done } = scratch();
+		const logs = captureLogs();
+		try {
+			fakeRepo(dir);
+			const log = join(dir, "shard.log");
+			writeFileSync(
+				log,
+				[
+					"ok   formal/fam/A.cfg: expected pass, got pass (5.0s, 300 distinct states)",
+					"ok   formal/fam/B.cfg: expected pass, got pass (2.0s)",
+				].join("\n"),
+			);
+			const out = join(dir, "table.json");
+			expect(main(["--log", log, "--out", out], { root: dir })).toBe(0);
+			const table = JSON.parse(readFileSync(out, "utf8"));
+			expect(table.files).toEqual({
+				"formal/fam/A.cfg": 5,
+				"formal/fam/B.cfg": 2,
+			});
+			expect(table.states).toEqual({ "formal/fam/A.cfg": 300 });
+		} finally {
+			logs.restore();
+			done();
+		}
+	});
+
+	it("keeps the counts the file already records when the logs predate them", () => {
+		const { dir, done } = scratch();
+		const logs = captureLogs();
+		try {
+			fakeRepo(dir);
+			const out = join(dir, "table.json");
+			writeFileSync(
+				out,
+				JSON.stringify({
+					files: { "formal/fam/A.cfg": 4 },
+					states: { "formal/fam/A.cfg": 136 },
+				}),
+			);
+			const log = join(dir, "old.log");
+			writeFileSync(
+				log,
+				[
+					"ok   formal/fam/A.cfg: expected pass, got pass (5.0s)",
+					"ok   formal/fam/B.cfg: expected pass, got pass (2.0s)",
+				].join("\n"),
+			);
+			expect(main(["--log", log, "--out", out], { root: dir })).toBe(0);
+			const table = JSON.parse(readFileSync(out, "utf8"));
+			expect(table.states).toEqual({ "formal/fam/A.cfg": 136 });
+			// The summary names how many counts the file holds, so a regeneration
+			// that drops them is visible in the run's own output.
+			expect(
+				logs.lines.some((line) => line.includes("1 distinct-state count")),
+			).toBe(true);
+		} finally {
+			logs.restore();
+			done();
+		}
+	});
+});

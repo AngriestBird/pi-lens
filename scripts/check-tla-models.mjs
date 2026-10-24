@@ -147,7 +147,7 @@ export function formatStateJump(
 	{ id, recorded, observed },
 	factor = STATE_COUNT_FACTOR,
 ) {
-	return `STATE-COUNT JUMP ${id}: old count ${recorded} distinct states (recorded in ${MODEL_COSTS_FILE}), new count ${observed} distinct states, more than ${factor}x the recorded count`;
+	return `STATE-COUNT JUMP ${id}: old count ${recorded} distinct states (recorded in ${MODEL_COSTS_FILE}), new count ${observed} distinct states, more than ${factor}x the recorded count. If the growth is intended, re-record the count: regenerate from a shard log that prints it (scripts/gen-tla-model-costs.mjs), or raise the count in ${MODEL_COSTS_FILE} in the same PR with the reason`;
 }
 
 /** The configs that ran with a count but have no recorded count yet. */
