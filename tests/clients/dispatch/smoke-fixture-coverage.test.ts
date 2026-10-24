@@ -61,6 +61,7 @@ import {
 	availabilityProblems,
 	CAPTURED_OUTPUT_DIR,
 	cleanProblems,
+	CapturedOutput,
 	listCapturedOutputs,
 	provenanceProblems,
 } from "../../helpers/captured-runner-output.js";
@@ -571,36 +572,22 @@ describe("smoke-fixture coverage", () => {
  * `CapturedOutput`-shaped record. Built here, not in the helper, because the
  * helper's population is `runner-output` by design.
  */
-function listExitCodeFixtures(): Array<{
-	relPath: string;
-	caseName: string;
-	provenance: Record<string, unknown> & { runner?: string };
-	file: string;
-	exitCode: number | null;
-	stdout: string;
-	stderr: string;
-	availability: Array<Record<string, unknown>>;
-	clean?: Record<string, unknown>;
-}> {
+function listExitCodeFixtures(): CapturedOutput[] {
 	const root = path.join(repoRoot, "tests/fixtures/runner-exit-codes");
-	const out: ReturnType<typeof listExitCodeFixtures> = [];
+	const out: CapturedOutput[] = [];
 	if (!fs.existsSync(root)) return out;
 	for (const runner of fs.readdirSync(root).sort()) {
 		const dir = path.join(root, runner);
 		for (const entry of fs.readdirSync(dir).sort()) {
 			if (!entry.endsWith(".captured.json")) continue;
+			// Raw fields only: a missing exitCode or stderr must reach the checks
+			// that refuse it, not a default that makes it look captured.
 			const parsed = JSON.parse(fs.readFileSync(path.join(dir, entry), "utf8"));
 			out.push({
+				...parsed,
 				relPath: `tests/fixtures/runner-exit-codes/${runner}/${entry}`,
 				caseName: entry.replace(/\.captured\.json$/, ""),
-				provenance: parsed.provenance,
-				file: parsed.file,
-				exitCode: parsed.exitCode ?? null,
-				stdout: parsed.stdout ?? "",
-				stderr: parsed.stderr ?? "",
-				availability: parsed.availability ?? [],
-				clean: parsed.clean,
-			});
+			} as CapturedOutput);
 		}
 	}
 	return out;
@@ -695,8 +682,8 @@ describe("captured real-bytes fixture provenance", () => {
 	// never reached them; this walk is their census.
 	it("every exit-code fixture carries a complete provenance and availability record", () => {
 		const problems = listExitCodeFixtures().flatMap((fixture) => [
-			...provenanceProblems(fixture as never),
-			...availabilityProblems(fixture as never),
+			...provenanceProblems(fixture),
+			...availabilityProblems(fixture),
 		]);
 		expect(
 			problems,
@@ -711,7 +698,7 @@ describe("captured real-bytes fixture provenance", () => {
 	// availability checks and not the gate the capture itself uses.
 	it("every exit-code fixture passes the capture gate's record rule", () => {
 		const problems = listExitCodeFixtures().flatMap((fixture) =>
-			recordProblems(fixture as never),
+			recordProblems(fixture),
 		);
 		expect(
 			problems,
