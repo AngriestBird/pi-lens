@@ -74,6 +74,7 @@ import {
 	countEntriesSince,
 } from "./lib/latency-log-phases.mjs";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import { scratchHomeEnv } from "./lib/scratch-home-env.mjs";
 import { startRpcSession } from "./rpc-load-check.mjs";
 
 const isWindows = process.platform === "win32";
@@ -166,7 +167,7 @@ function runPiRpc({
 			stderr: "inherit",
 			env: {
 				...process.env,
-				PI_LENS_HOME: logHome,
+				...scratchHomeEnv(logHome),
 				...env,
 				ANTHROPIC_API_KEY:
 					process.env.ANTHROPIC_API_KEY || "sk-ant-dummy-compat-smoke",

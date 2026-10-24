@@ -14,6 +14,7 @@ import { constants as osConstants } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import { scratchHomeEnv } from "./lib/scratch-home-env.mjs";
 import {
 	claimScratchDir,
 	ownerAlive,
@@ -283,7 +284,7 @@ export async function main(argv = process.argv.slice(2)) {
 	const envFor = (side) => ({
 		...process.env,
 		TMPDIR: tmp,
-		PI_LENS_HOME: homes[side],
+		...scratchHomeEnv(homes[side]),
 		PI_LENS_TEST_MAX_WORKERS: "6",
 	});
 

@@ -21,19 +21,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginScope } from "../../clients/session-scope.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
-const logLatency = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("../../clients/latency-logger.js")>();
-	return {
-		...actual,
-		logLatency: (entry: Parameters<typeof actual.logLatency>[0]) => {
-			logLatency(entry);
-			actual.logLatency(entry);
-		},
-	};
-});
-
 import { resetBoundedTelemetry } from "../../clients/bounded-telemetry.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import type { FunctionCallGraph } from "../../clients/call-graph.js";
@@ -240,7 +227,6 @@ beforeEach(async () => {
 
 afterEach(() => {
 	cancelLSPIdleReset();
-	logLatency.mockClear();
 	resetDegradationLedger();
 	resetBoundedTelemetry();
 });

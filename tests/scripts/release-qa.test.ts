@@ -1860,6 +1860,7 @@ describe("release-QA pack call site (#3887 F1)", () => {
 				"scripts/rpc-load-check.mjs",
 				"scripts/lib/is-main-module.mjs",
 				"scripts/lib/latency-log-phases.mjs",
+				"scripts/lib/scratch-home-env.mjs",
 				"scripts/lib/md-matrix.mjs",
 				"scripts/lib/mcp-stdio-client.mjs",
 				"scripts/supply-host-provided-deps.mjs",
@@ -1982,6 +1983,7 @@ describe("release-QA dirty-checkout refusal (#2619 review F1)", () => {
 				"scripts/rpc-load-check.mjs",
 				"scripts/lib/is-main-module.mjs",
 				"scripts/lib/latency-log-phases.mjs",
+				"scripts/lib/scratch-home-env.mjs",
 				"scripts/lib/md-matrix.mjs",
 				"scripts/lib/mcp-stdio-client.mjs",
 			]) {

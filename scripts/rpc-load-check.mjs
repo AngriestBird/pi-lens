@@ -56,6 +56,7 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isMainModule } from "./lib/is-main-module.mjs";
+import { scratchHomeEnv } from "./lib/scratch-home-env.mjs";
 import {
 	parseNdjsonEntries,
 	phaseWasLogged,
@@ -367,7 +368,7 @@ export async function run(piBin, { extension, failWorker }) {
 	const env = {
 		...process.env,
 		PI_CODING_AGENT_DIR: agentDir,
-		PI_LENS_HOME: lensHome,
+		...scratchHomeEnv(path.join(scratch, "home"), lensHome),
 		PI_OFFLINE: "1",
 		PI_SKIP_VERSION_CHECK: "1",
 	};

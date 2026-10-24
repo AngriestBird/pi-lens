@@ -872,6 +872,9 @@ export const wallClockBudgetInclude = [
 	// #4401: the RPC session smoke's exit code is the contract; only a real
 	// child process (a stand-in pi) can exit or write a signal to turn it red.
 	"tests/scripts/rpc-load-check-spawn.test.ts",
+	// #4789: the child-report cases spawn REAL `node -e` children under the
+	// scratch home pin and read back the HOME and XDG dirs each one inherited.
+	"tests/scripts/scratch-home-env.test.ts",
 	// #3401: the seed script's default git path (depth-2 fetch, refspec, blob
 	// specs) against real throwaway repos and a depth-1 clone (flake-shape
 	// admission).
