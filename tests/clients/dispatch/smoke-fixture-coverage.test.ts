@@ -566,6 +566,46 @@ describe("smoke-fixture coverage", () => {
 	});
 });
 
+/**
+ * Every `tests/fixtures/runner-exit-codes/<runner>/<case>.captured.json` as a
+ * `CapturedOutput`-shaped record. Built here, not in the helper, because the
+ * helper's population is `runner-output` by design.
+ */
+function listExitCodeFixtures(): Array<{
+	relPath: string;
+	caseName: string;
+	provenance: Record<string, unknown> & { runner?: string };
+	file: string;
+	exitCode: number | null;
+	stdout: string;
+	stderr: string;
+	availability: Array<Record<string, unknown>>;
+	clean?: Record<string, unknown>;
+}> {
+	const root = path.join(repoRoot, "tests/fixtures/runner-exit-codes");
+	const out: ReturnType<typeof listExitCodeFixtures> = [];
+	if (!fs.existsSync(root)) return out;
+	for (const runner of fs.readdirSync(root).sort()) {
+		const dir = path.join(root, runner);
+		for (const entry of fs.readdirSync(dir).sort()) {
+			if (!entry.endsWith(".captured.json")) continue;
+			const parsed = JSON.parse(fs.readFileSync(path.join(dir, entry), "utf8"));
+			out.push({
+				relPath: `tests/fixtures/runner-exit-codes/${runner}/${entry}`,
+				caseName: entry.replace(/\.captured\.json$/, ""),
+				provenance: parsed.provenance,
+				file: parsed.file,
+				exitCode: parsed.exitCode ?? null,
+				stdout: parsed.stdout ?? "",
+				stderr: parsed.stderr ?? "",
+				availability: parsed.availability ?? [],
+				clean: parsed.clean,
+			});
+		}
+	}
+	return out;
+}
+
 describe("captured real-bytes fixture provenance", () => {
 	const captured = listCapturedOutputs();
 
@@ -649,6 +689,63 @@ describe("captured real-bytes fixture provenance", () => {
 		).toEqual([]);
 	});
 
+	// #4522 review F3: the exit-code fixtures (`tests/fixtures/runner-exit-codes/`)
+	// are written by the same capture script, so they meet the same provenance and
+	// availability gates. They sit outside `runner-output`, so `listCapturedOutputs`
+	// never reached them; this walk is their census.
+	it("every exit-code fixture carries a complete provenance and availability record", () => {
+		const problems = listExitCodeFixtures().flatMap((fixture) => [
+			...provenanceProblems(fixture as never),
+			...availabilityProblems(fixture as never),
+		]);
+		expect(
+			problems,
+			`exit-code fixture(s) with an incomplete provenance or availability record. Re-capture with scripts/capture-runner-output.mjs --out-dir tests/fixtures/runner-exit-codes:\n${problems.join("\n")}`,
+		).toEqual([]);
+	});
+
+	// A clean run is required of every runner-output fixture because the matrix's
+	// clean cell replays it. An exit-code fixture is a failing run whose input is
+	// the failure itself: the invalid configuration. A valid-config run of the
+	// same invocation is a different capture, so each fixture below is admitted
+	// without a clean run, by name, with its reason. Stale entries red.
+	const EXIT_CODE_CLEAN_ADMISSIONS: Record<string, string> = {
+		"detekt/broken-config":
+			"the malformed detekt.yml is the input; the same invocation on a valid config is not this probe",
+		"detekt/findings-then-exit1":
+			"the non-numeric build.weights value is the input that fails the run after it reports",
+	};
+	it("every exit-code fixture without a clean run is admitted by name with its reason", () => {
+		const fixtures = listExitCodeFixtures();
+		const unadmitted = fixtures
+			.filter((f) => !f.clean)
+			.filter(
+				(f) =>
+					!(
+						f.relPath
+							.replace(/^tests\/fixtures\/runner-exit-codes\//, "")
+							.replace(/\.captured\.json$/, "") in EXIT_CODE_CLEAN_ADMISSIONS
+					),
+			)
+			.map((f) => f.relPath);
+		expect(
+			unadmitted,
+			`exit-code fixture(s) with no clean run and no named admission: ${unadmitted.join(", ")}`,
+		).toEqual([]);
+		const stale = Object.keys(EXIT_CODE_CLEAN_ADMISSIONS).filter(
+			(key) =>
+				!fixtures.some(
+					(f) =>
+						f.relPath ===
+						`tests/fixtures/runner-exit-codes/${key}.captured.json`,
+				),
+		);
+		expect(
+			stale,
+			`stale clean-run admission(s) with no such exit-code fixture: ${stale.join(", ")}`,
+		).toEqual([]);
+	});
+
 	// #4522 F1: `.gitignore` ignores `*.js` and `*.md` globally, so a clean
 	// workspace whose inputs are JavaScript or Markdown was captured, replayed
 	// from the working tree, and never committed: five fixtures named workspaces
@@ -659,6 +756,7 @@ describe("captured real-bytes fixture provenance", () => {
 		const roots = [
 			path.join(repoRoot, "tests/fixtures/runner-output"),
 			path.join(repoRoot, "tests/fixtures/runner-output-clean"),
+			path.join(repoRoot, "tests/fixtures/runner-exit-codes"),
 		];
 		const inputs: string[] = [];
 		const walk = (dir: string): void => {

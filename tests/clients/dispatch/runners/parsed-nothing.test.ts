@@ -410,9 +410,9 @@ describe("runners that reached the gate through spawnFailedWithNoOutput (#1948 F
 		}
 	});
 
-	// #4522: exit 1 is detekt's tool-error class, so it is rejected before the
-	// parser runs. The record is the runner-empty-result one, not parsed-nothing.
-	it("detekt records a rejected invocation when a config failure exits 1", async () => {
+	// #4522 review F2: exit 1 is admitted and skipWhenParsedNothing skips it
+	// when the parser reads nothing, so the record is runner-parsed-nothing.
+	it("detekt records when a config failure yields no parsable finding", async () => {
 		const env = setupTestEnvironment("pi-lens-1948-detekt-");
 		try {
 			const summary = await ledger();
@@ -434,14 +434,11 @@ describe("runners that reached the gate through spawnFailedWithNoOutput (#1948 F
 
 			expect(result.status).toBe("skipped");
 			expect(result.diagnostics).toEqual([]);
-			expect(parsedNothingRow(summary, "detekt").group).toBeUndefined();
-			const empty = summary
-				.getDegradationSummary()
-				.find((entry) => entry.kind === "runner-empty-result");
-			const row = empty?.latestReasons.find(
-				(entry) => entry.subject === "detekt",
-			);
-			expect(row?.reason).toContain("rejected-invocation");
+			const { row } = parsedNothingRow(summary, "detekt");
+			expect(
+				row,
+				"expected a runner-parsed-nothing row for detekt",
+			).toBeDefined();
 			expect(row?.reason).toContain("invalid config property");
 		} finally {
 			env.cleanup();
@@ -643,6 +640,73 @@ describe("detekt findings on stderr (#4522)", () => {
 
 			expect(result.status).not.toBe("skipped");
 			expect(result.diagnostics.length).toBeGreaterThan(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #4522 review F2: detekt can print a finding and then exit 1, when a
+ * configuration value fails after the report is written. The captured bytes
+ * are `tests/fixtures/runner-exit-codes/detekt/findings-then-exit1.captured.json`
+ * (detekt 1.23.8, a non-numeric `build.weights` entry). The finding must
+ * survive: a run that already printed findings is not an unanswered tool.
+ *
+ * Recurrence: exit 1 was rejected as a tool error before the parser ran, so
+ * the printed finding was dropped (`skipped`, 0 diagnostics).
+ */
+describe("detekt findings printed before exit 1 (#4522 F2)", () => {
+	beforeEach(() => {
+		vi.resetModules();
+		safeSpawnAsync.mockReset();
+		getLinterPolicyForCwd.mockReset();
+		getLinterPolicyForCwd.mockReturnValue(null);
+	});
+
+	it("keeps the finding when detekt prints it and then exits 1", async () => {
+		const env = setupTestEnvironment("pi-lens-4522-detekt-findings-exit1-");
+		try {
+			const captured = JSON.parse(
+				fs.readFileSync(
+					new URL(
+						"../../../fixtures/runner-exit-codes/detekt/findings-then-exit1.captured.json",
+						import.meta.url,
+					),
+					"utf8",
+				),
+			) as { exitCode: number; stdout: string; stderr: string };
+			expect(captured.exitCode).toBe(1);
+			fs.cpSync(
+				fileURLToPath(
+					new URL(
+						"../../../fixtures/runner-exit-codes/detekt/findings-workspace/",
+						import.meta.url,
+					),
+				),
+				env.tmpDir,
+				{ recursive: true },
+			);
+			const filePath = path.join(env.tmpDir, "Bad.kt");
+			safeSpawnAsync.mockResolvedValue({
+				stdout: captured.stdout.split("__WORKSPACE__").join(env.tmpDir),
+				stderr: captured.stderr.split("__WORKSPACE__").join(env.tmpDir),
+				status: captured.exitCode,
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/detekt.js")
+			).default;
+			const result = await runner.run(
+				createCtx("kotlin", filePath, env.tmpDir) as never,
+			);
+
+			expect(
+				result.status,
+				"detekt exit 1 after printing a finding read as skipped: the printed finding was dropped",
+			).not.toBe("skipped");
+			expect(result.diagnostics.map((d) => d.rule)).toContain(
+				"ForbiddenComment",
+			);
 		} finally {
 			env.cleanup();
 		}

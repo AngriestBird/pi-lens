@@ -59,7 +59,7 @@ const DOCUMENTED_RAN: Record<string, number[]> = {
 	"cpp-check.ts": [1, 2],
 	"credo.ts": [1, 2],
 	"dart-analyze.ts": [1, 2, 3],
-	"detekt.ts": [2],
+	"detekt.ts": [1, 2],
 	"dotnet-build.ts": [1, 2],
 	"elixir-check.ts": [1, 2],
 	"eslint.ts": [1, 2],

@@ -1174,6 +1174,31 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 		30_000,
 	);
 
+	// #4522 F4: the captured exit-1 broken-config shape through the production
+	// dispatcher, not runner.run. A dispatched detekt exit 1 with no findings
+	// must never be delivered as a completed (clean or dirty) analysis.
+	it("detekt exit 1 on a malformed config is skipped through dispatch, never a clean verdict (#4522)", async () => {
+		const captured = JSON.parse(
+			fs.readFileSync(
+				new URL(
+					"../../../fixtures/runner-exit-codes/detekt/broken-config.captured.json",
+					import.meta.url,
+				),
+				"utf8",
+			),
+		) as { exitCode: number; stderr: string; stdout: string };
+		const observed = await drive("detekt", {
+			...DRIVERS.detekt,
+			reply: () => ({
+				status: captured.exitCode,
+				stdout: captured.stdout,
+				stderr: captured.stderr,
+			}),
+		});
+		expect(observed.result?.status).toBe("skipped");
+		expect(observed.result?.diagnostics).toEqual([]);
+	});
+
 	// A hand-rolled ternary's other arm: findings below the runner's threshold
 	// stay `succeeded` and carry no kind (Stryker survivor on detekt.ts:203,
 	// `"succeeded"` → `""`, #3800).
