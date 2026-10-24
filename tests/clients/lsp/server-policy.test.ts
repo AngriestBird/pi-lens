@@ -414,20 +414,6 @@ describe("lsp server policy", () => {
 		await expect(FSharpServer.root(file)).resolves.toBeUndefined();
 	});
 
-	it("does not spawn csharp-ls where no solution or project file exists", async () => {
-		const { CSharpServer } = await import("../../../clients/lsp/server.js");
-		const tmp = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-csharp-no-project-spawn-"),
-		);
-		dirs.push(tmp);
-		fs.writeFileSync(path.join(tmp, "Script.cs"), "class Script {}\n");
-
-		launchLSP.mockClear();
-		const spawned = await CSharpServer.spawn(tmp, { allowInstall: false });
-		expect(spawned).toBeUndefined();
-		expect(launchLSP).not.toHaveBeenCalled();
-	});
-
 	it("tries pi-lens managed csharp candidates before legacy global dotnet tools", async () => {
 		const { CSharpServer } = await import("../../../clients/lsp/server.js");
 		const { getGlobalPiLensDir } =
@@ -436,7 +422,6 @@ describe("lsp server policy", () => {
 			path.join(os.tmpdir(), "pi-lens-csharp-candidates-"),
 		);
 		dirs.push(tmp);
-		fs.writeFileSync(path.join(tmp, "App.csproj"), "<Project />\n");
 
 		launchLSP.mockRejectedValue(toolNotFound());
 

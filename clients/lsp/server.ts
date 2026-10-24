@@ -14,6 +14,7 @@ import path from "node:path";
 import {
 	getGlobalPiLensDir,
 	getProjectIgnoreGlobs,
+	isExcludedDirName,
 	isPathIgnoredByProject,
 } from "../file-utils.js";
 import {
@@ -66,6 +67,7 @@ import {
 } from "../zizmor-config.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
+import { readDirEntriesSafeAsync } from "../source-walker.js";
 import { findLocalSgconfig, resolveBaselineSgconfig } from "../sgconfig.js";
 import { findLocalTyposConfig } from "../typos-config.js";
 import { resolvePackagePath } from "../package-root.js";
@@ -154,8 +156,16 @@ export type LspRootFallback = {
 	marker?: string;
 };
 
-/** The reason text for a root fallback, worded by what actually happened. */
-export function describeRootFallback(fallback: LspRootFallback): string {
+/**
+ * The reason text for a root fallback, worded by what actually happened.
+ * `hosted` is false when no client was acquired for the file (#4806: a
+ * `spawnNeedsProjectFile` server declined at a project-less root), so the
+ * "started at the file's directory" clause would be false.
+ */
+export function describeRootFallback(
+	fallback: LspRootFallback,
+	hosted = true,
+): string {
 	const tail = "so pi-lens cannot confirm the server analysed the file";
 	if (fallback.cause === "failed") {
 		return `${fallback.serverName}: resolving the project root for this file failed, ${tail}`;
@@ -163,7 +173,10 @@ export function describeRootFallback(fallback: LspRootFallback): string {
 	if (fallback.cause === "unselected") {
 		return `${fallback.serverName}: found ${fallback.marker} for this file but pi-lens did not select it as the project root (a test-fixture or git-ignored directory is never used as one), ${tail}`;
 	}
-	return `${fallback.serverName}: no project root found for this file (looked for ${fallback.rootMarkers.join(" / ")}); the server was started at the file's directory and may not have analysed it`;
+	const none = `${fallback.serverName}: no project root found for this file (looked for ${fallback.rootMarkers.join(" / ")})`;
+	return hosted
+		? `${none}; the server was started at the file's directory and may not have analysed it`
+		: none;
 }
 
 /** Resolve a server identity cwd through the shared tool-cwd seam. */
@@ -657,6 +670,16 @@ export interface LSPServerInfo {
 	 * documented behaviour.
 	 */
 	requiresProjectRoot?: boolean;
+	/**
+	 * #4806: the server's own process aborts when its cwd has none of its root
+	 * markers anywhere below it (csharp-ls throws "no .csproj/.fsproj or sln
+	 * files found" on a thread-pool thread and the .NET runtime raises SIGABRT).
+	 * Set, the registry declines the spawn before any process starts when
+	 * {@link declinesProjectlessRoot} finds no marker in a bounded search of the
+	 * root's subtree. Omitted (the default for every other server): spawn.
+	 * `requiresProjectRoot` only words an empty answer; this trait gates a spawn.
+	 */
+	spawnNeedsProjectFile?: boolean;
 	/** Simple command name whose absence disables spawn attempts briefly across roots. */
 	availabilityKey?: string;
 	/** Simple binary name whose project-local install must be refused for adopted roots. */
@@ -1780,6 +1803,49 @@ export function declinesLooseFileRoot(
 		realpathOrResolve(root),
 		realpathOrResolve(os.homedir()),
 	);
+}
+
+/** Directories {@link declinesProjectlessRoot} reads before it gives up. */
+export const PROJECT_FILE_SEARCH_MAX_DIRS = 128;
+
+/**
+ * #4806: does this server's spawn policy refuse the resolved `root` because no
+ * project file exists at it or below it? csharp-ls searches its cwd
+ * recursively (`Directory.GetFiles(dir, "*.csproj", SearchOption.AllDirectories)`)
+ * and aborts only when that finds nothing, so this mirrors the recursion
+ * rather than reading the top level alone. The marker rule is the one root
+ * resolution uses (`markerExists` over the server's own `rootMarkers`).
+ *
+ * Bounded: a breadth-first walk (nearest directories first) reads at most
+ * {@link PROJECT_FILE_SEARCH_MAX_DIRS} directories, skipping the excluded
+ * directory names (`isExcludedDirName`). A project deeper than that bound, or
+ * only under an excluded name, reads as absent: a decline, never a spawn,
+ * because the spawn is the process abort. The cost is up to
+ * `1 + rootMarkers.length` directory reads per directory visited, paid only
+ * when a spawn is attempted for a root with no project at its top level.
+ */
+export async function declinesProjectlessRoot(
+	server: Pick<LSPServerInfo, "spawnNeedsProjectFile" | "root" | "rootMarkers">,
+	root: string,
+): Promise<boolean> {
+	if (server.spawnNeedsProjectFile !== true) return false;
+	const markers = server.rootMarkers ?? server.root.rootMarkers ?? [];
+	if (markers.length === 0) return false;
+	const queue = [root];
+	for (let visited = 0; visited < PROJECT_FILE_SEARCH_MAX_DIRS; visited++) {
+		const dir = queue.shift();
+		if (dir === undefined) break;
+		for (const marker of markers) {
+			if (await markerExists(dir, marker)) return false;
+		}
+		for (const entry of await readDirEntriesSafeAsync(dir)) {
+			if (visited + queue.length + 1 >= PROJECT_FILE_SEARCH_MAX_DIRS) break;
+			if (entry.isDirectory() && !isExcludedDirName(entry.name)) {
+				queue.push(path.join(dir, entry.name));
+			}
+		}
+	}
+	return true;
 }
 
 export function RootWithFallback(
@@ -3611,23 +3677,14 @@ export const PowerShellServer: LSPServerInfo = {
 	},
 };
 
-/** Whether `dir` itself holds a solution/project file csharp-ls can load. */
-async function dirHasDotnetProjectFile(dir: string): Promise<boolean> {
-	try {
-		return (await readdir(dir)).some((name) =>
-			/\.(?:sln|slnx|csproj|fsproj)$/i.test(name),
-		);
-	} catch {
-		return false;
-	}
-}
-
 export const CSharpServer: LSPServerInfo = {
 	id: "csharp",
 	idleEviction: "unmeasured",
 	role: "language",
 	// Documented (#3750): csharp-ls needs a solution or project.
 	requiresProjectRoot: true,
+	// Measured (#4806): with none below its cwd csharp-ls aborts the process.
+	spawnNeedsProjectFile: true,
 	name: "csharp-ls",
 	executesProjectCode: true,
 	extensions: KIND_EXTENSIONS["csharp"],
@@ -3637,12 +3694,6 @@ export const CSharpServer: LSPServerInfo = {
 	// (shared marker list — see file-kinds.ts, refs #895).
 	root: createRootDetector([...DOTNET_CSHARP_ROOT_MARKERS]),
 	async spawn(root, options) {
-		// csharp-ls throws "no .csproj/.fsproj or sln files found" on a worker
-		// thread when its cwd holds none, and the .NET runtime aborts the whole
-		// process (SIGABRT, core dump). The root fallback in `resolveLspServerCwd`
-		// can still hand it the file's own directory (Unity `Assets/**` has no
-		// solution), so decline here instead of spawning a guaranteed crash.
-		if (!(await dirHasDotnetProjectFile(root))) return undefined;
 		const candidates = dotnetToolCandidates("csharp-ls");
 
 		return resolveAndLaunch(

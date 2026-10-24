@@ -245,7 +245,12 @@ describe("#3750 an empty result under a server-root fallback", () => {
 
 	it("applies to every server that requires a project, not only rust (csharp-ls)", async () => {
 		answerWith("empty");
+		// A project one level BELOW the file's directory: csharp-ls searches its
+		// cwd recursively, so pi-lens starts it at the fallback root (#4806 F4)
+		// and the #3750 demotion applies to its empty answer.
 		const dir = workspace();
+		fs.mkdirSync(path.join(dir, "sub"));
+		fs.writeFileSync(path.join(dir, "sub", "App.csproj"), "<Project />\n");
 		const file = source(dir, "Orphan.cs");
 
 		const { text } = await runTool(dir, { path: file });
@@ -254,6 +259,37 @@ describe("#3750 an empty result under a server-root fallback", () => {
 			"Primary LSP (csharp): unconfirmed — csharp-ls: no project root found for this file",
 		);
 		expect(text).not.toContain("confirmed clean");
+	});
+
+	// Recurrence guarded (#4806 F1): csharp-ls aborts without a project file, so
+	// the registry declines the spawn at a project-less fallback root. No client
+	// then answers, and the primary line said only "could not be started, or was
+	// still starting" (a transient start problem) while the #3750 root verdict
+	// that names the durable cause never reached the model.
+	it("names the missing project when csharp-ls is declined at a project-less root", async () => {
+		answerWith("empty");
+		const dir = workspace();
+		const file = source(dir, "Orphan.cs");
+
+		const { text, details } = await runTool(dir, { path: file });
+
+		expect(text).toMatch(
+			/Primary LSP \(csharp[^)]*\): not available — no language server answered for this file/,
+		);
+		expect(text).toContain(
+			"csharp-ls: no project root found for this file (looked for *.csproj / *.sln / *.slnx).",
+		);
+		expect(text).not.toContain("confirmed clean");
+		expect(text).not.toContain("started at the file's directory");
+		expect(details.unconfirmed).toBe(true);
+		expect(String(details.rootFallbackReason)).toContain(
+			"csharp-ls: no project root found for this file",
+		);
+		// The decline is the registry's policy record, not a spawn failure.
+		const declined = getDegradationSummary().find(
+			(group) => group.kind === "lsp-root-declined",
+		);
+		expect(declined?.latestReasons[0]?.subject).toContain("csharp:");
 	});
 
 	// Recurrence guarded: #3750 round 1 demoted all 11 undefined-root servers, so a
@@ -361,8 +397,10 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		const { text } = await runTool(root, { paths: [rust, csharp] });
 
 		expect(text).toContain("0 files confirmed clean, 2 unconfirmed");
+		// The declined csharp-ls file names its root verdict with the files no
+		// server answered; the rust file keeps the hosted-server wording.
 		expect(text).toContain(
-			"may not have analysed it; csharp-ls: no project root found for this file",
+			"1 with no language server answer (it could not be started, or was still starting): csharp-ls: no project root found for this file (looked for *.csproj / *.sln / *.slnx); the other 1: rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock); the server was started at the file's directory and may not have analysed it",
 		);
 		expect(text).toContain("NOT the same as 0 diagnostics.");
 	});
