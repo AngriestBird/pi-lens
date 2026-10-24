@@ -142,6 +142,9 @@ export const CI_ONLY_PRE_PUSH_TESTS = {
 // import resolution cannot discover them. The governance suite pins this
 // executable population against the scanner shape.
 export const TREE_SCANNING_GOVERNANCE_TESTS = [
+	// #4535: walks clients/tools/mcp/scripts + index.ts for every use of
+	// `subscribeDiskChange`, so a subscriber added without a census row reds.
+	"tests/clients/disk-change-census-4535.test.ts",
 	// #3937: walks clients/tools/mcp/scripts + index.ts for bridge-entry
 	// construction sites (provenance fold over the source tree).
 	"tests/clients/mutation-bridge-lineage-epoch-sweep.test.ts",
