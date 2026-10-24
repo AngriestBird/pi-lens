@@ -1,4 +1,3 @@
-// flake-shape: in-process-mock — the LSP client is a spawned language-server process (JSON-RPC over stdio), and this file's subject is the registry's spawn policy and bookkeeping, not the process
 /**
  * #4806 — csharp-ls aborts the whole process (SIGABRT, one core dump per
  * attempt) when its cwd has no `.sln`/`.slnx`/`.csproj` anywhere below it. The
@@ -44,28 +43,6 @@ import {
 } from "../../../clients/project-trust.js";
 import { removeTempDirSync } from "../test-utils.js";
 
-const createLSPClient = vi.hoisted(() => vi.fn());
-
-vi.mock("../../../clients/lsp/client.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../../clients/lsp/client.js")>()),
-	createLSPClient,
-}));
-
-function makeFakeProcess() {
-	return {
-		process: {
-			killed: false,
-			kill: vi.fn(),
-			on: vi.fn(),
-			removeListener: vi.fn(),
-		},
-		stdin: { on: vi.fn(), off: vi.fn(), write: vi.fn() },
-		stdout: { on: vi.fn(), off: vi.fn(), pipe: vi.fn() },
-		stderr: { on: vi.fn(), off: vi.fn() },
-		pid: 4242,
-	};
-}
-
 function makeHooks(): ClientGenerationHooks {
 	return {
 		releaseNotifyWrite: () => undefined,
@@ -77,16 +54,17 @@ function makeHooks(): ClientGenerationHooks {
 	};
 }
 
-/** The production csharp row with only the launched binary stubbed. */
+/**
+ * The production csharp row with only the launched binary stubbed. The stub
+ * reports the binary unavailable (`undefined`): a call to it is the evidence
+ * that the registry did not decline, and no client is ever created.
+ */
 function csharpWithStubSpawn(): LSPServerInfo & {
 	spawn: ReturnType<typeof vi.fn>;
 } {
 	return {
 		...CSharpServer,
-		spawn: vi.fn(async () => ({
-			process: makeFakeProcess() as never,
-			source: "direct" as const,
-		})),
+		spawn: vi.fn(async () => undefined),
 	} as LSPServerInfo & { spawn: ReturnType<typeof vi.fn> };
 }
 
@@ -98,8 +76,6 @@ beforeEach(() => {
 	// is covered by lsp-registry-trust).
 	setProjectTrustState("trusted");
 	resetDegradationLedger();
-	createLSPClient.mockReset();
-	createLSPClient.mockRejectedValue(new Error("stubbed initialize"));
 });
 
 afterEach(() => {
@@ -193,10 +169,9 @@ describe("csharp-ls spawn needs a project file below its root (#4806)", () => {
 	it("spawns where the root itself holds a solution or project file", async () => {
 		const dir = tree("top-level");
 		plant(dir, "App.csproj");
-		const { server, outcome } = await acquire(dir, csFile(dir));
+		const { server } = await acquire(dir, csFile(dir));
 
 		expect(server.spawn).toHaveBeenCalledTimes(1);
-		expect(outcome).not.toBe("declined");
 	});
 
 	// F4: the fallback root is the file's own directory, and csharp-ls loads a
