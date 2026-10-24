@@ -2059,18 +2059,51 @@ function forEachBundledMktempFlag(a, handlers) {
 }
 
 /**
- * A word, after {@link expandShellWord}, that bash may still expand to nothing
- * (#4057): empty, or made only of references this scan leaves unexpanded and
- * bash can expand to the empty string, in any concatenation. Those are a
- * variable with no known value (`$D`, `${D}`), a positional parameter
- * (`$1`-`$9`, `${N}`), `$@`, `$*` (empty with no parameters), and `$!` (empty
- * before any background job; measured with /bin/bash 3.2.57). Not `$0`, `$#`,
- * `$$`, `$?` or `$-`, which bash always sets to a non-empty value, and not a
- * word with any resolved text. A `${D:-x}`-style expansion is not matched: the
- * expander leaves it as written.
+ * The readings of a typed word (#4057, #4826): {@link expandShellWord}'s text
+ * as written, and, when that text still holds a reference this scan cannot
+ * resolve, the same text with each such reference removed, as if bash had
+ * expanded it to nothing. A rule that judges where the word lands reads both
+ * and denies when either denies, as {@link findDeny} reads a substitution
+ * (#3997). The gate admits no list of spellings that can be empty: a reference
+ * left unresolved after expansion is unknown, whatever its form. Removed: any
+ * `$NAME`, `${ … }` (nested braces too; an unterminated one runs to the end of
+ * the word), `$( … )` and `$(( … ))`, a positional `$1`-`$9`, `$@`, `$*`,
+ * `$!`, a backtick span, and a `~user`/`~+`/`~-` tilde. Kept as written: `$0`,
+ * `$#`, `$$`, `$?`, `$-` and a lone `$`, which bash always sets to something.
+ *
+ * @param {string} word
+ * @param {string | null | undefined} cwd
+ * @param {Record<string, string>} env see {@link lookupShellVariable}
+ * @returns {string[]} one reading, or two when the word holds an unresolved reference
  */
-const MAY_EXPAND_TO_NOTHING =
-	/^(?:\$(?:\{(?:[A-Za-z_][A-Za-z0-9_]*|[1-9][0-9]*|[@*!])\}|[A-Za-z_][A-Za-z0-9_]*|[1-9@*!]))*$/;
+function expandShellReadings(word, cwd, env) {
+	const { text } = expandShellWord(word, cwd, env);
+	const unresolved = text.replace(/^~[^/]*/, "");
+	let bare = "";
+	for (let i = 0; i < unresolved.length; i++) {
+		const ch = unresolved[i];
+		const next = unresolved[i + 1] ?? "";
+		if (ch === "`") {
+			const close = unresolved.indexOf("`", i + 1);
+			i = close === -1 ? unresolved.length : close;
+		} else if (ch === "$" && (next === "{" || next === "(")) {
+			const close = next === "{" ? "}" : ")";
+			let depth = 0;
+			let end = i + 1;
+			for (; end < unresolved.length; end++) {
+				if (unresolved[end] === next) depth++;
+				else if (unresolved[end] === close && --depth === 0) break;
+			}
+			i = end;
+		} else if (ch === "$" && /[A-Za-z_]/.test(next)) {
+			i++;
+			while (/[A-Za-z0-9_]/.test(unresolved[i + 1] ?? "")) i++;
+		} else if (ch === "$" && /[1-9@*!]/.test(next)) {
+			i++;
+		} else bare += ch;
+	}
+	return bare === text ? [text] : [text, bare];
+}
 
 /**
  * Classify an `mktemp` invocation's args for #3526's `tmpCheckout` rule.
@@ -2147,47 +2180,45 @@ function classifyMktemp(args, cwd, env, expansionEnv = env) {
 		i++;
 	}
 	if (!isDir) return null;
-	// #3988: bash expands `~`/`$TMPDIR`/`$HOME` in the template BEFORE mktemp
-	// sees it, so `$TMPDIR/x.XXXXXX` is an ABSOLUTE template, not a relative
-	// one that lands in cwd. It expands them before an inline prefix applies
-	// (#4057).
-	if (template !== undefined)
-		template = expandShellWord(template, cwd, expansionEnv).text;
-	// #4057: a `-p`/`--tmpdir=` value or a template that bash may expand to
-	// nothing ({@link MAY_EXPAND_TO_NOTHING}: empty once expanded, or only
-	// references this scan cannot resolve and bash can expand to empty) is
-	// read twice, as #3997 reads a substitution: as written, and as empty. GNU
-	// mktemp takes an empty `-p ''`/`--tmpdir=` as its own `$TMPDIR`, else
-	// /tmp, and a template word that vanishes leaves no template, which
-	// defaults there too. Quotes are gone by now, so `-p "$D"` and `-p $D` read
-	// alike; the first reading that lands under /tmp denies.
-	const mayBeEmpty = (/** @type {string} */ text) =>
-		MAY_EXPAND_TO_NOTHING.test(text);
-	const emptyReading =
-		tmpdirOverride?.dir !== undefined
-			? mayBeEmpty(
-					expandShellWord(tmpdirOverride.dir, cwd, tmpdirOverride.env).text,
-				)
-			: template !== undefined && mayBeEmpty(template);
-	/** @type {string} */
-	let targetDir;
-	let targetEnv = expansionEnv;
-	if (tmpdirOverride?.dir !== undefined) {
-		targetDir = tmpdirOverride.dir;
-		targetEnv = tmpdirOverride.env;
-	} else if (template !== undefined && isAbsolute(template))
-		targetDir = dirname(template);
-	else if (template === undefined || forceTmpdirRelative) {
-		// GNU mktemp's own default, `$TMPDIR` from its own env (#4057).
-		targetDir = "$TMPDIR";
-		targetEnv = env;
-	} else targetDir = cwd ?? process.cwd();
-	const landsUnderTmp = (
-		/** @type {string} */ dir,
-		/** @type {Record<string, string>} */ dirEnv,
-	) => isUnderTmpRoot(resolveShellPath(dir, cwd, dirEnv).path);
-	return landsUnderTmp(targetDir, targetEnv) ||
-		(emptyReading && landsUnderTmp("$TMPDIR", env))
+	// Where the directory can land, every reading of every word that decides
+	// it ({@link expandShellReadings}; the first reading that lands under /tmp
+	// denies). #3988: bash expands `~`/`$TMPDIR`/`$HOME` in a typed word
+	// BEFORE mktemp sees it, so `$TMPDIR/x.XXXXXX` is an ABSOLUTE template, not
+	// a relative one that lands in cwd; it expands them before an inline
+	// prefix applies (#4057). A reading that is empty lands in mktemp's own
+	// default directory: GNU mktemp takes an empty `-p ''`/`--tmpdir=` as its
+	// `$TMPDIR`, and takes an empty or unset `$TMPDIR` as /tmp (coreutils
+	// mktemp.c: `env && *env ? env : "/tmp"`). Quotes are gone by now, so
+	// `-p "$D"` and `-p $D` read alike.
+	const defaultDirs = () =>
+		expandShellReadings("$TMPDIR", cwd, env).map((dir) =>
+			dir === "" ? TMP_ROOT : dir,
+		);
+	/** @type {string[]} */
+	let targetDirs;
+	if (tmpdirOverride?.dir !== undefined)
+		targetDirs = expandShellReadings(
+			tmpdirOverride.dir,
+			cwd,
+			tmpdirOverride.env,
+		).flatMap((dir) => (dir === "" ? defaultDirs() : [dir]));
+	else if (template === undefined) targetDirs = defaultDirs();
+	else
+		targetDirs = expandShellReadings(template, cwd, expansionEnv).flatMap(
+			(text) => {
+				if (isAbsolute(text)) return [dirname(text)];
+				// `-t` roots a relative template at $TMPDIR; so does a template
+				// that vanished. Otherwise it lands in mktemp's cwd.
+				return forceTmpdirRelative || text === ""
+					? defaultDirs()
+					: [cwd ?? process.cwd()];
+			},
+		);
+	// The words are expanded already; what is left in them is unresolved in
+	// every environment, so the prefix is never consulted again (#4057).
+	return targetDirs.some((dir) =>
+		isUnderTmpRoot(resolveShellPath(dir, cwd, {}).path),
+	)
 		? "tmpCheckout"
 		: null;
 }
@@ -2600,14 +2631,14 @@ function classifyNode(
 	// expands a `$NAME` inside a double-quoted payload, and an attached
 	// `--require=`/`--import=`/`--loader=` value is a flag to this scan, never
 	// the file word.
-	const fileArg =
-		fileArgWord === undefined
-			? undefined
-			: expandShellWord(fileArgWord, cwd, expansionEnv).text;
 	const fileArgLoadsRuntimeCode =
-		fileArg !== undefined &&
-		(fileArgUnderDir(fileArg, "clients") || fileArgUnderDir(fileArg, "dist")) &&
-		loadsPiLensRuntime(fileArg, cwd, initialIdentity);
+		fileArgWord !== undefined &&
+		expandShellReadings(fileArgWord, cwd, expansionEnv).some(
+			(fileArg) =>
+				(fileArgUnderDir(fileArg, "clients") ||
+					fileArgUnderDir(fileArg, "dist")) &&
+				loadsPiLensRuntime(fileArg, cwd, initialIdentity),
+		);
 	const evalPayloadLoadsRuntimeCode =
 		hasFlag &&
 		[...rawSegment.matchAll(RUNTIME_LOAD_PATTERN)].some((match) =>
