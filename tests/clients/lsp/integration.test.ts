@@ -955,6 +955,32 @@ describe("LSP Client Integration — mutation-bridge fallback for server-initiat
 	let filePath: string;
 	let prevDataDir: string | undefined;
 
+	// The mutation-bridge slot is process-wide and first-wins
+	// (clients/mutation-bridge.ts), so the first mount in this file freezes
+	// its getters. Mount once and read each case's runtime through a holder
+	// (the readDeps shape io-bridge.test.ts uses), so every case sees its own
+	// runtime whatever order shuffle runs them in (#4561 L3).
+	const bridgeHolder: { runtime?: unknown; cacheManager?: CacheManager } = {};
+	let bridgeMounted = false;
+	function bindMutationBridge(
+		runtime: unknown,
+		cacheManager: CacheManager,
+	): void {
+		bridgeHolder.runtime = runtime;
+		bridgeHolder.cacheManager = cacheManager;
+		if (bridgeMounted) return;
+		bridgeMounted = true;
+		registerMutationBridge({
+			getRuntime: () => bridgeHolder.runtime as never,
+			getCacheManager: () => bridgeHolder.cacheManager as never,
+			getProjectRoot: () => tmpDir,
+			getDispatchCwd: () => tmpDir,
+			countFileLines,
+			isRecordable: () => true,
+			dbg: () => {},
+		});
+	}
+
 	// #2450 review round 2 (F2): 8 lines, with the edit target on line 7
 	// (1-based) — never line 1 — so the real recorded range ({7,7}) cannot
 	// collide with the {1,1} resource-op/whole-file-fallback default. A test
@@ -1012,15 +1038,7 @@ describe("LSP Client Integration — mutation-bridge fallback for server-initiat
 		runtime.setTelemetryIdentity({ sessionId: "s-2450-fallback" });
 		runtime.beginTurn();
 		const cacheManager = new CacheManager(false);
-		registerMutationBridge({
-			getRuntime: () => runtime as never,
-			getCacheManager: () => cacheManager,
-			getProjectRoot: () => tmpDir,
-			getDispatchCwd: () => tmpDir,
-			countFileLines,
-			isRecordable: () => true,
-			dbg: () => {},
-		});
+		bindMutationBridge(runtime, cacheManager);
 
 		// Same call shape as "applies a server-initiated edit solicited during
 		// executeCommand" above: no mutationContext argument. The edit lands on
@@ -1117,15 +1135,7 @@ describe("LSP Client Integration — mutation-bridge fallback for server-initiat
 			});
 			bridgeRuntime.beginTurn();
 			const bridgeCacheManager = new CacheManager(false);
-			registerMutationBridge({
-				getRuntime: () => bridgeRuntime as never,
-				getCacheManager: () => bridgeCacheManager,
-				getProjectRoot: () => tmpDir,
-				getDispatchCwd: () => tmpDir,
-				countFileLines,
-				isRecordable: () => true,
-				dbg: () => {},
-			});
+			bindMutationBridge(bridgeRuntime, bridgeCacheManager);
 
 			const outerContext = {
 				cwd: outerCwd,
@@ -1341,15 +1351,7 @@ describe("LSP Client Integration — mutation-bridge fallback for server-initiat
 			bridgeRuntime.setTelemetryIdentity({ sessionId: "s-2479-bridge" });
 			bridgeRuntime.beginTurn();
 			const bridgeCacheManager = new CacheManager(false);
-			registerMutationBridge({
-				getRuntime: () => bridgeRuntime as never,
-				getCacheManager: () => bridgeCacheManager,
-				getProjectRoot: () => tmpDir,
-				getDispatchCwd: () => tmpDir,
-				countFileLines,
-				isRecordable: () => true,
-				dbg: () => {},
-			});
+			bindMutationBridge(bridgeRuntime, bridgeCacheManager);
 
 			const outerContext = {
 				cwd: outerCwd,
