@@ -14,6 +14,9 @@ The vendored file wins on any difference from this digest.
 
 - Premise first: reproduce the defect through the production call path before
   the fix ([§1 Building](docs/engineering-principles.md#1-building)).
+- Speculative robustness needs buy-in: no new mechanism for an unreproduced
+  race or edge case without the trigger path, evidence, cost and a maintainer
+  decision ([§1 Building](docs/engineering-principles.md#1-building)).
 - Climb the minimalism ladder: reuse an existing seam before adding a line
   ([§1 Building](docs/engineering-principles.md#1-building)).
 - Net-count rule: a new shared helper deletes a same-shape sibling in the same

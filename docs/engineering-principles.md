@@ -20,6 +20,18 @@ the deliverable is the recorded refutation (which invariant covers it, with the
 probe) and, where cheap, an assertion that pins it, not machinery for a
 collision that cannot occur.
 
+**Speculative robustness needs buy-in.** Before adding mechanism for a race,
+security edge case or failure nobody has reproduced, state the trigger path
+(which inputs, in what order, through which production caller), the evidence
+that it can happen, and the cost (new state, seams, tests to maintain). Without
+a reproduction the default is no new mechanism: record the case as a hypothesis
+or an accepted residual for the maintainer to decide. Workers flag it in the
+hand-back and do not build it; reviewers file an unproven race as a hypothesis,
+not a high-severity finding. This never waives validation, error handling or
+security at a real trust boundary; it bounds new mechanism, not hygiene.
+Screen: can the author name the production sequence that triggers it, with
+evidence?
+
 **Climb the minimalism ladder before writing code.** Be lazy about the
 solution, never about reading. Trace the real flow, then ask in order: does this
 need to exist at all; does the codebase already do it (reuse the seam); does the

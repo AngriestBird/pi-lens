@@ -319,7 +319,10 @@ the reproduction command or probe output, expected and observed behaviour, the
 root cause, cost, and a concrete remedy, and whether it is an
 issue-acceptance or a repository-standard finding. Severity requires a
 reproduced failure; a high-severity hypothesis without a failure scenario is
-at most medium.
+at most medium. A remedy that adds mechanism for an unreproduced race or edge
+case is filed as a hypothesis with its trigger path and cost, for the
+maintainer to decide, not prescribed to the fixer (principles §1, speculative
+robustness).
 
 Start with one verdict: `merge-ready`, `needs changes`, `redesign`, or
 `conflicted`. Then give spec-compliance and standards-compliance findings under
