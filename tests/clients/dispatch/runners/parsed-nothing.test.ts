@@ -20,6 +20,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import { setupTestEnvironment } from "../../test-utils.js";
@@ -409,7 +410,9 @@ describe("runners that reached the gate through spawnFailedWithNoOutput (#1948 F
 		}
 	});
 
-	it("detekt records when a config failure yields no parsable finding", async () => {
+	// #4522: exit 1 is detekt's tool-error class, so it is rejected before the
+	// parser runs. The record is the runner-empty-result one, not parsed-nothing.
+	it("detekt records a rejected invocation when a config failure exits 1", async () => {
 		const env = setupTestEnvironment("pi-lens-1948-detekt-");
 		try {
 			const summary = await ledger();
@@ -429,12 +432,16 @@ describe("runners that reached the gate through spawnFailedWithNoOutput (#1948 F
 				createCtx("kotlin", filePath, env.tmpDir) as never,
 			);
 
+			expect(result.status).toBe("skipped");
 			expect(result.diagnostics).toEqual([]);
-			const { row } = parsedNothingRow(summary, "detekt");
-			expect(
-				row,
-				"expected a runner-parsed-nothing row for detekt",
-			).toBeDefined();
+			expect(parsedNothingRow(summary, "detekt").group).toBeUndefined();
+			const empty = summary
+				.getDegradationSummary()
+				.find((entry) => entry.kind === "runner-empty-result");
+			const row = empty?.latestReasons.find(
+				(entry) => entry.subject === "detekt",
+			);
+			expect(row?.reason).toContain("rejected-invocation");
 			expect(row?.reason).toContain("invalid config property");
 		} finally {
 			env.cleanup();
@@ -495,5 +502,149 @@ describe("recordParsedNothing rule (#1948)", () => {
 		).toBe(true);
 		const { row } = parsedNothingRow(summary, "ruff");
 		expect(row?.reason).toContain("source=managed");
+	});
+});
+
+/**
+ * #4522 matrix cells for detekt, fed by captured bytes through the production
+ * runner. Exit 2 is detekt's findings class and exit 1 is its tool-error class
+ * (a malformed config, an exception): `detekt --input … --config …` with an
+ * invalid detekt.yml exits 1, prints nothing on stdout, and writes the
+ * InvalidConfigurationError on stderr. The exit-1 bytes are
+ * `tests/fixtures/runner-exit-codes/detekt/broken-config.captured.json`.
+ *
+ * Recurrence: exit 1 was admitted in the `ran` set and read clean (the
+ * "an unanswered tool read clean" red of the tool-state matrix, #4522).
+ */
+describe("detekt captured exit-code matrix (#4522)", () => {
+	beforeEach(() => {
+		vi.resetModules();
+		safeSpawnAsync.mockReset();
+		getLinterPolicyForCwd.mockReset();
+		getLinterPolicyForCwd.mockReturnValue(null);
+	});
+
+	function fixtureUrl(relative: string): URL {
+		return new URL(relative, import.meta.url);
+	}
+
+	it("skips, never reads clean, when detekt exits 1 on a malformed config", async () => {
+		const env = setupTestEnvironment("pi-lens-4522-detekt-exit1-");
+		try {
+			const summary = await ledger();
+			const captured = JSON.parse(
+				fs.readFileSync(
+					fixtureUrl(
+						"../../../fixtures/runner-exit-codes/detekt/broken-config.captured.json",
+					),
+					"utf8",
+				),
+			) as { exitCode: number; stdout: string; stderr: string };
+			expect(captured.exitCode).toBe(1);
+			fs.cpSync(
+				fileURLToPath(
+					fixtureUrl("../../../fixtures/runner-exit-codes/detekt/workspace/"),
+				),
+				env.tmpDir,
+				{ recursive: true },
+			);
+			const filePath = path.join(env.tmpDir, "Bad.kt");
+			safeSpawnAsync.mockResolvedValue({
+				stdout: captured.stdout.split("__WORKSPACE__").join(env.tmpDir),
+				stderr: captured.stderr.split("__WORKSPACE__").join(env.tmpDir),
+				status: captured.exitCode,
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/detekt.js")
+			).default;
+			const result = await runner.run(
+				createCtx("kotlin", filePath, env.tmpDir) as never,
+			);
+
+			expect(
+				result.status,
+				"detekt exit 1 on a malformed config reads as a completed analysis: an unanswered tool read clean",
+			).toBe("skipped");
+			expect(result.diagnostics).toEqual([]);
+			expect(summary.getDegradationSummary().length).toBeGreaterThan(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps exit 2 with findings as a completed analysis", async () => {
+		const env = setupTestEnvironment("pi-lens-4522-detekt-exit2-");
+		try {
+			const captured = JSON.parse(
+				fs.readFileSync(
+					fixtureUrl(
+						"../../../fixtures/runner-output/detekt/real.captured.json",
+					),
+					"utf8",
+				),
+			) as { stdout: string; stderr: string };
+			fs.cpSync(
+				fileURLToPath(fixtureUrl("../../../fixtures/tool-smoke/detekt/")),
+				env.tmpDir,
+				{ recursive: true },
+			);
+			const filePath = path.join(env.tmpDir, "Bad.kt");
+			safeSpawnAsync.mockResolvedValue({
+				stdout: captured.stdout.split("__WORKSPACE__").join(env.tmpDir),
+				stderr: captured.stderr.split("__WORKSPACE__").join(env.tmpDir),
+				status: 2,
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/detekt.js")
+			).default;
+			const result = await runner.run(
+				createCtx("kotlin", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).not.toBe("skipped");
+			expect(result.diagnostics.length).toBeGreaterThan(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("detekt findings on stderr (#4522)", () => {
+	beforeEach(() => {
+		vi.resetModules();
+		safeSpawnAsync.mockReset();
+		getLinterPolicyForCwd.mockReset();
+		getLinterPolicyForCwd.mockReturnValue(null);
+	});
+
+	// Moved here from nonzero-exit-no-output.test.ts: the witness ratchet reads
+	// status literals per matrix file, so a detekt status here must not count as
+	// a hadolint cell there. Exit 2 is detekt's measured findings class.
+	it("detekt still parses findings that arrive on stderr with a nonzero exit", async () => {
+		const env = setupTestEnvironment("pi-lens-detekt-stderr-");
+		try {
+			fs.writeFileSync(
+				path.join(env.tmpDir, "detekt.yml"),
+				"build:\n  maxIssues: 0\n",
+			);
+			const filePath = path.join(env.tmpDir, "Main.kt");
+			fs.writeFileSync(filePath, 'fun main() { println("hi") }\n');
+			safeSpawnAsync.mockResolvedValue({
+				status: 2,
+				stdout: "",
+				stderr: `${filePath}:1:1: warning: This expression contains a magic number [MagicNumber]\n`,
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/detekt.js")
+			).default;
+			const result = await runner.run(
+				createCtx("kotlin", filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).not.toBe("skipped");
+			expect(result.diagnostics.length).toBeGreaterThan(0);
+		} finally {
+			env.cleanup();
+		}
 	});
 });

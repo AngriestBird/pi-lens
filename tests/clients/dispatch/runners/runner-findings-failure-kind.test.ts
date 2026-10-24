@@ -358,7 +358,8 @@ const DRIVERS: Record<string, Driver> = {
 			),
 		status: "failed",
 		reply: ({ filePath }) => ({
-			status: 1,
+			// #4522: detekt's measured findings exit is 2 (captured real.captured.json).
+			status: 2,
 			stdout: `${filePath}:4:5: error: magic number (${MARKER}) [MagicNumber]\n`,
 		}),
 	},
@@ -1180,7 +1181,7 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 		const observed = await drive("detekt", {
 			...DRIVERS.detekt,
 			reply: ({ filePath }) => ({
-				status: 1,
+				status: 2,
 				stdout: `${filePath}:4:5: warning: magic number (${MARKER}) [MagicNumber]\n`,
 			}),
 		});

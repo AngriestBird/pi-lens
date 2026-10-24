@@ -190,9 +190,10 @@ const detektRunner: RunnerDefinition = {
 				result,
 				output: raw,
 				// EXIT TABLE (detekt 1.23.8 captured fixture): 0 clean; 2 findings on stdout with empty stderr.
-				// Exit 1 is admitted but unmeasured: with no parseable line it reads clean (#4522 remainder).
+				// Exit 1 is a tool error, measured (captured broken-config run: an invalid detekt.yml
+				// prints InvalidConfigurationError on stderr and no findings), so it is rejected, not ran.
 				// Any other nonzero exit is rejected.
-				exitCodes: { ran: [1, 2] },
+				exitCodes: { ran: [2] },
 			},
 			(out) => parseDetektOutput(out, ctx.filePath, cwd),
 		);
