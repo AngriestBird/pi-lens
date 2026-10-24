@@ -2713,6 +2713,34 @@ describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () =>
 			);
 			expect(result.status).toBe(rule === null ? 0 : 2);
 		});
+
+		// #4057 accepted residual: neither the shell nor the hook's env has
+		// LANE_4057, so bash expands `$LANE_4057` to the empty string and node
+		// runs `/clients/probe.mjs`. expandShellWord leaves an unknown `$NAME` in
+		// place, and loadsPiLensRuntime resolves that leftover under this
+		// repository, so the hook denies, as master does for the same word with no
+		// prefix. Master allowed the prefixed form only by expanding the prefix.
+		it.each([
+			{
+				label: "an inline VAR= does not resolve an unknown $VAR file word",
+				command:
+					"LANE_4057=/home/dev/guard-bash-4057-lane node $LANE_4057/clients/probe.mjs",
+			},
+			{
+				label: "an unknown $VAR file word with no prefix",
+				command: "node $LANE_4057/clients/probe.mjs",
+			},
+		])("$label reads as relative to this repository (#4057)", ({ command }) => {
+			const result = runHook(
+				command,
+				Object.fromEntries(
+					Object.entries(BASE_ENV).filter(([key]) => key !== "LANE_4057"),
+				),
+				repoRoot,
+			);
+			expect(result.stderr).toBe(`${RULE_MESSAGES.probe}\n`);
+			expect(result.status).toBe(2);
+		});
 	});
 });
 
@@ -4113,16 +4141,18 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 	// #4057: mktemp has two TMPDIRs. A word the agent typed (a template, a
 	// `-p` or `--tmpdir=` value, a `~`) is expanded by bash from the shell's own
 	// variables before the inline prefix applies, as git's words are (#3997).
-	// mktemp's own default directory (no template, `-t`, bare `--tmpdir`) is
-	// read from mktemp's environment, so the prefix moves it. Measured on macOS
-	// (/bin/bash 3.2, BSD mktemp) with TMPDIR=a in the shell: `TMPDIR=b mktemp
-	// -d $TMPDIR/x.XXXXXX`, `-p $TMPDIR x.XXXXXX` and `--tmpdir=$TMPDIR
-	// x.XXXXXX` landed in a, and bare `--tmpdir x.XXXXXX` landed in b. The
-	// no-template and `-t` rows follow GNU mktemp as #3526 measured it; BSD
-	// mktemp uses the per-user temp directory there instead. Each row sets the
-	// hook's ambient TMPDIR (or HOME) itself, so the runner's own value never
-	// decides it, and names only absent directories, which the hook judges as
-	// spelled on every platform.
+	// GNU mktemp's own default directory (no template, `-t`, bare `--tmpdir`) is
+	// read from mktemp's environment, so the prefix moves it. The rule models
+	// GNU coreutils mktemp as #3526 measured it (9.4); this change did not re-run
+	// GNU mktemp. Measured on macOS 26.5 (/bin/bash 3.2.57, BSD mktemp from
+	// shell_cmds-329, whose man page lists `-p tmpdir, --tmpdir[=tmpdir]`) with
+	// TMPDIR=a in the shell: `TMPDIR=b mktemp -d $TMPDIR/x.XXXXXX`, `-p $TMPDIR
+	// x.XXXXXX` and `--tmpdir=$TMPDIR x.XXXXXX` landed in a, bare `--tmpdir
+	// x.XXXXXX` landed in b, and no template and `-t` landed in the per-user
+	// temp directory, in neither, so only the GNU model backs those two rows.
+	// Each row sets the hook's ambient TMPDIR (or HOME) itself, so the runner's
+	// own value never decides it, and names only absent directories, which the
+	// hook judges as spelled on every platform.
 	describe("an inline TMPDIR= moves only mktemp's own default (#4057)", () => {
 		const AMBIENT_TMP = "/tmp/guard-bash-4057-ambient";
 		const AMBIENT_OFF = "/home/dev/guard-bash-4057-ambient";
@@ -4194,6 +4224,23 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 				label: "an earlier export is the shell's TMPDIR for a typed word",
 				command: `export TMPDIR=/tmp/guard-bash-4057-exported; TMPDIR=${INLINE_OFF} mktemp -d $TMPDIR/x.XXXXXX`,
 				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			// Accepted residual: TMPDIR is unset in the shell and in the hook's env.
+			// Bash expands a typed `$TMPDIR` to the empty string, so mktemp gets
+			// `/guard-bash-4057-unset/…`, but the hook reads lookupShellVariable's
+			// `/tmp` default, as git's words do. The prefix is not consulted. The
+			// absent subdirectory keeps macOS's /tmp symlink out of the verdict.
+			{
+				label: "an unset shell TMPDIR in a template reads the /tmp default",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d $TMPDIR/guard-bash-4057-unset/x.XXXXXX`,
+				ambient: {},
+				rule: "tmpCheckout",
+			},
+			{
+				label: "an unset shell TMPDIR in a -p value reads the /tmp default",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d -p $TMPDIR/guard-bash-4057-unset x.XXXXXX`,
+				ambient: {},
 				rule: "tmpCheckout",
 			},
 			{

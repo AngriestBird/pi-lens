@@ -129,10 +129,10 @@
  * Bash expands git's, mktemp's and node's path words before an inline
  * `VAR=val` prefix applies, so they are expanded without it, while what the
  * program reads from its own env still sees it: git's hook-bypass check
- * (`HUSKY=0`), mktemp's default `$TMPDIR` (no template, `-t`, bare
- * `--tmpdir`), and node's `PI_LENS_HOME` (#3997, #4057). A path git or
- * mktemp hands the kernel is resolved physically, a `cd` target logically
- * (#3997 H3). A path that cannot be
+ * (`HUSKY=0`), GNU mktemp's default `$TMPDIR` (no template, `-t`, bare
+ * `--tmpdir`; the rule models GNU mktemp), and node's `PI_LENS_HOME` (#3997,
+ * #4057). A path git or mktemp hands the kernel is resolved physically, a
+ * `cd` target logically (#3997 H3). A path that cannot be
  * resolved statically (`$(…)`/backticks, `~user`, a variable with no known
  * value, a glob, a cwd made unknown by an unresolvable `cd`) makes
  * `git worktree remove` fail CLOSED (`worktreeUnresolved`); the tmp-checkout
@@ -2015,7 +2015,7 @@ function classifyNpm(cmd, args, cwd, env) {
  *     (measured); folded through the same `$TMPDIR`-sentinel path.
  *
  * The `$TMPDIR` sentinel (no template, `-t` with a relative template, bare
- * `--tmpdir`) is mktemp's own env read, so it expands with the inline
+ * `--tmpdir`) is GNU mktemp's own env read, so it expands with the inline
  * `TMPDIR=` prefix. Every word the command typed (a template, a
  * `-p`/`--tmpdir=` value) was expanded by bash before that prefix applied, so
  * it expands without it (#4057).
@@ -2560,8 +2560,11 @@ function classifyNode(
 	);
 	// #3988: the FILE argument is a shell word (`~/r/dist/x.mjs`, `$HOME/…`),
 	// so it is expanded like every other path argument, before an inline
-	// prefix applies (#4057); an `-e` payload's specifiers are JavaScript,
-	// which no shell expansion reaches.
+	// prefix applies (#4057). Two words are not expanded here, as on master:
+	// the `-e`/`-p` payload is matched as raw segment text, though bash still
+	// expands a `$NAME` inside a double-quoted payload, and an attached
+	// `--require=`/`--import=`/`--loader=` value is a flag to this scan, never
+	// the file word.
 	const fileArg =
 		fileArgWord === undefined
 			? undefined
