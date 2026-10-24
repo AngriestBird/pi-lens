@@ -42,6 +42,7 @@ import {
 } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { pyrightInitialization } from "../../../clients/lsp/server.js";
+import { waitFor } from "../interleaving-kit.js";
 import { setupTestEnvironment } from "../test-utils.js";
 
 function executableOnPath(name: string): string | undefined {
@@ -146,7 +147,11 @@ describe.skipIf(!CAN_RUN)("pyright applies pi-lens settings (#4758)", () => {
 		return client;
 	}
 
-	/** Open `text`, then poll until `done` holds; the last snapshot is returned either way. */
+	/**
+	 * Open `text`, then wait until `done` holds. An exhausted wait throws with the
+	 * last diagnostics snapshot, which is the red a setting that never applies
+	 * produces.
+	 */
 	async function diagnosticsUntil(
 		c: Awaited<ReturnType<typeof createLSPClient>>,
 		file: string,
@@ -154,14 +159,10 @@ describe.skipIf(!CAN_RUN)("pyright applies pi-lens settings (#4758)", () => {
 		done: (diagnostics: LSPDiagnostic[]) => boolean,
 	): Promise<LSPDiagnostic[]> {
 		await c.notify.open(file, text, "python");
-		const deadline = Date.now() + WAIT_MS;
-		let last: LSPDiagnostic[] = [];
-		while (Date.now() < deadline) {
-			last = c.getDiagnostics(file);
-			if (done(last)) return last;
-			await new Promise((resolve) => setTimeout(resolve, 250));
-		}
-		return last;
+		return waitFor(() => c.getDiagnostics(file), done, {
+			timeoutMs: WAIT_MS,
+			intervalMs: 250,
+		});
 	}
 
 	const summary = (diagnostics: LSPDiagnostic[]): string =>
