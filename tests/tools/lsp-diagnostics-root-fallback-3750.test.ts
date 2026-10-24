@@ -282,8 +282,8 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		expect(text).not.toContain("confirmed clean");
 		expect(text).not.toContain("started at the file's directory");
 		expect(details.unconfirmed).toBe(true);
-		expect(String(details.rootFallbackReason)).toContain(
-			"csharp-ls: no project root found for this file",
+		expect(details.rootFallbackReason).toBe(
+			"csharp-ls: no project root found for this file (looked for *.csproj / *.sln / *.slnx)",
 		);
 		// The decline is the registry's policy record, not a spawn failure.
 		const declined = getDegradationSummary().find(

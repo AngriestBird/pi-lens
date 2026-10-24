@@ -30,7 +30,6 @@ import {
 	CSharpServer,
 	FSharpServer,
 	OmniSharpServer,
-	PROJECT_FILE_SEARCH_MAX_DIRS,
 	declinesProjectlessRoot,
 	type LSPServerInfo,
 } from "../../../clients/lsp/server.js";
@@ -241,16 +240,17 @@ describe("csharp-ls spawn needs a project file below its root (#4806)", () => {
 		expect(server.spawn).not.toHaveBeenCalled();
 	});
 
-	// The bound: breadth-first, at most PROJECT_FILE_SEARCH_MAX_DIRS directories
-	// read, root included. A tree wider than the bound reads as project-less
-	// (decline) rather than being walked without limit.
-	it("reads at most the bounded number of directories", async () => {
+	// The bound (128 directories, root included, breadth-first; the changelog
+	// states the number): a tree wider than the bound reads as project-less
+	// (decline) rather than being walked without limit. The sizes are literal
+	// so that moving the constant moves a cell.
+	it("reads at most 128 directories", async () => {
 		const wide = tree("bound-wide");
 		const narrow = tree("bound-narrow");
-		for (let index = 0; index < PROJECT_FILE_SEARCH_MAX_DIRS + 2; index += 1) {
+		for (let index = 0; index < 130; index += 1) {
 			plant(wide, `d${index}`, "x", "App.csproj");
 		}
-		for (let index = 0; index < PROJECT_FILE_SEARCH_MAX_DIRS / 2; index += 1) {
+		for (let index = 0; index < 64; index += 1) {
 			plant(narrow, `d${index}`, "x", "App.csproj");
 		}
 

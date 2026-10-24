@@ -1806,7 +1806,7 @@ export function declinesLooseFileRoot(
 }
 
 /** Directories {@link declinesProjectlessRoot} reads before it gives up. */
-export const PROJECT_FILE_SEARCH_MAX_DIRS = 128;
+const PROJECT_FILE_SEARCH_MAX_DIRS = 128;
 
 /**
  * #4806: does this server's spawn policy refuse the resolved `root` because no
@@ -1830,7 +1830,6 @@ export async function declinesProjectlessRoot(
 ): Promise<boolean> {
 	if (server.spawnNeedsProjectFile !== true) return false;
 	const markers = server.rootMarkers ?? server.root.rootMarkers ?? [];
-	if (markers.length === 0) return false;
 	const queue = [root];
 	for (let visited = 0; visited < PROJECT_FILE_SEARCH_MAX_DIRS; visited++) {
 		const dir = queue.shift();
