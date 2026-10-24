@@ -83,6 +83,7 @@ import { bounded } from "../deadline-utils.js";
 import {
 	DEFAULT_LSP_SERVER_ROLE,
 	type LspReplyOrdering,
+	type LspResendRecheck,
 	type LspServerRole,
 } from "./server-traits.js";
 import { FRESHNESS_CADENCE_MS } from "../freshness-cadence.js";
@@ -672,6 +673,14 @@ export interface LSPServerInfo {
 	 * evidence and the fail-safe `unmeasured` default.
 	 */
 	replyOrdering?: LspReplyOrdering;
+	/**
+	 * #4782 unchanged-bytes re-check trait: whether a didChange carrying the
+	 * bytes the server holds makes it check the document again. Consumed by the
+	 * bash-write primary phase (`resyncHeldPrimaries` in clients/lsp/index.ts);
+	 * see {@link LspResendRecheck} for the measured evidence and the fail-safe
+	 * `unmeasured` default.
+	 */
+	resendRecheck?: LspResendRecheck;
 	/**
 	 * ID of the preferred language server this server backs up. Primary selection
 	 * already tries language servers in registry order; this marker prevents an
@@ -3049,6 +3058,10 @@ export const PythonServer: LSPServerInfo = {
 	id: "python",
 	idleEviction: "transparent",
 	role: "language",
+	// #4782: pyright 1.1.414 answers an unchanged-bytes didChange for its new
+	// version (measured; see LspResendRecheck). basedpyright is its fork; ty is
+	// unmeasured.
+	resendRecheck: "rechecks",
 	name: "Pyright Language Server",
 	extensions: KIND_EXTENSIONS["python"],
 	root: RootWithFallback(

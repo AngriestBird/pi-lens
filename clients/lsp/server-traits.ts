@@ -137,6 +137,32 @@ export type LspReplyOrdering =
 	| "threaded"
 	| "unmeasured";
 
+/**
+ * #4782: what this server does with a didChange that carries the bytes it
+ * already holds (only the version moves).
+ *
+ * `"rechecks"` = it checks the document again, against the bytes it now holds
+ * for every other document, and publishes an answer for the new version. The
+ * bash-write primary phase (`resyncHeldPrimaries`, clients/lsp/index.ts) then
+ * sends each document it wrote before the last one again, so the server's
+ * latest check of each one follows every byte change of the command: a
+ * dependent checked before its rewritten dependency arrived is checked again.
+ * Measured with pyright 1.1.414 over a raw JSON-RPC session: an identical
+ * didChange right after the dependency's was answered for its version 6/6
+ * (+260..265 ms), and one sent with nothing pending 3/3.
+ *
+ * `"unmeasured"` = the default and the fail-safe: no re-send, which is what
+ * every server got before the trait existed. A server that publishes nothing
+ * for unchanged bytes must stay here: a re-send empties the client's answer for
+ * the document with no answer coming, so the read ends inconclusive. clangd
+ * 22.1.0 is one (measured: no publish 2/2 with nothing pending, 3/3 after it
+ * had answered the burst; #3405 saw the same).
+ */
+export type LspResendRecheck = "rechecks" | "unmeasured";
+
+/** The fail-safe default: no re-send. */
+export const DEFAULT_RESEND_RECHECK: LspResendRecheck = "unmeasured";
+
 /** The trait fields a server definition may declare. */
 export interface LspServerTraitDeclaration {
 	/** #1488 lifecycle class. Required: `LSPServerInfo.role` is non-optional. */
@@ -149,6 +175,8 @@ export interface LspServerTraitDeclaration {
 	readonly notifyInflightLimit?: number | undefined;
 	/** #1722 reply-ordering semantics. Omit for {@link DEFAULT_REPLY_ORDERING}. */
 	readonly replyOrdering?: LspReplyOrdering | undefined;
+	/** #4782 unchanged-bytes re-check. Omit for {@link DEFAULT_RESEND_RECHECK}. */
+	readonly resendRecheck?: LspResendRecheck | undefined;
 }
 
 /** The total trait record every consumer reads: no field is optional. */
@@ -156,6 +184,7 @@ export interface LspServerTraits {
 	readonly role: LspServerRole;
 	readonly notifyInflightLimit: number;
 	readonly replyOrdering: LspReplyOrdering;
+	readonly resendRecheck: LspResendRecheck;
 }
 
 /**
@@ -195,8 +224,8 @@ export const DEFAULT_REPLY_ORDERING: LspReplyOrdering = "unmeasured";
  * (`scripts/probe-clean-signal.mjs`), `emptyFirstPublish` by
  * `tests/config/lsp-first-publish-census.test.ts`. Copying a value into a
  * second table would give it a second source of truth with no second
- * measurement behind it. `role`, `notifyInflightLimit` and `replyOrdering` are
- * declared here instead because they are policy the maintainer states, not
+ * measurement behind it. `role`, `notifyInflightLimit`, `replyOrdering` and
+ * `resendRecheck` are declared here instead because they are policy the maintainer states, not
  * behaviour a probe re-measures.
  */
 export const STRATEGY_TABLE_TRAITS = [
@@ -228,6 +257,7 @@ export function serverTraits(
 			role: declaration.role,
 			notifyInflightLimit: Math.floor(declaredLimit),
 			replyOrdering: declaration.replyOrdering ?? DEFAULT_REPLY_ORDERING,
+			resendRecheck: declaration.resendRecheck ?? DEFAULT_RESEND_RECHECK,
 		};
 	}
 	const envLimit = Number(process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT);
@@ -238,5 +268,6 @@ export function serverTraits(
 				? Math.floor(envLimit)
 				: DEFAULT_NOTIFY_INFLIGHT_LIMIT,
 		replyOrdering: declaration.replyOrdering ?? DEFAULT_REPLY_ORDERING,
+		resendRecheck: declaration.resendRecheck ?? DEFAULT_RESEND_RECHECK,
 	};
 }

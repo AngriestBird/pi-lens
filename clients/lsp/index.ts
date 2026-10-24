@@ -3644,6 +3644,16 @@ export class LSPService {
 	 * (for a server whose replies are `threaded` it proves only liveness).
 	 * `drained` requires measured single-task ordering and a successful probe;
 	 * threaded/unmeasured servers and timeouts are undrained.
+	 *
+	 * #4782: a server may check a document as soon as it reads its change, so a
+	 * dependent sent before its rewritten dependency is checked against the
+	 * dependency's old bytes, and its re-check after the dependency arrives is
+	 * the server's own timer, which can answer after the drain reply. No answer
+	 * carries the dependency's version, so no read can tell. A client whose
+	 * server `rechecks` unchanged bytes is therefore sent each document again,
+	 * after the last one it was sent, before the drain: the server's latest check
+	 * of each follows every change of this pass, and the re-send's version bump
+	 * lets a versioned server's older answer be dropped as superseded.
 	 */
 	async resyncHeldPrimaries(
 		filePaths: readonly string[],
@@ -3652,7 +3662,12 @@ export class LSPService {
 		let sent = 0;
 		const sentTo = new Map<
 			string,
-			{ client: LSPClientInfo; ordered: boolean }
+			{
+				client: LSPClientInfo;
+				ordered: boolean;
+				rechecks: boolean;
+				documents: Array<{ filePath: string; content: string }>;
+			}
 		>();
 		for (const filePath of filePaths) {
 			if (this.checkDestroyed()) break;
@@ -3683,15 +3698,35 @@ export class LSPService {
 				);
 				const key = root ? `${server.id}:${normalizeMapKey(root)}` : undefined;
 				const client = key ? this.state.clients.get(key) : undefined;
-				if (key && client)
+				if (key && client) {
+					const traits = serverTraits(server);
+					const documents = sentTo.get(key)?.documents ?? [];
+					documents.push({ filePath, content });
 					sentTo.set(key, {
 						client,
-						ordered:
-							serverTraits(server).replyOrdering === "single-task-ordered",
+						ordered: traits.replyOrdering === "single-task-ordered",
+						rechecks: traits.resendRecheck === "rechecks",
+						documents,
 					});
+				}
 			}
 		}
 		if (sentTo.size === 0) return { sent, drained: true };
+		await Promise.all(
+			[...sentTo.values()]
+				.filter(({ rechecks }) => rechecks)
+				.flatMap(({ client, documents }) =>
+					documents
+						.slice(0, -1)
+						.map(({ filePath, content }) =>
+							client.notify.open(
+								filePath,
+								content,
+								getLanguageId(filePath) ?? "plaintext",
+							),
+						),
+				),
+		);
 		const answers = await Promise.all(
 			[...sentTo.values()].map(async ({ client, ordered }) => {
 				// #4528 r2: a threaded or unmeasured reply proves only liveness.

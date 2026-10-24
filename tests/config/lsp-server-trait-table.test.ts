@@ -30,6 +30,7 @@ import {
 	DEFAULT_LSP_SERVER_ROLE,
 	DEFAULT_NOTIFY_INFLIGHT_LIMIT,
 	DEFAULT_REPLY_ORDERING,
+	DEFAULT_RESEND_RECHECK,
 	isAuxiliary,
 	serverTraits,
 	STRATEGY_TABLE_TRAITS,
@@ -44,6 +45,7 @@ const SERVER_DEFINITION_TRAITS = [
 	"role",
 	"notifyInflightLimit",
 	"replyOrdering",
+	"resendRecheck",
 ] as const;
 
 /**
@@ -193,6 +195,11 @@ describe("#1756 stage 1 — declared server trait table", () => {
 		expect(DEFAULT_NOTIFY_INFLIGHT_LIMIT).toBe(
 			PRE_FOLD_NOTIFY_INFLIGHT_DEFAULT,
 		);
+		// #4782: an unmeasured server is never sent a document's unchanged bytes
+		// again. One that publishes nothing for them (clangd) would lose its
+		// answer for the document with none coming.
+		expect(DEFAULT_RESEND_RECHECK).toBe("unmeasured");
+		expect(serverTraits({ role: "language" }).resendRecheck).toBe("unmeasured");
 		expect(serverTraits({ role: "auxiliary" }).notifyInflightLimit).toBe(
 			PRE_FOLD_NOTIFY_INFLIGHT_DEFAULT,
 		);
