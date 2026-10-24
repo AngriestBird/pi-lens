@@ -319,7 +319,7 @@ describe("trace validation inputs fail closed (#3533 round 2)", () => {
 	// input. None of these paths reaches the JVM, so no jar is needed.
 	describe("the CLI exits 2 before any JVM is started", () => {
 		const run = async (text: string | undefined, ...flags: string[]) => {
-			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "trace-cli-"));
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-trace-cli-"));
 			try {
 				const file = path.join(dir, "input.json");
 				if (text !== undefined) fs.writeFileSync(file, text);
