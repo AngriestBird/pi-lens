@@ -408,6 +408,7 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 	);
 	const targets = answers.flatMap((answer) => answer.targets);
 	const primary = answers.reduce((count, answer) => count + answer.primary, 0);
+	const unheld = answers.reduce((count, answer) => count + answer.unheld, 0);
 	const resyncFailed = answers.some((answer) => answer.failed);
 	const drained = answers.every((answer) => answer.drained);
 	const held = answers.reduce((count, answer) => count + answer.held, 0);
@@ -450,6 +451,8 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 				heldPopulation: unlistable ? "all-held" : "delta-held",
 				current: held - targets.length,
 				primary,
+				// #4742: delta paths no client holds, sent as watched-files events.
+				unheld,
 				primaryMs,
 				drained,
 				resynced: count("resynced"),

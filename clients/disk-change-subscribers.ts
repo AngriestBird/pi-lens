@@ -133,6 +133,12 @@ export interface HeldDocumentsAnswer {
 	targets: string[];
 	/** Documents this pass sent to a primary. */
 	primary: number;
+	/**
+	 * #4742: published paths NO client holds that went out as exact-URI
+	 * watched-files events (`notifyUnheldPaths`). `0` when there were none, the
+	 * population was unknown, or the send failed (that case is recorded).
+	 */
+	unheld: number;
 	/** A primary send threw; the next check may read a stale view. */
 	failed: boolean;
 	/** Every client that took a send answered its drain probe in time. */
@@ -148,6 +154,7 @@ const NO_HELD_DOCUMENTS: HeldDocumentsAnswer = {
 	held: 0,
 	targets: [],
 	primary: 0,
+	unheld: 0,
 	failed: false,
 	drained: true,
 };
@@ -161,6 +168,7 @@ const UNCHECKED_HELD_DOCUMENTS: HeldDocumentsAnswer = {
 	held: -1,
 	targets: [],
 	primary: 0,
+	unheld: 0,
 	failed: true,
 	drained: false,
 };
@@ -221,6 +229,62 @@ async function sendToHeldPrimaries(
 }
 
 /**
+ * #4742: tell the live primaries about published paths no client holds.
+ *
+ * A server keeps the bytes of a module it read for an importer, and a module
+ * that is not open in any server is neither resynced (the held-document phase
+ * skips it) nor re-read by the server: pyright kept the pre-move bytes of an
+ * imported module, and flagged every attribute of it as unknown on each run
+ * for the server's life. A watched-files event for the exact URI is what makes
+ * the server re-read a closed file, so each unheld path goes out through the
+ * seam #4476 built for declaration files, which delivers to live clients of the
+ * file's servers only and never spawns one.
+ *
+ * The type is read from the disk now, not from the detector: a path that is
+ * gone is Deleted, and any other answer (present, or a stat error) is Changed,
+ * which makes the server re-read and find out. The detectors' deltas carry
+ * names only, so a path born inside the change is also Changed here; a
+ * Created-only server cache (a cached missing import) is not addressed by
+ * this slice.
+ *
+ * A failure must not cost the held-document phase that runs after it, so it is
+ * recorded once per root and the phase goes on.
+ */
+async function notifyUnheldPaths(
+	service: NonNullable<ReturnType<typeof peekLSPService>>,
+	change: DiskChange,
+	held: ReadonlySet<string>,
+): Promise<number> {
+	if (change.paths === "unknown") return 0;
+	const unheld = change.paths.filter((filePath) => !held.has(filePath));
+	if (unheld.length === 0) return 0;
+	try {
+		const events = await Promise.all(
+			unheld.map(async (filePath) => {
+				const gone = await nodeFs.promises.stat(filePath).then(
+					() => false,
+					(cause: NodeJS.ErrnoException) =>
+						cause.code === "ENOENT" || cause.code === "ENOTDIR",
+				);
+				return {
+					filePath,
+					type: WATCHED_FILE_TYPE[gone ? "deleted" : "changed"],
+				};
+			}),
+		);
+		service.notifyOutOfBandFileChanges(events);
+		return events.length;
+	} catch (cause) {
+		recordDegradationOnce({
+			kind: "disk-change-unheld-notify-failed",
+			subject: change.root,
+			reason: `the watched-files events for ${unheld.length} unheld path(s) were not delivered, so a closed module changed on disk may keep its old bytes in a live server: ${cause instanceof Error ? cause.message : String(cause)}`,
+		});
+		return 0;
+	}
+}
+
+/**
  * D2/D1: the held-document phase of a disk change. The candidates are the
  * publish's own population, narrowed to what a live client holds:
  *
@@ -245,6 +309,9 @@ async function resyncHeldDocuments(
 		change.paths === "unknown"
 			? [...held]
 			: change.paths.filter((filePath) => held.has(filePath));
+	// Before the primary phase: the drain probe that phase ends with then covers
+	// these events too, and a failure here is recorded, never thrown past it.
+	const unheld = await notifyUnheldPaths(service, change, held);
 	const { targets, primary, failed, drained } = await sendToHeldPrimaries(
 		change.root,
 		candidates,
@@ -254,6 +321,7 @@ async function resyncHeldDocuments(
 		held: candidates.length,
 		targets,
 		primary,
+		unheld,
 		failed,
 		drained,
 	};

@@ -340,6 +340,14 @@ export type DegradationKind =
 	 * so a broken consumer cannot spam the agent-facing summary.
 	 */
 	| "disk-change-subscriber-failed"
+	/**
+	 * #4742: the exact-URI watched-files events for published paths no client
+	 * holds could not be built or delivered (`notifyUnheldPaths`,
+	 * clients/disk-change-subscribers.ts), so a closed module changed on disk
+	 * may keep its old bytes in a live server. Subject: the normalized root;
+	 * one row per root per session.
+	 */
+	| "disk-change-unheld-notify-failed"
 	| "dispatch-non-absolute-baseline-path"
 	/**
 	 * A server-initiated `workspace/applyEdit` fell back to the mutation
