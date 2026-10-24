@@ -1101,47 +1101,51 @@ const scanFixture = (source: string): UndrainedRead[] =>
 
 describe("sink reads drain first (#4381)", () => {
 	// Recurrence: #4381 (master run 38515888889), after #3682, #3721 and #3193.
-	it("no test reads an in-process log sink before draining it", () => {
-		const sinks = discoverSinkModules();
-		// Dead-scan floors (sweep-kit, #1718): the sink discovery and the tree
-		// walk each have to find something before an empty result means clean.
-		assertNonEmptyScan("ndjson sink modules", sinks.length, 10);
-		const files = listSourceFiles(TESTS_ROOT, {
-			extensions: [".ts"],
-			exclude: (rel) => rel.startsWith("fixtures/"),
-		});
-		assertNonEmptyScan("tests/ source files", files.length, 1000);
-		const violations: string[] = [];
-		let sinkFiles = 0;
-		for (const absolute of files) {
-			const rel = relativePosix(REPO_ROOT, absolute);
-			if (rel === SELF) continue;
-			const source = readWalkedFile(absolute);
-			if (source === undefined) continue;
-			if (
-				sinks.some((sink) => sink.pathSymbols.some((s) => source.includes(s)))
-			)
-				sinkFiles += 1;
-			for (const hit of scanUndrainedSinkReads(source, sinks)) {
-				const callers = hit.undrainedCallers.length
-					? ` (undrained call sites: ${hit.undrainedCallers.map((line) => `:${line}`).join(", ")})`
-					: "";
-				violations.push(
-					`${rel}:${hit.line} ${hit.callee} of ${hit.sinks.join(", ")}${callers}: ${hit.text}`,
-				);
+	it(
+		"no test reads an in-process log sink before draining it",
+		() => {
+			const sinks = discoverSinkModules();
+			// Dead-scan floors (sweep-kit, #1718): the sink discovery and the tree
+			// walk each have to find something before an empty result means clean.
+			assertNonEmptyScan("ndjson sink modules", sinks.length, 10);
+			const files = listSourceFiles(TESTS_ROOT, {
+				extensions: [".ts"],
+				exclude: (rel) => rel.startsWith("fixtures/"),
+			});
+			assertNonEmptyScan("tests/ source files", files.length, 1000);
+			const violations: string[] = [];
+			let sinkFiles = 0;
+			for (const absolute of files) {
+				const rel = relativePosix(REPO_ROOT, absolute);
+				if (rel === SELF) continue;
+				const source = readWalkedFile(absolute);
+				if (source === undefined) continue;
+				if (
+					sinks.some((sink) => sink.pathSymbols.some((s) => source.includes(s)))
+				)
+					sinkFiles += 1;
+				for (const hit of scanUndrainedSinkReads(source, sinks)) {
+					const callers = hit.undrainedCallers.length
+						? ` (undrained call sites: ${hit.undrainedCallers.map((line) => `:${line}`).join(", ")})`
+						: "";
+					violations.push(
+						`${rel}:${hit.line} ${hit.callee} of ${hit.sinks.join(", ")}${callers}: ${hit.text}`,
+					);
+				}
 			}
-		}
-		assertNonEmptyScan("test files naming a sink path symbol", sinkFiles, 20);
-		expect(
-			violations,
-			"a test reads a log sink while its own writes may still be queued (#4381). " +
-				"Await the sink's flush (flushSessionStartLog, flushLatencyLog, ..., or " +
-				"flushAllNdjsonWriters) in the same scope right before the read, with no " +
-				"other await in between, or inside the helper that reads. " +
-				"Promise.all([flush...]), a dynamic-import flush, and sequential drains " +
-				"are not recognised; use flushAllNdjsonWriters().",
-		).toEqual([]);
-	}, 120_000);
+			assertNonEmptyScan("test files naming a sink path symbol", sinkFiles, 20);
+			expect(
+				violations,
+				"a test reads a log sink while its own writes may still be queued (#4381). " +
+					"Await the sink's flush (flushSessionStartLog, flushLatencyLog, ..., or " +
+					"flushAllNdjsonWriters) in the same scope right before the read, with no " +
+					"other await in between, or inside the helper that reads. " +
+					"Promise.all([flush...]), a dynamic-import flush, and sequential drains " +
+					"are not recognised; use flushAllNdjsonWriters().",
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it(
 		"every sink module roots its path in LOG_ROOT_SYMBOLS (drift pin)",

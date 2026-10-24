@@ -229,6 +229,7 @@ import {
 	stableOccurrenceKey,
 } from "../support/sweep-kit.js";
 import { cookedIdentifier, cookedString } from "../support/cooked-literal.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -2624,8 +2625,9 @@ describe("#4590 env PATH composition", () => {
 		// filtered walk this replaced took 3.4 s). The ceiling is load-bearing, not
 		// decorative: the Windows lane runs the same work about seven times slower
 		// — 23.9 s for the FILTERED census of the first head that carried one
-		// (#4600 F3) — so the old 5 s default could not pass there and this 60 s
-		// bound is what a pathological runner hits instead of hanging the shard.
-		60_000,
+		// (#4600 F3) — so the old 5 s default could not pass there and the shared
+		// `TREE_WALK_TIMEOUT_MS` (30 s, scaled by the lane: 90 s on Windows) is what a
+		// pathological runner hits instead of hanging the shard.
+		TREE_WALK_TIMEOUT_MS,
 	);
 });

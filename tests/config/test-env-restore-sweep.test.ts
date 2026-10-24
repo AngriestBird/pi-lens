@@ -996,20 +996,28 @@ describe("#4589 test-env-restore ratchet", () => {
 	// order cannot move the cost into a 60 s case (the #4549 shape).
 	beforeAll(() => sweepOnce(), 120_000);
 
-	it("reports every unrestored env write and reds on a new one", () => {
-		const findings = sweepOnce();
-		const problems = unadmittedOffenders(findings, BASELINE);
-		process.stderr.write(
-			`test-env-restore-sweep: ${findings.length} live write(s), ${BASELINE.size} baselined, ${problems.length} new\n`,
-		);
-		expect(problems, problems.join("\n")).toEqual([]);
-	}, 60_000);
+	it(
+		"reports every unrestored env write and reds on a new one",
+		() => {
+			const findings = sweepOnce();
+			const problems = unadmittedOffenders(findings, BASELINE);
+			process.stderr.write(
+				`test-env-restore-sweep: ${findings.length} live write(s), ${BASELINE.size} baselined, ${problems.length} new\n`,
+			);
+			expect(problems, problems.join("\n")).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("baseline entries remain live", () => {
-		// The shrink-only direction: a restore added anywhere makes its row
-		// stale, and a stale row reds until it is deleted.
-		expect(staleBaselineRows(sweepOnce(), BASELINE)).toEqual([]);
-	}, 60_000);
+	it(
+		"baseline entries remain live",
+		() => {
+			// The shrink-only direction: a restore added anywhere makes its row
+			// stale, and a stale row reds until it is deleted.
+			expect(staleBaselineRows(sweepOnce(), BASELINE)).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it.skipIf(!process.env.TEST_ENV_RESTORE_REGEN)(
 		"regenerates the baseline",
@@ -1037,7 +1045,7 @@ describe("#4589 test-env-restore ratchet", () => {
 				].join("\n"),
 			);
 		},
-		60_000,
+		TREE_WALK_TIMEOUT_MS,
 	);
 });
 

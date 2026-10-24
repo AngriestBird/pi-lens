@@ -137,27 +137,31 @@ describe("win32 gate lane governance (#2536)", () => {
 		TREE_WALK_TIMEOUT_MS,
 	);
 
-	it("keeps the workflow population and execution filter wired", () => {
-		const steps = windowsJobSteps();
-		const runner = steps.find(
-			(step) => step.name === "Run Windows Vitest subset",
-		);
-		const runnerRun = runner?.run ?? "";
+	it(
+		"keeps the workflow population and execution filter wired",
+		() => {
+			const steps = windowsJobSteps();
+			const runner = steps.find(
+				(step) => step.name === "Run Windows Vitest subset",
+			);
+			const runnerRun = runner?.run ?? "";
 
-		// Recurrence: #2536's gates can be documented yet omitted from the only
-		// Windows job, leaving the platform-specific assertions unexecuted. The
-		// enumeration step's command is pinned by windows-vitest-workflow.test.ts.
-		const detectedFiles = detectedWin32GateFiles();
-		const population = libraryLaneFiles();
-		expect(population).toContain(
-			"tests/clients/dispatch/runners/go-vet.test.ts",
-		);
-		expect(libraryGates().length).toBeGreaterThan(0);
-		expect(libraryGateFiles()).toEqual(expect.arrayContaining(detectedFiles));
-		expect(population).toEqual(expect.arrayContaining(detectedFiles));
-		expect(runnerRun).toContain('vitest run "${FILES[@]}"');
-		expect(runner?.shell).toBe("bash");
-	}, 60_000);
+			// Recurrence: #2536's gates can be documented yet omitted from the only
+			// Windows job, leaving the platform-specific assertions unexecuted. The
+			// enumeration step's command is pinned by windows-vitest-workflow.test.ts.
+			const detectedFiles = detectedWin32GateFiles();
+			const population = libraryLaneFiles();
+			expect(population).toContain(
+				"tests/clients/dispatch/runners/go-vet.test.ts",
+			);
+			expect(libraryGates().length).toBeGreaterThan(0);
+			expect(libraryGateFiles()).toEqual(expect.arrayContaining(detectedFiles));
+			expect(population).toEqual(expect.arrayContaining(detectedFiles));
+			expect(runnerRun).toContain('vitest run "${FILES[@]}"');
+			expect(runner?.shell).toBe("bash");
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	// #3278 made this the SECOND admission: two tests/-tree walks blew vitest's
 	// 5 s default in the nightly Stryker job. Same 60 s budget and the same

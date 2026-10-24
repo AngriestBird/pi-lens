@@ -20,6 +20,7 @@ import {
 	stripSource,
 } from "../support/sweep-kit.js";
 import { siblingPin } from "../support/sibling-pin.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const TESTS_ROOT = resolve(ROOT, "tests");
@@ -613,7 +614,6 @@ function census(): string[] {
 	censusCache ??= discoveredTreeScanners();
 	return censusCache;
 }
-const CENSUS_TIMEOUT_MS = 30_000;
 
 function readWorkflow() {
 	return yaml.load(readFileSync(WORKFLOW_PATH, "utf8")) as {
@@ -692,7 +692,7 @@ describe("targeted advisory workflow contract (#3215)", () => {
 				10,
 			);
 		},
-		CENSUS_TIMEOUT_MS,
+		TREE_WALK_TIMEOUT_MS,
 	);
 
 	it(
@@ -736,7 +736,7 @@ describe("targeted advisory workflow contract (#3215)", () => {
 			);
 			expect(stale).toEqual([]);
 		},
-		CENSUS_TIMEOUT_MS,
+		TREE_WALK_TIMEOUT_MS,
 	);
 
 	it("runs the selector on every PR with a full checkout and no gating power", () => {
@@ -1284,7 +1284,7 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			expect(TEST_TREE_GOVERNANCE_TESTS).toContain(ratchet);
 			expect(TREE_SCANNING_GOVERNANCE_TESTS).not.toContain(ratchet);
 		},
-		CENSUS_TIMEOUT_MS,
+		TREE_WALK_TIMEOUT_MS,
 	);
 
 	it(
@@ -1295,7 +1295,7 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			expect(TEST_TREE_GOVERNANCE_TESTS).toContain(scanner);
 			expect(TREE_SCANNING_GOVERNANCE_TESTS).not.toContain(scanner);
 		},
-		CENSUS_TIMEOUT_MS,
+		TREE_WALK_TIMEOUT_MS,
 	);
 });
 

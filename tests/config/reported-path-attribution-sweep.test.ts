@@ -714,26 +714,30 @@ function stalePins(
 }
 
 describe("runner reported-path attribution single-source-of-truth (#3278)", () => {
-	it("has no unpinned local reported-path compare in any runner or tool client", () => {
-		const { counts, scanned } = census();
-		assertNonEmptyScan(
-			"clients/dispatch/runners + clients/*-client.ts source files",
-			scanned,
-			78,
-		);
-		const pinned = { ...LOCAL_COMPARE_PINS, ...NON_MEMBER_PINS };
-		const audit = auditSymbolCounts({
-			sweepName: "local reported-path compare (#3278)",
-			counts,
-			pinned,
-			remediation: REMEDIATION,
-		});
-		expect(audit.problems).toEqual([]);
-		expect(
-			stalePins(counts, pinned),
-			"a pinned local compare is gone — good, now shrink the pin",
-		).toEqual([]);
-	}, 30_000);
+	it(
+		"has no unpinned local reported-path compare in any runner or tool client",
+		() => {
+			const { counts, scanned } = census();
+			assertNonEmptyScan(
+				"clients/dispatch/runners + clients/*-client.ts source files",
+				scanned,
+				78,
+			);
+			const pinned = { ...LOCAL_COMPARE_PINS, ...NON_MEMBER_PINS };
+			const audit = auditSymbolCounts({
+				sweepName: "local reported-path compare (#3278)",
+				counts,
+				pinned,
+				remediation: REMEDIATION,
+			});
+			expect(audit.problems).toEqual([]);
+			expect(
+				stalePins(counts, pinned),
+				"a pinned local compare is gone — good, now shrink the pin",
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it(
 		"has no unpinned location parser without pathsEqual (#3295)",

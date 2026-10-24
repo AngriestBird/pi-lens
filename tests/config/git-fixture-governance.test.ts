@@ -60,9 +60,6 @@ const NOT_A_FIXTURE = [
 ] as const;
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
-// These scans read every TypeScript test source; allow the tree-wide work to
-// grow beyond Vitest's default timeout on Windows.
-const REPOSITORY_SCAN_TEST_TIMEOUT_MS = 30_000;
 
 /**
  * Every callee that can put a `git` process on the end of an argument list:
@@ -480,7 +477,7 @@ describe("real Git fixture governance", () => {
 				`Bare Git spawns found:\n${offenders.join("\n")}`,
 			).toEqual([]);
 		},
-		REPOSITORY_SCAN_TEST_TIMEOUT_MS,
+		TREE_WALK_TIMEOUT_MS,
 	);
 
 	it(
@@ -629,7 +626,7 @@ describe("real Git fixture governance", () => {
 					offenders.join("\n"),
 			).toEqual([]);
 		},
-		REPOSITORY_SCAN_TEST_TIMEOUT_MS,
+		TREE_WALK_TIMEOUT_MS,
 	);
 
 	it("detects the #3066 round 1 shape: git show <sha>:<path> through the fixture wrapper", () => {

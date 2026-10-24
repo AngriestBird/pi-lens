@@ -8,10 +8,13 @@
  * A census is a test whose callback walks the tree, or reads a binding that a
  * walk produced at module or describe scope (a suite-level `files` list is a
  * walk even though the callback never names the walker), or an `it.each` /
- * `it.for` over such a table. A census with a third argument carries a budget
- * and is admitted whatever its value; a census with the default two arguments
- * is refused. The fix is the shared `TREE_WALK_TIMEOUT_MS`
- * (`tests/support/test-timeout-scale.ts`), never a per-file number.
+ * `it.for` over such a table. The gate enforces one rule on every census: its
+ * third argument is the shared `TREE_WALK_TIMEOUT_MS`
+ * (`tests/support/test-timeout-scale.ts`), or a `scaledTestTimeout(...)` call
+ * for a census that needs more than the shared ceiling (name the reason in a
+ * comment; the gate does not read it). The default two arguments, a raw number, a
+ * file-local constant, an options object or any other expression is refused,
+ * because only the scaled forms follow the lane's `PI_LENS_TEST_TIMEOUT_SCALE`.
  *
  * The detector admits known-good forms and refuses the rest (AGENTS.md shape
  * 69, shape 85). It reads the parsed AST, so a name in a comment, a title or
@@ -35,8 +38,12 @@
  *   included) given `ls-files` as a string, an array element, or a binding
  *   of either.
  *
- * Not read (accepted residual): a walker reached only through a helper in
- * another module.
+ * Not read (accepted residual, live population 0, backstop `Unit tests
+ * Windows`, which reds on the first census that times out there): a walker
+ * reached only through a helper in another module; a recursive walker spelled as
+ * a variable-bound arrow function; a walker or spawner reached through a local
+ * wrapper function; and a walk named by an enclosing `describe.each` table or
+ * `for...of` loop instead of by the case.
  */
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -324,9 +331,27 @@ function walksTree(node: SgNode, scope: Scope): boolean {
 	);
 }
 
+/**
+ * The only third arguments the gate admits: the shared constant, or a call to
+ * `scaledTestTimeout(...)` for a census that truly needs more than the shared
+ * ceiling (the call site names the reason in a comment). A raw number, a
+ * file-local constant, an options object or any other expression is refused,
+ * because only the scaled forms follow the lane's `PI_LENS_TEST_TIMEOUT_SCALE`.
+ */
+function admittedBudget(node: SgNode | undefined): boolean {
+	if (!node) return false;
+	if (node.kind() === "identifier")
+		return node.text() === "TREE_WALK_TIMEOUT_MS";
+	if (node.kind() !== "call_expression") return false;
+	return node.field("function")?.text() === "scaledTestTimeout";
+}
+
 interface Census {
 	title: string;
 	argCount: number;
+	/** The census has the default budget or a third argument that is not an
+	 *  admitted scaled budget. */
+	refused: boolean;
 	/** `declaration`, or `unclassified` for a test-shaped call the detector
 	 *  could not trace to a vitest `it`/`test` binding. */
 	how: "declaration" | "unclassified";
@@ -386,6 +411,7 @@ function censuses(source: string): Census[] {
 				found.push({
 					title: args[0].text(),
 					argCount: args.length,
+					refused: args.length === 2 || !admittedBudget(args[2]),
 					how: "declaration",
 				});
 			continue;
@@ -401,6 +427,7 @@ function censuses(source: string): Census[] {
 			found.push({
 				title: args[0].text(),
 				argCount: args.length,
+				refused: args.length === 2 || !admittedBudget(args[2]),
 				how: "unclassified",
 			});
 	}
@@ -414,7 +441,7 @@ describe("tree census timeout (#4828)", () => {
 	// `expect(["ls-files"])` fixture was read as a walk.
 	const defaultBudget = (source: string) =>
 		censuses(source)
-			.filter((census) => census.argCount === 2)
+			.filter((census) => census.refused)
 			.map((census) => census.title);
 	const VITEST = 'import { it, test, describe } from "vitest";\n';
 	const KIT = 'import { listSourceFiles } from "../support/sweep-kit.js";\n';
@@ -541,6 +568,32 @@ describe("tree census timeout (#4828)", () => {
 		expect(defaultBudget(budgeted)).toEqual([]);
 	});
 
+	// Recurrence (#4828 verify r3 F8): the gate recorded only the argument count,
+	// so `it(..., 5000)` passed while the catalogue said "never a per-file
+	// number"; 29 live censuses carried their own number, 27 of them unscaled.
+	it.each([
+		["a raw number", "5000"],
+		["a numeric separator literal", "30_000"],
+		["a file-local constant", "CENSUS_TIMEOUT_MS"],
+		["an options object", "{ timeout: 5000 }"],
+		["the shared constant scaled again", "TREE_WALK_TIMEOUT_MS * 2"],
+		["a member of another module", "other.TREE_WALK_TIMEOUT_MS"],
+		["an unscaled call", "Math.max(5000, 1)"],
+	])("plants: refuses a third argument that is %s", (_name, budget) => {
+		const source = `${VITEST}${KIT}it("c", () => { listSourceFiles(ROOT); }, ${budget});`;
+		expect(censuses(source)).toHaveLength(1);
+		expect(defaultBudget(source)).toEqual(['"c"']);
+	});
+
+	it.each([
+		["the shared constant", "TREE_WALK_TIMEOUT_MS"],
+		["a scaled call with a reason", "scaledTestTimeout(60_000)"],
+	])("plants: admits a third argument that is %s", (_name, budget) => {
+		const source = `${VITEST}${KIT}it("c", () => { listSourceFiles(ROOT); }, ${budget});`;
+		expect(censuses(source)).toHaveLength(1);
+		expect(defaultBudget(source)).toEqual([]);
+	});
+
 	it.each([
 		[
 			"a suite alias",
@@ -586,7 +639,7 @@ describe("tree census timeout (#4828)", () => {
 				const rel = relativePosix(ROOT, file);
 				for (const found of censuses(source)) {
 					census += 1;
-					if (found.argCount === 2) flagged.push(`${rel}: ${found.title}`);
+					if (found.refused) flagged.push(`${rel}: ${found.title}`);
 				}
 				// Shape 81: turn the loop once per file so each parsed native tree is
 				// freed before the next file is parsed.

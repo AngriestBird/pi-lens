@@ -31,6 +31,7 @@ import {
 	latencyAdmissionHeader,
 	type ViMockExportFinding,
 } from "../support/vi-mock-export-gate.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const TESTS_ROOT = path.join(REPO_ROOT, "tests");
@@ -227,11 +228,15 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 	// so test order (including the shuffle census) cannot move the cost.
 	beforeAll(() => sweepOnce(), 120_000);
 
-	it("keeps every latency-logger mock on the real export surface", async () => {
-		// Recurrence guard for #2272 and #2281: a whole-module factory mock can
-		// stay green until an untested production call reaches a newly added export.
-		expect(await scanLatencyLoggerSurface()).toEqual([]);
-	}, 60_000);
+	it(
+		"keeps every latency-logger mock on the real export surface",
+		async () => {
+			// Recurrence guard for #2272 and #2281: a whole-module factory mock can
+			// stay green until an untested production call reaches a newly added export.
+			expect(await scanLatencyLoggerSurface()).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("every latency pin carries a reason and the file carries its header", () => {
 		// Shape 38: a latency baseline pin without two-part admission reds.
@@ -1365,7 +1370,7 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 			);
 			expect(result.problems, result.problems.join("\n")).toEqual([]);
 		},
-		60_000,
+		TREE_WALK_TIMEOUT_MS,
 	);
 
 	it.skipIf(!!process.env.VI_MOCK_EXPORT_REGEN)(
@@ -1376,7 +1381,7 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 			const dead = Object.keys(BASELINE).filter((entry) => !live.has(entry));
 			expect(dead).toEqual([]);
 		},
-		60_000,
+		TREE_WALK_TIMEOUT_MS,
 	);
 
 	it.skipIf(!process.env.VI_MOCK_EXPORT_REGEN)(
@@ -1387,7 +1392,7 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 				`${JSON.stringify(baselineFrom(await scan()), null, "\t")}\n`,
 			);
 		},
-		60_000,
+		TREE_WALK_TIMEOUT_MS,
 	);
 });
 
