@@ -518,6 +518,14 @@ describe("tree census timeout (#4828)", () => {
 			'it("c", () => { gitExecFileSync("git", ["ls-files", "-z"]); });',
 		],
 		[
+			"a spawn bound to a const",
+			'const run = execFileSync;\nit("c", () => { run("git", ["ls-files"]); });',
+		],
+		[
+			"a spawn destructured under a new name",
+			'import * as cp from "node:child_process";\nconst { execFileSync: run } = cp;\nit("c", () => { run("git", ["ls-files"]); });',
+		],
+		[
 			"an aliased child_process spawn of git ls-files",
 			'import { execFileSync as run } from "node:child_process";\nit("c", () => { run("git", ["ls-files"]); });',
 		],
