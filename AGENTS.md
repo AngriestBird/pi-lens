@@ -960,6 +960,12 @@ file-scoped worklist and receives no project-wide scanner output.
 - Use `PathKeyedMap` for path-keyed memory. Choose
   `normalizeEphemeralMapKey` for process-local hot indexes and `normalizeMapKey`
   for long-lived shared state. Preserve original display paths separately.
+- Resolve a path's identity once, where it enters (a tool argument, a write
+  event, `createDispatchContext`, `FormatService`), and hand it down. The
+  widget, delta-baseline and finding stores key a path that is already an
+  identity: they keep the syntactic key and resolve nothing per write
+  (maintainer decision 2026-10-24; shape 1). A walk or key derived from a caller
+  spelling instead answers for the link's project, not the file's.
 - A path a host tool was given resolves through `resolveHostToolPath` (the
   base expansion) or `resolveToolCallFilePath` (base plus pi's variant
   ladder), never a bare `path.resolve(base, raw)`; see shape 74.
