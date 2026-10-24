@@ -91,42 +91,71 @@ describe("trace validation, session-lifecycle pilot (#3533)", () => {
 	// (principles §1, "Gates fail closed"). Every row form the pilot does not
 	// model must refuse the trace, not be skipped, or a run with a /tree or a
 	// subagent in it would be "checked" with the interesting rows missing.
+	// Each case also asserts the gate that refuses it. A start row built from the
+	// shutdown row below lacks `handoffSource`, so without valid later-stage
+	// fields every start case is refused by the hand-off gate and the case
+	// still passes with its own gate deleted (PR #4824 review, CodeRabbit).
+	const validStart = {
+		transition: "start",
+		scopeId: 3,
+		parentScopeId: 2,
+		handoffSource: "none",
+	};
 	it.each([
-		["a /tree move", { transition: "tree", reason: "tree" }],
-		["a secondary scope", { role: "secondary" }],
+		[
+			"a /tree move",
+			{ transition: "tree", reason: "tree" },
+			/row form is not admitted/,
+		],
+		[
+			"a secondary scope",
+			{ role: "secondary" },
+			/role secondary is not modelled/,
+		],
 		[
 			"a started scope ended without a shutdown",
 			{ transition: "end", reason: "superseded", scopeId: 2 },
+			/a started scope ended without a shutdown/,
 		],
 		[
 			"a start with no session id",
-			{
-				transition: "start",
-				reason: "reload",
-				sessionId: undefined,
-				scopeId: 3,
-			},
+			{ ...validStart, reason: "reload", sessionId: undefined },
+			/start without a session id, or after a branch move/,
 		],
 		[
 			"a start after a branch move",
-			{ transition: "start", reason: "reload", branchEpoch: 1, scopeId: 3 },
+			{ ...validStart, reason: "reload", branchEpoch: 1 },
+			/start without a session id, or after a branch move/,
 		],
 		[
 			"a start reason the pilot does not model",
-			{ transition: "start", reason: "clone", scopeId: 3 },
+			{ ...validStart, reason: "clone" },
+			/start reason is not modelled/,
 		],
 		[
 			"a shutdown reason the pilot does not model",
 			{ transition: "shutdown", reason: "idle" },
+			/shutdown reason or scope is not modelled/,
 		],
-	])("refuses %s instead of dropping the row", (_name, patch) => {
+	])("refuses %s instead of dropping the row", (_name, patch, gate) => {
 		const rows = recorded();
 		// Row 2 is the first process's shutdown:reload of scope 2.
 		rows[2] = {
 			...rows[2],
 			metadata: { ...rows[2].metadata, ...patch },
 		};
-		expect(extractTraces(rows)[0]?.rejected).not.toEqual([]);
+		expect(extractTraces(rows)[0]?.rejected.join(" ")).toMatch(gate);
+	});
+
+	// Control: the valid start fields alone are admitted, so the cases above are
+	// refused for the field they change and not for the shared fixture.
+	it("admits the shared start fields the refusal cases build on", () => {
+		const rows = recorded();
+		rows[2] = {
+			...rows[2],
+			metadata: { ...rows[2].metadata, ...validStart, reason: "reload" },
+		};
+		expect(extractTraces(rows)[0]?.rejected).toEqual([]);
 	});
 
 	// Recurrence prevented: pi's jiti load re-creates the coordinator on
@@ -400,11 +429,22 @@ describe("trace validation inputs fail closed (#3533 round 2)", () => {
 		expect(trace?.events[1]).toMatchObject({ a: "begin", src });
 	});
 
+	// Recurrence prevented: F9. A refused start left its scope without a ticket,
+	// so the same scope's shutdown was reported as "not modelled": a false second
+	// reason beside the real one.
+	it("reports one reason for a refused start, not a second for its shutdown", () => {
+		const rejected = extractTraces(without("parentScopeId"))[0]?.rejected;
+		expect(rejected).toHaveLength(1);
+		expect(rejected?.[0]).toMatch(/start:fork scope 3: parentScopeId/);
+	});
+
 	// Recurrence prevented: F4. RetireOk("resume") needs `sess[primary] # "A"`
 	// and Begin("resume") sets `sess` to "A", the startup session. A resume of
-	// a session that is not the startup one is outside the model: the extractor
-	// reports it as a new identity (empty sameAs), which TLC then cannot match.
-	it("sends a resume of a foreign session as a new identity", () => {
+	// a session that is not the startup one is outside the model. The extractor
+	// maps session ids to earlier tickets: a previously unseen session has an
+	// empty sameAs, a non-startup session seen earlier in the process has that
+	// scope's ticket and not 1. TLC cannot match either.
+	it("maps a resume of a non-startup session to its own tickets, not the startup one", () => {
 		const prefix = [
 			startRow({ transition: "end", reason: "superseded", scopeId: 1 }),
 			startRow({
@@ -439,6 +479,7 @@ describe("trace validation inputs fail closed (#3533 round 2)", () => {
 			])[0]?.events.at(-1);
 		expect(resume("s")).toMatchObject({ k: "resume", sameAs: [1] });
 		expect(resume("foreign")).toMatchObject({ k: "resume", sameAs: [] });
+		expect(resume("n")).toMatchObject({ k: "resume", sameAs: [2] });
 	});
 });
 
@@ -455,24 +496,36 @@ describe("the generated Obs and TNext carry every conjunct (#3533 round 2)", () 
 			.map((line) => line.replace(/\s+/g, " ").trim())
 			.join("\n");
 	};
-	it.each([
-		// the retire disjunct
-		String.raw`\/ /\ ev.a = "retire"`,
-		String.raw`/\ primary = ev.scope /\ primary' = 0`,
-		String.raw`/\ pend'.k = ev.k /\ why'[ev.scope] = ev.k`,
-		// the begin disjunct
-		String.raw`\/ /\ ev.a = "begin"`,
-		String.raw`/\ primary = 0 /\ pend.k = ev.k`,
-		String.raw`/\ primary' = ev.scope /\ role'[ev.scope] = ev.role`,
-		String.raw`/\ (ev.parent = 0 \/ predOf'[ev.scope] = ev.parent)`,
-		String.raw`/\ \A u \in 1..(ev.scope - 1) : (sess'[u] = sess'[ev.scope]) <=> (u \in ev.sameAs)`,
-		// TNext: the matched step and the hidden before-fork step
-		String.raw`\/ /\ ti < Len(TR) /\ Next /\ Obs(TR[ti + 1]) /\ ti' = ti + 1`,
-		String.raw`\/ /\ ti < Len(TR) /\ TR[ti + 1].a = "retire" /\ TR[ti + 1].k \in {"fork", "clone"}`,
-		String.raw`/\ forking = "no" /\ Next /\ forking' # "no" /\ ti' = ti`,
-		"NotDone == ti < Len(TR)",
-	])("pins %s", (conjunct) => {
-		expect(moduleText()).toContain(conjunct);
+	// Recurrence prevented: F7. Presence pins cannot see an ADDED disjunct: a
+	// planted `\/ TRUE` in Obs left every pin green and made the planted code
+	// drift check pass. The whole block is compared, so any edit reds.
+	it("is exactly this Obs, TNext, TSpec and NotDone block", () => {
+		const text = moduleText();
+		const block = text.slice(
+			text.indexOf("Obs(ev) =="),
+			text.indexOf("====") === -1 ? undefined : text.indexOf("===="),
+		);
+		expect(block).toBe(
+			[
+				String.raw`Obs(ev) ==`,
+				String.raw`\/ /\ ev.a = "retire"`,
+				String.raw`/\ primary = ev.scope /\ primary' = 0`,
+				String.raw`/\ pend'.k = ev.k /\ why'[ev.scope] = ev.k`,
+				String.raw`\/ /\ ev.a = "begin"`,
+				String.raw`/\ primary = 0 /\ pend.k = ev.k`,
+				String.raw`/\ primary' = ev.scope /\ role'[ev.scope] = ev.role`,
+				String.raw`/\ (ev.parent = 0 \/ predOf'[ev.scope] = ev.parent)`,
+				String.raw`/\ (taken' # taken) <=> (ev.src = "slot")`,
+				String.raw`/\ \A u \in 1..(ev.scope - 1) : (sess'[u] = sess'[ev.scope]) <=> (u \in ev.sameAs)`,
+				String.raw`TNext ==`,
+				String.raw`\/ /\ ti < Len(TR) /\ Next /\ Obs(TR[ti + 1]) /\ ti' = ti + 1`,
+				String.raw`\/ /\ ti < Len(TR) /\ TR[ti + 1].a = "retire" /\ TR[ti + 1].k \in {"fork", "clone"}`,
+				String.raw`/\ forking = "no" /\ Next /\ forking' # "no" /\ ti' = ti`,
+				String.raw`TSpec == (Init /\ ti = 0) /\ [][TNext]_<<vars, ti>>`,
+				String.raw`NotDone == ti < Len(TR)`,
+				"",
+			].join("\n"),
+		);
 	});
 	it("pins the hand-off-source conjunct on the verdict path", () => {
 		expect(moduleText()).toContain(

@@ -132,6 +132,9 @@ line per process and exits non-zero on any of:
   rows (empty, another phase, a renamed phase literal), no events, or
   unparseable JSON. An empty population never passes, also under
   `--expect not-producible`; an unknown event kind is an `UNCHECKED` trace;
+- `UNCHECKED <label>: <why>`, exit 2, when the jar is missing or fails its
+  checksum (round 1 exited 1 with a stack for both). All output, the usage line
+  included, goes to stdout;
 - `error (<why>)`, exit 2: TLC did not decide, or the trace is outside the
   model's bounds. `RetireOk` allows each retire reason once per behaviour
   (`k \notin used`, `SessionLifecycle.tla:646`), so a second `/reload` is
@@ -266,11 +269,14 @@ Named, not built (principles: speculative robustness needs buy-in):
 - **Resume of a non-startup session.** The model hardcodes `resume -> "A"`
   (`TargetOf`, `SessionLifecycle.tla:642`; `Init` has `sess[1] = "A"`), and
   `RetireOk` refuses a resume from a primary already in `A`. A recorded resume
-  is therefore checked only against the process's startup session: the
-  extractor reports a resume of any other session as a new identity (empty
-  `sameAs`), which the model cannot produce. Pinned in
-  `tests/scripts/trace-validate-session-lifecycle.test.ts`; extending the
-  model to resume arbitrary sessions is the rollout issue's call.
+  is therefore checked only against the process's startup session. The
+  extractor maps the resumed session id to the earlier scopes with the same
+  id (`sameAs`): the startup scope's ticket for the startup session, which the
+  model can produce; no ticket for a session not seen before in the process
+  (empty `sameAs`); and that scope's own ticket, not the startup one, for a
+  non-startup session seen earlier. The model cannot produce the last two.
+  Pinned in `tests/scripts/trace-validate-session-lifecycle.test.ts`;
+  extending the model to resume arbitrary sessions is the rollout issue's call.
 - **Store content.** `Obs` compares role, lineage, hand-off source and session
   identity. It does not compare facts in the read guard, the turn counter, or
   the advisory queue; content drift stays with the invariants and unit tests.

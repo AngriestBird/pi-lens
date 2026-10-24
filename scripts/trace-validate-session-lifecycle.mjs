@@ -63,6 +63,7 @@ const HANDOFF_SOURCES = new Set([
  * never coerced.
  * Not admitted (the model needs state the rows do not carry): tree, demote,
  * secondary scopes, an end of a started scope, a startup after the first.
+ * After a refused start, later rows of that scope add no second reason.
  *
  * @param {Array<Record<string, any>>} rows latency rows, in file order
  * @returns {Array<{ pid: number, events: object[], rejected: string[] }>}
@@ -87,6 +88,8 @@ function extractOne(pid, rows) {
 	const sessionOf = [];
 	/** scope ids seen as `end:superseded` with no start: construction scopes */
 	const constructed = new Set();
+	/** scope ids whose start row was refused: later rows of that scope add no second reason */
+	const refused = new Set();
 	const reject = (row, why) =>
 		rejected.push(
 			`${row.metadata?.transition}:${row.metadata?.reason} scope ${row.metadata?.scopeId}: ${why}`,
@@ -94,6 +97,8 @@ function extractOne(pid, rows) {
 	for (const row of rows) {
 		const m = row.metadata ?? {};
 		const kind = `${m.transition}:${m.reason}`;
+		if (refused.has(m.scopeId)) continue;
+		const before = rejected.length;
 		if (m.role !== "primary") {
 			reject(row, `role ${m.role} is not modelled by the pilot`);
 		} else if (kind === "end:superseded") {
@@ -152,6 +157,12 @@ function extractOne(pid, rows) {
 		} else {
 			reject(row, "row form is not admitted");
 		}
+		if (
+			m.transition === "start" &&
+			rejected.length > before &&
+			m.scopeId !== undefined
+		)
+			refused.add(m.scopeId);
 	}
 	return { pid, events, rejected };
 }
@@ -376,8 +387,6 @@ export function loadTraces(text, { kind, file }) {
 	} catch (error) {
 		throw new Error(`${file}: unparseable JSON (${error.message})`);
 	}
-	if (!Array.isArray(records))
-		throw new Error(`${file}: expected a JSON array of ${kind}`);
 	const traces =
 		kind === "rows"
 			? extractTraces(records)
