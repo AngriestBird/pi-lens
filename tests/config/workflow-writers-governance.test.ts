@@ -421,7 +421,7 @@ const REGISTERED_EXCEPTIONS: Record<string, string> = {};
 // The census as counts: dispatchable workflows, and writer steps per workflow.
 // A new writer (even a guarded one) or a new dispatchable workflow reds here so
 // its author reviews the guard; the failure prints the re-pin.
-const DISPATCHABLE_WORKFLOWS = 17;
+const DISPATCHABLE_WORKFLOWS = 18;
 // #4077: the split moved every writer step into its own job without adding one,
 // except codeql.yml, whose SARIF upload moved into the `upload` job as the
 // `github/codeql-action/upload-sarif` writer action (+1).
