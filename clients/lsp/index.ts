@@ -3713,19 +3713,17 @@ export class LSPService {
 		}
 		if (sentTo.size === 0) return { sent, drained: true };
 		await Promise.all(
-			[...sentTo.values()]
-				.filter(({ rechecks }) => rechecks)
-				.flatMap(({ client, documents }) =>
-					documents
-						.slice(0, -1)
-						.map(({ filePath, content }) =>
-							client.notify.open(
-								filePath,
-								content,
-								getLanguageId(filePath) ?? "plaintext",
-							),
+			[...sentTo.values()].flatMap(({ client, rechecks, documents }) =>
+				(rechecks ? documents : [])
+					.slice(0, -1)
+					.map(({ filePath, content }) =>
+						client.notify.open(
+							filePath,
+							content,
+							getLanguageId(filePath) ?? "plaintext",
 						),
-				),
+					),
+			),
 		);
 		const answers = await Promise.all(
 			[...sentTo.values()].map(async ({ client, ordered }) => {
