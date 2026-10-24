@@ -4599,7 +4599,8 @@ function hookAnchorsFromDiff(diff, map, options) {
  * The post-image is read from the checkout the lint runs in, which is the PR's
  * own head tree in CI and the working tree locally; `cwd` defaults to the
  * directory `localDiff` diffs, so the diff and the post-image agree. The
- * merge-base image lets the rule verify a comment-only edit.
+ * merge-base image lets the rule verify a comment-only edit and tell an ADDED
+ * file (absent on the base), which may quote a push-run URL instead (#4756).
  */
 export function lintWorkflowRunEvidence(
 	body,
@@ -4607,21 +4608,26 @@ export function lintWorkflowRunEvidence(
 ) {
 	if (!diff) return [];
 	const unreadable = [];
-	// The merge base is what `localDiff` diffs from; no base image (an added
-	// file, a shallow checkout) reads as "not a comment-only edit".
+	// The merge base is what `localDiff` diffs from. `null` from
+	// `readBaseWorkflow` means ADDED (the file is absent on the base) and relaxes
+	// the run-evidence rule; a base that cannot be resolved or read (a shallow
+	// checkout) answers "" instead, which fails closed: not added, and not a
+	// comment-only edit.
 	const mergeBase = resolvePrBase(cwd);
+	const existsOnBase = baseFileReader(cwd);
 	const errors = evaluateWorkflowRunEvidence({
 		changedFiles: parseChangedFiles(diff),
 		body,
 		readBaseWorkflow: (file) => {
-			if (!mergeBase) return null;
+			if (!mergeBase) return "";
+			if (existsOnBase(file) === false) return null;
 			try {
 				return gitExecFileSync(["show", `${mergeBase}:${file}`], {
 					cwd,
 					encoding: "utf8",
 				});
 			} catch {
-				return null;
+				return "";
 			}
 		},
 		readWorkflow: (file) => {

@@ -21,6 +21,14 @@
 // An `on:` block this reader cannot parse is treated as not executing: the
 // rule fails closed and asks for evidence rather than reading clean.
 //
+// WHAT COUNTS AS THE QUOTED BRANCH RUN. An edited existing file: a quoted
+// `gh workflow run <file> --ref <branch>` with a run id within
+// RUN_ID_WINDOW_LINES. An ADDED file (no merge-base image): that form, or a
+// line naming the file plus a run URL (`.../actions/runs/<id>`) or
+// `gh run view <id>` in the window. GitHub registers `workflow_dispatch` only
+// from the default branch, so the dispatch of a new file answers 404 and its
+// branch run can only come from a temporary push trigger (#4756).
+//
 // The reader is dependency-free on purpose: the PR-body lane runs
 // `node scripts/check-pr-body.mjs` with no `npm install` (it installs only
 // `marked`, the markdown lexer `blankHtmlComments` reads through, #4717), so
@@ -242,6 +250,17 @@ export function classifyWorkflowEdit(text, file) {
 // The names a body may use for `file`: the bare name or the full path. Matched
 // as whole tokens, never as a pattern built from the name.
 const namesOf = (file) => [file.slice(file.lastIndexOf("/") + 1), file];
+// `name` as a whole token of `line`: `x.yml.bak`, `my-x.yml` and `dir/x.yml`
+// are other files.
+const namesToken = (line, name) => {
+	for (let at = line.indexOf(name); at >= 0; at = line.indexOf(name, at + 1))
+		if (
+			!/[\w./-]/.test(line[at - 1] ?? "") &&
+			!/[\w.-]/.test(line[at + name.length] ?? "")
+		)
+			return true;
+	return false;
+};
 
 // HTML comments are the one place prose could satisfy the rule invisibly. The
 // comment-end rule is the shared one (#4565): a private copy here recognised
@@ -249,17 +268,33 @@ const namesOf = (file) => [file.slice(file.lastIndexOf("/") + 1), file];
 // hidden even though the reader sees the text after it.
 const blankComments = (body) => blankHtmlComments(body);
 
-function quotesRunId(lines, file) {
+// An ADDED dispatch-only workflow cannot be dispatched from its branch: GitHub
+// registers `workflow_dispatch` only for a file on the default branch, so
+// `gh workflow run <file> --ref <branch>` answers 404 (#4756). Its branch run
+// can only come from a temporary push trigger, so for an added file (no base
+// image) a line naming the file plus a run URL or `gh run view <id>` in the
+// window counts too. An edited existing file keeps the dispatch rule: there the
+// dispatch works and the stricter form is available.
+const ADDED_RUN_ID = /(?:\/actions\/runs\/|\bgh\s+run\s+view\s+)(\d{8,})/i;
+
+function quotesRunId(lines, file, added) {
 	const names = namesOf(file);
 	return lines.some((line, index) => {
 		const argument = /\bgh\s+workflow\s+run\s+(\S+)/.exec(line)?.[1];
-		return (
+		const dispatched =
 			argument !== undefined &&
 			names.includes(unquote(argument)) &&
-			/--ref\b/.test(line) &&
+			/--ref\b/.test(line);
+		const runId = dispatched
+			? RUN_ID
+			: added && names.some((name) => namesToken(line, name))
+				? ADDED_RUN_ID
+				: null;
+		return (
+			runId !== null &&
 			lines
 				.slice(index, index + RUN_ID_WINDOW_LINES)
-				.some((candidate) => RUN_ID.test(candidate))
+				.some((candidate) => runId.test(candidate))
 		);
 	});
 }
@@ -342,7 +377,7 @@ export function evaluateWorkflowRunEvidence({
 		if (text === null) continue;
 		const verdict = classifyWorkflowEdit(text, file);
 		if (verdict.executes) continue;
-		if (quotesRunId(lines, file)) continue;
+		if (quotesRunId(lines, file, readBaseWorkflow(file) === null)) continue;
 		const name = file.slice(file.lastIndexOf("/") + 1);
 		const evidence = `run \`gh workflow run ${name} --ref <branch>\` and quote the command with its run id`;
 		const declared = declaresUnaffected(lines, file);

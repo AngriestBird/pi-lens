@@ -24,6 +24,7 @@ import {
 	detectFlattenedBody,
 	lintPullRequestEvent,
 	lintLocalPrBody,
+	lintWorkflowRunEvidence,
 	localDiff,
 	lintPrBody,
 	testCorpus,
@@ -5347,6 +5348,50 @@ describe("Workflow run unaffected declaration is verified (#3085 round 2)", () =
 			rows(["    steps:", "      - run: echo changed"], false),
 		);
 		expect(errorsFor(declared)).not.toContain("Changed workflow");
+	});
+});
+
+// #4756. Recurrence: an ADDED dispatch-only workflow cannot be dispatched from
+// its branch, so the run-evidence rule accepts a push-run URL naming the file
+// for an added file only. The merge-base read decides added vs edited: a file
+// absent on the base is added; a base that cannot be resolved must NOT read as
+// added (a shallow checkout would otherwise relax the rule for every edit).
+describe("added workflow accepts a push-run URL, through the real merge-base read (#4756)", () => {
+	const WORKFLOW = ".github/workflows/windows-repeat-probe.yml";
+	const pushRun = `${body}\n\nRun: https://github.com/o/r/actions/runs/40131910781 (windows-repeat-probe.yml, push trigger)`;
+	let fixtureCwd = "";
+	afterEach(() => {
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+	const errorsFor = () =>
+		lintLocalPrBody(pushRun, fixtureCwd).errors.join("\n");
+
+	it("accepts it for a file the base does not have", () => {
+		fixtureCwd = createOriginMasterFixture(WORKFLOW);
+		expect(errorsFor()).not.toContain("Changed workflow");
+	});
+
+	it("refuses it for a file the base has (an edit)", () => {
+		fixtureCwd = createOriginMasterFixture(undefined, {
+			path: WORKFLOW,
+			pre: ["name: probe", "on:", "  workflow_dispatch:"],
+			post: ["name: probe", "on:", "  workflow_dispatch:", "# edit"],
+			dirty: ["name: probe", "on:", "  workflow_dispatch:", "# edit"],
+		});
+		expect(errorsFor()).toContain("Changed workflow");
+	});
+
+	it("refuses it when no base resolves (not a git checkout)", () => {
+		fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-nobase-"));
+		mkdirSync(join(fixtureCwd, ".github/workflows"), { recursive: true });
+		writeFileSync(
+			join(fixtureCwd, WORKFLOW),
+			"name: probe\non:\n  workflow_dispatch:\n",
+		);
+		const diff = `diff --git a/${WORKFLOW} b/${WORKFLOW}\n`;
+		expect(
+			lintWorkflowRunEvidence(pushRun, { diff, cwd: fixtureCwd }).join("\n"),
+		).toContain("Changed workflow");
 	});
 });
 

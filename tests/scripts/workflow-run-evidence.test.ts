@@ -194,6 +194,51 @@ describe("evaluateWorkflowRunEvidence: the quoted branch run (#3085)", () => {
 		).toEqual([]);
 	});
 
+	// Recurrence (#4756): the PR adding windows-repeat-probe.yml (workflow_dispatch
+	// only) could not satisfy this rule. GitHub registers dispatch only from the
+	// default branch, so `gh workflow run <file> --ref <branch>` answered 404 and
+	// the only branch run was a temporary push-trigger run. An ADDED file (no base
+	// image) accepts a line naming it plus a run URL or `gh run view <id>`; an
+	// edited existing file keeps the dispatch rule.
+	describe("an added file quotes a push-triggered branch run (#4756)", () => {
+		const pushRun =
+			"Run: https://github.com/o/r/actions/runs/40131910781 (stryker-nightly.yml, push trigger)";
+		it("accepts a line naming the added file with a run URL", () => {
+			expect(run(pushRun)).toEqual([]);
+		});
+		it("accepts the full path and a `gh run view <id>` form, id on the next line", () => {
+			expect(
+				run(
+					".github/workflows/stryker-nightly.yml, temporary push trigger:\n$ gh run view 40131910781",
+				),
+			).toEqual([]);
+		});
+		it("reds the same push-run form for an edited existing file", () => {
+			expect(run(pushRun, [FILE], {}, text)).toHaveLength(1);
+		});
+		it("reds a run URL that names a different workflow", () => {
+			expect(
+				run(
+					"Run: https://github.com/o/r/actions/runs/40131910781 (compat-smoke.yml, push trigger)",
+				),
+			).toHaveLength(1);
+		});
+		it("reds a file-name token that is part of another path or name", () => {
+			for (const line of [
+				"x/stryker-nightly.yml https://github.com/o/r/actions/runs/40131910781",
+				"my-stryker-nightly.yml https://github.com/o/r/actions/runs/40131910781",
+				"stryker-nightly.yml.bak https://github.com/o/r/actions/runs/40131910781",
+			])
+				expect(run(line)).toHaveLength(1);
+		});
+		it("reds prose `run id` for the bare-name form and a URL with no file name", () => {
+			expect(run("stryker-nightly.yml run id: 40131910781")).toHaveLength(1);
+			expect(
+				run("https://github.com/o/r/actions/runs/40131910781"),
+			).toHaveLength(1);
+		});
+	});
+
 	it("reds the command with no run id", () => {
 		expect(run("gh workflow run stryker-nightly.yml --ref b")).toHaveLength(1);
 	});
@@ -208,6 +253,9 @@ describe("evaluateWorkflowRunEvidence: the quoted branch run (#3085)", () => {
 		expect(
 			run(
 				"gh workflow run stryker-nightly.yml\nhttps://github.com/o/r/actions/runs/12345678901",
+				[FILE],
+				{},
+				text,
 			),
 		).toHaveLength(1);
 	});
