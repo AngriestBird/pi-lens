@@ -598,7 +598,7 @@ function sha256(file) {
 	return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
-async function ensureJar(jarArg, root) {
+export async function ensureJar(jarArg, root) {
 	const jar = resolveJarPath(jarArg, root);
 	if (!fs.existsSync(jar)) {
 		if (jarArg) throw new Error(`--jar ${jarArg} does not exist`);
