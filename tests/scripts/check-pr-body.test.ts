@@ -1,5 +1,6 @@
 // flake-shape: real-process-spawn — the exact local CLI, shallow checkout and gh label read are the subject; an in-process call cannot prove any of those command boundaries.
 import {
+	appendFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -5365,9 +5366,10 @@ describe("added workflow accepts a push-run URL, through the real merge-base rea
 		rmSync(fixtureCwd, { recursive: true, force: true });
 	});
 	const addOrigin = (url = "https://github.com/o/r.git") =>
-		execFileSync("git", ["-C", fixtureCwd, "remote", "add", "origin", url], {
-			stdio: "ignore",
-		});
+		appendFileSync(
+			join(fixtureCwd, ".git", "config"),
+			`[remote "origin"]\n\turl = ${url}\n`,
+		);
 	const errorsFor = (text = pushRun) =>
 		lintLocalPrBody(text, fixtureCwd).errors.join("\n");
 	const editedFixture = () => {
@@ -5413,9 +5415,11 @@ describe("added workflow accepts a push-run URL, through the real merge-base rea
 			editedFixture();
 			const shim = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-gitshim-"));
 			try {
-				const real = execFileSync("sh", ["-c", "command -v git"], {
-					encoding: "utf8",
-				}).trim();
+				const real = (process.env.PATH ?? "")
+					.split(delimiter)
+					.map((directory) => join(directory, "git"))
+					.find((candidate) => existsSync(candidate));
+				expect(real).toBeDefined();
 				writeFileSync(
 					join(shim, "git"),
 					`#!/bin/sh\nfor a in "$@"; do case "$a" in cat-file|ls-tree) exit 128;; esac; done\nexec '${real}' "$@"\n`,

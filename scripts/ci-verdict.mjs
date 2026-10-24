@@ -210,7 +210,10 @@ import {
 	stripAnsi,
 	stripLineTimestamps,
 } from "./lib/ci-failure-classifier.mjs";
-import { githubHeaders } from "./lib/github-rest.mjs";
+import {
+	githubHeaders,
+	parseOwnerRepoFromGitRemote,
+} from "./lib/github-rest.mjs";
 import { parseVitestSummary } from "./lib/vitest-summary.mjs";
 import {
 	CHANGES_CHECK,
@@ -2331,20 +2334,7 @@ export function formatGatingSplit(rows, failingRows = [], details = []) {
 export const TRANSPORT_GH = "gh";
 export const TRANSPORT_REST = "rest";
 
-/**
- * Parses `owner/repo` out of a `git remote get-url origin` value -- both the
- * SSH (`git@github.com:owner/repo.git`) and HTTPS
- * (`https://github.com/owner/repo.git`) forms this repo's own clones use.
- * `gh repo view` resolves the current repository the same way (from the
- * checkout's remote), so this is the REST transport's equivalent when `gh`
- * itself cannot be asked to do it.
- */
-export function parseOwnerRepoFromGitRemote(remoteUrl) {
-	const match = /github\.com[:/]{1,2}([^/\s]+)\/([^/\s.]+?)(?:\.git)?\/?$/.exec(
-		String(remoteUrl ?? "").trim(),
-	);
-	return match ? `${match[1]}/${match[2]}` : null;
-}
+export { parseOwnerRepoFromGitRemote };
 
 /**
  * REST equivalent of `resolveRepository` (#3497): `gh repo view` has no REST

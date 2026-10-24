@@ -3,7 +3,6 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
-import { parseOwnerRepoFromGitRemote } from "./ci-verdict.mjs";
 import {
 	blankMarkdown,
 	blankHtmlComments,
@@ -17,7 +16,7 @@ import {
 	markdownBlockComments,
 	markdownHeadings,
 } from "./lib/markdown-lexer.mjs";
-import { githubGet } from "./lib/github-rest.mjs";
+import { githubGet, parseOwnerRepoFromGitRemote } from "./lib/github-rest.mjs";
 import {
 	changedHookAnchors,
 	evaluateTlaCoverage,
