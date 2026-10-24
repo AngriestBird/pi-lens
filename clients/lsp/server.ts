@@ -701,6 +701,19 @@ export interface LSPServerInfo {
 	 * Cascade can read its passive snapshot instead of actively touching neighbors.
 	 */
 	autoPropagateDiagnostics?: boolean;
+	/**
+	 * The configuration section (one name) that this server's `initialization`
+	 * blob IS the contents of, for a server whose startup options and pulled
+	 * settings share one shape. rust-analyzer reads `initializationOptions` flat
+	 * at startup, then PULLS the `rust-analyzer` section; with no mapping the
+	 * pull is answered `{}` (#4758). The client answers that section from the
+	 * blob (user `serverOverrides` included) and leaves `initializationOptions`
+	 * unwrapped. A server whose settings already sit under their section names
+	 * inside the blob (pyright: {@link pyrightInitialization}) omits it. It sits
+	 * on the server, not the spawn result, so a user `command` override that
+	 * replaces `spawn` keeps it.
+	 */
+	settingsSection?: string;
 	spawn(
 		root: string,
 		options?: LSPSpawnOptions,
@@ -2921,19 +2934,28 @@ export const DenoServer: LSPServerInfo = {
 };
 
 /**
- * The settings pi-lens hands pyright and basedpyright.
+ * The settings pi-lens hands pyright and basedpyright, keyed by the sections
+ * those servers PULL (`python`, `python.analysis`, `pyright`).
  *
- * openFilesOnly: true — analyse only open files rather than the full workspace.
- * Avoids the 5–14 s cold-start on large projects caused by workspace-wide
- * analysis on startup. Deep type checking is still available via the standalone
- * pyright CLI runner that runs in parallel.
+ * pyright reads `initializationOptions` only for `disablePullDiagnostics`, so a
+ * bare `pythonPath` or `openFilesOnly` key was never applied (#4758). Each
+ * setting sits under the section pyright asks for, and the client's
+ * `workspace/configuration` handler answers that request from this tree; the
+ * same tree is the `workspace/didChangeConfiguration` payload.
+ *
+ * `diagnosticMode: "openFilesOnly"` analyses only open files rather than the
+ * full workspace. It avoids the 5–14 s cold-start on large projects caused by
+ * workspace-wide analysis on startup. Deep type checking is still available via
+ * the standalone pyright CLI runner that runs in parallel.
  */
 export function pyrightInitialization(
 	pythonPath?: string,
 ): Record<string, unknown> {
 	return {
-		...(pythonPath ? { pythonPath } : {}),
-		openFilesOnly: true,
+		python: {
+			...(pythonPath ? { pythonPath } : {}),
+			analysis: { diagnosticMode: "openFilesOnly" },
+		},
 	};
 }
 
@@ -3409,6 +3431,7 @@ export const RustServer: LSPServerInfo = {
 	// Measured (#3750): rust-analyzer answers an empty result for a detached file.
 	requiresProjectRoot: true,
 	name: "rust-analyzer",
+	settingsSection: "rust-analyzer",
 	executesProjectCode: true,
 	extensions: KIND_EXTENSIONS["rust"],
 	// No FileDirRoot fallback (#201): rust-analyzer is a heavy workspace server

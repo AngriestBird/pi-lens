@@ -372,6 +372,16 @@ const lspSpawnHeavyInclude = [
 	// launchLSP/getServerById marker, so the census cannot derive it (its known
 	// marker gap); membership is by hand.
 	"tests/clients/lsp/opengrep-offline-findings-4765.integration.test.ts",
+	// #4758: the production LSPService over a real stdio fake-server child that
+	// pulls `workspace/configuration` after `initialized`; waits on a real
+	// handshake and the answer's trace line, the same #1022/#2332 shape as its
+	// lane siblings.
+	"tests/clients/lsp/config-section-answers-4758.test.ts",
+	// #4758: a real pyright-langserver child (skipped, with a named reason, when
+	// none is installed) behind a real initialize handshake, then a first-
+	// diagnostics wait of up to 30 s per case — the #1022/#2332 shape of its
+	// lane siblings.
+	"tests/clients/lsp/pyright-settings-effect-4758.integration.test.ts",
 	// #4248: the unknown-trust project-local binary witness resolves a real
 	// PATH entry through launchLSP; keep that child-spawn boundary phased here.
 	"tests/clients/lsp/service-project-trust.test.ts",
