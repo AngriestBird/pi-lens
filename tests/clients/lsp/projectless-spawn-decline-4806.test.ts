@@ -28,7 +28,6 @@ import {
 } from "../../../clients/degradation-ledger.js";
 import {
 	CSharpServer,
-	FSharpServer,
 	OmniSharpServer,
 	declinesProjectlessRoot,
 	type LSPServerInfo,
@@ -261,13 +260,8 @@ describe("csharp-ls spawn needs a project file below its root (#4806)", () => {
 		expect(await declinesProjectlessRoot(CSharpServer, narrow)).toBe(false);
 	});
 
-	// F8: only the server whose abort is reproduced declares the trait.
-	it("is declared by csharp-ls alone among the .NET rows", () => {
-		expect(CSharpServer.spawnNeedsProjectFile).toBe(true);
-		expect(OmniSharpServer.spawnNeedsProjectFile).toBeUndefined();
-		expect(FSharpServer.spawnNeedsProjectFile).toBeUndefined();
-	});
-
+	// F8: OmniSharp (also `fallbackFor: "csharp"`) and FSAutocomplete keep their
+	// default, which is to spawn: only csharp-ls's abort is reproduced.
 	it("never declines a server that does not declare the trait", async () => {
 		const dir = tree("undeclared");
 		expect(await declinesProjectlessRoot(OmniSharpServer, dir)).toBe(false);
