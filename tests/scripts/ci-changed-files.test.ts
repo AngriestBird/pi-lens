@@ -99,6 +99,9 @@ describe("classifyChangedFiles: the strict docs allowlist", () => {
 		[["formal/file-locks/FileLock.tla"], true],
 		[["formal/x/y.cfg", "docs/a.md"], true],
 		[["scripts/check-tla-models.mjs"], true],
+		// #4714 F2: a table-only diff (a regeneration PR) changes the recorded
+		// state counts the ratchet compares, so it must run the model shards.
+		[["scripts/tla-model-costs.json"], true],
 		[[".github/workflows/ci.yml"], true],
 		[["clients/index.ts"], false],
 		[["docs/formal-notes.md"], false],

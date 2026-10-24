@@ -184,6 +184,8 @@ const SCRIPT_WRITERS: Record<string, string> = {
 const SCRIPT_NON_WRITERS: Record<string, string> = {
 	"scripts/capture-runner-fixtures.mjs":
 		"the `-f` is yamllint's format flag in a captured-fixture argv",
+	"scripts/check-ci-job-p90.mjs":
+		"imports only read helpers from ci-verdict; every gh call it makes is a GET",
 	"scripts/hooks/guard-bash.mjs":
 		"the hook parses git subcommands (`push`) to deny them; it runs none",
 	"scripts/lib/workflow-run-evidence.mjs":
