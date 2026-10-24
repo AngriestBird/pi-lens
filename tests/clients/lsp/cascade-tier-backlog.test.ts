@@ -32,13 +32,6 @@ vi.mock("../../../clients/cascade-logger.js", () => ({
 	logCascade,
 }));
 
-vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
-	...(await importActual<
-		typeof import("../../../clients/latency-logger.js")
-	>()),
-	logLatency: vi.fn(),
-}));
-
 const FILE = "C:/repo/neighbor.ts";
 
 /** Mirrors `MAX_OUTSTANDING_TOUCHES` in clients/lsp/cascade-tier.ts. */
