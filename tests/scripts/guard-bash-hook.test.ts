@@ -4243,6 +4243,61 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 				ambient: {},
 				rule: "tmpCheckout",
 			},
+			// A `-p`/`--tmpdir=` value or a template that is one variable the shell
+			// does not have expands to nothing. GNU mktemp reads an empty `-p ''` or
+			// `--tmpdir=` as its own `$TMPDIR`, else /tmp (coreutils mktemp.c), and a
+			// vanished template leaves none, which defaults there too. The prefix's
+			// `D` never reaches the word. The ambient TMPDIR is an absent directory,
+			// so macOS's /tmp symlink stays out of the verdict.
+			{
+				label: "-p $D, D only in the prefix: mktemp's TMPDIR under /tmp",
+				command: "D=/tmp/guard-bash-4057-lane mktemp -d -p $D x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "$D", D only in the prefix: mktemp\'s TMPDIR under /tmp',
+				command: 'D=/tmp/guard-bash-4057-lane mktemp -d -p "$D" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "-p ${D}, D only in the prefix: mktemp's TMPDIR under /tmp",
+				command: "D=/tmp/guard-bash-4057-lane mktemp -d -p ${D} x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "--tmpdir=$D, D only in the prefix: mktemp's TMPDIR under /tmp",
+				command: "D=/tmp/guard-bash-4057-lane mktemp -d --tmpdir=$D x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label:
+					"a $D template, D only in the prefix: mktemp's TMPDIR under /tmp",
+				command: "D=/tmp/guard-bash-4057-lane mktemp -d $D",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: 'an empty-assigned -p "$D" reads mktemp\'s TMPDIR under /tmp',
+				command: 'D=; mktemp -d -p "$D" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "-p \"$D\" follows mktemp's TMPDIR off /tmp, not the prefix's D",
+				command: 'D=/tmp/guard-bash-4057-lane mktemp -d -p "$D" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: null,
+			},
+			{
+				label: '-p "$D" with D unset reads the prefix\'s TMPDIR under /tmp',
+				command: `TMPDIR=${INLINE_TMP} mktemp -d -p "$D" x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
 			{
 				label: "no template lands in the prefix's TMPDIR under /tmp",
 				command: `TMPDIR=${INLINE_TMP} mktemp -d`,
@@ -4258,6 +4313,18 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 			{
 				label: "-t lands in the prefix's TMPDIR under /tmp",
 				command: `TMPDIR=${INLINE_TMP} mktemp -d -t x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "-t lands in the prefix's TMPDIR off /tmp",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d -t x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			{
+				label: "a bundled -dt lands in the prefix's TMPDIR under /tmp",
+				command: `TMPDIR=${INLINE_TMP} mktemp -dt x.XXXXXX`,
 				ambient: { TMPDIR: AMBIENT_OFF },
 				rule: "tmpCheckout",
 			},
