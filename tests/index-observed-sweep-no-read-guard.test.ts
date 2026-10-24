@@ -246,6 +246,10 @@ describe("#4535 slice 3: the settled sweep publishes what it finds", () => {
 	let prevDataDir: string | undefined;
 	const cleanups: Array<() => void> = [];
 	const primaries: Array<{ paths: string[]; drainMs: number }> = [];
+	// The publish is detached from the settle; the language server's primary
+	// send is its last observable step, so the case waits on that, not on a timer.
+	let primarySent: () => void = () => undefined;
+	let primaryReached: Promise<void>;
 
 	beforeEach(async () => {
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4535-sweep-"));
@@ -254,6 +258,9 @@ describe("#4535 slice 3: the settled sweep publishes what it finds", () => {
 		resetObservedMutationNet();
 		replayedProducerEntries.length = 0;
 		primaries.length = 0;
+		primaryReached = new Promise<void>((resolve) => {
+			primarySent = resolve;
+		});
 		// The case before this one left its session registered as the primary, so
 		// this case's session would be classified a concurrent secondary and its
 		// `agent_settled` skipped.
@@ -268,6 +275,7 @@ describe("#4535 slice 3: the settled sweep publishes what it finds", () => {
 				drainMs: number,
 			) => {
 				primaries.push({ paths: [...paths], drainMs });
+				primarySent();
 				return { sent: paths.length, drained: true };
 			},
 			resyncGitChangedFiles: async () => new Map<string, string>(),
@@ -315,13 +323,9 @@ describe("#4535 slice 3: the settled sweep publishes what it finds", () => {
 
 		fs.writeFileSync(filePath, "export const a = 2;\nexport const b = 3;\n");
 		await pi.emit("agent_settled", {}, ctx);
-		// The publish is detached from the settle: poll for the chain.
-		await vi.waitFor(
-			() =>
-				expect(
-					published.filter((c) => c.origin === "settled-sweep"),
-				).toHaveLength(1),
-			{ timeout: 5000 },
+		await primaryReached;
+		expect(published.filter((c) => c.origin === "settled-sweep")).toHaveLength(
+			1,
 		);
 
 		const [change] = published.filter((c) => c.origin === "settled-sweep");
@@ -335,13 +339,9 @@ describe("#4535 slice 3: the settled sweep publishes what it finds", () => {
 			paths: [key],
 		});
 		// The language server consumer sent the stale held document to a primary.
-		await vi.waitFor(
-			() =>
-				expect(primaries).toEqual([
-					{ paths: [key], drainMs: HOOK_WALL_BUDGET_MS.agent_settled },
-				]),
-			{ timeout: 5000 },
-		);
+		expect(primaries).toEqual([
+			{ paths: [key], drainMs: HOOK_WALL_BUDGET_MS.agent_settled },
+		]);
 		// The diagnostics cache refuses the entries that depend on the path.
 		expect(
 			workspaceFileCreatedAtFor(

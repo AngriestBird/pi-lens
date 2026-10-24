@@ -386,8 +386,8 @@ export const LSP_CONSUMER = "lsp";
  * drifted document itself, so a delivery back to the service would be the same
  * write twice.
  */
-const LSP_ORIGINS: readonly DiskChangeOrigin[] = DISK_CHANGE_ORIGINS.filter(
-	(origin) => origin !== "drift-heartbeat",
+const LSP_ORIGINS: readonly DiskChangeOrigin[] = DISK_CHANGE_ORIGINS.flatMap(
+	(origin) => (origin === "drift-heartbeat" ? [] : [origin]),
 );
 
 /**

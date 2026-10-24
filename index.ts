@@ -3506,6 +3506,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// `agent_settled` never waits on a server; the chain records its own
 				// failures (`publishSettledSweepDrift`).
 				void publishSettledSweepDrift(cwd, result).catch((publishErr) => {
+					// none: the chain records its own failures per chunk
+					// (`disk-change-recovered-drift-failed`) and the publisher never
+					// rejects, so only a programming error reaches here and `dbg` names it.
 					dbg(`observed_settled_sweep: publish failed: ${publishErr}`);
 				});
 			}

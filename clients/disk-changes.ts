@@ -467,12 +467,11 @@ async function fanOut(
 	const failed = new Set<string>();
 	// A snapshot, not a live iteration: a subscriber that unsubscribes or
 	// registers while this publish runs must not change who this one reaches.
-	const registered = Array.from(subscribers().values()).filter(
-		(subscriber) =>
-			subscriber.origins === undefined ||
-			subscriber.origins.includes(change.origin),
-	);
+	const registered = Array.from(subscribers().values());
 	for (const subscriber of registered) {
+		// Delivery is the declaration (see {@link DiskChangeSubscriber.origins}).
+		if (subscriber.origins && !subscriber.origins.includes(change.origin))
+			continue;
 		try {
 			results.set(subscriber.id, await subscriber.handler(change));
 		} catch (cause) {

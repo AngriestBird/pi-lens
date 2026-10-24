@@ -23,7 +23,7 @@ import {
 	diskChangeSubscriberOrigins,
 } from "../../clients/disk-changes.js";
 import { stripCommentsAndStrings } from "../support/session-state-scan.js";
-import { listSourceFiles } from "../support/sweep-kit.js";
+import { assertNonEmptyScan, listSourceFiles } from "../support/sweep-kit.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 
@@ -31,12 +31,14 @@ const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 const PRODUCTION_ROOTS = ["clients", "tools", "mcp", "scripts"] as const;
 
 function productionSources(): string[] {
-	return [
+	const sources = [
 		path.join(repoRoot, "index.ts"),
 		...PRODUCTION_ROOTS.flatMap((root) =>
 			listSourceFiles(path.join(repoRoot, root), { skipTests: true }),
 		),
 	];
+	assertNonEmptyScan("production source population", sources.length, 400);
+	return sources;
 }
 
 /**
