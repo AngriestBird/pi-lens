@@ -514,6 +514,10 @@ describe("tree census timeout (#4828)", () => {
 			'it("c", () => { execSync("git ls-files"); });',
 		],
 		[
+			"a recursive directory walk helper",
+			'function walkFiles(dir) {\n\tconst out = [];\n\tfunction walk(current) {\n\t\tfor (const entry of readdirSync(current)) walk(entry);\n\t}\n\twalk(dir);\n\treturn out;\n}\nit("c", () => { walkFiles(ROOT); });',
+		],
+		[
 			"a git ls-files spawn",
 			'it("c", () => { gitExecFileSync("git", ["ls-files", "-z"]); });',
 		],
@@ -548,6 +552,10 @@ describe("tree census timeout (#4828)", () => {
 		[
 			"a nested helper call inside a budgeted case",
 			'it("c", () => { run(x, () => listSourceFiles(ROOT)); }, TREE_WALK_TIMEOUT_MS);',
+		],
+		[
+			"a one-directory listing helper",
+			'function listDir(dir) {\n\treturn readdirSync(dir);\n}\nit("c", () => { listDir(ROOT); });',
 		],
 		[
 			"an ls-files literal inside an expectation",
