@@ -1,0 +1,225 @@
+{
+  "source": "Synthetic recording shaped like gh api repos/{o}/{r}/actions/runs/{id}/jobs; durations are chosen so each job sits at a stated fraction of its ci.yml timeout-minutes cap.",
+  "runs": [
+    {
+      "id": 1000,
+      "created_at": "2026-10-18T10:00:00Z",
+      "head_branch": "master",
+      "event": "push",
+      "jobs": [
+        {
+          "name": "Lint & type-check",
+          "started_at": "2026-10-18T10:00:00Z",
+          "completed_at": "2026-10-18T10:06:40Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 1/2)",
+          "started_at": "2026-10-18T10:00:00Z",
+          "completed_at": "2026-10-18T10:15:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 2/2)",
+          "started_at": "2026-10-18T10:00:00Z",
+          "completed_at": "2026-10-18T10:16:40Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests",
+          "started_at": "2026-10-18T10:00:00Z",
+          "completed_at": "2026-10-18T10:00:12Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests Windows",
+          "started_at": "2026-10-18T10:00:00Z",
+          "completed_at": "2026-10-18T10:25:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Changelog fragment (fast-fail)",
+          "started_at": "2026-10-18T10:00:00Z",
+          "completed_at": "2026-10-18T10:00:05Z",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 1001,
+      "created_at": "2026-10-19T10:00:00Z",
+      "head_branch": "master",
+      "event": "push",
+      "jobs": [
+        {
+          "name": "Lint & type-check",
+          "started_at": "2026-10-19T10:00:00Z",
+          "completed_at": "2026-10-19T10:07:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 1/2)",
+          "started_at": "2026-10-19T10:00:00Z",
+          "completed_at": "2026-10-19T10:16:40Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 2/2)",
+          "started_at": "2026-10-19T10:00:00Z",
+          "completed_at": "2026-10-19T10:17:30Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests",
+          "started_at": "2026-10-19T10:00:00Z",
+          "completed_at": "2026-10-19T10:00:12Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests Windows",
+          "started_at": "2026-10-19T10:00:00Z",
+          "completed_at": "2026-10-19T10:25:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Changelog fragment (fast-fail)",
+          "started_at": "2026-10-19T10:00:00Z",
+          "completed_at": "2026-10-19T10:00:05Z",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 1002,
+      "created_at": "2026-10-20T10:00:00Z",
+      "head_branch": "master",
+      "event": "push",
+      "jobs": [
+        {
+          "name": "Lint & type-check",
+          "started_at": "2026-10-20T10:00:00Z",
+          "completed_at": "2026-10-20T10:07:20Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 1/2)",
+          "started_at": "2026-10-20T10:00:00Z",
+          "completed_at": "2026-10-20T10:18:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 2/2)",
+          "started_at": "2026-10-20T10:00:00Z",
+          "completed_at": "2026-10-20T10:18:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests",
+          "started_at": "2026-10-20T10:00:00Z",
+          "completed_at": "2026-10-20T10:00:13Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests Windows",
+          "started_at": "2026-10-20T10:00:00Z",
+          "completed_at": "2026-10-20T10:25:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Changelog fragment (fast-fail)",
+          "started_at": "2026-10-20T10:00:00Z",
+          "completed_at": "2026-10-20T10:00:06Z",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 1003,
+      "created_at": "2026-10-21T10:00:00Z",
+      "head_branch": "master",
+      "event": "push",
+      "jobs": [
+        {
+          "name": "Lint & type-check",
+          "started_at": "2026-10-21T10:00:00Z",
+          "completed_at": "2026-10-21T10:07:30Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 1/2)",
+          "started_at": "2026-10-21T10:00:00Z",
+          "completed_at": "2026-10-21T10:18:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 2/2)",
+          "started_at": "2026-10-21T10:00:00Z",
+          "completed_at": "2026-10-21T10:18:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests",
+          "started_at": "2026-10-21T10:00:00Z",
+          "completed_at": "2026-10-21T10:00:12Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests Windows",
+          "started_at": "2026-10-21T10:00:00Z",
+          "completed_at": "2026-10-21T10:25:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Changelog fragment (fast-fail)",
+          "started_at": "2026-10-21T10:00:00Z",
+          "completed_at": "2026-10-21T10:00:05Z",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 1004,
+      "created_at": "2026-10-22T10:00:00Z",
+      "head_branch": "master",
+      "event": "push",
+      "jobs": [
+        {
+          "name": "Lint & type-check",
+          "started_at": "2026-10-22T10:00:00Z",
+          "completed_at": "2026-10-22T10:07:30Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 1/2)",
+          "started_at": "2026-10-22T10:00:00Z",
+          "completed_at": "2026-10-22T10:18:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests (shard 2/2)",
+          "started_at": "2026-10-22T10:00:00Z",
+          "completed_at": "2026-10-22T10:18:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests",
+          "started_at": "2026-10-22T10:00:00Z",
+          "completed_at": "2026-10-22T10:00:12Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests Windows",
+          "started_at": "2026-10-22T10:00:00Z",
+          "completed_at": "2026-10-22T10:25:00Z",
+          "conclusion": "success"
+        },
+        {
+          "name": "Changelog fragment (fast-fail)",
+          "started_at": "2026-10-22T10:00:00Z",
+          "completed_at": "2026-10-22T10:00:05Z",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ]
+}
