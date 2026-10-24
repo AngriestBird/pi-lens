@@ -8,6 +8,7 @@ import { formatCodeQualityWarningsAdvisory } from "../../clients/code-quality-wa
 import {
 	TOOL_REGISTRY,
 	resolveLensToolName,
+	translateGuidanceToolNames,
 } from "../../clients/tool-config.js";
 import { generatedSkipNotice } from "../../clients/lens-engine.js";
 import { CacheManager } from "../../clients/cache-manager.js";
@@ -299,6 +300,24 @@ describe("#2535 adapter-aware agent tool names", () => {
 			expect(piConsumed?.messages[0].content).toContain(stored);
 		} finally {
 			env.cleanup();
+		}
+	});
+
+	// #4682 (maintainer decision 2026-10-24, the #2535 F3 rule): the orientation
+	// names only tools the MCP host can call. Recurrence: ast_grep_outline and
+	// lens_diagnostic_mark have no mcpName, and the one stored record named them
+	// to MCP agents ("Situational (call directly): ..., ast_grep_outline, ...").
+	it("MCP-translated session-start guidance names no pi-only tool (#4682)", () => {
+		const mcp = translateGuidanceToolNames(
+			SESSION_START_GUIDANCE.join("\n"),
+			"mcp",
+		);
+		for (const entry of TOOL_REGISTRY) {
+			if (typeof entry.piName !== "string") continue;
+			if (typeof entry.mcpName === "string") continue;
+			expect(mcp, entry.piName).not.toMatch(
+				new RegExp(`(?<![A-Za-z0-9_])${entry.piName}(?![A-Za-z0-9_])`),
+			);
 		}
 	});
 
