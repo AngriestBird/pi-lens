@@ -14,6 +14,9 @@ The vendored file wins on any difference from this digest.
 
 - Premise first: reproduce the defect through the production call path before
   the fix ([§1 Building](docs/engineering-principles.md#1-building)).
+- Speculative robustness needs buy-in: no new mechanism for an unreproduced
+  race or edge case without the trigger path, evidence, cost and a maintainer
+  decision ([§1 Building](docs/engineering-principles.md#1-building)).
 - Climb the minimalism ladder: reuse an existing seam before adding a line
   ([§1 Building](docs/engineering-principles.md#1-building)).
 - Net-count rule: a new shared helper deletes a same-shape sibling in the same
@@ -503,7 +506,7 @@ file-scoped worklist and receives no project-wide scanner output.
     `tests/clients/prompt-cache-prefix-writers.test.ts` (one tier-2 cell per
     writer: registration, session-start plan, activation, injection).
 
-83. **Tool-state prose blind to a posture:** model-facing text (orientation,
+84. **Tool-state prose blind to a posture:** model-facing text (orientation,
     tool descriptions, nudges) that names a tool as active, inactive, available
     or needing activation must hold under every posture the renderer cannot see:
     each `tools.<name>.enabled` value, each `tools.lazy` value (true, false,
@@ -635,6 +638,19 @@ file-scoped worklist and receives no project-wide scanner output.
     subject can write in. Then show that each root gets its own verdict, or that
     one root provably covers them. Census: not countable yet. Instance and
     dates: `HISTORY.md`.
+
+83. **Rule re-derived beside its owner:** a consumer rebuilds a rule that a
+    shared seam already owns (a marker list, a glob-to-RegExp matcher, a case
+    fold) instead of calling the owner, so the copy drifts from it on
+    spelling, anchoring, case and file-versus-directory. The copy is always
+    plausible beside the owner, and a fix of one consumer leaves its siblings.
+    Screen: before writing a marker, pattern, bound or normaliser, grep the
+    tree for its literal and for the matcher that applies it; does a module
+    already own it, and does this caller route through that module? Then list
+    the other callers that hold their own copy and fold them or say why not.
+    Census: not countable yet. Enforcer: none: judgment-only. A scan cannot
+    tell a copied rule from a coincidental literal without reading what the
+    value feeds. Instances and dates: `HISTORY.md`.
 
 </important>
 
@@ -970,6 +986,12 @@ file-scoped worklist and receives no project-wide scanner output.
 - Use `PathKeyedMap` for path-keyed memory. Choose
   `normalizeEphemeralMapKey` for process-local hot indexes and `normalizeMapKey`
   for long-lived shared state. Preserve original display paths separately.
+- Resolve a path's identity once, where it enters (a tool argument, a write
+  event, `createDispatchContext`, `FormatService`), and hand it down. The
+  widget, delta-baseline and finding stores key a path that is already an
+  identity: they keep the syntactic key and resolve nothing per write
+  (maintainer decision 2026-10-24; shape 1). A walk or key derived from a caller
+  spelling instead answers for the link's project, not the file's.
 - A path a host tool was given resolves through `resolveHostToolPath` (the
   base expansion) or `resolveToolCallFilePath` (base plus pi's variant
   ladder), never a bare `path.resolve(base, raw)`; see shape 74.

@@ -1109,7 +1109,7 @@ describe("ast_grep_search tool", () => {
 		});
 	});
 
-	// #4682 shape 83 / PR #4809 F3: the no-match hint recommends sibling tools,
+	// #4682 shape 84 / PR #4809 F3: the no-match hint recommends sibling tools,
 	// so it must name what the delivery host can actually call. Recurrence: an
 	// MCP caller was told to use symbol_search, module_report, lsp_navigation and
 	// ast_grep_search — none of which MCP has a name for (real-entry probe: four

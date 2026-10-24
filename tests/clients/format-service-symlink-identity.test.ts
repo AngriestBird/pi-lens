@@ -27,13 +27,14 @@ import { FormatService } from "../../clients/format-service.js";
 import { clearFormatterRuntimeState } from "../../clients/formatters.js";
 import {
 	getPathIdentityFallbacks,
+	normalizeMapKey,
 	resetPathIdentityFallbacks,
 } from "../../clients/path-utils.js";
 import { setProjectTrustState } from "../../clients/project-trust.js";
 import {
 	clearWidgetState,
 	getFileDiagnosticSummaries,
-	recordFormatter,
+	recordDiagnostics,
 } from "../../clients/widget-state.js";
 import {
 	getTmpRootRegistry,
@@ -361,15 +362,19 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 		}
 	});
 
-	// #4689 item 3 / #4675 F2: the widget keys a row by its spelling, so the
-	// identity-keyed formatter record must not open a second row for the same
-	// inode. Red on 1ce5d1480: the row is keyed by the target (`CLAUDE.md`), and
-	// the sibling record under the link spelling adds a second row.
-	it("keys the widget row by the caller's spelling, one row per inode", async () => {
+	// #4689 item 3 / #4675 F2: the widget keys a row syntactically (#1020), so
+	// every writer hands it the file's path identity. The pipeline records its
+	// diagnostics under `normalizeMapKey(filePath)`; the formatter row for the
+	// same file must land on that key, not on the link spelling the agent typed.
+	// RECURRENCE GUARDED: `recordFormatter(path.resolve(filePath))` kept the
+	// spelling, so a formatted link left a second, never-finished widget row
+	// beside the pipeline's (one file, two records, one of them pending).
+	it("records the formatter row under the identity, one row per inode", async () => {
 		const fx = layout();
 		try {
+			const target = path.join(fx.session, "CLAUDE.md");
 			const link = path.join(fx.session, "AGENTS.md");
-			fs.writeFileSync(path.join(fx.session, "CLAUDE.md"), "# title\n");
+			fs.writeFileSync(target, "# title\n");
 			fs.symlinkSync("CLAUDE.md", link);
 			installPrettierDouble();
 			clearWidgetState();
@@ -377,10 +382,11 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 			const service = new FormatService("identity-widget", true);
 			service.recordRead(link);
 			await service.formatFile(link, { sessionRoot: fx.session });
-			recordFormatter(link, "prettier", true, true, "formatted");
+			// The pipeline's writer, at its entry (`analysePipeline`'s widget key).
+			recordDiagnostics(normalizeMapKey(link), []);
 
 			expect(getFileDiagnosticSummaries().map((s) => s.filePath)).toEqual([
-				link,
+				target,
 			]);
 		} finally {
 			fx.cleanup();

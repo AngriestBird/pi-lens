@@ -306,6 +306,65 @@ describe("#4689: a clean write reads clean under any spelling of the session or 
 	}
 });
 
+describe("#4689: a blocker raised through a link clears when the real file is rewritten clean", () => {
+	// RECURRENCE GUARDED: audit case b (stale shadow). A write through
+	// `src/link.ts` and a clean write to `src/real.ts` are one file; the
+	// widget kept one record per spelling, so the link's blocker stayed
+	// pending and `lens_diagnostics` told the model a fixed file was still
+	// broken. Both orders are driven: the link may be the spelling that
+	// raised, or the one that cleared. Green on the base, since #4712 r2 made
+	// the pipeline write the identity: this is the decision-2026-10-24 witness
+	// (identity at the entry, syntactic key in the store), and it reds when the
+	// pipeline's widget key is the spelling again.
+	for (const [name, first, second] of [
+		[
+			"raise through the link, clear through the real path",
+			"src/link.ts",
+			"src/real.ts",
+		],
+		[
+			"raise through the real path, clear through the link",
+			"src/real.ts",
+			"src/link.ts",
+		],
+	] as const) {
+		it(`${name}: lens_diagnostics reads clean`, async (ctx) => {
+			const fx = family(`stale-${first.replace(/\W/g, "-")}`);
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd: fx.repo,
+				flags: new Map(GUARDED_FLAGS),
+				responses: [
+					step(readTarget(fx.realFile), "reading"),
+					step(writeTarget(first, BLOCKING_FILE), "raising"),
+					step(writeTarget(second, CLEAN_FILE), "clearing"),
+					step(fauxToolCall("lens_diagnostics", { mode: "all" }), "checking"),
+					step(commitAttempt(), "committing"),
+					endTurn(),
+				],
+			});
+			try {
+				await handle.prompt("go");
+				const last = handle.requests.at(-1) ?? [];
+				const [raised, cleared] = toolResults(last, "write");
+				const [commit] = toolResults(last, "bash");
+				expect(commit?.text ?? "").not.toContain(GATE_BLOCK);
+				expect(commit?.text ?? "").toContain(RAN_MARKER);
+				expect(raised?.text ?? "").toContain("STOP");
+				expect(cleared?.text ?? "").not.toContain("STOP");
+				const [verdict] = toolResults(last, "lens_diagnostics");
+				expect(verdict?.text ?? "").toContain(
+					"No issues across 1 file diagnosed this session",
+				);
+				expect(verdict?.text ?? "").not.toContain("pending file");
+			} finally {
+				await handle.dispose();
+			}
+		});
+	}
+});
+
 describe("#4689: lens_diagnostics names a file relative to the session root under any spelling of it", () => {
 	// RECURRENCE GUARDED: the widget store keys a file by its path identity
 	// while the session root stays the spelling the session started with, and

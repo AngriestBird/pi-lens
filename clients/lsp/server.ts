@@ -14,6 +14,7 @@ import path from "node:path";
 import {
 	getGlobalPiLensDir,
 	getProjectIgnoreGlobs,
+	isExcludedDirName,
 	isPathIgnoredByProject,
 } from "../file-utils.js";
 import {
@@ -66,6 +67,7 @@ import {
 } from "../zizmor-config.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
+import { readDirEntriesSafeAsync } from "../source-walker.js";
 import { findLocalSgconfig, resolveBaselineSgconfig } from "../sgconfig.js";
 import { findLocalTyposConfig } from "../typos-config.js";
 import { resolvePackagePath } from "../package-root.js";
@@ -152,10 +154,24 @@ export type LspRootFallback = {
 	requiresProjectRoot: boolean;
 	cause: "failed" | "unselected" | "none";
 	marker?: string;
+	/**
+	 * #4806: set for a server whose spawn is declined by a bounded search below
+	 * its root ({@link declinesProjectlessRoot}); the directory bound that
+	 * search stops at, so a reason about an absence can name the limit.
+	 */
+	searchBound?: number;
 };
 
-/** The reason text for a root fallback, worded by what actually happened. */
-export function describeRootFallback(fallback: LspRootFallback): string {
+/**
+ * The reason text for a root fallback, worded by what actually happened.
+ * `hosted` is false when no client was acquired for the file (#4806: a
+ * `spawnNeedsProjectFile` server declined at a project-less root), so the
+ * "started at the file's directory" clause would be false.
+ */
+export function describeRootFallback(
+	fallback: LspRootFallback,
+	hosted = true,
+): string {
 	const tail = "so pi-lens cannot confirm the server analysed the file";
 	if (fallback.cause === "failed") {
 		return `${fallback.serverName}: resolving the project root for this file failed, ${tail}`;
@@ -163,13 +179,26 @@ export function describeRootFallback(fallback: LspRootFallback): string {
 	if (fallback.cause === "unselected") {
 		return `${fallback.serverName}: found ${fallback.marker} for this file but pi-lens did not select it as the project root (a test-fixture or git-ignored directory is never used as one), ${tail}`;
 	}
-	return `${fallback.serverName}: no project root found for this file (looked for ${fallback.rootMarkers.join(" / ")}); the server was started at the file's directory and may not have analysed it`;
+	// #4806: only a declined spawn (`!hosted`) rests on the bounded search.
+	const bound =
+		!hosted && fallback.searchBound !== undefined
+			? `, including a bounded search of ${fallback.searchBound} directories below it`
+			: "";
+	const none = `${fallback.serverName}: no project root found for this file (looked for ${fallback.rootMarkers.join(" / ")}${bound})`;
+	return hosted
+		? `${none}; the server was started at the file's directory and may not have analysed it`
+		: none;
 }
 
 /** Resolve a server identity cwd through the shared tool-cwd seam. */
 export async function resolveLspServerCwd(
 	server: Pick<LSPServerInfo, "id" | "root" | "rootMarkers"> &
-		Partial<Pick<LSPServerInfo, "name" | "requiresProjectRoot">>,
+		Partial<
+			Pick<
+				LSPServerInfo,
+				"name" | "requiresProjectRoot" | "spawnNeedsProjectFile"
+			>
+		>,
 	filePath: string,
 	sessionCwd: string,
 	onRootFailure?: (reason: string) => void,
@@ -240,6 +269,9 @@ export async function resolveLspServerCwd(
 						? "unselected"
 						: "none",
 				...(refusedMarker !== undefined && { marker: refusedMarker }),
+				...(server.spawnNeedsProjectFile === true && {
+					searchBound: PROJECT_FILE_SEARCH_MAX_DIRS,
+				}),
 			});
 		}
 		return fallbackCwd?.cwd;
@@ -657,6 +689,16 @@ export interface LSPServerInfo {
 	 * documented behaviour.
 	 */
 	requiresProjectRoot?: boolean;
+	/**
+	 * #4806: the server's own process aborts when its cwd has none of its root
+	 * markers anywhere below it (csharp-ls throws "no .csproj/.fsproj or sln
+	 * files found" on a thread-pool thread and the .NET runtime raises SIGABRT).
+	 * Set, the registry declines the spawn before any process starts when
+	 * {@link declinesProjectlessRoot} finds no marker in a bounded search of the
+	 * root's subtree. Omitted (the default for every other server): spawn.
+	 * `requiresProjectRoot` only words an empty answer; this trait gates a spawn.
+	 */
+	spawnNeedsProjectFile?: boolean;
 	/** Simple command name whose absence disables spawn attempts briefly across roots. */
 	availabilityKey?: string;
 	/** Simple binary name whose project-local install must be refused for adopted roots. */
@@ -701,6 +743,21 @@ export interface LSPServerInfo {
 	 * Cascade can read its passive snapshot instead of actively touching neighbors.
 	 */
 	autoPropagateDiagnostics?: boolean;
+	/**
+	 * The configuration section (one name) that this server's `initialization`
+	 * blob IS the contents of, for a server that PULLS its settings under that
+	 * name. rust-analyzer applies `initializationOptions` flat at startup and
+	 * then pulls the `rust-analyzer` section; with no mapping that pull is
+	 * answered `{}` (#4758), and an empty client config is a no-op it skips, so
+	 * today the mapping only makes the pull answer repeat what startup already
+	 * applied. The effect of the pull answer is unmeasured (#4512). The client
+	 * answers the section from the blob (user `serverOverrides` included) and
+	 * leaves `initializationOptions` unwrapped. A server whose settings already
+	 * sit under their section names inside the blob (pyright:
+	 * {@link pyrightInitialization}) omits it. It sits on the server, not the
+	 * spawn result, so a user `command` override that replaces `spawn` keeps it.
+	 */
+	settingsSection?: string;
 	spawn(
 		root: string,
 		options?: LSPSpawnOptions,
@@ -1780,6 +1837,48 @@ export function declinesLooseFileRoot(
 		realpathOrResolve(root),
 		realpathOrResolve(os.homedir()),
 	);
+}
+
+/** Directories {@link declinesProjectlessRoot} reads before it gives up. */
+const PROJECT_FILE_SEARCH_MAX_DIRS = 128;
+
+/**
+ * #4806: does this server's spawn policy refuse the resolved `root` because no
+ * project file exists at it or below it? csharp-ls searches its cwd
+ * recursively (`Directory.GetFiles(dir, "*.csproj", SearchOption.AllDirectories)`)
+ * and aborts only when that finds nothing, so this mirrors the recursion
+ * rather than reading the top level alone. The marker rule is the one root
+ * resolution uses (`markerExists` over the server's own `rootMarkers`).
+ *
+ * Bounded: a breadth-first walk (nearest directories first) reads at most
+ * {@link PROJECT_FILE_SEARCH_MAX_DIRS} directories, skipping the excluded
+ * directory names (`isExcludedDirName`). A project deeper than that bound, or
+ * only under an excluded name, reads as absent: a decline, never a spawn,
+ * because the spawn is the process abort. The cost is up to
+ * `1 + rootMarkers.length` directory reads per directory visited, paid only
+ * when a spawn is attempted for a root with no project at its top level.
+ */
+export async function declinesProjectlessRoot(
+	server: Pick<LSPServerInfo, "spawnNeedsProjectFile" | "root" | "rootMarkers">,
+	root: string,
+): Promise<boolean> {
+	if (server.spawnNeedsProjectFile !== true) return false;
+	const markers = server.rootMarkers ?? server.root.rootMarkers ?? [];
+	const queue = [root];
+	for (let visited = 0; visited < PROJECT_FILE_SEARCH_MAX_DIRS; visited++) {
+		const dir = queue.shift();
+		if (dir === undefined) break;
+		for (const marker of markers) {
+			if (await markerExists(dir, marker)) return false;
+		}
+		for (const entry of await readDirEntriesSafeAsync(dir)) {
+			if (visited + queue.length + 1 >= PROJECT_FILE_SEARCH_MAX_DIRS) break;
+			if (entry.isDirectory() && !isExcludedDirName(entry.name)) {
+				queue.push(path.join(dir, entry.name));
+			}
+		}
+	}
+	return true;
 }
 
 export function RootWithFallback(
@@ -2920,6 +3019,32 @@ export const DenoServer: LSPServerInfo = {
 	},
 };
 
+/**
+ * The settings pi-lens hands pyright and basedpyright, keyed by the sections
+ * those servers PULL (`python`, `python.analysis`, `pyright`).
+ *
+ * pyright reads `initializationOptions` only for `disablePullDiagnostics`, so a
+ * bare `pythonPath` or `openFilesOnly` key was never applied (#4758). Each
+ * setting sits under the section pyright asks for, and the client's
+ * `workspace/configuration` handler answers that request from this tree; the
+ * same tree is the `workspace/didChangeConfiguration` payload.
+ *
+ * `diagnosticMode: "openFilesOnly"` analyses only open files rather than the
+ * full workspace. It avoids the 5–14 s cold-start on large projects caused by
+ * workspace-wide analysis on startup. Deep type checking is still available via
+ * the standalone pyright CLI runner that runs in parallel.
+ */
+export function pyrightInitialization(
+	pythonPath?: string,
+): Record<string, unknown> {
+	return {
+		python: {
+			...(pythonPath ? { pythonPath } : {}),
+			analysis: { diagnosticMode: "openFilesOnly" },
+		},
+	};
+}
+
 export const PythonServer: LSPServerInfo = {
 	id: "python",
 	idleEviction: "transparent",
@@ -2942,15 +3067,6 @@ export const PythonServer: LSPServerInfo = {
 		const toolEnvironment = await getToolEnvironment();
 		const env = augmentPythonEnvironment(toolEnvironment, pythonEnvironment);
 		let source: "direct" | "managed" | "package-manager" = "direct";
-
-		// openFilesOnly: true — analyse only open files rather than the full workspace.
-		// Avoids the 5–14 s cold-start on large projects caused by workspace-wide
-		// analysis on startup. Deep type checking is still available via the standalone
-		// pyright CLI runner that runs in parallel.
-		const pyrightInit = (pythonPath?: string): Record<string, unknown> => ({
-			...(pythonPath ? { pythonPath } : {}),
-			openFilesOnly: true,
-		});
 
 		// Project ownership outranks checker preference: exhaust explicit project
 		// candidates before a bare command can resolve to pi-lens's managed bin or
@@ -2980,7 +3096,7 @@ export const PythonServer: LSPServerInfo = {
 			return {
 				process: projectPyright.process,
 				source: projectPyright.source,
-				initialization: pyrightInit(pythonEnvironment?.pythonPath),
+				initialization: pyrightInitialization(pythonEnvironment?.pythonPath),
 			};
 		}
 
@@ -3017,7 +3133,7 @@ export const PythonServer: LSPServerInfo = {
 			return {
 				process: pathPyright.process,
 				source: pathPyright.source,
-				initialization: pyrightInit(pythonEnvironment?.pythonPath),
+				initialization: pyrightInitialization(pythonEnvironment?.pythonPath),
 			};
 		}
 
@@ -3061,7 +3177,7 @@ export const PythonServer: LSPServerInfo = {
 		return {
 			process: resolved.process,
 			source,
-			initialization: pyrightInit(pythonEnvironment?.pythonPath),
+			initialization: pyrightInitialization(pythonEnvironment?.pythonPath),
 		};
 	},
 };
@@ -3401,6 +3517,7 @@ export const RustServer: LSPServerInfo = {
 	// Measured (#3750): rust-analyzer answers an empty result for a detached file.
 	requiresProjectRoot: true,
 	name: "rust-analyzer",
+	settingsSection: "rust-analyzer",
 	executesProjectCode: true,
 	extensions: KIND_EXTENSIONS["rust"],
 	// No FileDirRoot fallback (#201): rust-analyzer is a heavy workspace server
@@ -3617,6 +3734,8 @@ export const CSharpServer: LSPServerInfo = {
 	role: "language",
 	// Documented (#3750): csharp-ls needs a solution or project.
 	requiresProjectRoot: true,
+	// Measured (#4806): with none below its cwd csharp-ls aborts the process.
+	spawnNeedsProjectFile: true,
 	name: "csharp-ls",
 	executesProjectCode: true,
 	extensions: KIND_EXTENSIONS["csharp"],

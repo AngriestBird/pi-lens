@@ -1803,7 +1803,7 @@ async function callTool(
 			name === "pilens_ast_grep_search"
 				? astGrepSearchTool
 				: astGrepReplaceTool;
-		// #4682 shape 83 (F3): the search tool's no-match hint recommends sibling
+		// #4682 shape 84 (F3): the search tool's no-match hint recommends sibling
 		// tools, so the route tells it which host renders the answer. The replace
 		// tool consumes no host yet: its own NOT APPLIED line is a residual.
 		const ctx = {

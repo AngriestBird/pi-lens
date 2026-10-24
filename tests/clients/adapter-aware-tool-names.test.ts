@@ -365,7 +365,7 @@ describe("#2535 adapter-aware agent tool names", () => {
 		expect(kept).toContain("Use pilens_ast_grep_search dump=true");
 	});
 
-	// #4682 shape 83 (F3): the MCP ast-grep route must tell the tool which host
+	// #4682 shape 84 (F3): the MCP ast-grep route must tell the tool which host
 	// renders its answer. A runtime probe of the route costs a real ast-grep
 	// binary, so this pins the call shape the same way the isLensGuardEnabled
 	// pin in tests/mcp/server.smoke.test.ts does; tests/tools/ast-grep-search

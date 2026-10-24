@@ -910,7 +910,7 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 				const output = groupByFile
 					? formatGroupedByFile(page)
 					: astGrepClient.formatMatches(page, false, false, PAGE_SIZE);
-				// #4682 shape 83 (F3): the no-match hint recommends sibling tools, so it
+				// #4682 shape 84 (F3): the no-match hint recommends sibling tools, so it
 				// follows the delivery host. Only the hint is translated, never the match
 				// text: a match can quote source that spells a tool name.
 				const rawHint =
