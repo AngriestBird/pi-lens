@@ -2016,7 +2016,8 @@ function classifyNpm(cmd, args, cwd, env) {
  *
  * The `$TMPDIR` sentinel (no template, `-t` with a relative template, bare
  * `--tmpdir`) is GNU mktemp's own env read, so it expands with the inline
- * `TMPDIR=` prefix. Every word the command typed (a template, a
+ * `TMPDIR=` prefix, and an empty TMPDIR falls back to /tmp as an unset one
+ * does. Every word the command typed (a template, a
  * `-p`/`--tmpdir=` value) was expanded by bash before that prefix applied, so
  * it expands without it (#4057).
  *
