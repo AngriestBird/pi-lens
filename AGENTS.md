@@ -243,6 +243,7 @@ ADR: docs/adr/0006-derived-state-benchmark-first.md
 ADR: docs/adr/0007-end-to-end-witness-per-seam-slice.md
 ADR: docs/adr/0008-turn-end-lane-interface.md
 ADR: docs/adr/0009-reported-path-attribution.md
+ADR: docs/adr/0010-trace-validation-session-lifecycle.md
 
 ## Recurring defect shapes
 

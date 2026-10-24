@@ -23,7 +23,7 @@
  * `--rows` is a JSON array (or NDJSON) of latency rows; `--events` is a JSON
  * array of already-extracted events (a hand-written negative case).
  * Exit 0 when every trace meets --expect, 1 when one does not, 2 on a usage
- * error or an unchecked trace.
+ * error, unreadable input, no traces at all, or an unchecked trace.
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -41,15 +41,26 @@ const MODEL = "SessionLifecycle";
 
 const START_REASONS = new Set(["new", "resume", "fork", "reload"]);
 const RETIRE_REASONS = new Set(["new", "resume", "fork", "reload", "quit"]);
+/** `StartSource` of clients/session-scope.ts: the hand-off sources a start row may carry. */
+const HANDOFF_SOURCES = new Set([
+	"slot",
+	"own-sidecar",
+	"parent-sidecar",
+	"none",
+]);
 
 /**
  * Rows -> traces. One trace per process id. Admitted forms, everything else
  * is a `rejected` entry that refuses the trace:
- *   end:superseded   a scope that never started (a coordinator's construction
+ *   end:superseded   a scope with no start row (a coordinator's construction
  *                    scope); admitted only when no start of that scope exists.
  *   start:startup    the process's first primary start; it is the model's Init.
  *   start:<r>        a later primary start, r in new|resume|fork|reload.
  *   shutdown:<r>     the live primary's shutdown, r in new|resume|fork|reload|quit.
+ * A start row must carry a safe-integer `parentScopeId` that names a started
+ * scope or a construction scope already seen as `end:superseded`, and a
+ * `handoffSource` from HANDOFF_SOURCES; an absent or unknown value is refused,
+ * never coerced.
  * Not admitted (the model needs state the rows do not carry): tree, demote,
  * secondary scopes, an end of a started scope, a startup after the first.
  *
@@ -74,6 +85,8 @@ function extractOne(pid, rows) {
 	const ticket = new Map();
 	/** model ticket -> sessionId */
 	const sessionOf = [];
+	/** scope ids seen as `end:superseded` with no start: construction scopes */
+	const constructed = new Set();
 	const reject = (row, why) =>
 		rejected.push(
 			`${row.metadata?.transition}:${row.metadata?.reason} scope ${row.metadata?.scopeId}: ${why}`,
@@ -86,6 +99,7 @@ function extractOne(pid, rows) {
 		} else if (kind === "end:superseded") {
 			if (ticket.has(m.scopeId))
 				reject(row, "a started scope ended without a shutdown");
+			else constructed.add(m.scopeId);
 		} else if (m.transition === "start") {
 			if (typeof m.sessionId !== "string" || m.branchEpoch !== 0)
 				reject(row, "start without a session id, or after a branch move");
@@ -97,6 +111,16 @@ function extractOne(pid, rows) {
 				}
 			} else if (!START_REASONS.has(m.reason)) {
 				reject(row, "start reason is not modelled");
+			} else if (!HANDOFF_SOURCES.has(m.handoffSource)) {
+				reject(row, "handoffSource is absent or not a known source");
+			} else if (
+				!Number.isSafeInteger(m.parentScopeId) ||
+				!(ticket.has(m.parentScopeId) || constructed.has(m.parentScopeId))
+			) {
+				reject(
+					row,
+					"parentScopeId is not a started scope or a seen construction scope",
+				);
 			} else {
 				const scope = ticket.size + 1;
 				ticket.set(m.scopeId, scope);
@@ -107,7 +131,8 @@ function extractOne(pid, rows) {
 					scope,
 					role: "primary",
 					// parentScopeId is coordinator-local: a re-created coordinator's
-					// parent is its construction scope, which has no ticket (0).
+					// parent is its construction scope (checked above), which has no
+					// ticket (0).
 					parent: ticket.get(m.parentScopeId) ?? 0,
 					src: m.handoffSource === "slot" ? "slot" : "other",
 					sameAs: sessionOf
@@ -336,6 +361,43 @@ export function readJsonRecords(text) {
 		.map((line) => JSON.parse(line));
 }
 
+/**
+ * Text -> traces, or an Error naming the file. A population of zero traces is
+ * refused: an empty file, rows of another phase or a renamed phase literal
+ * must not pass as "nothing to check" (principles: gates fail closed).
+ *
+ * @param {string} text file contents
+ * @param {{ kind: "rows" | "events", file: string }} source
+ */
+export function loadTraces(text, { kind, file }) {
+	let records;
+	try {
+		records = readJsonRecords(text);
+	} catch (error) {
+		throw new Error(`${file}: unparseable JSON (${error.message})`);
+	}
+	if (!Array.isArray(records))
+		throw new Error(`${file}: expected a JSON array of ${kind}`);
+	const traces =
+		kind === "rows"
+			? extractTraces(records)
+			: [{ pid: 0, events: records, rejected: [] }];
+	if (kind === "rows" && traces.length === 0)
+		throw new Error(`${file}: no session_scope_transition rows`);
+	if (kind === "events" && records.length === 0)
+		throw new Error(`${file}: no events`);
+	for (const trace of traces) {
+		for (const event of trace.events) {
+			try {
+				renderEvent(event);
+			} catch (error) {
+				trace.rejected.push(error.message);
+			}
+		}
+	}
+	return traces;
+}
+
 async function main() {
 	const { values } = parseArgs({
 		options: {
@@ -356,22 +418,34 @@ async function main() {
 		);
 		process.exit(2);
 	}
+	const file = values.rows ?? values.events;
+	let traces;
+	try {
+		traces = loadTraces(fs.readFileSync(file, "utf8"), {
+			kind: values.rows ? "rows" : "events",
+			file,
+		});
+	} catch (error) {
+		console.log(`UNCHECKED ${error.message}`);
+		process.exit(2);
+	}
 	const jar = await ensureJar(values.jar, ROOT);
-	const records = readJsonRecords(
-		fs.readFileSync(values.rows ?? values.events, "utf8"),
-	);
-	const traces = values.rows
-		? extractTraces(records)
-		: [{ pid: 0, events: records, rejected: [] }];
 	let exit = 0;
 	for (const trace of traces) {
-		const label = `${values.rows ?? values.events} pid ${trace.pid}`;
+		const label = `${file} pid ${trace.pid}`;
 		if (trace.rejected.length > 0) {
 			console.log(`UNCHECKED ${label}: ${trace.rejected.join("; ")}`);
 			exit = 2;
 			continue;
 		}
-		const verdict = await checkTrace(trace.events, { jar });
+		let verdict;
+		try {
+			verdict = await checkTrace(trace.events, { jar });
+		} catch (error) {
+			console.log(`UNCHECKED ${label}: ${error.message}`);
+			exit = 2;
+			continue;
+		}
 		const stuck =
 			verdict.status === "not-producible"
 				? firstUnmatchedEvent(trace.events, verdict.searchDepth)

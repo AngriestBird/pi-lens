@@ -6,6 +6,7 @@ import {
 	classifyTraceOutput,
 	extractTraces,
 	firstUnmatchedEvent,
+	loadTraces,
 	readJsonRecords,
 	renderTraceConfig,
 	renderTraceModule,
@@ -250,5 +251,175 @@ describe("trace validation, session-lifecycle pilot (#3533)", () => {
 			scope: 1,
 			effect: "ctx-read",
 		});
+	});
+});
+
+describe("trace validation inputs fail closed (#3533 round 2)", () => {
+	const startRow = (m: Record<string, unknown>): Row => ({
+		phase: "session_scope_transition",
+		pid: 9,
+		metadata: { role: "primary", branchEpoch: 0, sessionId: "s", ...m },
+	});
+	// The second recorded process: startup, then a /fork. Row 3 is the fork start.
+	const forkProcess = () => recorded().filter((r) => r.pid === 1475275);
+	const withForkStart = (patch: Record<string, unknown>) => {
+		const rows = forkProcess();
+		rows[3] = { ...rows[3], metadata: { ...rows[3].metadata, ...patch } };
+		return rows;
+	};
+	const without = (field: string) => {
+		const rows = forkProcess();
+		const metadata = { ...rows[3].metadata };
+		delete metadata[field];
+		rows[3] = { ...rows[3], metadata };
+		return rows;
+	};
+
+	// Recurrence prevented: F1 of the PR #4824 review. `--rows` over an empty
+	// file, another phase, or a renamed phase literal produced zero traces and
+	// the CLI printed nothing and exited 0, also under `--expect not-producible`.
+	it.each([
+		["an empty array", "[]"],
+		["rows of another phase", JSON.stringify([{ phase: "other", pid: 1 }])],
+		[
+			"rows whose phase literal was renamed",
+			JSON.stringify(recorded().map((r) => ({ ...r, phase: "scope_move" }))),
+		],
+	])("refuses %s as an empty trace population, naming the file", (_n, text) => {
+		expect(() =>
+			loadTraces(text, { kind: "rows", file: "x.rows.json" }),
+		).toThrow(/x\.rows\.json: no session_scope_transition rows/);
+	});
+	it("refuses an empty event list too", () => {
+		expect(() => loadTraces("[]", { kind: "events", file: "e.json" })).toThrow(
+			/e\.json: no events/,
+		);
+	});
+
+	// Recurrence prevented: F6 / CR4. Unparseable JSON and an unknown event
+	// kind escaped `main()` as an uncaught error and exit 1, the code that
+	// means "not producible".
+	it("names unparseable JSON with the file instead of a bare SyntaxError", () => {
+		expect(() =>
+			loadTraces("{not json", { kind: "rows", file: "bad.json" }),
+		).toThrow(/bad\.json: unparseable JSON/);
+	});
+	it("refuses an unknown event kind as an unchecked trace", () => {
+		const [trace] = loadTraces('[{"a":"bogus"}]', {
+			kind: "events",
+			file: "e.json",
+		});
+		expect(trace?.rejected.join(" ")).toMatch(/unknown event kind/);
+	});
+
+	// Recurrence prevented: F3 / CR2. A start row that lost `handoffSource` or
+	// `parentScopeId` was coerced to `other` / parent 0 and then compared.
+	it.each([
+		["handoffSource is absent", () => without("handoffSource")],
+		[
+			"handoffSource is a value the pilot does not know",
+			() => withForkStart({ handoffSource: "weird" }),
+		],
+		["parentScopeId is absent", () => without("parentScopeId")],
+		[
+			"parentScopeId is not an integer",
+			() => withForkStart({ parentScopeId: "1" }),
+		],
+		[
+			"parentScopeId names a scope that never started",
+			() => withForkStart({ parentScopeId: 77 }),
+		],
+	])("refuses a start row whose %s", (_name, build) => {
+		expect(extractTraces(build())[0]?.rejected).not.toEqual([]);
+	});
+	it.each([
+		["slot", "slot"],
+		["own-sidecar", "other"],
+		["parent-sidecar", "other"],
+		["none", "other"],
+	])("admits handoffSource %s as src %s", (source, src) => {
+		const [trace] = extractTraces(withForkStart({ handoffSource: source }));
+		expect(trace?.rejected).toEqual([]);
+		expect(trace?.events[1]).toMatchObject({ a: "begin", src });
+	});
+
+	// Recurrence prevented: F4. RetireOk("resume") needs `sess[primary] # "A"`
+	// and Begin("resume") sets `sess` to "A", the startup session. A resume of
+	// a session that is not the startup one is outside the model: the extractor
+	// reports it as a new identity (empty sameAs), which TLC then cannot match.
+	it("sends a resume of a foreign session as a new identity", () => {
+		const prefix = [
+			startRow({ transition: "end", reason: "superseded", scopeId: 1 }),
+			startRow({
+				transition: "start",
+				reason: "startup",
+				scopeId: 2,
+				parentScopeId: 1,
+				handoffSource: "none",
+			}),
+			startRow({ transition: "shutdown", reason: "new", scopeId: 2 }),
+			startRow({
+				transition: "start",
+				reason: "new",
+				scopeId: 3,
+				parentScopeId: 2,
+				sessionId: "n",
+				handoffSource: "none",
+			}),
+			startRow({ transition: "shutdown", reason: "resume", scopeId: 3 }),
+		];
+		const resume = (sessionId: string) =>
+			extractTraces([
+				...prefix,
+				startRow({
+					transition: "start",
+					reason: "resume",
+					scopeId: 4,
+					parentScopeId: 3,
+					sessionId,
+					handoffSource: "none",
+				}),
+			])[0]?.events.at(-1);
+		expect(resume("s")).toMatchObject({ k: "resume", sameAs: [1] });
+		expect(resume("foreign")).toMatchObject({ k: "resume", sameAs: [] });
+	});
+});
+
+describe("the generated Obs and TNext carry every conjunct (#3533 round 2)", () => {
+	// Recurrence prevented: F2. The verdict path (Obs, TNext) had no JVM-free
+	// pin, so deleting a conjunct left the suite green and only widened what
+	// TLC accepts. Comment lines are blanked first so a comment cannot satisfy
+	// a requirement.
+	const moduleText = () => {
+		const events = extractTraces(recorded())[0]?.events as TraceEvent[];
+		return renderTraceModule(events)
+			.split("\n")
+			.filter((line) => !line.trimStart().startsWith("\\*"))
+			.map((line) => line.replace(/\s+/g, " ").trim())
+			.join("\n");
+	};
+	it.each([
+		// the retire disjunct
+		String.raw`\/ /\ ev.a = "retire"`,
+		String.raw`/\ primary = ev.scope /\ primary' = 0`,
+		String.raw`/\ pend'.k = ev.k /\ why'[ev.scope] = ev.k`,
+		// the begin disjunct
+		String.raw`\/ /\ ev.a = "begin"`,
+		String.raw`/\ primary = 0 /\ pend.k = ev.k`,
+		String.raw`/\ primary' = ev.scope /\ role'[ev.scope] = ev.role`,
+		String.raw`/\ (ev.parent = 0 \/ predOf'[ev.scope] = ev.parent)`,
+		String.raw`/\ \A u \in 1..(ev.scope - 1) : (sess'[u] = sess'[ev.scope]) <=> (u \in ev.sameAs)`,
+		// TNext: the matched step and the hidden before-fork step
+		String.raw`\/ /\ ti < Len(TR) /\ Next /\ Obs(TR[ti + 1]) /\ ti' = ti + 1`,
+		String.raw`\/ /\ ti < Len(TR) /\ TR[ti + 1].a = "retire" /\ TR[ti + 1].k \in {"fork", "clone"}`,
+		String.raw`/\ forking = "no" /\ Next /\ forking' # "no" /\ ti' = ti`,
+		"NotDone == ti < Len(TR)",
+	])("pins %s", (conjunct) => {
+		expect(moduleText()).toContain(conjunct);
+	});
+	it("pins the hand-off-source conjunct on the verdict path", () => {
+		expect(moduleText()).toContain(
+			String.raw`/\ (taken' # taken) <=> (ev.src = "slot")`,
+		);
 	});
 });

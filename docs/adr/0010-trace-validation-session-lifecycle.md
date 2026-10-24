@@ -81,16 +81,16 @@ of those rows, without the cwd path a raw row carries.
 
 | Row | Event | Spec action | What the check compares |
 |---|---|---|---|
-| `end:superseded` of a never-started scope | none | outside the model | admitted only for a construction scope |
+| `end:superseded` of a scope with no start row | none | outside the model | admitted only when no start of that scope exists; the scope id is then a known construction scope |
 | first `start:startup` | none | `Init` (scope 1, primary, file `A`) | role primary, epoch 0 |
 | `shutdown:<r>` primary | `retire(r, scope)` | `Retire(r)` | the live primary is that scope; `pend.k = r`; `why[scope] = r` |
-| `start:<r>` primary | `begin(r, scope, parent, src, sameAs)` | `Begin` | role; `predOf` equals the parent when it is a started scope; `handoffSource = slot` iff the step took the slot (`taken` grew); `sess` equal to a prior scope's iff the session ids are equal |
+| `start:<r>` primary | `begin(r, scope, parent, src, sameAs)` | `Begin` | the row carries a `handoffSource` in `slot`, `own-sidecar`, `parent-sidecar`, `none` and a safe-integer `parentScopeId` naming a started scope or a seen construction scope (otherwise the trace is refused); role; `predOf` equals the parent when it is a started scope; `handoffSource = slot` iff the step took the slot (`taken` grew); `sess` equal to a prior scope's iff the session ids are equal |
 | anything else | refuses the trace | none | `tree`, `demote`, any secondary, an end of a started scope, a second startup, an unknown reason |
 
 Real scope ids map to model tickets in order of start. `parentScopeId` is
 coordinator-local: pi's jiti load re-creates the coordinator on `/reload`, and
 the successor's parent is then its own construction scope (probed with
-`bridge-reload-ts`'s entry, 2026-10-24), so an unstarted parent checks nothing.
+`bridge-reload-ts`'s entry, 2026-10-24), so a parent that is a seen construction scope checks nothing; any other unstarted or absent parent is refused.
 `session_before_fork` is not a row; the generated module lets one hidden
 `BeforeFork` step precede a fork or clone retire. pi sends `fork` for `/clone`,
 so `clone` never appears in rows.
@@ -105,6 +105,12 @@ per-family TLA+ (15 lines); the extractor is the only per-family JS. Constants
 are `Merged.cfg`'s own text with `Writers = {}` and `MaxSteps` sized to the
 trace, so `formal/switch-pins.json` and its pin test cover them and no second
 copy of the as-built switches exists.
+`Writers = {}` is a consequence of the design, not a convenience. `Obs` is
+checked against `Next` per event with no interleaving: between two events the
+model can only stutter or take the hidden before-fork step. That makes the check
+tight per event, and it means store writers are not merely unavailable. A
+writer step between two events is a transition no row accounts for, so the
+pilot cannot model one until rows carry writes (section 11).
 
 Rejected: a per-spec JS replayer. It is a second implementation of a 40-way
 next-state relation over 60 variables; every model edit would need the same
@@ -122,6 +128,10 @@ line per process and exits non-zero on any of:
   model has no step matching event N;
 - `UNCHECKED … <row>: <why>`, exit 2: a row outside the admitted forms, never
   skipped (principles: gates fail closed);
+- `UNCHECKED <file>: <why>`, exit 2: the file holds no `session_scope_transition`
+  rows (empty, another phase, a renamed phase literal), no events, or
+  unparseable JSON. An empty population never passes, also under
+  `--expect not-producible`; an unknown event kind is an `UNCHECKED` trace;
 - `error (<why>)`, exit 2: TLC did not decide, or the trace is outside the
   model's bounds. `RetireOk` allows each retire reason once per behaviour
   (`k \notin used`, `SessionLifecycle.tla:646`), so a second `/reload` is
@@ -253,6 +263,14 @@ Named, not built (principles: speculative robustness needs buy-in):
   traces of production length need a trace-mode switch in the spec.
 - **More families.** Each family needs its own extractor and `Obs`.
 - **A model `Continue` step** for #4815 (section 8).
+- **Resume of a non-startup session.** The model hardcodes `resume -> "A"`
+  (`TargetOf`, `SessionLifecycle.tla:642`; `Init` has `sess[1] = "A"`), and
+  `RetireOk` refuses a resume from a primary already in `A`. A recorded resume
+  is therefore checked only against the process's startup session: the
+  extractor reports a resume of any other session as a new identity (empty
+  `sameAs`), which the model cannot produce. Pinned in
+  `tests/scripts/trace-validate-session-lifecycle.test.ts`; extending the
+  model to resume arbitrary sessions is the rollout issue's call.
 - **Store content.** `Obs` compares role, lineage, hand-off source and session
   identity. It does not compare facts in the read guard, the turn counter, or
   the advisory queue; content drift stays with the invariants and unit tests.
@@ -313,7 +331,10 @@ ok …/lifecycle-drive.rows.json pid 1444894: producible, 3 events, 0.79s
 whole CLI, 2 traces: 1.81 s wall, 4.27 s user, 323 MB max RSS
 ```
 
-JVM + SANY floor, and a nine-event trace (`reload, new, resume, fork, quit`):
+JVM + SANY floor, and a nine-event trace (`reload, new, resume, fork, quit`).
+The nine-event file is a hand-written `--events` file used for timing; it is not
+what the rows path would emit for a resume, which needs a `sameAs` that contains
+the startup ticket:
 
 ```text
 JVM+SANY floor (trivial module) run 1: 0.71 s wall
