@@ -32,6 +32,11 @@ registry; other doubles only as `AGENTS.md` admits them.
   (name what you tried), or `blocked` (name the missing access or state).
 - Climb the minimalism ladder before screening against the `AGENTS.md`
   catalog: the catalog says what must not break, never what to add.
+- Mechanism for a race, security edge case or failure nobody has reproduced is
+  not built in the round (principles §1, speculative robustness). Name its
+  trigger path, evidence and cost under scope at the top of the hand-back, and
+  leave the decision to the maintainer. Validation, error handling and security
+  at a real trust boundary are still required.
 - Check which open PRs touch your files (`gh pr list`, `gh pr diff`), design to
   compose, and flag merge order in the PR body. Branch `fix/<N>-<slug>` from
   `origin/master` unless the brief names a branch. Preserve contributor
