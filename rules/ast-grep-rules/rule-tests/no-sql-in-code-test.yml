@@ -29,6 +29,10 @@ valid:
   - 'runner.execute("-- note\NSELECT * FROM " + source)'
   # A template with no substitution is constant SQL.
   - 'db.execute(`SELECT * FROM users`)'
+  # The first argument must open with a quote or backtick.
+  - 'db.execute(update + " SET x = 1")'
+  # An escaped tab does not end a -- comment.
+  - 'db.execute("-- c\tSELECT * FROM t WHERE id = " + id)'
 invalid:
   - 'db.query("SELECT * FROM users WHERE id = " + id)'
   - 'db.query("DELETE FROM sessions WHERE token = " + token, [])'

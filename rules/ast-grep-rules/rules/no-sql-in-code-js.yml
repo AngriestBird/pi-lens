@@ -74,7 +74,7 @@ note: |
   variable, whitespace written as `\u000a`, `\x0a` or a backslash line
   continuation, a FROM-less SELECT built by concatenation
   (`"SELECT pg_sleep(" + n + ")"`), and statements the alternation does
-  not list (`INSERT IGNORE INTO`).
+  not list (`INSERT IGNORE INTO`, `INSERT OR REPLACE INTO`).
 rule:
   any:
     - all:
