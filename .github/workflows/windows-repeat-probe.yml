@@ -7,10 +7,6 @@ name: Windows repeat probe (manual)
 # so a red run is data, not a failed check.
 
 on:
-  # TEMPORARY (round 2, #4756): push trigger so the probe runs from this branch.
-  # Commit B removes it; the merged file is dispatch-only.
-  push:
-    branches: [fix/4756-4756-windows-repeat-probe]
   workflow_dispatch:
     inputs:
       test_file:
@@ -56,8 +52,8 @@ jobs:
       - name: Validate inputs
         shell: bash
         env:
-          TEST_FILE: ${{ inputs.test_file || 'tests/clients/lsp/server-policy.test.ts' }}
-          REPEAT: ${{ inputs.repeat || 20 }}
+          TEST_FILE: ${{ inputs.test_file }}
+          REPEAT: ${{ inputs.repeat }}
         run: |
           set -euo pipefail
           if [[ ! "$TEST_FILE" =~ ^tests/[A-Za-z0-9_./-]+\.test\.ts$ ]] || [[ "$TEST_FILE" == *..* ]]; then
@@ -73,8 +69,8 @@ jobs:
       - name: Run the file repeatedly
         shell: bash
         env:
-          TEST_FILE: ${{ inputs.test_file || 'tests/clients/lsp/server-policy.test.ts' }}
-          REPEAT: ${{ inputs.repeat || 20 }}
+          TEST_FILE: ${{ inputs.test_file }}
+          REPEAT: ${{ inputs.repeat }}
           PI_LENS_TEST_TIMEOUT_SCALE: '3'
         run: |
           set -u
