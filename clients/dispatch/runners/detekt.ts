@@ -217,6 +217,10 @@ const detektRunner: RunnerDefinition = {
 		// Those findings are kept, but the read is incomplete, so the run is flagged
 		// `inconclusive` (the existing "reached no verdict" shape, as tree-sitter's
 		// query-run-threw path). Exit 2 is the complete findings class and is not flagged.
+		// #4522 F2: here `inconclusive` sits beside failureKind `blocking_diagnostics`,
+		// a pairing the RunnerResult field doc does not name, and hasUsableResult still
+		// counts this run as usable coverage. It is inert for detekt today (no
+		// primary-group consumer reads it); this is a documented gap, not a behaviour.
 		return result.status === 1 ? { ...verdict, inconclusive: true } : verdict;
 	},
 };

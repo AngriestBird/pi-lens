@@ -563,7 +563,14 @@ describe("detekt captured exit-code matrix (#4522)", () => {
 				"detekt exit 1 on a malformed config reads as a completed analysis: an unanswered tool read clean",
 			).toBe("skipped");
 			expect(result.diagnostics).toEqual([]);
-			expect(summary.getDegradationSummary().length).toBeGreaterThan(0);
+			// #4522 T4: the skip's own record, not any degradation row. A different
+			// kind (another tool's, or a different detekt record) must red here.
+			const { group, row } = parsedNothingRow(summary, "detekt");
+			expect(
+				group,
+				"the skip is recorded as runner-parsed-nothing",
+			).toBeDefined();
+			expect(row, "the record names detekt").toBeDefined();
 		} finally {
 			env.cleanup();
 		}
@@ -600,6 +607,8 @@ describe("detekt captured exit-code matrix (#4522)", () => {
 
 			expect(result.status).not.toBe("skipped");
 			expect(result.diagnostics.length).toBeGreaterThan(0);
+			// #4522 F1: exit 2 is the complete findings class, so it is never flagged.
+			expect(result.inconclusive).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}

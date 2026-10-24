@@ -1053,7 +1053,7 @@ interface Observed {
 		| { status: string; failureKind?: string; diagnosticCount: number }
 		| undefined;
 	/** The latency.log runner row's metadata, as the log analyzer reads it. */
-	logged: { failureKind?: string } | undefined;
+	logged: { failureKind?: string; inconclusive?: boolean } | undefined;
 }
 
 async function drive(runnerId: string, driver: Driver): Promise<Observed> {
@@ -1201,6 +1201,25 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 			"ForbiddenComment",
 		);
 		expect(observed.result?.inconclusive).toBe(true);
+		// #4522 T3: the failed latency row says the read was incomplete, not only
+		// that the findings failed it (the metadata is what latency.log carries).
+		expect(observed.logged?.inconclusive).toBe(true);
+	});
+
+	// #4522 T3: exit 1 with warning-only findings is `succeeded`, and its latency
+	// row still says the read was incomplete. Recurrence: the warning row logged
+	// no metadata, so a monitor could not see the partial analysis.
+	it("flags a warning-only detekt exit 1 as inconclusive in the latency row (#4522)", async () => {
+		const observed = await drive("detekt", {
+			...DRIVERS.detekt,
+			reply: ({ filePath }) => ({
+				status: 1,
+				stdout: `${filePath}:4:5: warning: magic number (${MARKER}) [MagicNumber]\n`,
+			}),
+		});
+		expect(observed.result?.status).toBe("succeeded");
+		expect(observed.result?.inconclusive).toBe(true);
+		expect(observed.logged?.inconclusive).toBe(true);
 	});
 
 	// #4522 F4: the captured exit-1 broken-config shape through the production
@@ -1242,6 +1261,10 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 		expect(observed.result?.status).toBe("succeeded");
 		expect(observed.result?.semantic).toBe("warning");
 		expect(observed.result?.failureKind).toBeUndefined();
+		// #4522 F1: exit 2 is the complete findings class, so it stays conclusive
+		// in the result and in the latency row.
+		expect(observed.result?.inconclusive).toBeUndefined();
+		expect(observed.logged?.inconclusive).toBeUndefined();
 	});
 
 	// The dangerous inverse (F4): a run that produced no usable result must never
