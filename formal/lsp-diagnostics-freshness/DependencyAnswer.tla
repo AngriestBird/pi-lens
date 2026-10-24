@@ -44,7 +44,14 @@
 (* stored answer. A ghost `dropped` is set when the window fires on a      *)
 (* stored answer with no later receipt pending and the wait stays open; it *)
 (* clears with the answer (Clear). Mutant "dropAnswer" does that, so the   *)
-(* wait can only end by timeout.                                           *)
+(* wait can only end by timeout. Mutant "widenAnswerGuard" reaches the    *)
+(* same outcome by a different edit, a guard that also refuses a stored    *)
+(* answer: the ghost observes a real outcome, not only its own mutant.     *)
+(*                                                                         *)
+(* Cancel (NoCanceledStored): Clear cancels the slot's receipt. A ghost    *)
+(* `canceled` holds the seq of the receipt the last Clear took out of the  *)
+(* slot; the invariant says the cache never holds it. Mutant "retainSlot"  *)
+(* leaves the receipt in the slot, so its timer stores it.                 *)
 (*                                                                         *)
 (* Not modelled: a publish computed before the server read a.ts's own      *)
 (* change (that is DiagnosticsFreshness's #3484 shape: the server here     *)
@@ -68,6 +75,8 @@ CONSTANTS
     Mutant        \* "none" | "noSettleGuard" (the guard on the early return only)
                   \* | "noAnswerGuard" (the quiet window settles on an emptied cache)
                   \* | "dropAnswer" (the quiet window rejects the only stored answer)
+                  \* | "widenAnswerGuard" (the answer guard refuses a stored answer too)
+                  \* | "retainSlot" (Clear leaves the receipt in the quiet-window slot)
 
 NONE == -1
 
@@ -87,11 +96,12 @@ VARIABLES
     newest,   \* ghost: at the settle, the cache held the newest receipt
     result,   \* the cache touchFile read
     clears,   \* clears landed so far
-    dropped   \* ghost: a quiet window rejected the answer stored now (no clear
+    dropped,  \* ghost: a quiet window rejected the answer stored now (no clear
               \* since)
+    canceled  \* ghost: the seq of the receipt the last Clear took out of the slot
 
 vars == <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot, drained, w,
-          how, newest, result, clears, dropped>>
+          how, newest, result, clears, dropped, canceled>>
 
 Empty == [has |-> FALSE, zv |-> NONE, ne |-> FALSE, seq |-> NONE]
 Off == [on |-> FALSE, zv |-> NONE, ne |-> FALSE, seq |-> NONE]
@@ -113,6 +123,7 @@ Init ==
     /\ result = Empty
     /\ clears = 0
     /\ dropped = FALSE
+    /\ canceled = NONE
 
 \* The guard at each site. The early return keeps it under every mutant.
 StartGuarded == PendingGuard
@@ -135,7 +146,7 @@ ServerRead ==
                       ELSE pubs
     /\ wire' = Tail(wire)
     /\ UNCHANGED <<npubs, rx, cache, slot, drained, w, how, newest, result,
-                   clears, dropped>>
+                   clears, dropped, canceled>>
 
 ServerPublish ==
     /\ srvA
@@ -144,7 +155,7 @@ ServerPublish ==
     /\ npubs' = npubs + 1
     /\ owed' = FALSE
     /\ UNCHANGED <<wire, srvA, srvZ, rx, cache, slot, drained, w, how, newest,
-                   result, clears, dropped>>
+                   result, clears, dropped, canceled>>
 
 -----------------------------------------------------------------------------
 \* The publishDiagnostics handler and its quiet-window slot (client.ts).
@@ -160,7 +171,7 @@ ClientReceive ==
               /\ rx' = rx + 1
               /\ UNCHANGED drained
     /\ UNCHANGED <<wire, srvA, srvZ, owed, npubs, cache, w, how, newest, result,
-                   clears, dropped>>
+                   clears, dropped, canceled>>
 
 \* The slot's timer stores the receipt and emits; a listening, armed or
 \* deferred waiter (re)arms its quiet window.
@@ -170,7 +181,7 @@ SlotFire ==
     /\ slot' = Off
     /\ w' = IF w \in {"listen", "armed", "deferred"} THEN "armed" ELSE w
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, drained, how,
-                   newest, result, clears, dropped>>
+                   newest, result, clears, dropped, canceled>>
 
 -----------------------------------------------------------------------------
 \* The waiter: the skipped dispatch touch, after the drain reply.
@@ -185,7 +196,7 @@ WaitStart ==
          ELSE /\ w' = "listen"
               /\ UNCHANGED <<how, newest>>
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot,
-                   drained, result, clears, dropped>>
+                   drained, result, clears, dropped, canceled>>
 
 WaitSettle ==
     /\ w = "armed"
@@ -197,7 +208,7 @@ WaitSettle ==
          \* receipt pending and gives it up; only a deadline can end the wait.
          THEN /\ w' = "listen"
               /\ UNCHANGED <<how, newest>>
-         ELSE IF AnswerGuarded /\ ~cache.has
+         ELSE IF AnswerGuarded /\ (~cache.has \/ Mutant = "widenAnswerGuard")
          \* #4785 F4: a clear emptied the store this window was armed for;
          \* the wait keeps waiting for the next store, or its deadline.
          THEN /\ w' = "listen"
@@ -210,14 +221,14 @@ WaitSettle ==
     \* open.
     /\ dropped' = (cache.has /\ ~slot.on /\ w' # "resolved")
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot,
-                   drained, result, clears>>
+                   drained, result, clears, canceled>>
 
 WaitTimeout ==
     /\ w \in {"listen", "armed", "deferred"}
     /\ w' = "resolved"
     /\ how' = "timeout"
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot,
-                   drained, newest, result, clears, dropped>>
+                   drained, newest, result, clears, dropped, canceled>>
 
 \* clearDiagnosticsForPath (client.ts:2169) while the wait is open: the stored
 \* answer and the receipt in the quiet-window slot go in one tick. The wait's
@@ -227,7 +238,8 @@ Clear ==
     /\ w \in {"idle", "listen", "armed", "deferred"}
     /\ cache.has \/ slot.on
     /\ cache' = Empty
-    /\ slot' = Off
+    /\ slot' = IF Mutant = "retainSlot" THEN slot ELSE Off
+    /\ canceled' = IF slot.on THEN slot.seq ELSE canceled
     /\ clears' = clears + 1
     /\ dropped' = FALSE \* the rejected answer is gone
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, drained, w, how,
@@ -238,7 +250,7 @@ Read ==
     /\ w' = "read"
     /\ result' = cache
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot,
-                   drained, how, newest, clears, dropped>>
+                   drained, how, newest, clears, dropped, canceled>>
 
 Next == ServerRead \/ ServerPublish \/ ClientReceive \/ SlotFire
         \/ WaitStart \/ WaitSettle \/ WaitTimeout \/ Clear \/ Read
@@ -263,6 +275,12 @@ SettleNeedsAnswer == how = "settled" => cache.has
 \* budget. `SettleNeedsAnswer` cannot see that: a window that rejects the only
 \* answer never settles. `dropped` clears with the answer (`Clear`).
 NoDroppedAnswer == how = "timeout" => ~dropped
+
+\* #4785 F1: a clear cancels the receipt in the slot, so it must never be stored
+\* afterwards. Every receipt has a unique `seq` (its receive order), and
+\* `canceled` names the one the last clear took. Without the cancel the slot's
+\* timer stores the canceled answer, which an old STOP can be.
+NoCanceledStored == cache.has => cache.seq # canceled
 
 \* Its consequence for the bash write: a settled read of a.ts was computed
 \* against z.ts's new bytes (#4782's phantom STOP is a read with zv = 0).

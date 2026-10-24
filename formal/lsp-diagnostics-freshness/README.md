@@ -299,22 +299,31 @@ Invariants:
   run out its budget. `dropped` is a ghost, set from the outcome of
   `WaitSettle` (the window fired on a stored answer, nothing was pending, and
   the wait is still open) and cleared by `Clear`. `SettleNeedsAnswer` cannot
-  see this: a window that rejects the only answer never settles.
+  see this: a window that rejects the only answer never settles. In the
+  as-built spec the ghost stays FALSE, so only a mutant that changes the
+  window's outcome reaches it.
+- `NoCanceledStored` (`cache.has => cache.seq # canceled`): the receipt a
+  `Clear` takes out of the slot is never stored afterwards. Each receipt has a
+  unique `seq`; the ghost `canceled` holds the one the last `Clear` took.
 
-`DependencyFix` is the exhaustive check of all four invariants.
+`DependencyFix` is the exhaustive check of all five invariants.
 `DependencyLateRepublish` carries them too, but TLC stops at its own expected
-`NoPhantomFinding` counterexample, so it explores 253 of its 640 states.
+`NoPhantomFinding` counterexample, so it explores 287 of its states. With only
+the three newest invariants it passes all 874.
 
 | Config | Expect | Verdict | Distinct states | s |
 |---|---|---|---|---|
-| `DependencyFix` | pass | pass | 423 | 0 |
+| `DependencyFix` | pass | pass | 590 | 0 |
 | `DependencyPreFix` | violated NoPhantomFinding | violated NoPhantomFinding | 196 | 0 |
-| `DependencyMutSettleGuard` | violated NewestAtSettle | violated NewestAtSettle | 279 | 0 |
-| `DependencyLateRepublish` | violated NoPhantomFinding (residual) | violated NoPhantomFinding | 253 | 0 |
-| `DependencyMutAnswerGuard` | violated SettleNeedsAnswer | violated SettleNeedsAnswer | 234 | 0 |
+| `DependencyMutSettleGuard` | violated NewestAtSettle | violated NewestAtSettle | 355 | 0 |
+| `DependencyLateRepublish` | violated NoPhantomFinding (residual) | violated NoPhantomFinding | 287 | 0 |
+| `DependencyMutAnswerGuard` | violated SettleNeedsAnswer | violated SettleNeedsAnswer | 284 | 0 |
 | `DependencyMutAnswerGuardNoClear` | pass (vacuity) | pass | 266 | 0 |
-| `DependencyMutDropAnswer` | violated NoDroppedAnswer | violated NoDroppedAnswer | 233 | 0 |
-| `DependencyMutDropAnswerBlind` | pass (blindness) | pass | 442 | 0 |
+| `DependencyMutDropAnswer` | violated NoDroppedAnswer | violated NoDroppedAnswer | 283 | 0 |
+| `DependencyMutDropAnswerBlind` | pass (blindness) | pass | 615 | 0 |
+| `DependencyMutWidenGuard` | violated NoDroppedAnswer | violated NoDroppedAnswer | 283 | 0 |
+| `DependencyMutRetainSlot` | violated NoCanceledStored | violated NoCanceledStored | 39 | 0 |
+| `DependencyMutRetainSlotBlind` | pass (blindness) | pass | 777 | 0 |
 
 **`DependencyPreFix`** is the measured trace:
 1. The server reads `a.ts`'s change and publishes the pre-`z.ts` STOP.
@@ -369,12 +378,37 @@ wait. 11 states:
 4. `WaitTimeout` ends the wait with `how = "timeout"`.
 
 **`DependencyMutDropAnswerBlind`** is its blindness ratchet: the same mutant
-with only the three older invariants passes (442 states), because a wait that
+with only the three older invariants passes (615 states), because a wait that
 never settles breaks none of them. If it reds, an older invariant now sees the
 drop and `NoDroppedAnswer` is no longer the property that catches it. The
 property passes trivially only if no run reaches the drop; the mutant config
 shows one does. Neutering the ghost (`dropped' = FALSE`) turns the mutant
 config green.
+
+**`DependencyMutWidenGuard`**: a second edit that reaches the same outcome.
+The answer guard is widened (`AnswerGuarded /\ ~cache.has` becomes
+`AnswerGuarded`), so the window also refuses a stored answer. The state graph
+equals the hand mutant's (283 states, same counterexample), and the three older
+invariants pass it (615 states, the same as `DependencyMutDropAnswerBlind`). It
+shows `NoDroppedAnswer` observes a real outcome and not only its own mutant.
+
+**`DependencyMutRetainSlot`**: `Clear` empties the cache but leaves the receipt
+in the slot (`Mutant = "retainSlot"`). 6 states:
+1. The server publishes the pre-`z.ts` STOP (`seq 0`); the client receives it
+   into the slot.
+2. `Clear` empties the cache and, in the code, cancels the receipt; here the
+   ghost records `canceled = 0` and the slot stays.
+3. `SlotFire` stores the receipt: the cache holds `seq 0`, the canceled answer.
+
+**`DependencyMutRetainSlotBlind`** is its blindness ratchet: the same mutant
+checked with the four older invariants passes (777 states). The canceled
+receipt is a valid answer for the content it was computed for, so no settle or
+freshness rule breaks. Neutering the ghost (`canceled' = canceled`) turns the
+mutant config green.
+
+The omitted `SlotFire` reset of `dropped` moves no verdict, but it moves the
+distinct counts (a probe that resets it changes the blind config's count), so
+the counts above belong to this exact spec.
 
 The drop exit (the `PENDING_RECEIPT_DROPPED` listener,
 `clients/lsp/client.ts:4742`) carries the same `answerStored` guard and has no
