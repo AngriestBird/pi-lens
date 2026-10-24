@@ -199,6 +199,8 @@ describe("#4689 item 6: the home ceiling holds on the identity axis", () => {
 		const { fx, home } = homeAsLink();
 		try {
 			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			// The marker the climb must not reach: one directory above the "home".
+			fs.writeFileSync(path.join(path.dirname(fx.repo), ".gitignore"), "\n");
 			const file = path.join(home, "src", "real.ts");
 			const cwd = resolveToolCwd("formatter", "shfmt", file, {
 				cwd: path.parse(file).root,
@@ -206,7 +208,8 @@ describe("#4689 item 6: the home ceiling holds on the identity axis", () => {
 				suppressTelemetry: true,
 			}).cwd;
 			// `shfmt` roots at `.editorconfig`/`.gitignore`, which the repo does
-			// not hold; with the ceiling at the repo no marker is reachable.
+			// not hold; with the ceiling at the repo only the planted one above
+			// it would answer, and the ceiling forbids it.
 			expect(cwd).toBe(path.join(fx.repo, "src"));
 		} finally {
 			fx.cleanup();
