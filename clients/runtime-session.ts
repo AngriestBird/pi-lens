@@ -134,6 +134,7 @@ import { resetZizmorTokenAvailability } from "./zizmor-config.js";
 import { resetSpawnTimeoutCooldowns } from "./spawn-timeout-cooldown.js";
 import { resetTestRunnerDelivery } from "./test-runner-delivery.js";
 import { resetLspMutationNoBridgeDbgLatch } from "./lsp-mutation.js";
+import { isStaleExtensionCtxError } from "./session-event-guard.js";
 import type {
 	ClassificationBasis,
 	SessionStartClassification,
@@ -1358,15 +1359,32 @@ function scheduleStartupScans(
 			dbg("session_start scans: analyzer bootstrap unavailable — skipped");
 			return;
 		}
-		scheduleStartupScansWithClients(
-			resolved,
-			runtime,
-			sessionGeneration,
-			analysisRoot,
-			snapshotRoot,
-			languageProfile,
-			dbg,
-		);
+		// #4815: the await above can outlive the session. A reload that lands
+		// inside it leaves the host ctx behind `deps.getFlag` / `deps.notify`
+		// stale, and the first read below throws the SDK's stale-ctx error into
+		// this fire-and-forget IIFE, which has no other catch. The replacement
+		// session runs its own scans, so skipping is the whole answer; anything
+		// that is NOT the stale-ctx message stays as loud as it was.
+		try {
+			scheduleStartupScansWithClients(
+				resolved,
+				runtime,
+				sessionGeneration,
+				analysisRoot,
+				snapshotRoot,
+				languageProfile,
+				dbg,
+			);
+		} catch (err) {
+			if (!isStaleExtensionCtxError(err)) throw err;
+			dbg("session_start scans: extension ctx went stale — skipped");
+			recordDegradationOnce({
+				kind: "extension-ctx-stale",
+				subject: "session-start-scans",
+				reason:
+					"session-start scans skipped: the session was replaced while the analyzer bootstrap was pending",
+			});
+		}
 	})();
 }
 
