@@ -349,8 +349,8 @@ function admittedBudget(node: SgNode | undefined): boolean {
 interface Census {
 	title: string;
 	argCount: number;
-	/** The census has the default budget or a third argument that is not an
-	 *  admitted scaled budget. */
+	/** The census has no third argument (the default budget) or one that is
+	 *  not an admitted scaled budget. */
 	refused: boolean;
 	/** `declaration`, or `unclassified` for a test-shaped call the detector
 	 *  could not trace to a vitest `it`/`test` binding. */
@@ -411,7 +411,7 @@ function censuses(source: string): Census[] {
 				found.push({
 					title: args[0].text(),
 					argCount: args.length,
-					refused: args.length === 2 || !admittedBudget(args[2]),
+					refused: !admittedBudget(args[2]),
 					how: "declaration",
 				});
 			continue;
@@ -427,7 +427,7 @@ function censuses(source: string): Census[] {
 			found.push({
 				title: args[0].text(),
 				argCount: args.length,
-				refused: args.length === 2 || !admittedBudget(args[2]),
+				refused: !admittedBudget(args[2]),
 				how: "unclassified",
 			});
 	}
