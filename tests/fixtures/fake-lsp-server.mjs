@@ -619,6 +619,12 @@ function send(msg) {
 	process.stdout.write(encode(msg));
 }
 
+// #4801: see "FAKE_LSP_HANG_PROJECT_INFO" in the advertised commands below.
+const HANG_PROJECT_INFO = ["1", "cancel"].includes(
+	process.env.FAKE_LSP_HANG_PROJECT_INFO ?? "",
+);
+let hungProjectInfoId = null;
+
 function handle(raw) {
 	let data;
 	try {
@@ -680,6 +686,21 @@ function handle(raw) {
 		) {
 			trace(`echo-eligible ${data.method}`);
 		}
+	}
+
+	if (
+		process.env.FAKE_LSP_HANG_PROJECT_INFO === "cancel" &&
+		data.method === "$/cancelRequest" &&
+		hungProjectInfoId !== null &&
+		data.params?.id === hungProjectInfoId
+	) {
+		send({
+			jsonrpc: "2.0",
+			id: hungProjectInfoId,
+			error: { code: -32800, message: "cancelled" },
+		});
+		hungProjectInfoId = null;
+		return;
 	}
 
 	// Initialize handshake. FAKE_LSP_IGNORE_INITIALIZE simulates a hung server
@@ -836,12 +857,11 @@ function handle(raw) {
 							"fake.applyEditDeferred",
 							"fake.releaseDeferredApplyEdit",
 							// #4801: the tsserver escape hatch, whose `projectInfo` request
-							// the server accepts and never answers (or cancels). Off by
+							// the server accepts and never answers. "1" ignores a cancel for
+							// it; "cancel" answers the cancel with RequestCancelled. Off by
 							// default so the advertised list the other suites pin does not
 							// move.
-							...(process.env.FAKE_LSP_HANG_PROJECT_INFO === "1"
-								? ["typescript.tsserverRequest"]
-								: []),
+							...(HANG_PROJECT_INFO ? ["typescript.tsserverRequest"] : []),
 						],
 					},
 					// #3310: `FAKE_LSP_NO_DIAGNOSTIC_PROVIDER=1` advertises NO pull
@@ -1464,10 +1484,13 @@ function handle(raw) {
 		// #4801: accepted, never answered; a `$/cancelRequest` for it is
 		// ignored, like a wedged server. The trace file shows the cancel.
 		if (
+			HANG_PROJECT_INFO &&
 			cmd === "typescript.tsserverRequest" &&
 			data.params?.arguments?.[0] === "projectInfo"
-		)
+		) {
+			hungProjectInfoId = data.id;
 			return;
+		}
 		if (cmd === "fake.applyEdit" || cmd === "fake.applyEditDeferred") {
 			const spec = buildApplyEditSpec(data.params?.arguments);
 			pendingExec = { execId: data.id, command: cmd };
