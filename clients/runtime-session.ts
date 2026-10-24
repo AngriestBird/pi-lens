@@ -1334,6 +1334,23 @@ export const STARTUP_TASK_DEFER_MS: Partial<Record<StartupTaskName, number>> = {
 	"ast-grep-exports": 5400,
 };
 
+/**
+ * #4815: the one answer to a stale host ctx met while the deferred scans were
+ * being scheduled. Records the skip (once per session, through the ledger's
+ * existing `extension-ctx-stale` kind) and returns; any error that is NOT the
+ * SDK's stale-ctx message is thrown again, unchanged.
+ */
+function recordStaleScanSkip(err: unknown, dbg: SessionStartDeps["dbg"]): void {
+	if (!isStaleExtensionCtxError(err)) throw err;
+	dbg("session_start scans: extension ctx went stale — skipped");
+	recordDegradationOnce({
+		kind: "extension-ctx-stale",
+		subject: "session-start-scans",
+		reason:
+			"session-start scans skipped: the session was replaced while the analyzer bootstrap was pending",
+	});
+}
+
 // Fire off heavy scans as background tasks — don't block session start.
 // Each consumer already handles the "not ready yet" case gracefully
 // (cachedExports.size > 0, cache miss paths).
@@ -1376,14 +1393,7 @@ function scheduleStartupScans(
 				dbg,
 			);
 		} catch (err) {
-			if (!isStaleExtensionCtxError(err)) throw err;
-			dbg("session_start scans: extension ctx went stale — skipped");
-			recordDegradationOnce({
-				kind: "extension-ctx-stale",
-				subject: "session-start-scans",
-				reason:
-					"session-start scans skipped: the session was replaced while the analyzer bootstrap was pending",
-			});
+			recordStaleScanSkip(err, dbg);
 		}
 	})();
 }

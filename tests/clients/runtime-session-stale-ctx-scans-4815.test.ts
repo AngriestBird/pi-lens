@@ -29,7 +29,7 @@ import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
 import { pinFixtureHome, setupTestEnvironment } from "./test-utils.js";
 
 /** The pi SDK's own `assertActive()` message after a session replacement. */
-const STALE_CTX_MESSAGE =
+const SDK_STALE_MESSAGE =
 	"This extension ctx is stale after session replacement or reload. " +
 	"Do not use a captured pi or command ctx after ctx.newSession(), " +
 	"ctx.fork(), ctx.switchSession(), or ctx.reload().";
@@ -195,10 +195,10 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		const scanFile = vi.fn((): unknown[] => []);
 		const writeCache = vi.fn((_key: string) => {});
 		const notify = vi.fn((_message: string) => {
-			if (replaced && reads.notify) throw new Error(STALE_CTX_MESSAGE);
+			if (replaced && reads.notify) throw new Error(SDK_STALE_MESSAGE);
 		});
 		const getFlag = (name: string): boolean | string | undefined => {
-			if (replaced && reads.flag) throw new Error(STALE_CTX_MESSAGE);
+			if (replaced && reads.flag) throw new Error(SDK_STALE_MESSAGE);
 			return name === "lens-lsp";
 		};
 		const unhandled: unknown[] = [];
@@ -315,7 +315,13 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 	it("still schedules the scans for a live session (the guard is not a blanket skip)", async () => {
 		const cwd = project();
 		const runtime = new RuntimeCoordinator();
-		const writeCache = vi.fn((_key: string) => {});
+		let todoBaselineWritten!: () => void;
+		const written = new Promise<void>((resolve) => {
+			todoBaselineWritten = resolve;
+		});
+		const writeCache = vi.fn((key: string) => {
+			if (key === "todo-baseline") todoBaselineWritten();
+		});
 		const demand = gatedBootstrap();
 		await handleSessionStart(
 			makeDeps(cwd, runtime, {
@@ -327,16 +333,8 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 			}),
 		);
 		demand.release(null);
-		await vi.waitFor(
-			() => {
-				expect(writeCache).toHaveBeenCalledWith(
-					"todo-baseline",
-					expect.anything(),
-					expect.anything(),
-				);
-			},
-			{ timeout: 10_000 },
-		);
+		// The live session's own TODO scan is the proof the scans were scheduled.
+		await written;
 		expect(staleGroup()).toBeUndefined();
 	});
 });
