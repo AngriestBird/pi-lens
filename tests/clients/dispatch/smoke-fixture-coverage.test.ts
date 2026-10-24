@@ -704,6 +704,21 @@ describe("captured real-bytes fixture provenance", () => {
 		).toEqual([]);
 	});
 
+	// #4522 review R2 F3: the capture gate's own rule (recordProblems) runs over the
+	// exit-code root too. Without it, a version the probe never printed (the
+	// availability answer's banner disagreeing with the recorded version) passes
+	// this census. Recurrence: the round-2 census ran the provenance and
+	// availability checks and not the gate the capture itself uses.
+	it("every exit-code fixture passes the capture gate's record rule", () => {
+		const problems = listExitCodeFixtures().flatMap((fixture) =>
+			recordProblems(fixture as never),
+		);
+		expect(
+			problems,
+			`exit-code fixture(s) whose recorded answers the capture gate refuses:\n${problems.join("\n")}`,
+		).toEqual([]);
+	});
+
 	// A clean run is required of every runner-output fixture because the matrix's
 	// clean cell replays it. An exit-code fixture is a failing run whose input is
 	// the failure itself: the invalid configuration. A valid-config run of the
