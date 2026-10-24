@@ -358,7 +358,8 @@ const DRIVERS: Record<string, Driver> = {
 			),
 		status: "failed",
 		reply: ({ filePath }) => ({
-			status: 1,
+			// #4522: detekt's measured findings exit is 2 (captured real.captured.json).
+			status: 2,
 			stdout: `${filePath}:4:5: error: magic number (${MARKER}) [MagicNumber]\n`,
 		}),
 	},
@@ -1052,7 +1053,7 @@ interface Observed {
 		| { status: string; failureKind?: string; diagnosticCount: number }
 		| undefined;
 	/** The latency.log runner row's metadata, as the log analyzer reads it. */
-	logged: { failureKind?: string } | undefined;
+	logged: { failureKind?: string; inconclusive?: boolean } | undefined;
 }
 
 async function drive(runnerId: string, driver: Driver): Promise<Observed> {
@@ -1173,10 +1174,42 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 		30_000,
 	);
 
-	// A hand-rolled ternary's other arm: findings below the runner's threshold
-	// stay `succeeded` and carry no kind (Stryker survivor on detekt.ts:203,
-	// `"succeeded"` → `""`, #3800).
-	it("keeps a warning-only detekt run succeeded without failureKind", async () => {
+	// #4522 T1: exit 1 after printed findings, through the production dispatcher.
+	// The findings are kept, and the run is flagged inconclusive: a tool error
+	// means the read is incomplete, so it must not claim full coverage.
+	it("detekt exit 1 after printed findings keeps them and is flagged inconclusive through dispatch (#4522)", async () => {
+		const captured = JSON.parse(
+			fs.readFileSync(
+				new URL(
+					"../../../fixtures/runner-exit-codes/detekt/findings-then-exit1.captured.json",
+					import.meta.url,
+				),
+				"utf8",
+			),
+		) as { exitCode: number; stderr: string; stdout: string };
+		const observed = await drive("detekt", {
+			...DRIVERS.detekt,
+			reply: ({ filePath }) => ({
+				status: captured.exitCode,
+				// The captured line names Bad.kt; the dispatched file is the driver's.
+				stdout: captured.stdout.replace(/__WORKSPACE__\/Bad\.kt/g, filePath),
+				stderr: captured.stderr,
+			}),
+		});
+		expect(observed.result?.status).not.toBe("skipped");
+		expect(observed.result?.diagnostics.map((d) => d.rule)).toContain(
+			"ForbiddenComment",
+		);
+		expect(observed.result?.inconclusive).toBe(true);
+		// #4522 T3: the failed latency row says the read was incomplete, not only
+		// that the findings failed it (the metadata is what latency.log carries).
+		expect(observed.logged?.inconclusive).toBe(true);
+	});
+
+	// #4522 T3: exit 1 with warning-only findings is `succeeded`, and its latency
+	// row still says the read was incomplete. Recurrence: the warning row logged
+	// no metadata, so a monitor could not see the partial analysis.
+	it("flags a warning-only detekt exit 1 as inconclusive in the latency row (#4522)", async () => {
 		const observed = await drive("detekt", {
 			...DRIVERS.detekt,
 			reply: ({ filePath }) => ({
@@ -1185,8 +1218,53 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 			}),
 		});
 		expect(observed.result?.status).toBe("succeeded");
+		expect(observed.result?.inconclusive).toBe(true);
+		expect(observed.logged?.inconclusive).toBe(true);
+	});
+
+	// #4522 F4: the captured exit-1 broken-config shape through the production
+	// dispatcher, not runner.run. A dispatched detekt exit 1 with no findings
+	// must never be delivered as a completed (clean or dirty) analysis.
+	it("detekt exit 1 on a malformed config is skipped through dispatch, never a clean verdict (#4522)", async () => {
+		const captured = JSON.parse(
+			fs.readFileSync(
+				new URL(
+					"../../../fixtures/runner-exit-codes/detekt/broken-config.captured.json",
+					import.meta.url,
+				),
+				"utf8",
+			),
+		) as { exitCode: number; stderr: string; stdout: string };
+		const observed = await drive("detekt", {
+			...DRIVERS.detekt,
+			reply: () => ({
+				status: captured.exitCode,
+				stdout: captured.stdout,
+				stderr: captured.stderr,
+			}),
+		});
+		expect(observed.result?.status).toBe("skipped");
+		expect(observed.result?.diagnostics).toEqual([]);
+	});
+
+	// A hand-rolled ternary's other arm: findings below the runner's threshold
+	// stay `succeeded` and carry no kind (Stryker survivor on detekt.ts:203,
+	// `"succeeded"` → `""`, #3800).
+	it("keeps a warning-only detekt run succeeded without failureKind", async () => {
+		const observed = await drive("detekt", {
+			...DRIVERS.detekt,
+			reply: ({ filePath }) => ({
+				status: 2,
+				stdout: `${filePath}:4:5: warning: magic number (${MARKER}) [MagicNumber]\n`,
+			}),
+		});
+		expect(observed.result?.status).toBe("succeeded");
 		expect(observed.result?.semantic).toBe("warning");
 		expect(observed.result?.failureKind).toBeUndefined();
+		// #4522 F1: exit 2 is the complete findings class, so it stays conclusive
+		// in the result and in the latency row.
+		expect(observed.result?.inconclusive).toBeUndefined();
+		expect(observed.logged?.inconclusive).toBeUndefined();
 	});
 
 	// The dangerous inverse (F4): a run that produced no usable result must never
