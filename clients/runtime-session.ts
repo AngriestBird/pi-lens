@@ -119,6 +119,7 @@ import {
 	subagentLightModeNotice,
 } from "./subagent-mode.js";
 import { TrivyClient, type TrivyResult } from "./trivy-client.js";
+import { TOOL_REGISTRY } from "./tool-config.js";
 import { isWarmAttached } from "./warm-attach.js";
 import { setSessionLanguages } from "./widget-state.js";
 import { logWordIndex } from "./word-index-logger.js";
@@ -134,6 +135,7 @@ import { resetZizmorTokenAvailability } from "./zizmor-config.js";
 import { resetSpawnTimeoutCooldowns } from "./spawn-timeout-cooldown.js";
 import { resetTestRunnerDelivery } from "./test-runner-delivery.js";
 import { resetLspMutationNoBridgeDbgLatch } from "./lsp-mutation.js";
+import { isStaleExtensionCtxError } from "./session-event-guard.js";
 import type {
 	ClassificationBasis,
 	SessionStartClassification,
@@ -1333,6 +1335,23 @@ export const STARTUP_TASK_DEFER_MS: Partial<Record<StartupTaskName, number>> = {
 	"ast-grep-exports": 5400,
 };
 
+/**
+ * #4815: the one answer to a stale host ctx met while the deferred scans were
+ * being scheduled. Records the skip (once per session, through the ledger's
+ * existing `extension-ctx-stale` kind) and returns; any error that is NOT the
+ * SDK's stale-ctx message is thrown again, unchanged.
+ */
+function recordStaleScanSkip(err: unknown, dbg: SessionStartDeps["dbg"]): void {
+	if (!isStaleExtensionCtxError(err)) throw err;
+	dbg("session_start scans: extension ctx went stale — skipped");
+	recordDegradationOnce({
+		kind: "extension-ctx-stale",
+		subject: "session-start-scans",
+		reason:
+			"session-start scans skipped: the session was replaced while the analyzer bootstrap was pending",
+	});
+}
+
 // Fire off heavy scans as background tasks — don't block session start.
 // Each consumer already handles the "not ready yet" case gracefully
 // (cachedExports.size > 0, cache miss paths).
@@ -1358,15 +1377,25 @@ function scheduleStartupScans(
 			dbg("session_start scans: analyzer bootstrap unavailable — skipped");
 			return;
 		}
-		scheduleStartupScansWithClients(
-			resolved,
-			runtime,
-			sessionGeneration,
-			analysisRoot,
-			snapshotRoot,
-			languageProfile,
-			dbg,
-		);
+		// #4815: the await above can outlive the session. A reload that lands
+		// inside it leaves the host ctx behind `deps.getFlag` / `deps.notify`
+		// stale, and the first read below throws the SDK's stale-ctx error into
+		// this fire-and-forget IIFE, which has no other catch. The replacement
+		// session runs its own scans, so skipping is the whole answer; anything
+		// that is NOT the stale-ctx message stays as loud as it was.
+		try {
+			scheduleStartupScansWithClients(
+				resolved,
+				runtime,
+				sessionGeneration,
+				analysisRoot,
+				snapshotRoot,
+				languageProfile,
+				dbg,
+			);
+		} catch (err) {
+			recordStaleScanSkip(err, dbg);
+		}
 	})();
 }
 
@@ -2240,13 +2269,13 @@ function readSubstituteGuidance(
 function situationalGuidance(
 	isEnabled: (name: string) => boolean,
 ): string | undefined {
+	// #4682: the same registry rows that feed the lazy catalog (index.ts
+	// LAZY_TOOL_CATALOG), so a situational tool added to TOOL_REGISTRY is named
+	// without a second edit.
 	const active: string[] = [];
-	for (const name of [
-		"lsp_navigation",
-		"ast_grep_search",
-		"ast_grep_replace",
-	]) {
-		if (isEnabled(name)) active.push(name);
+	for (const entry of TOOL_REGISTRY) {
+		if (!(entry as { situational?: true }).situational) continue;
+		if (isEnabled(entry.name)) active.push(entry.name);
 	}
 	if (active.length === 0) return undefined;
 	// #4682: one clause, true under every tools.lazy posture. With lazy=false
