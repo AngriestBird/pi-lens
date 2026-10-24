@@ -7,6 +7,7 @@ import { expect, describe, it } from "vitest";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 import { type RealPi, withRealPi } from "../support/real-pi-harness.js";
 import { scaledTestTimeout } from "../support/test-timeout-scale.js";
+import { recordScopeTransitions } from "../support/trace-recorder.js";
 
 const realPiAvailable =
 	spawnSync("pi", ["--version"], { stdio: "ignore" }).status === 0;
@@ -328,6 +329,8 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 						rows,
 					}),
 				).toEqual(expectedTransitions);
+				// #3533: feeds scripts/trace-validate-session-lifecycle.mjs when asked.
+				recordScopeTransitions(pi, "lifecycle-drive");
 			},
 		);
 	}, 60_000);
