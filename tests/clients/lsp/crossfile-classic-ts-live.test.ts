@@ -22,8 +22,8 @@
  *    module gone. That case stays skipped while pi-lens advertises no
  *    relative-pattern support, because the classic wrapper then asks for no
  *    client-side watching at all and drops every watched-files event pi-lens
- *    sends. The skip is derived from that capability, so it lifts on its own
- *    the moment the client claims it.
+ *    sends. The skip needs both the capability claim and the classic spawn's
+ *    `tsserver.useClientFileWatcher`; see CLASSIC_SPAWN_ASKS_CLIENT_WATCHING.
  *
  * Opt-in like the other live TypeScript suites: it runs only with
  * `PI_LENS_INTEGRATION=1` and a classic compiler named by
