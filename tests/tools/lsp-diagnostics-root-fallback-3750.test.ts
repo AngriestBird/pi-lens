@@ -292,6 +292,60 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		expect(declined?.latestReasons[0]?.subject).toContain("csharp:");
 	});
 
+	// Recurrence guarded (#4806 N2): the root verdict on an unavailable primary
+	// was wired for every `requiresProjectRoot` server but pinned only for
+	// csharp-ls, so narrowing either arm of the widening to csharp stayed green.
+	// Here rust-analyzer's command is a path that does not exist (no client ever
+	// runs), and the file has no Cargo.toml: the model must read the durable cause
+	// (no project), not only the transient "could not be started".
+	it("names the missing project when a rust-analyzer that cannot start is asked about a project-less file (single file and batch)", async () => {
+		answerWith("empty");
+		const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
+		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
+		try {
+			const dir = workspace();
+			fs.mkdirSync(path.join(dir, ".pi-lens"));
+			fs.writeFileSync(
+				path.join(dir, ".pi-lens", "lsp.json"),
+				JSON.stringify({
+					serverOverrides: {
+						rust: { command: [path.join(dir, "missing", "rust-analyzer")] },
+					},
+				}),
+			);
+			const first = source(dir, "one.rs");
+			const second = source(dir, "two.rs");
+
+			const single = await runTool(dir, { path: first });
+
+			expect(single.text).toMatch(
+				/Primary LSP \(rust\): not available — no language server answered for this file/,
+			);
+			expect(single.text).toContain(
+				"rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock).",
+			);
+			expect(single.text).not.toContain("started at the file's directory");
+			// The bounded csharp-ls search is not rust-analyzer's decision.
+			expect(single.text).not.toContain("bounded search");
+			expect(single.details.unconfirmed).toBe(true);
+			expect(single.details.rootFallbackReason).toBe(
+				"rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock)",
+			);
+
+			const batch = await runTool(dir, { paths: [first, second] });
+
+			expect(batch.text).toContain("0 files confirmed clean, 2 unconfirmed");
+			expect(batch.text).toContain(
+				"2 with no language server answer (it could not be started, or was still starting): rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock). NOT the same as 0 diagnostics.",
+			);
+			expect(batch.text).not.toContain("bounded search");
+		} finally {
+			if (savedInstall === undefined)
+				delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
+			else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
+		}
+	}, 30_000);
+
 	// Recurrence guarded: #3750 round 1 demoted all 11 undefined-root servers, so a
 	// healthy Lua repo (`.luarc.json` is optional; lua-language-server analyses
 	// standalone files) could never read confirmed clean.
