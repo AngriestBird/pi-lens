@@ -200,6 +200,9 @@ describe("#1756 stage 1 — declared server trait table", () => {
 		// answer for the document with none coming.
 		expect(DEFAULT_RESEND_RECHECK).toBe("unmeasured");
 		expect(serverTraits({ role: "language" }).resendRecheck).toBe("unmeasured");
+		expect(
+			serverTraits({ role: "language", notifyInflightLimit: 4 }).resendRecheck,
+		).toBe("unmeasured");
 		expect(serverTraits({ role: "auxiliary" }).notifyInflightLimit).toBe(
 			PRE_FOLD_NOTIFY_INFLIGHT_DEFAULT,
 		);
