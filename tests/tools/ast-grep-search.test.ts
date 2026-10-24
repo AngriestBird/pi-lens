@@ -1156,6 +1156,25 @@ describe("ast_grep_search tool", () => {
 		expect(text).not.toContain("pilens_");
 	});
 
+	// #4682 F4 (PR #4809 verify round 2): `index.ts` registers this tool for pi
+	// with no `host` in ctx, so the tool's own default decides which names a pi
+	// agent reads. Recurrence: `ctx.host ?? "pi"` flipped to `?? "mcp"` left
+	// every other ast-grep case green while a pi caller read pilens_* names.
+	it("defaults the no-match hint to the pi host when the caller names none (#4682 F4)", async () => {
+		const tool = createAstGrepSearchTool(makeClient());
+		const result = await tool.execute(
+			"no-match-default-host",
+			{ pattern: "foo($X)", lang: "typescript" },
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+		const text = String(result.content[0].text);
+		expect(text).toContain("symbol_search");
+		expect(text).toContain("module_report");
+		expect(text).not.toContain("pilens_");
+	});
+
 	it("runs dump mode through the search handler with the shared result contract", async () => {
 		const dumpAst = vi
 			.fn()

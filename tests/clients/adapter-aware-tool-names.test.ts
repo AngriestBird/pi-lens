@@ -17,7 +17,12 @@ import {
 	renderSessionStartGuidance,
 	SESSION_START_GUIDANCE,
 } from "../../clients/runtime-session.js";
-import { stripSource } from "../support/sweep-kit.js";
+import {
+	callSites,
+	lineOf,
+	matchingCloseIndex,
+	stripSource,
+} from "../support/sweep-kit.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const report: ActionableWarningsReport = {
@@ -362,9 +367,15 @@ describe("#2535 adapter-aware agent tool names", () => {
 
 	// #4682 shape 83 (F3): the MCP ast-grep route must tell the tool which host
 	// renders its answer. A runtime probe of the route costs a real ast-grep
-	// binary, so this pins the call shape the same way the project-scan notice
-	// pin above does; tests/tools/ast-grep-search.test.ts drives the render.
-	it("mcp/server.ts passes the MCP host into the ast-grep search route (#4682 F3)", () => {
+	// binary, so this pins the call shape the same way the isLensGuardEnabled
+	// pin in tests/mcp/server.smoke.test.ts does; tests/tools/ast-grep-search
+	// .test.ts drives the render on both hosts.
+	// Recurrence (PR #4809 verify round 2, F5; coderabbit thread at line 378):
+	// asserting only that `host: "mcp"` occurs between two route conditionals
+	// stayed green while `tool.execute` received a different, hostless context
+	// object, so the route delivered pi names to MCP agents. The pin now binds
+	// the executed argument itself.
+	it("mcp/server.ts hands the MCP host to the ast-grep search tool it executes (#4682 F3)", () => {
 		const source = stripSource(fs.readFileSync("mcp/server.ts", "utf8"), {
 			strings: "keep",
 		});
@@ -375,7 +386,27 @@ describe("#2535 adapter-aware agent tool names", () => {
 			routeStart,
 		);
 		expect(routeEnd).toBeGreaterThan(routeStart);
-		expect(source.slice(routeStart, routeEnd)).toContain('host: "mcp"');
+		// The route's own `tool.execute(...)`: its last argument must be the `ctx`
+		// object, never a second, hostless literal.
+		const routeFirstLine = lineOf(source, routeStart);
+		const routeLastLine = lineOf(source, routeEnd);
+		const executed = callSites(source, /^execute$/).filter(
+			(site) => site.line >= routeFirstLine && site.line <= routeLastLine,
+		);
+		expect(executed).toHaveLength(1);
+		expect(executed[0].argsText).toMatch(/,\s*ctx\s*$/);
+		// ...and that `ctx` is the object carrying the MCP host for the search arm.
+		const declaration = "const ctx = ";
+		const declarationStart = source.indexOf(declaration, routeStart);
+		expect(declarationStart).toBeGreaterThan(routeStart);
+		const braceAt = declarationStart + declaration.length;
+		const bodyEnd = matchingCloseIndex(source, braceAt, "{", "}", {
+			quoteAware: true,
+		});
+		expect(bodyEnd).toBeGreaterThan(braceAt);
+		const ctxBody = source.slice(braceAt, bodyEnd);
+		expect(ctxBody).toContain('host: "mcp"');
+		expect(ctxBody).toContain('name === "pilens_ast_grep_search"');
 	});
 
 	it("mcp/session.ts consumes session-start guidance for the MCP host", () => {
