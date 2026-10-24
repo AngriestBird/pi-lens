@@ -9,6 +9,7 @@ import {
 	p90,
 	p90CapReport,
 	RUNTIME_CAP_WARN_RATIO,
+	runtimeCapLines,
 } from "../../scripts/lib/ci-runtime-cap.mjs";
 
 // #4691 (item 3 of #3920): nothing compared a required CI job's measured
@@ -207,11 +208,61 @@ describe("required CI job p90 against timeout-minutes (#4691)", () => {
 			);
 		expect(at(419)).not.toContain("Lint & type-check");
 		expect(at(420)).toContain("Lint & type-check");
+		// The per-head report is the other reader of the one comparator: the same
+		// 420 s run prints there too, and 419 s does not.
+		const perHead = (s: number) =>
+			runtimeCapLines({
+				caps,
+				checkRuns: [
+					{
+						name: "Lint & type-check",
+						started_at: "2026-10-18T10:00:00Z",
+						completed_at: new Date(
+							Date.parse("2026-10-18T10:00:00Z") + s * 1000,
+						)
+							.toISOString()
+							.replace(".000Z", "Z"),
+					},
+				],
+			}).join("\n");
+		expect(perHead(419)).toContain("no job is at 70%");
+		expect(perHead(420)).toContain("Lint & type-check 420s of 600s (70%)");
 	});
 
 	it("nearest-rank p90", () => {
 		expect(p90([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])).toBe(9);
 		expect(p90([5])).toBe(5);
 		expect(p90([])).toBeUndefined();
+	});
+});
+
+// Recurrence: #4825 F3. The p90 steps sat after `Detect untriaged issues`, which
+// exits 1 whenever an issue is untriaged (8 of the last 10 scheduled runs), and
+// GitHub skips every step after a failed one: the nightly was silent on the days
+// it ran. The detector now runs last, under `!cancelled()` so a p90 step that
+// fails cannot skip it either, and no step is `continue-on-error`.
+describe("untriaged-issues.yml step order (#4691)", () => {
+	const workflow = yaml.load(
+		readFileSync(
+			resolve(ROOT, ".github/workflows/untriaged-issues.yml"),
+			"utf8",
+		),
+	) as {
+		jobs: Record<
+			string,
+			{ steps: Array<{ name?: string; run?: string; if?: string }> }
+		>;
+	};
+	const steps = Object.values(workflow.jobs).flatMap((job) => job.steps);
+	const indexOfRun = (needle: string) =>
+		steps.findIndex((step) => step.run?.includes(needle));
+
+	it("runs the p90 check before the detector, and the detector survives a p90 failure", () => {
+		const p90Step = indexOfRun("scripts/check-ci-job-p90.mjs");
+		const detector = indexOfRun("scripts/detect-untriaged-issues.mjs");
+		expect(p90Step).toBeGreaterThan(-1);
+		expect(detector).toBeGreaterThan(p90Step);
+		expect(steps[detector].if).toBe("${{ !cancelled() }}");
+		expect(JSON.stringify(steps)).not.toContain("continue-on-error");
 	});
 });
