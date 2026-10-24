@@ -498,6 +498,10 @@ describe("tree census timeout (#4828)", () => {
 			'import { it as check } from "vitest";\nconst register = () => check("c", () => { listSourceFiles(ROOT); });',
 		],
 		[
+			"a namespace vitest import declared in a helper",
+			'import * as v from "vitest";\nconst register = () => v.it.skipIf(cond)("c", () => { listSourceFiles(ROOT); });',
+		],
+		[
 			"it.for over a walked table",
 			'const table = listSourceFiles(ROOT);\nit.for(table)("c", (file) => { expect(file).toBeTruthy(); });',
 		],
@@ -577,8 +581,8 @@ describe("tree census timeout (#4828)", () => {
 			// Calibration 2026-10-25: 151 census tests declared (121 carried the
 			// default budget before #4828; every one carries a budget after it). The
 			// floor is the measured count, shrink-only: a regression in binding
-			// propagation (measured 51) or the `it.each` table branch (measured 148)
-			// drops the count and reds here, where a floor of 30 stayed green.
+			// propagation (measured 52) drops the count and reds here, where a floor of 30 stayed
+			// green.
 			assertNonEmptyScan("tree census tests", census, 151);
 			expect(flagged).toEqual([]);
 		},
