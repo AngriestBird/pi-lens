@@ -20,6 +20,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // magnitude-independent.
 vi.hoisted(() => {
 	process.env.PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS = "150";
+	// #4801: the read-only command ceiling is also read at module load. The
+	// hang test below waits it out for real; every other read-only call in
+	// this file is answered at once by the fixture.
+	process.env.PI_LENS_LSP_PROJECT_IDENTITY_PROBE_TIMEOUT_MS = "300";
 });
 import { createLSPClient } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
@@ -1451,4 +1455,80 @@ describe("LSP Client Integration — mutation-bridge fallback for server-initiat
 			removeTempDirSync(innerCwd);
 		}
 	});
+});
+
+// #4801: `runReadOnlyServerCommand` raced `safeSendRequest` against a timer and
+// passed no signal. A server that accepted the command and never answered left
+// the request pending for good: no `$/cancelRequest` went out and the
+// connection's busy count never dropped, so `ClientRegistry` (which declines to
+// evict `isBusy()` clients, client-registry.ts) could never retire the client.
+// The warm-attach membership probe takes this route, so each attached read
+// could add one more pending request. The commands that share this timeout
+// are `executeReadOnlyCommand` callers only: the tsserver `projectInfo`
+// membership probe (`fetchTsserverProjectIdentity`) and the didOpen
+// project-identity probe (`probeTsserverProjectIdentity`).
+describe("LSP Client Integration — a timed-out read-only command is cancelled and released (#4801)", () => {
+	it("sends $/cancelRequest and drops the busy count for a command the server never answers", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ro-cancel-"));
+		const trace = path.join(tmp, "trace.log");
+		const proc = await spawnFakeLspServer({
+			cwd: tmp,
+			env: {
+				...process.env,
+				FAKE_LSP_HANG_COMMAND: "1",
+				FAKE_LSP_TRACE_FILE: trace,
+			},
+		});
+		const client = await createLSPClient({
+			serverId: "fake",
+			process: proc,
+			root: tmp,
+		});
+		try {
+			expect(client.isBusy?.()).toBe(false);
+
+			const res = await client.executeReadOnlyCommand("fake.hang");
+
+			expect(res.executed).toBe(false);
+			expect(res.reason).toContain("timed out");
+			// Final before the caller sees the timeout: no waiting, no polling.
+			expect(client.isBusy?.()).toBe(false);
+			// The server sees the cancel on the wire...
+			await vi.waitFor(
+				() => {
+					expect(fs.readFileSync(trace, "utf-8")).toContain(
+						"recv $/cancelRequest",
+					);
+				},
+				{ timeout: 2000 },
+			);
+			// ...and the client no longer counts the abandoned request, so the
+			// registry's eviction predicate reads it as idle. The server never
+			// answered the cancel, so this is a local release, not a reply.
+			expect(client.isBusy?.()).toBe(false);
+			// The connection is still usable after the local release.
+			const next = await client.executeReadOnlyCommand("fake.doThing");
+			expect(next.executed).toBe(true);
+			expect(client.isBusy?.()).toBe(false);
+			// An answered command is never cancelled: still exactly one cancel.
+			expect(
+				fs
+					.readFileSync(trace, "utf-8")
+					.split("\n")
+					.filter((line) => line === "recv $/cancelRequest"),
+			).toHaveLength(1);
+		} finally {
+			try {
+				await client.shutdown();
+			} catch {
+				/* ignore */
+			}
+			try {
+				await stopLSP(proc);
+			} catch {
+				/* ignore */
+			}
+			removeTempDirSync(tmp);
+		}
+	}, 15_000);
 });

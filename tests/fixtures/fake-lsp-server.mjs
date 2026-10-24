@@ -835,6 +835,12 @@ function handle(raw) {
 							"fake.applyEdit",
 							"fake.applyEditDeferred",
 							"fake.releaseDeferredApplyEdit",
+							// #4801: a command the server accepts and never answers, and
+							// never cancels. Off by default so the advertised list the
+							// other suites pin does not move.
+							...(process.env.FAKE_LSP_HANG_COMMAND === "1"
+								? ["fake.hang"]
+								: []),
 						],
 					},
 					// #3310: `FAKE_LSP_NO_DIAGNOSTIC_PROVIDER=1` advertises NO pull
@@ -1454,6 +1460,9 @@ function handle(raw) {
 	// result once the client has responded (so tests are race-free).
 	if (data.method === "workspace/executeCommand") {
 		const cmd = data.params?.command;
+		// #4801: accepted, never answered; a `$/cancelRequest` for it is
+		// ignored, like a wedged server. The trace file shows the cancel.
+		if (cmd === "fake.hang") return;
 		if (cmd === "fake.applyEdit" || cmd === "fake.applyEditDeferred") {
 			const spec = buildApplyEditSpec(data.params?.arguments);
 			pendingExec = { execId: data.id, command: cmd };
