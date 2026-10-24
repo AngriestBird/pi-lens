@@ -1,7 +1,13 @@
 // flake-shape: real-process-spawn — the nightly CLI is the subject: it must run as a real
 // child process with PATH pointing at a gh stand-in, which no in-process mock reproduces (#4691).
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -34,22 +40,56 @@ describe.skipIf(process.platform === "win32")(
 				env: {
 					PATH: `${dir}:${process.env.PATH}`,
 					FAKE_GH_FIXTURE: fixturePath,
+					GH_REPO: "owner/repo",
 				},
 			});
 		}
 
-		it("prints one ::warning per over-cap job, with the percent escaped, and exits 0", () => {
+		it("measures every required context: warns on TLA+ models and Unit tests Windows, and names the one it could not measure", () => {
+			// Recurrence: the first cut measured the constant fallback list (2 of the 9
+			// branch-protection contexts), so TLA+ models (the issue's motivating
+			// job) and Unit tests Windows (1500 s of a 1500 s cap) were silent (#4691
+			// F2). The fixture records no Install test (macos-latest) row.
 			const result = run(["--runs", "20"], RECORDED);
 			expect(result.status).toBe(0);
 			const warnings = result.stdout
 				.split("\n")
-				.filter((line) => line.startsWith("::warning"));
-			expect(warnings).toHaveLength(1);
-			expect(warnings[0]).toContain(
-				'::warning title=CI job p90 near timeout::ci.yml job lint-and-typecheck "Lint & type-check"',
+				.filter((line) => line.startsWith("::warning title=CI job p90 near"));
+			expect(warnings).toHaveLength(3);
+			expect(warnings.join("\n")).toContain('"Lint & type-check"');
+			expect(warnings.join("\n")).toContain("75.0%25 of its 600 s cap");
+			expect(warnings.join("\n")).toContain('"Unit tests Windows"');
+			expect(warnings.join("\n")).toContain("100.0%25 of its 1500 s cap");
+			expect(warnings.join("\n")).toContain('"TLA+ models (shard 2/4)"');
+			const unmeasured = result.stdout
+				.split("\n")
+				.filter((line) =>
+					line.startsWith("::warning title=CI job p90 unmeasured"),
+				);
+			expect(unmeasured).toHaveLength(1);
+			expect(unmeasured[0]).toContain(
+				'unmeasured required context "Install test (macos-latest)"',
 			);
-			expect(warnings[0]).toContain("75.0%25 of its 600 s cap");
-			expect(result.stdout).toContain("1 warning(s)");
+			expect(result.stdout).toContain(
+				"ci-job-p90: 8 of 9 required contexts measured",
+			);
+		});
+
+		it("falls back to the constant required list and says so when branch protection is unreadable", () => {
+			// Recurrence: a silent fallback reads as a clean population (AGENTS shape 10).
+			const unreadable = join(dir, "unprotected.json");
+			writeFileSync(
+				unreadable,
+				JSON.stringify({
+					...JSON.parse(readFileSync(RECORDED, "utf8")),
+					required: null,
+				}),
+			);
+			const result = run(["--runs", "20"], unreadable);
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain(
+				"ci-job-p90: branch protection unreadable; measuring the fallback required list",
+			);
 		});
 
 		it("refuses --runs outside 1..100 with exit 1", () => {

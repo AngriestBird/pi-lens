@@ -1,143 +1,212 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
+import yaml from "../../clients/deps/js-yaml.js";
+import { escapeRegExp } from "../../clients/string-utils.js";
 import {
 	formatP90Warning,
+	jobCapEntries,
 	p90,
-	P90_CAP_RATIO,
-	p90Warnings,
-	requiredJobSpecs,
-} from "../../scripts/lib/ci-job-p90.mjs";
+	p90CapReport,
+	RUNTIME_CAP_WARN_RATIO,
+} from "../../scripts/lib/ci-runtime-cap.mjs";
 
 // #4691 (item 3 of #3920): nothing compared a required CI job's measured
 // runtime with its `timeout-minutes`. The TLA+ cap (720 s) was found only when
-// PRs timed out (623-881 s, #3918). These tests drive the pure computation on a
-// recorded master-run fixture; the gh fetch is the only host boundary and lives
-// in scripts/check-ci-job-p90.mjs.
+// PRs timed out (623-881 s, #3918). These tests drive the shared rule's p90 mode
+// (scripts/lib/ci-runtime-cap.mjs, the module ci-verdict's per-head report also
+// uses) on a recorded master-run fixture; the gh fetch is the only host boundary
+// and lives in scripts/check-ci-job-p90.mjs.
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
-const ciWorkflow = load(
-	readFileSync(resolve(ROOT, ".github/workflows/ci.yml"), "utf8"),
-) as { jobs: Record<string, unknown> };
+const caps = ["ci.yml", "lint.yml"].flatMap((file) =>
+	jobCapEntries(
+		yaml.load(readFileSync(resolve(ROOT, ".github/workflows", file), "utf8")),
+		`.github/workflows/${file}`,
+		escapeRegExp,
+	),
+);
 const fixture = JSON.parse(
 	readFileSync(
 		resolve(ROOT, "tests/fixtures/ci-job-p90/master-runs.json"),
 		"utf8",
 	),
-) as { runs: Parameters<typeof p90Warnings>[0]["runs"] };
+) as {
+	runs: Parameters<typeof p90CapReport>[0]["runs"];
+	required: string[];
+};
+const REQUIRED = fixture.required;
 
-function withShardsAt(seconds: number) {
-	return fixture.runs.map((run) => ({
+function withDuration(
+	runs: typeof fixture.runs,
+	jobName: string,
+	seconds: number,
+) {
+	return runs.map((run) => ({
 		...run,
-		jobs: run.jobs.map((job) => {
-			if (!job.name.startsWith("Unit tests (shard")) return job;
-			const started = Date.parse(job.started_at as string);
-			return {
-				...job,
-				completed_at: new Date(started + seconds * 1000)
-					.toISOString()
-					.replace(".000Z", "Z"),
-			};
-		}),
+		jobs: run.jobs.map((job) =>
+			job.name === jobName
+				? {
+						...job,
+						completed_at: new Date(
+							Date.parse(job.started_at as string) + seconds * 1000,
+						)
+							.toISOString()
+							.replace(".000Z", "Z"),
+					}
+				: job,
+		),
 	}));
 }
 
+const report = (runs = fixture.runs, requiredChecks: string[] = REQUIRED) =>
+	p90CapReport({ caps, runs, requiredChecks });
+
 describe("required CI job p90 against timeout-minutes (#4691)", () => {
 	// Recurrence: #3918 (TLA+ shards timed out at 623-881 s against a 720 s cap).
-	it("warns on a job at 75% of its cap and stays silent at 60%", () => {
-		const specs = requiredJobSpecs(ciWorkflow);
-		const { warnings } = p90Warnings({ specs, runs: fixture.runs });
-		expect(warnings.map((w) => w.key)).toEqual(["lint-and-typecheck"]);
-		const line = formatP90Warning(warnings[0]);
-		expect(line).toContain('"Lint & type-check"');
-		expect(line).toContain("p90 450 s");
-		expect(line).toContain("75.0% of its 600 s cap");
-		expect(line).toContain("timeout-minutes 10");
-		expect(line).toContain("5 master runs 2026-10-18 to 2026-10-22");
-		expect(line).toContain("5 samples");
+	it("warns on jobs at or over 70% of their cap and stays silent below it", () => {
+		const names = report().warnings.map((w) => w.name);
+		expect(names).toEqual([
+			"Unit tests Windows", // 1500 s of 1500 s
+			"TLA+ models (shard 2/4)", // 1000 s of 1200 s
+			"Lint & type-check", // 450 s of 600 s
+		]);
+		// Unit tests shards run at 1080 s of 1800 s (60%), Install tests far below.
+		expect(names.some((n) => n.startsWith("Unit tests ("))).toBe(false);
 	});
 
 	it("names the job, p90, cap and run window in the warning line", () => {
-		const specs = requiredJobSpecs(ciWorkflow);
-		const [w] = p90Warnings({ specs, runs: fixture.runs }).warnings;
-		expect(w.p90Seconds).toBe(450);
-		expect(w.capSeconds).toBe(600);
-		expect(w.window).toEqual({ runs: 5, from: "2026-10-18", to: "2026-10-22" });
-	});
-
-	it("emits one record per job per run, never one per shard sample", () => {
-		// Recurrence: #4691 acceptance 3. The shard matrix has 10 samples (5 runs
-		// x 2 shards); pushing them all over the cap must still give one record.
-		const specs = requiredJobSpecs(ciWorkflow);
-		const { warnings } = p90Warnings({
-			specs,
-			runs: withShardsAt(1350),
+		const lint = report().warnings.find((w) => w.name === "Lint & type-check");
+		expect(lint).toMatchObject({
+			p90Seconds: 450,
+			capSeconds: 600,
+			samples: 5,
+			window: { runs: 5, from: "2026-10-18", to: "2026-10-22" },
 		});
-		const shardWarnings = warnings.filter((w) => w.key === "test");
-		expect(shardWarnings).toHaveLength(1);
-		expect(shardWarnings[0].samples).toBe(10);
-		expect(shardWarnings[0].capSeconds).toBe(1800);
+		const line = formatP90Warning(lint as NonNullable<typeof lint>);
+		expect(line).toContain('"Lint & type-check"');
+		expect(line).toContain("p90 450 s is 75.0% of its 600 s cap");
+		expect(line).toContain("timeout-minutes 10");
+		expect(line).toContain("window 5 master runs 2026-10-18 to 2026-10-22");
+		expect(line).toContain("5 samples");
 	});
 
-	it("reads the required jobs and their caps from the real ci.yml", () => {
-		const specs = requiredJobSpecs(ciWorkflow);
-		const byKey = Object.fromEntries(specs.map((s) => [s.key, s]));
-		expect(byKey.test?.capMinutes).toBe(30);
-		expect(byKey["unit-tests"]?.capMinutes).toBe(10);
-		expect(byKey["lint-and-typecheck"]?.capMinutes).toBe(10);
-		// Not a required check: its 1500 s runs at a 1500 s cap would warn if it
-		// were wrongly admitted.
-		expect(byKey["unit-tests-windows"]).toBeUndefined();
+	// Recurrence: CodeRabbit thread on #4825. `from`/`to` came only from runs that
+	// contributed a sample, so "20 master runs 2026-10-18 to 2026-10-20" described
+	// three runs.
+	it("labels the window from every selected run, and keeps the sample count separate", () => {
+		const runs = Array.from({ length: 20 }, (_, i) => ({
+			id: i,
+			created_at: `2026-10-${String(i + 1).padStart(2, "0")}T10:00:00Z`,
+			jobs:
+				i >= 17
+					? [
+							{
+								name: "Lint & type-check",
+								started_at: "2026-10-18T10:00:00Z",
+								completed_at: "2026-10-18T10:07:30Z",
+							},
+						]
+					: [],
+		}));
+		const [w] = report(runs).warnings;
+		expect(w.window).toEqual({
+			runs: 20,
+			from: "2026-10-01",
+			to: "2026-10-20",
+		});
+		expect(w.samples).toBe(3);
 	});
 
-	it("ignores skipped and untimed rows, and reports jobs with no samples", () => {
-		const specs = requiredJobSpecs(ciWorkflow);
-		const runs = [
+	it("emits one record per job name per invocation, never one per sample", () => {
+		// Recurrence: #4691 acceptance 3. Each shard has 5 samples (one per run);
+		// pushing them all over the cap still gives one record per shard.
+		const runs = withDuration(
+			withDuration(fixture.runs, "Unit tests (shard 1/2)", 1350),
+			"Unit tests (shard 2/2)",
+			1350,
+		);
+		const shards = report(runs).warnings.filter((w) =>
+			w.name.startsWith("Unit tests ("),
+		);
+		expect(shards.map((w) => [w.name, w.samples])).toEqual([
+			["Unit tests (shard 1/2)", 5],
+			["Unit tests (shard 2/2)", 5],
+		]);
+	});
+
+	// Recurrence: the first cut measured the constant fallback list (2 of the 9
+	// branch-protection contexts), so TLA+ models, Unit tests Windows, Install
+	// test x3, knip and oxfmt were silent (#4691 F2).
+	it("measures the passed required set from the real workflows, not a constant list", () => {
+		const measured = report().measuredContexts;
+		expect(measured).toEqual(
+			expect.arrayContaining([
+				"Unit tests Windows",
+				"TLA+ models",
+				"Install test (ubuntu-latest)",
+				"Install test (windows-latest)",
+				"Lint & type-check",
+				"Unit tests",
+			]),
+		);
+		// No row for macOS in the recording: absent from the measured set, so the
+		// caller names it.
+		expect(measured).not.toContain("Install test (macos-latest)");
+		// A job outside the passed required set is not measured: Unit tests
+		// Windows sits at 1500 s of 1500 s and stays silent when not required.
+		const narrow = report(fixture.runs, ["Lint & type-check", "Unit tests"]);
+		expect(narrow.warnings.map((w) => w.name)).toEqual(["Lint & type-check"]);
+		expect(narrow.measuredContexts).not.toContain("Unit tests Windows");
+	});
+
+	it("does not measure a required context whose only rows did not run, or whose job has no cap", () => {
+		const skipped = [
 			{
 				id: 1,
 				created_at: "2026-10-18T10:00:00Z",
 				jobs: [
+					// Real skipped rows carry equal or inverted timestamps.
 					{
 						name: "Lint & type-check",
-						started_at: null,
-						completed_at: null,
-						conclusion: "skipped",
+						started_at: "2026-10-18T10:00:50Z",
+						completed_at: "2026-10-18T10:00:43Z",
+					},
+					{
+						name: "knip",
+						started_at: "2026-10-18T10:00:00Z",
+						completed_at: "2026-10-18T10:00:00Z",
+					},
+					{ name: "oxfmt format check", started_at: null, completed_at: null },
+					// Required by branch protection but declared in no workflow's caps.
+					{
+						name: "Unknown required job",
+						started_at: "2026-10-18T10:00:00Z",
+						completed_at: "2026-10-18T10:20:00Z",
 					},
 				],
 			},
 		];
-		const result = p90Warnings({ specs, runs });
+		const result = report(skipped, [
+			"Lint & type-check",
+			"knip",
+			"oxfmt format check",
+			"Unknown required job",
+		]);
 		expect(result.warnings).toEqual([]);
-		const lint = result.skipped.find((s) => s.key === "lint-and-typecheck");
-		expect(lint?.reason).toBe("no samples");
+		expect(result.measuredContexts).toEqual([]);
 	});
 
-	it("keeps exactly-70% quiet and warns just above it (strictly over the ratio)", () => {
-		expect(P90_CAP_RATIO).toBe(0.7);
-		const specs = requiredJobSpecs(ciWorkflow);
-		// lint cap is 600 s: 420 s is exactly 70%, 421 s is over it.
+	it("uses the ratio ci-verdict's per-head report uses, at the boundary", () => {
+		expect(RUNTIME_CAP_WARN_RATIO).toBe(0.7);
+		// lint cap is 600 s: 420 s is exactly 70% (warns, like runtimeCapLines),
+		// 419 s is under it.
 		const at = (s: number) =>
-			p90Warnings({
-				specs,
-				runs: fixture.runs.map((run) => ({
-					...run,
-					jobs: run.jobs.map((job) =>
-						job.name === "Lint & type-check"
-							? {
-									...job,
-									completed_at: new Date(
-										Date.parse(job.started_at as string) + s * 1000,
-									)
-										.toISOString()
-										.replace(".000Z", "Z"),
-								}
-							: job,
-					),
-				})),
-			}).warnings.map((w) => w.key);
-		expect(at(420)).toEqual([]);
-		expect(at(421)).toEqual(["lint-and-typecheck"]);
+			report(withDuration(fixture.runs, "Lint & type-check", s)).warnings.map(
+				(w) => w.name,
+			);
+		expect(at(419)).not.toContain("Lint & type-check");
+		expect(at(420)).toContain("Lint & type-check");
 	});
 
 	it("nearest-rank p90", () => {

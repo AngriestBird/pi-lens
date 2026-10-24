@@ -4,29 +4,40 @@
  * that a required CI job's p90 runtime over recent master runs nears its
  * `timeout-minutes` cap. Wired as a step in .github/workflows/untriaged-issues.yml.
  *
- * This CLI is the host boundary: it reads ci.yml, lists the last N completed
- * master push runs of ci.yml with `gh api`, and reads each run's job rows.
- * The computation is scripts/lib/ci-job-p90.mjs and is what the tests drive.
+ * A thin caller. The rule (ratio, job-name matcher, cap entries, the p90 mode)
+ * is scripts/lib/ci-runtime-cap.mjs, shared with ci-verdict's per-head
+ * "Runtime vs cap" report. The required set is branch protection, read through
+ * ci-verdict's `resolveRequiredCheckNames`; the caps are `readJobTimeCaps`.
+ * This file only does the host reads: the last N completed master push runs of
+ * each workflow that holds a required job, and each run's job rows.
  *
- * It warns and never gates: exit 0 whenever the data was read, one
- * `::warning` annotation per job (never one per shard sample). Exit 1 only
- * when the data could not be read, so a broken nightly is visible.
+ * It warns and never gates: exit 0 whenever the data was read, one `::warning`
+ * annotation per job over the ratio, and one per required context it could not
+ * measure (never silent). Exit 1 only when the data could not be read, so a
+ * broken nightly is visible.
  *
- * Usage: node scripts/check-ci-job-p90.mjs [--runs N] [--workflow path]
+ * Usage: node scripts/check-ci-job-p90.mjs [--runs N]
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import { load } from "js-yaml";
+import { resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+	readJobTimeCaps,
+	resolveRepository,
+	resolveRequiredCheckNames,
+} from "./ci-verdict.mjs";
+import { REQUIRED_CHECKS } from "./lib/ci-checks.mjs";
 import {
 	formatP90Warning,
-	p90Warnings,
-	P90_CAP_RATIO,
-	requiredJobSpecs,
-} from "./lib/ci-job-p90.mjs";
+	p90CapReport,
+	RUNTIME_CAP_WARN_RATIO,
+} from "./lib/ci-runtime-cap.mjs";
 
 const DEFAULT_RUNS = 20;
 const MAX_RUNS = 100;
+/** The workflows that hold a required job and run on a push to master. */
+const WORKFLOWS = ["ci.yml", "lint.yml"];
+const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
 function gh(args) {
 	const result = spawnSync("gh", args, {
@@ -41,33 +52,25 @@ function gh(args) {
 	return result.stdout;
 }
 
-/** Workflow commands escape %, CR and LF in the message body. */
-function annotationData(text) {
-	return text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+/** A workflow `::warning` command; %, CR and LF are escaped in its body. */
+function annotation(title, text) {
+	const data = text
+		.replace(/%/g, "%25")
+		.replace(/\r/g, "%0D")
+		.replace(/\n/g, "%0A");
+	return `::warning title=${title}::${data}`;
 }
 
 function parseArgs(argv) {
 	let runs = DEFAULT_RUNS;
-	let workflow = ".github/workflows/ci.yml";
 	for (let i = 0; i < argv.length; i += 1) {
 		if (argv[i] === "--runs") runs = Number(argv[(i += 1)]);
-		else if (argv[i] === "--workflow") workflow = argv[(i += 1)];
 		else throw new Error(`unknown argument: ${argv[i]}`);
 	}
 	if (!Number.isInteger(runs) || runs < 1 || runs > MAX_RUNS) {
 		throw new Error(`--runs must be an integer 1..${MAX_RUNS}`);
 	}
-	return { runs, workflow };
-}
-
-function listMasterRuns(count) {
-	const body = JSON.parse(
-		gh([
-			"api",
-			`repos/{owner}/{repo}/actions/workflows/ci.yml/runs?branch=master&event=push&status=completed&per_page=${count}`,
-		]),
-	);
-	return body.workflow_runs ?? [];
+	return { runs };
 }
 
 function jobRowsOf(runId) {
@@ -84,26 +87,61 @@ function jobRowsOf(runId) {
 		.map((line) => JSON.parse(line));
 }
 
-async function main() {
-	const { runs: runCount, workflow } = parseArgs(process.argv.slice(2));
-	const ci = load(readFileSync(workflow, "utf8"));
-	const specs = requiredJobSpecs(ci);
-	const runs = listMasterRuns(runCount).map((run) => ({
+function listMasterRuns(workflow, count) {
+	const body = JSON.parse(
+		gh([
+			"api",
+			`repos/{owner}/{repo}/actions/workflows/${workflow}/runs?branch=master&event=push&status=completed&per_page=${count}`,
+		]),
+	);
+	return (body.workflow_runs ?? []).map((run) => ({
 		id: run.id,
 		created_at: run.created_at,
 		jobs: jobRowsOf(run.id),
 	}));
-	const { warnings, skipped } = p90Warnings({ specs, runs });
-	for (const w of warnings) {
+}
+
+async function main() {
+	const { runs: runCount } = parseArgs(process.argv.slice(2));
+	const repository = process.env.GH_REPO || resolveRepository(gh);
+	const live = resolveRequiredCheckNames(repository, gh);
+	const requiredChecks = live ?? REQUIRED_CHECKS;
+	if (live === null) {
 		console.log(
-			`::warning title=CI job p90 near timeout::${annotationData(formatP90Warning(w))}`,
+			annotation(
+				"CI job p90 population",
+				`ci-job-p90: branch protection unreadable; measuring the fallback required list (${REQUIRED_CHECKS.join(", ")})`,
+			),
 		);
 	}
-	const skippedText = skipped.map((s) => `${s.key} (${s.reason})`).join(", ");
+	const caps = await readJobTimeCaps(ROOT);
+	const measured = new Set();
+	let warningCount = 0;
+	for (const workflow of WORKFLOWS) {
+		const report = p90CapReport({
+			caps: caps.filter(
+				(entry) => entry.file === `.github/workflows/${workflow}`,
+			),
+			runs: listMasterRuns(workflow, runCount),
+			requiredChecks,
+		});
+		for (const context of report.measuredContexts) measured.add(context);
+		for (const w of report.warnings) {
+			warningCount += 1;
+			console.log(annotation("CI job p90 near timeout", formatP90Warning(w)));
+		}
+	}
+	for (const name of requiredChecks.filter((n) => !measured.has(n))) {
+		console.log(
+			annotation(
+				"CI job p90 unmeasured",
+				`ci-job-p90: unmeasured required context "${name}": no job of ${WORKFLOWS.join(" or ")} with a timeout-minutes cap had a completed run in the last ${runCount} master runs`,
+			),
+		);
+	}
 	console.log(
-		`ci-job-p90: ${specs.length} required jobs over ${runs.length} master runs ` +
-			`at ratio ${P90_CAP_RATIO}; ${warnings.length} warning(s)` +
-			(skippedText ? `; skipped: ${skippedText}` : ""),
+		`ci-job-p90: ${measured.size} of ${requiredChecks.length} required contexts measured over the last ${runCount} master runs of ${WORKFLOWS.join(", ")} ` +
+			`at ratio ${RUNTIME_CAP_WARN_RATIO}; ${warningCount} warning(s)`,
 	);
 }
 
