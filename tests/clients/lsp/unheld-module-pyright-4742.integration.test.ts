@@ -20,7 +20,6 @@
  * `PI_LENS_TEST_PYRIGHT_BIN`, then PATH, then
  * `~/.pi-lens/tools/node_modules/.bin` through `REAL_HOME` (read-only).
  */
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -33,6 +32,7 @@ import {
 } from "../../../clients/project-trust.js";
 import { resetOpaqueMutationState } from "../../../clients/opaque-mutation-scan.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import { execFileSync } from "../../support/git-fixture-env.js";
 import { REAL_HOME } from "../../support/vitest-setup.js";
 import {
 	cleanupTestEnvironmentsDrained,
