@@ -40,7 +40,10 @@ import {
 	resetLSPConfigStateForTests,
 } from "../../../clients/lsp/config.js";
 import { LSPService } from "../../../clients/lsp/index.js";
-import { setProjectTrustState } from "../../../clients/project-trust.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../../clients/project-trust.js";
 import {
 	PythonServer,
 	RustServer,
@@ -63,6 +66,9 @@ describe("workspace/configuration answers each section (#4758)", () => {
 	});
 	afterEach(() => {
 		resetLSPConfigStateForTests();
+		// #4808 F3: the sibling LSP suites restore the process-global trust state;
+		// leaving it "trusted" leaks into any case that reads it.
+		resetProjectTrust();
 		removeTempDirSync(tmp);
 	});
 

@@ -6898,8 +6898,8 @@ export async function createLSPClient(options: {
 	// the settings tree (what a `workspace/configuration` pull is answered from,
 	// and the `didChangeConfiguration` payload) puts that blob under the section
 	// the server asks for. rust-analyzer's startup options ARE its
-	// `rust-analyzer` section; answering that pull with `{}` read as "no
-	// settings".
+	// `rust-analyzer` section, so the pull answer restates them instead of
+	// sending `{}`.
 	const settings =
 		settingsSection && initialization
 			? { [settingsSection]: initialization }

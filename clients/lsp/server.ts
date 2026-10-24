@@ -703,15 +703,17 @@ export interface LSPServerInfo {
 	autoPropagateDiagnostics?: boolean;
 	/**
 	 * The configuration section (one name) that this server's `initialization`
-	 * blob IS the contents of, for a server whose startup options and pulled
-	 * settings share one shape. rust-analyzer reads `initializationOptions` flat
-	 * at startup, then PULLS the `rust-analyzer` section; with no mapping the
-	 * pull is answered `{}` (#4758). The client answers that section from the
-	 * blob (user `serverOverrides` included) and leaves `initializationOptions`
-	 * unwrapped. A server whose settings already sit under their section names
-	 * inside the blob (pyright: {@link pyrightInitialization}) omits it. It sits
-	 * on the server, not the spawn result, so a user `command` override that
-	 * replaces `spawn` keeps it.
+	 * blob IS the contents of, for a server that PULLS its settings under that
+	 * name. rust-analyzer applies `initializationOptions` flat at startup and
+	 * then pulls the `rust-analyzer` section; with no mapping that pull is
+	 * answered `{}` (#4758), and an empty client config is a no-op it skips, so
+	 * today the mapping only makes the pull answer repeat what startup already
+	 * applied. The effect of the pull answer is unmeasured (#4512). The client
+	 * answers the section from the blob (user `serverOverrides` included) and
+	 * leaves `initializationOptions` unwrapped. A server whose settings already
+	 * sit under their section names inside the blob (pyright:
+	 * {@link pyrightInitialization}) omits it. It sits on the server, not the
+	 * spawn result, so a user `command` override that replaces `spawn` keeps it.
 	 */
 	settingsSection?: string;
 	spawn(

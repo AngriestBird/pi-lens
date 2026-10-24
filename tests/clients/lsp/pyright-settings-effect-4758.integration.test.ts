@@ -1,3 +1,4 @@
+// real-home: read-only path probe for the maintainer's managed pyright (`~/.pi-lens/tools/node_modules/.bin/pyright-langserver`); the pinned home has no managed tools tree, so without the real home the effect case skips on the one host that has pyright.
 // flake-shape: real-process-spawn — a real pyright-langserver child is the observation; only its own diagnostics can show whether a setting reached it.
 /**
  * #4758 acceptance, over a real pyright: a setting pi-lens sends must change a
@@ -29,12 +30,15 @@
  * Skipped, with a named reason, when no `pyright-langserver` or no `python3`
  * exists: the unit lanes install no managed tools. Set
  * `PI_LENS_TEST_PYRIGHT_BIN` to point at one; otherwise PATH, then
- * `~/.pi-lens/tools/node_modules/.bin`, is searched.
+ * `~/.pi-lens/tools/node_modules/.bin`, is searched. The harness pins HOME per
+ * worker (#4789), so the managed candidate reads the real home through
+ * `REAL_HOME`, a named read-only opt-out in
+ * `tests/support/real-home-readers.ts`; it never writes there.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { REAL_HOME } from "../../support/vitest-setup.js";
 import { mergeInitializationOptions } from "../../../clients/lsp/client-registry.js";
 import {
 	createLSPClient,
@@ -63,7 +67,7 @@ function findPyright(): string | undefined {
 	const override = process.env.PI_LENS_TEST_PYRIGHT_BIN;
 	if (override) return fs.existsSync(override) ? override : undefined;
 	const managed = path.join(
-		os.homedir(),
+		REAL_HOME,
 		".pi-lens",
 		"tools",
 		"node_modules",
