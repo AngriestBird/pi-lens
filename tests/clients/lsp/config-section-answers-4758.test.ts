@@ -182,6 +182,7 @@ describe("workspace/configuration answers each section (#4758)", () => {
 			{ diagnosticMode: "openFilesOnly" },
 			{},
 		]);
+		expect(seen.initOptions).toEqual(built);
 		expect(seen.pushed).toEqual(built);
 	}, 30_000);
 });
