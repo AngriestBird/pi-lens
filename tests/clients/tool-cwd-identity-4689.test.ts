@@ -162,8 +162,29 @@ describe("#4689 item 6: the home ceiling holds on the identity axis", () => {
 	// home; `repo/package.json` plays the marker the climb must not reach.
 	function homeAsLink(): { fx: Layout; home: string; start: string } {
 		const fx = layout();
-		const home = path.join(path.dirname(fx.repo), "repo-alias");
-		return { fx, home, start: path.join(home, "src") };
+		// The link lives OUTSIDE the repo's ancestors: a home spelled beside the
+		// repo would sit under the same parent, and the walk stops at any
+		// ancestor of the home it is given, hiding a ceiling on the wrong axis.
+		const elsewhere = setupTestEnvironment("pi-lens-home-link-");
+		const home = path.join(elsewhere.tmpDir, "home");
+		let skipReason = fx.skipReason;
+		try {
+			fs.symlinkSync(fx.repo, home, "dir");
+		} catch (err) {
+			skipReason ??= `cannot create symlinks here: ${String(err)}`;
+		}
+		return {
+			fx: {
+				...fx,
+				cleanup: () => {
+					fx.cleanup();
+					elsewhere.cleanup();
+				},
+				...(skipReason !== undefined && { skipReason }),
+			},
+			home,
+			start: path.join(home, "src"),
+		};
 	}
 
 	it("findNearestMarkerRoot: a link-spelled home stops the climb", (ctx) => {
