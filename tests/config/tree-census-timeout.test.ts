@@ -31,7 +31,7 @@
  *   `censusSourceFiles` or `listTrackedFiles` (import aliases, `const`
  *   aliases and destructured renames included) or a member call of one of
  *   those names, plus a recognised spawn call (`gitExecFileSync`,
- *   `execFileSync`, `execFile`, `spawnSync`, `spawn`, aliases included) given
+ *   `execFileSync`, `execFile`, `execSync`, `spawnSync`, `spawn`, aliases included) given
  *   `ls-files` as a string, an array element, or a binding of either.
  *
  * Not read (accepted residual): a walker reached only through a helper in
@@ -62,6 +62,7 @@ const SPAWNERS = new Set([
 	"gitExecFileSync",
 	"execFileSync",
 	"execFile",
+	"execSync",
 	"spawnSync",
 	"spawn",
 ]);
@@ -108,7 +109,7 @@ function mentionsLsFiles(node: SgNode, scope: Scope): boolean {
 	if (node.kind() !== "array") return false;
 	return node
 		.findAll({ rule: { kind: "string" } })
-		.some((text) => unquote(text.text()) === "ls-files");
+		.some((text) => /\bls-files\b/.test(text.text()));
 }
 
 /** Build the per-file name table from its imports and aliases. */
@@ -491,6 +492,22 @@ describe("tree census timeout (#4828)", () => {
 		[
 			"a walker destructured under a new name",
 			'import * as kit from "../support/sweep-kit.js";\nconst { listSourceFiles: walk } = kit;\nit("c", () => { walk(ROOT); });',
+		],
+		[
+			"an aliased vitest import declared in a helper",
+			'import { it as check } from "vitest";\nconst register = () => check("c", () => { listSourceFiles(ROOT); });',
+		],
+		[
+			"it.for over a walked table",
+			'const table = listSourceFiles(ROOT);\nit.for(table)("c", (file) => { expect(file).toBeTruthy(); });',
+		],
+		[
+			"a git ls-files array bound before the spawn",
+			'const args = ["ls-files", "-z"];\nit("c", () => { gitExecFileSync("git", args); });',
+		],
+		[
+			"a git ls-files shell command string",
+			'it("c", () => { execSync("git ls-files"); });',
 		],
 		[
 			"a git ls-files spawn",
