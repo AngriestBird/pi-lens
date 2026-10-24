@@ -1004,6 +1004,22 @@
 							"title": "does not settle on the stored answer when a later receipt arrives inside the quiet window"
 						}
 					]
+				},
+				"Resend": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "checks a dependent against its rewritten dependency when the primary re-checks dependents only after the drain reply (push diagnostics)",
+					"narrowedBy": {
+						"FALSE": {
+							"configs": [
+								"DependencyFix",
+								"DependencyMutAnswerGuardNoClear",
+								"DependencyMutDropAnswerBlind",
+								"DependencyMutRetainSlotBlind"
+							],
+							"reason": "The phase as it runs for a server not declared to re-check unchanged bytes: the re-send is gated on resendRecheck (\"sends a dependent once when its primary is not declared to re-check unchanged bytes\" pins that branch). These configs check the read's guards against an in-order republish on a drained phase, where no re-send is sent."
+						}
+					}
 				}
 			},
 			"notCodeChoice": [
@@ -1022,7 +1038,9 @@
 						"VersionedServer",
 						"AsyncServer",
 						"ReplyFirst",
-						"Republish"
+						"Republish",
+						"Versioned",
+						"Drain"
 					]
 				},
 				{

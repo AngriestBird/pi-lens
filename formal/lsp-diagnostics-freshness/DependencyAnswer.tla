@@ -4,24 +4,36 @@
 (* after one bash command rewrote a.ts and its dependency z.ts.            *)
 (*                                                                         *)
 (* Actors:                                                                 *)
-(*  - the primary phase (resyncHeldPrimaries, clients/lsp/index.ts): it    *)
-(*    sends a.ts's didChange (handleNotifyOpenOnce clears a.ts's cache and *)
-(*    pending receipt in that tick, so the model starts with both empty),  *)
-(*    then z.ts's, then the drain request, in order on one stream. The     *)
-(*    dispatch's wait starts only after the drain reply (a drained phase); *)
-(*  - the server: reads its input in order; once it has read a.ts's change  *)
-(*    it may publish a.ts's check, computed against the z.ts it holds      *)
-(*    (ghost `zv`); the answer before z.ts's change STOPs (non-empty), the *)
-(*    one after it is clean. Republish: having read z.ts's change, it      *)
-(*    publishes a.ts's re-check before it reads its next message (the fake *)
-(*    checker's synchronous republish). Server-to-client messages are FIFO;*)
-(*  - the publishDiagnostics handler (client.ts, setupIncomingHandlers):   *)
-(*    a version-less receipt replaces the pending one in the quiet-window  *)
-(*    slot (`pendingDiagnostics`); the slot's timer stores it and emits;   *)
-(*  - the waiter, the skipped dispatch touch (no baseline):                *)
-(*    clientWaitForDiagnostics's early return (a non-empty cache), else a  *)
-(*    listener whose quiet window settles on the cache; a timeout also     *)
-(*    resolves it; touchFile then reads the cache.                         *)
+(*   - the primary phase (resyncHeldPrimaries, clients/lsp/index.ts): it   *)
+(*     sends a.ts's didChange (handleNotifyOpenOnce clears a.ts's cache    *)
+(*     and pending receipt in that tick, so the model starts with both     *)
+(*     empty), then z.ts's, in order on one stream. With `Resend` (#4782   *)
+(*     item 1, a server declared `resendRecheck: "rechecks"`) it then      *)
+(*     writes a.ts's unchanged bytes again (ClientSend of "a2"): that      *)
+(*     write clears a.ts's cache and slot in its tick and moves the        *)
+(*     client's version of a.ts to 2. With `Drain` the phase ends with the *)
+(*     drain request and the dispatch's wait starts only after its reply   *)
+(*     (a drained phase); without it (a threaded or unmeasured client,     *)
+(*     which is every row declared `rechecks` today) no drain request goes *)
+(*     out and the wait starts once the phase has written its last send;   *)
+(*   - the server: reads its input in order; once it has read a.ts's     *)
+(*     change it may publish a.ts's check, computed against the z.ts it    *)
+(*     holds (ghost `zv`); the answer before z.ts's change STOPs           *)
+(*     (non-empty), the one after it is clean. With `Versioned` a publish  *)
+(*     carries the a.ts version the server last read (pyright); without    *)
+(*     it, none (TLS). Republish: having read z.ts's change, it publishes  *)
+(*     a.ts's                                                              *)
+(*     re-check before it reads its next message (the fake checker's       *)
+(*     synchronous republish). Server-to-client messages are FIFO;         *)
+(*   - the publishDiagnostics handler (client.ts, setupIncomingHandlers):  *)
+(*     a versioned publish older than the client's version of a.ts is      *)
+(*     dropped as superseded (isSupersededPush); any other receipt         *)
+(*     replaces the pending one in the quiet-window slot                   *)
+(*     (`pendingDiagnostics`); the slot's timer stores it and emits;       *)
+(*   - the waiter, the skipped dispatch touch (no baseline):               *)
+(*     clientWaitForDiagnostics's early return (a non-empty cache), else a *)
+(*     listener whose quiet window settles on the cache; a timeout also    *)
+(*     resolves it; touchFile then reads the cache.                        *)
 (*                                                                         *)
 (* PendingGuard (the fix): neither the early return nor the quiet-window   *)
 (* settle takes the cache while the slot holds a later receipt; the        *)
@@ -55,15 +67,16 @@
 (*                                                                         *)
 (* Not modelled: a publish computed before the server read a.ts's own      *)
 (* change (that is DiagnosticsFreshness's #3484 shape: the server here     *)
-(* publishes only after reading it); versioned publishes and the three     *)
-(* unstored exits of the slot (superseded, config-failure refusal, a clear *)
-(* that cancels it), so the drop exit (the PENDING_RECEIPT_DROPPED         *)
-(* listener, which carries the same answerStored guard, client.ts:4742)    *)
-(* has no action; a clear after the wait resolved (the touch reads a few   *)
-(* awaits later); seed-first-push strategies, whose store cancels the slot *)
-(* (#4785 F1), so a receipt in the slot is always the later one; all       *)
-(* pinned by the #4782/#4785 tests under tests/clients/lsp/; threaded or   *)
-(* undrained phases (`undrained`).                                         *)
+(* publishes only after reading it); the unstored exits of the slot other  *)
+(* than the superseded drop (config-failure refusal, a clear that cancels  *)
+(* it), so the drop exit (the PENDING_RECEIPT_DROPPED listener, which      *)
+(* carries the same answerStored guard, client.ts:4742) has no action; a   *)
+(* clear after the wait resolved (the touch reads a few awaits later);     *)
+(* seed-first-push strategies, whose store cancels the slot (#4785 F1), so *)
+(* a receipt in the slot is always the later one; all pinned by the        *)
+(* #4782/#4785 tests under tests/clients/lsp/; a parallel tool's send of   *)
+(* a.ts during the phase (the #3481 read stamps, pinned by                 *)
+(* tests/clients/head-move-resync-4493.test.ts).                           *)
 (***************************************************************************)
 EXTENDS Integers, Sequences
 
@@ -72,6 +85,9 @@ CONSTANTS
     Republish,    \* the server republishes a.ts as it reads z.ts's change
     MaxPubs,      \* bound on server publishes
     MaxClears,    \* bound on clears of a.ts's stored state while its wait is open
+    Resend,       \* #4782 item 1: the phase re-sends a.ts after z.ts
+    Versioned,    \* publishes carry the a.ts version the server read
+    Drain,        \* the phase ends with the drain request (an ordered client)
     Mutant        \* "none" | "noSettleGuard" (the guard on the early return only)
                   \* | "noAnswerGuard" (the quiet window settles on an emptied cache)
                   \* | "dropAnswer" (the quiet window rejects the only stored answer)
@@ -98,16 +114,27 @@ VARIABLES
     clears,   \* clears landed so far
     dropped,  \* ghost: a quiet window rejected the answer stored now (no clear
               \* since)
-    canceled  \* ghost: the seq of the receipt the last Clear took out of the slot
+    canceled, \* ghost: the seq of the receipt the last Clear took out of the slot
+    sendQ,    \* the phase's sends not yet written
+    docVer,   \* the client's version of a.ts
+    srvVer    \* the a.ts version the server has read (0: none yet)
 
 vars == <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot, drained, w,
-          how, newest, result, clears, dropped, canceled>>
+          how, newest, result, clears, dropped, canceled, sendQ, docVer, srvVer>>
+
+\* Without Resend every send is written at the start, as in the original
+\* model; with it, the re-send (and the drain after it) are written by
+\* ClientSend, so a receipt can land before or after the re-send's clear.
+DrainMsg == IF Drain THEN << "drain" >> ELSE << >>
 
 Empty == [has |-> FALSE, zv |-> NONE, ne |-> FALSE, seq |-> NONE]
 Off == [on |-> FALSE, zv |-> NONE, ne |-> FALSE, seq |-> NONE]
 
 Init ==
-    /\ wire = << "a", "z", "drain" >>
+    /\ wire = << "a", "z" >> \o (IF Resend THEN << >> ELSE DrainMsg)
+    /\ sendQ = IF Resend THEN << "a2" >> \o DrainMsg ELSE << >>
+    /\ docVer = 1
+    /\ srvVer = 0
     /\ srvA = FALSE
     /\ srvZ = 0
     /\ owed = FALSE
@@ -138,24 +165,27 @@ ServerRead ==
     /\ wire # << >>
     /\ ~owed
     /\ LET m == Head(wire) IN
-         /\ srvA' = (srvA \/ m = "a")
+         /\ srvA' = (srvA \/ m \in {"a", "a2"})
+         /\ srvVer' = CASE m = "a" -> 1 [] m = "a2" -> 2 [] OTHER -> srvVer
          /\ srvZ' = IF m = "z" THEN 1 ELSE srvZ
          /\ owed' = (Republish /\ m = "z")
          /\ pubs' = IF m = "drain"
-                      THEN Append(pubs, [k |-> "reply", zv |-> NONE, ne |-> FALSE])
+                      THEN Append(pubs, [k |-> "reply", zv |-> NONE, ne |-> FALSE,
+                                         ver |-> NONE])
                       ELSE pubs
     /\ wire' = Tail(wire)
     /\ UNCHANGED <<npubs, rx, cache, slot, drained, w, how, newest, result,
-                   clears, dropped, canceled>>
+                   clears, dropped, canceled, sendQ, docVer>>
 
 ServerPublish ==
     /\ srvA
     /\ npubs < MaxPubs
-    /\ pubs' = Append(pubs, [k |-> "pub", zv |-> srvZ, ne |-> (srvZ = 0)])
+    /\ pubs' = Append(pubs, [k |-> "pub", zv |-> srvZ, ne |-> (srvZ = 0),
+                              ver |-> srvVer])
     /\ npubs' = npubs + 1
     /\ owed' = FALSE
     /\ UNCHANGED <<wire, srvA, srvZ, rx, cache, slot, drained, w, how, newest,
-                   result, clears, dropped, canceled>>
+                   result, clears, dropped, canceled, sendQ, docVer, srvVer>>
 
 -----------------------------------------------------------------------------
 \* The publishDiagnostics handler and its quiet-window slot (client.ts).
@@ -167,11 +197,14 @@ ClientReceive ==
        IF p.k = "reply"
          THEN /\ drained' = TRUE
               /\ UNCHANGED <<rx, slot>>
+         ELSE IF Versioned /\ p.ver < docVer
+         \* isSupersededPush: an answer for an older version never reaches the slot.
+         THEN UNCHANGED <<rx, slot, drained>>
          ELSE /\ slot' = [on |-> TRUE, zv |-> p.zv, ne |-> p.ne, seq |-> rx]
               /\ rx' = rx + 1
               /\ UNCHANGED drained
     /\ UNCHANGED <<wire, srvA, srvZ, owed, npubs, cache, w, how, newest, result,
-                   clears, dropped, canceled>>
+                   clears, dropped, canceled, sendQ, docVer, srvVer>>
 
 \* The slot's timer stores the receipt and emits; a listening, armed or
 \* deferred waiter (re)arms its quiet window.
@@ -181,14 +214,37 @@ SlotFire ==
     /\ slot' = Off
     /\ w' = IF w \in {"listen", "armed", "deferred"} THEN "armed" ELSE w
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, drained, how,
-                   newest, result, clears, dropped, canceled>>
+                   newest, result, clears, dropped, canceled, sendQ, docVer,
+                   srvVer>>
+
+-----------------------------------------------------------------------------
+\* The phase's later sends (Resend only). The re-send of a.ts goes through
+\* handleNotifyOpenOnce: in the tick it is written, a.ts's stored answer and the
+\* receipt in its slot are cleared, and the client's version moves on.
+ClientSend ==
+    /\ sendQ # << >>
+    /\ LET m == Head(sendQ) IN
+         /\ wire' = Append(wire, m)
+         /\ IF m = "a2"
+              THEN /\ docVer' = 2
+                   /\ cache' = Empty
+                   /\ slot' = Off
+                   /\ canceled' = IF slot.on THEN slot.seq ELSE canceled
+              ELSE UNCHANGED <<docVer, cache, slot, canceled>>
+    /\ sendQ' = Tail(sendQ)
+    /\ UNCHANGED <<srvA, srvZ, owed, pubs, npubs, rx, drained, w, how, newest,
+                   result, clears, dropped, srvVer>>
 
 -----------------------------------------------------------------------------
 \* The waiter: the skipped dispatch touch, after the drain reply.
 
+\* A drained phase starts the wait at the drain reply; an undrained one once the
+\* phase has written its last send (resyncHeldPrimaries returns).
+PhaseDone == IF Drain THEN drained ELSE sendQ = << >>
+
 WaitStart ==
     /\ w = "idle"
-    /\ drained
+    /\ PhaseDone
     /\ IF cache.has /\ cache.ne /\ ~(StartGuarded /\ slot.on)
          THEN /\ w' = "resolved"
               /\ how' = "settled"
@@ -196,7 +252,8 @@ WaitStart ==
          ELSE /\ w' = "listen"
               /\ UNCHANGED <<how, newest>>
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot,
-                   drained, result, clears, dropped, canceled>>
+                   drained, result, clears, dropped, canceled, sendQ, docVer,
+                   srvVer>>
 
 WaitSettle ==
     /\ w = "armed"
@@ -221,14 +278,15 @@ WaitSettle ==
     \* open.
     /\ dropped' = (cache.has /\ ~slot.on /\ w' # "resolved")
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot,
-                   drained, result, clears, canceled>>
+                   drained, result, clears, canceled, sendQ, docVer, srvVer>>
 
 WaitTimeout ==
     /\ w \in {"listen", "armed", "deferred"}
     /\ w' = "resolved"
     /\ how' = "timeout"
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot,
-                   drained, newest, result, clears, dropped, canceled>>
+                   drained, newest, result, clears, dropped, canceled, sendQ,
+                   docVer, srvVer>>
 
 \* clearDiagnosticsForPath (client.ts:2169) while the wait is open: the stored
 \* answer and the receipt in the quiet-window slot go in one tick. The wait's
@@ -243,16 +301,17 @@ Clear ==
     /\ clears' = clears + 1
     /\ dropped' = FALSE \* the rejected answer is gone
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, drained, w, how,
-                   newest, result>>
+                   newest, result, sendQ, docVer, srvVer>>
 
 Read ==
     /\ w = "resolved"
     /\ w' = "read"
     /\ result' = cache
     /\ UNCHANGED <<wire, srvA, srvZ, owed, pubs, npubs, rx, cache, slot,
-                   drained, how, newest, clears, dropped, canceled>>
+                   drained, how, newest, clears, dropped, canceled, sendQ, docVer,
+                   srvVer>>
 
-Next == ServerRead \/ ServerPublish \/ ClientReceive \/ SlotFire
+Next == ServerRead \/ ServerPublish \/ ClientReceive \/ SlotFire \/ ClientSend
         \/ WaitStart \/ WaitSettle \/ WaitTimeout \/ Clear \/ Read
 
 Spec == Init /\ [][Next]_vars
