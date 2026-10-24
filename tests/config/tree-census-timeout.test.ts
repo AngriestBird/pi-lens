@@ -31,8 +31,9 @@
  *   `censusSourceFiles` or `listTrackedFiles` (import aliases, `const`
  *   aliases and destructured renames included) or a member call of one of
  *   those names, plus a recognised spawn call (`gitExecFileSync`,
- *   `execFileSync`, `execFile`, `execSync`, `spawnSync`, `spawn`, aliases included) given
- *   `ls-files` as a string, an array element, or a binding of either.
+ *   `execFileSync`, `execFile`, `execSync`, `spawnSync`, `spawn`, aliases
+ *   included) given `ls-files` as a string, an array element, or a binding
+ *   of either.
  *
  * Not read (accepted residual): a walker reached only through a helper in
  * another module.
@@ -507,31 +508,28 @@ describe("tree census timeout (#4828)", () => {
 		],
 		[
 			"a git ls-files array bound before the spawn",
-			'const args = ["ls-files", "-z"];\nit("c", () => { gitExecFileSync("git", args); });',
+			'const args = ["ls-files", "-z"];\nit("c", () => { gitExecFileSync(bin, args); });',
 		],
-		[
-			"a git ls-files shell command string",
-			'it("c", () => { execSync("git ls-files"); });',
-		],
+		["an ls-files command string", 'it("c", () => { execSync("ls-files"); });'],
 		[
 			"a recursive directory walk helper",
 			'function walkFiles(dir) {\n\tconst out = [];\n\tfunction walk(current) {\n\t\tfor (const entry of readdirSync(current)) walk(entry);\n\t}\n\twalk(dir);\n\treturn out;\n}\nit("c", () => { walkFiles(ROOT); });',
 		],
 		[
 			"a git ls-files spawn",
-			'it("c", () => { gitExecFileSync("git", ["ls-files", "-z"]); });',
+			'it("c", () => { gitExecFileSync(bin, ["ls-files", "-z"]); });',
 		],
 		[
 			"a spawn bound to a const",
-			'const run = execFileSync;\nit("c", () => { run("git", ["ls-files"]); });',
+			'const run = execFileSync;\nit("c", () => { run(bin, ["ls-files"]); });',
 		],
 		[
 			"a spawn destructured under a new name",
-			'import * as cp from "node:child_process";\nconst { execFileSync: run } = cp;\nit("c", () => { run("git", ["ls-files"]); });',
+			'import * as cp from "node:child_process";\nconst { execFileSync: run } = cp;\nit("c", () => { run(bin, ["ls-files"]); });',
 		],
 		[
 			"an aliased child_process spawn of git ls-files",
-			'import { execFileSync as run } from "node:child_process";\nit("c", () => { run("git", ["ls-files"]); });',
+			'import { execFileSync as run } from "node:child_process";\nit("c", () => { run(bin, ["ls-files"]); });',
 		],
 	])("plants: refuses a default-budget census through %s", (_name, body) => {
 		const source = `${VITEST}${KIT}${body}`;
