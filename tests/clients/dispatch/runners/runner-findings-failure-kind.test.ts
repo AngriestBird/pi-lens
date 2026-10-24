@@ -1174,6 +1174,35 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 		30_000,
 	);
 
+	// #4522 T1: exit 1 after printed findings, through the production dispatcher.
+	// The findings are kept, and the run is flagged inconclusive: a tool error
+	// means the read is incomplete, so it must not claim full coverage.
+	it("detekt exit 1 after printed findings keeps them and is flagged inconclusive through dispatch (#4522)", async () => {
+		const captured = JSON.parse(
+			fs.readFileSync(
+				new URL(
+					"../../../fixtures/runner-exit-codes/detekt/findings-then-exit1.captured.json",
+					import.meta.url,
+				),
+				"utf8",
+			),
+		) as { exitCode: number; stderr: string; stdout: string };
+		const observed = await drive("detekt", {
+			...DRIVERS.detekt,
+			reply: ({ filePath }) => ({
+				status: captured.exitCode,
+				// The captured line names Bad.kt; the dispatched file is the driver's.
+				stdout: captured.stdout.replace(/__WORKSPACE__\/Bad\.kt/g, filePath),
+				stderr: captured.stderr,
+			}),
+		});
+		expect(observed.result?.status).not.toBe("skipped");
+		expect(observed.result?.diagnostics.map((d) => d.rule)).toContain(
+			"ForbiddenComment",
+		);
+		expect(observed.result?.inconclusive).toBe(true);
+	});
+
 	// #4522 F4: the captured exit-1 broken-config shape through the production
 	// dispatcher, not runner.run. A dispatched detekt exit 1 with no findings
 	// must never be delivered as a completed (clean or dirty) analysis.

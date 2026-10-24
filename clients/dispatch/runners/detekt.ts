@@ -209,10 +209,15 @@ const detektRunner: RunnerDefinition = {
 		}
 
 		const hasErrors = diagnostics.some((d) => d.severity === "error");
-		return findingsResult(diagnostics, {
+		const verdict = findingsResult(diagnostics, {
 			status: hasErrors ? "failed" : "succeeded",
 			semantic: hasErrors ? "blocking" : "warning",
 		});
+		// #4522 T1: exit 1 is a tool error, and detekt can print findings before it.
+		// Those findings are kept, but the read is incomplete, so the run is flagged
+		// `inconclusive` (the existing "reached no verdict" shape, as tree-sitter's
+		// query-run-threw path). Exit 2 is the complete findings class and is not flagged.
+		return result.status === 1 ? { ...verdict, inconclusive: true } : verdict;
 	},
 };
 

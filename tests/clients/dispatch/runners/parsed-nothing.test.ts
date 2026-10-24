@@ -707,6 +707,9 @@ describe("detekt findings printed before exit 1 (#4522 F2)", () => {
 			expect(result.diagnostics.map((d) => d.rule)).toContain(
 				"ForbiddenComment",
 			);
+			// #4522 T1: a tool error after printed findings is an incomplete read, flagged
+			// inconclusive, the existing "reached no verdict" shape (tree-sitter query-run-threw).
+			expect(result.inconclusive).toBe(true);
 		} finally {
 			env.cleanup();
 		}
