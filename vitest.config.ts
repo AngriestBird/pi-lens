@@ -623,6 +623,11 @@ export const wallClockBudgetInclude = [
 	// window. Keep child-process CPU sampling and this wall-clock lower bound in
 	// the fully serialized, dead-last phase.
 	"tests/clients/lsp/service-notify-cpu-liveness.test.ts",
+	// #4742: a real git checkout and a real pyright-langserver child (skipped,
+	// with a named reason, when none is installed): the stale bytes live only in
+	// the server, so the handshake and two diagnostics waits of up to 30 s run
+	// in the serialized lane (flake-shape admission).
+	"tests/clients/lsp/unheld-module-pyright-4742.integration.test.ts",
 	// #4709 slice 3b: the resolver verdict `runRebuild` acts on comes from the
 	// real package-manager lookup spawning executable stand-in managers on PATH
 	// (flake-shape admission).
@@ -764,6 +769,9 @@ export const wallClockBudgetInclude = [
 	// #1185: the committed checker CLI (exit code, report, cwd contract) is the
 	// subject; an in-process call of the pure policy cannot prove that boundary.
 	"tests/scripts/check-allow-scripts.test.ts",
+	// #4691: the nightly CLI runs as a real child process, with PATH at a gh
+	// stand-in serving recorded master runs (flake-shape admission).
+	"tests/scripts/check-ci-job-p90.test.ts",
 	"tests/scripts/check-pr-body.test.ts",
 	// #4397: the changed-test shuffle job's exit code is the contract; only a
 	// real vitest start reorders cases under `--sequence.shuffle`.

@@ -23,6 +23,7 @@ jobs:
     permissions:
       contents: read # checkout
       issues: read # list open issues
+      actions: read # #4691: read ci.yml runs and their job rows for the p90 step
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_REPOSITORY: ${{ github.repository }}
@@ -33,5 +34,27 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+      # #4691 (item 3 of #3920): warns, one annotation per job, when a required
+      # job's p90 over the last 20 master runs passes 70% of its timeout-minutes,
+      # and names every required context it could not measure. It never gates; a
+      # failed read exits 1, which a schedule run reports as advisory
+      # (ci-verdict, #4090). These steps sit ABOVE the detector: it exits 1 on
+      # most days (8 of the last 10 scheduled runs), and GitHub skips every step
+      # after a failed one. The check is scripts/lib/ci-runtime-cap.mjs, the rule
+      # ci-verdict's "Runtime vs cap" report also uses; it reads the workflow caps
+      # through the compiled clients/deps/js-yaml.js, so it needs the install and
+      # the build.
+      - name: Install dependencies for the CI job p90 check
+        run: npm ci --no-audit --no-fund --ignore-scripts
+      - name: Build the compiled clients for the CI job p90 check
+        run: npm run build
+      - name: Warn when a required CI job's p90 nears its timeout cap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/check-ci-job-p90.mjs --runs 20
       - name: Detect untriaged issues
+        # !cancelled(): this step exits 1 on an untriaged issue, which is the
+        # job's purpose; it must still run when a p90 step above it fails.
+        if: ${{ !cancelled() }}
         run: node scripts/detect-untriaged-issues.mjs

@@ -645,6 +645,12 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real Lean elaboration and diagnostic publication require Lake and elan across the child-process boundary; the serialized wall-clock lane isolates the handshake and diagnostic wait",
 	},
+	"real-process-spawn:clients/lsp/unheld-module-pyright-4742.integration.test.ts":
+		{
+			detector: "real-process-spawn",
+			reason:
+				"a clean-tree HEAD move needs a real git checkout and a closed module's stale bytes live only in a real pyright-langserver child; no double reproduces what the server kept",
+		},
 	"real-process-spawn:clients/mcp/review-rebuild.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -918,6 +924,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	},
 	// #2807 review F1/F4: the local CLI's exact argv and a shallow checkout's
 	// missing diff are the subjects; an in-process call cannot prove either.
+	// 2026-10-24 (#4691): the nightly CLI is the subject; it runs as a real child
+	// process whose PATH holds a gh stand-in, so no in-process double reproduces its
+	// argv, annotation output or exit codes.
+	"real-process-spawn:scripts/check-ci-job-p90.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the nightly CLI runs as a real child with PATH at a recorded gh stand-in; an in-process double would not prove its annotation escapes or exit codes",
+	},
 	"real-process-spawn:scripts/check-pr-body.test.ts": {
 		detector: "real-process-spawn",
 		reason:
