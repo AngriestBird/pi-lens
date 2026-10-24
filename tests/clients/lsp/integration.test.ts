@@ -1471,7 +1471,7 @@ describe("LSP Client Integration — a timed-out read-only command is cancelled 
 			cwd: tmp,
 			env: {
 				...process.env,
-				FAKE_LSP_HANG_COMMAND: "1",
+				FAKE_LSP_HANG_PROJECT_INFO: "1",
 				FAKE_LSP_TRACE_FILE: trace,
 			},
 		});
@@ -1483,7 +1483,15 @@ describe("LSP Client Integration — a timed-out read-only command is cancelled 
 		try {
 			expect(client.isBusy?.()).toBe(false);
 
-			const res = await client.executeReadOnlyCommand("fake.hang");
+			// The request `fetchTsserverProjectIdentity` sends for the warm-attach
+			// membership probe, which the server never answers.
+			const res = await client.executeReadOnlyCommand(
+				"typescript.tsserverRequest",
+				[
+					"projectInfo",
+					{ file: path.join(tmp, "a.ts"), needFileNameList: false },
+				],
+			);
 
 			expect(res.executed).toBe(false);
 			expect(res.reason).toContain("timed out");
@@ -1495,7 +1503,10 @@ describe("LSP Client Integration — a timed-out read-only command is cancelled 
 			// The connection is still usable after the local release. Its answer
 			// also orders the trace: the server reads stdio in order, so it has
 			// read the cancel before it answers a request sent after it.
-			const next = await client.executeReadOnlyCommand("fake.doThing");
+			const next = await client.executeReadOnlyCommand(
+				"typescript.tsserverRequest",
+				["version"],
+			);
 			expect(next.executed).toBe(true);
 			expect(client.isBusy?.()).toBe(false);
 			// The server saw the cancel on the wire, and an answered command is

@@ -835,11 +835,12 @@ function handle(raw) {
 							"fake.applyEdit",
 							"fake.applyEditDeferred",
 							"fake.releaseDeferredApplyEdit",
-							// #4801: a command the server accepts and never answers, and
-							// never cancels. Off by default so the advertised list the
-							// other suites pin does not move.
-							...(process.env.FAKE_LSP_HANG_COMMAND === "1"
-								? ["fake.hang"]
+							// #4801: the tsserver escape hatch, whose `projectInfo` request
+							// the server accepts and never answers (or cancels). Off by
+							// default so the advertised list the other suites pin does not
+							// move.
+							...(process.env.FAKE_LSP_HANG_PROJECT_INFO === "1"
+								? ["typescript.tsserverRequest"]
 								: []),
 						],
 					},
@@ -1462,7 +1463,11 @@ function handle(raw) {
 		const cmd = data.params?.command;
 		// #4801: accepted, never answered; a `$/cancelRequest` for it is
 		// ignored, like a wedged server. The trace file shows the cancel.
-		if (cmd === "fake.hang") return;
+		if (
+			cmd === "typescript.tsserverRequest" &&
+			data.params?.arguments?.[0] === "projectInfo"
+		)
+			return;
 		if (cmd === "fake.applyEdit" || cmd === "fake.applyEditDeferred") {
 			const spec = buildApplyEditSpec(data.params?.arguments);
 			pendingExec = { execId: data.id, command: cmd };
