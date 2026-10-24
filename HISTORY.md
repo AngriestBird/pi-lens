@@ -1,5 +1,18 @@
 # HISTORY
 
+## 2026-10-25 — default-budget tree census (shape 85)
+
+Four `tests/config` censuses (`lsp-spawn-heavy-coverage`,
+`pi-mock-importer-sweep`, `real-home-reader-registry`, `runner-group-id-census`)
+timed out on the Windows unit leg at vitest's 5 s default while taking 0.7 to
+1.2 s on Linux; the 2026-10-24 #4823 run timed out `pi-mock-importer-sweep`
+at 5000 ms. Issue #4828; the fix is PR #4832, which gave 121 census tests the
+shared `TREE_WALK_TIMEOUT_MS`. Review round 1 showed the first detector
+listed spellings (`it.each`, an array-element `ls-files`), so an `it.skipIf`
+census, an aliased walker and an `it.each` over a walked table were not seen
+(shape 69). Round 2 derives the declaration callee from the vitest imports and
+fails closed on a test-shaped call it cannot trace.
+
 ## 2026-10-24 — tool-state prose blind to a posture (shape 84)
 
 The session-start orientation named three of the five lazy tools (the hand list

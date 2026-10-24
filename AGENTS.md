@@ -835,6 +835,19 @@ file-scoped worklist and receives no project-wide scanner output.
     (a pinned `PI_LENS_HOME` whose `bin` links out is refused). Instances and
     dates: `HISTORY.md`.
 
+85. **Default-budget tree census:** a test whose callback walks the repo tree (a
+    whole-tree walker, a `git ls-files` spawn, a recursive directory walk, or a
+    suite-level population it reads) keeps vitest's 5 s default, and a walk that
+    costs 0.7 s on Linux costs several times that on the Windows unit leg and
+    times out there. The budget is the shared `TREE_WALK_TIMEOUT_MS` third
+    argument, never a per-file number. Screen: does this case call a walker or
+    read a binding one produced, and does its declaration carry a third argument?
+    Census: not countable yet outside `tests/config`. Enforcer:
+    `tests/config/tree-census-timeout.test.ts` (it derives the declaration
+    callee from the file's vitest imports, resolves walker aliases, and counts a
+    test-shaped call it cannot trace as a census). Instances and dates:
+    `HISTORY.md`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
