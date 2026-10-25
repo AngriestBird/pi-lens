@@ -337,6 +337,7 @@ const PROJECT_BOUNDARY_MARKERS = [
 	"mix.exs",
 	"pubspec.yaml",
 	"Package.swift",
+	"buildServer.json",
 ] as const;
 const PYTHON_BOUNDARY_MARKERS = new Set([
 	"setup.py",
