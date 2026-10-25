@@ -13,7 +13,14 @@ function resolveAgainstAncestors(cwd: string, filePath: string): string {
 	// leaves every other relative path's ancestor walk unchanged.
 	filePath = normalizeHostToolPath(filePath);
 	if (path.isAbsolute(filePath)) {
-		return path.resolve(filePath);
+		// #4689 item 6 (batch 7, #4853 verify F2): the answer is a map key
+		// (`resolveRunnerPath` normalizes it), so it is this spelling's path
+		// IDENTITY, never `path.resolve`, which folds a `..` after a directory
+		// link lexically: `/repo/link/../f.ts` would name `/repo/f.ts` while the
+		// kernel opens the link target's parent. The identity is paid ONCE, by
+		// `resolveRunnerPath`'s `normalizeMapKey` (#4876 review r2 F3: resolving
+		// here too doubled the kernel reads, 2 per dispatched file).
+		return filePath;
 	}
 
 	const normalizedRelative = filePath.replace(/\\/g, "/");

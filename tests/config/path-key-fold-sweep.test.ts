@@ -340,8 +340,15 @@ const SLASH_FOLD_PINS: Readonly<Record<string, number>> = {
  *   case-variant sibling.)
  * - `runtime-tool-call.ts` — `toPosix(path.resolve(f)).toLowerCase()`, where
  *   the fold is the haystack for lowercase MARKER substrings, not a key.
+ * - `file-utils.ts` — `isWithinPathForm`'s containment form: the two axes
+ *   `path.win32.relative` folds, separators and (on win32) case, in ONE
+ *   expression. Deliberately NOT a map key — it is the form `isWithinForm` is
+ *   handed, and the fold is selected by the VALUE's shape (`isWindowsPath`),
+ *   not the host, so a POSIX path keeps its literal backslashes (#4876 F1) and
+ *   the win32 axis is exercised on every lane (#4876 F4).
  */
 const CASE_FOLD_PINS: Readonly<Record<string, number>> = {
+	"clients/file-utils.ts": 1,
 	"clients/lsp/launch.ts": 1,
 	"clients/mcp/ipc.ts": 1,
 	"clients/runtime-tool-call.ts": 1,
