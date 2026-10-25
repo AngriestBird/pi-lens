@@ -6238,4 +6238,38 @@ describe("lens_diagnostics mode=full keys one file once across link spellings (#
 			);
 		expect(headers, text).toHaveLength(1);
 	});
+
+	// RECURRENCE GUARDED: the dedup key took the sweep's spelling while the
+	// stored row's key was recorded under the identity, so the same finding
+	// swept under the link rendered twice beside the widget's row.
+	it("renders one row for a finding held under the real path and swept under the link", async (ctx) => {
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		mockSummaries.push(
+			sum(
+				fx.realFile,
+				{ blocking: 1, errors: 1 },
+				{
+					diagnostics: [
+						{ ...staleBlocker, message: "held under the real path" },
+					],
+				},
+			),
+		);
+		const result = await run(
+			fullTool([
+				{
+					filePath: fx.fileLink,
+					diagnostics: [lspRow("swept under the link")],
+					count: 1,
+					unconfirmedServerIds: ["other-server"],
+				},
+			]),
+			{ mode: "full" },
+			fx.repo,
+		);
+		const text = String(result.content[0].text);
+		expect(text).toContain("held under the real path");
+		expect(text).not.toContain("swept under the link");
+		expect(result.details).toMatchObject({ totalBlocking: 1 });
+	});
 });
