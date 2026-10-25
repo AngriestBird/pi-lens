@@ -811,9 +811,20 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			await withFileMutationQueue(mainRs, async () => {});
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(settled).toBe(false);
-			// The bound is armed after the drain's real I/O, so wait for its timer.
-			for (let i = 0; i < 100 && vi.getTimerCount() === 0; i++)
-				await new Promise<void>((resolve) => setImmediate(resolve));
+			// The bound is armed after the drain's real I/O (the fixer's restore),
+			// which no production event announces. Recurrence: #4850, where a
+			// 100-turn spin ended before that I/O did on a loaded CI host. Wait on
+			// real time instead: `setTimeout` is faked here, so the kit's wait
+			// yields on `setImmediate`, and its deadline reads the real clock.
+			await waitFor(
+				() => vi.getTimerCount(),
+				(count) => count > 0,
+				{
+					timeoutMs: 10_000,
+					yieldControl: () =>
+						new Promise<void>((resolve) => setImmediate(resolve)),
+				},
+			);
 			expect(vi.getTimerCount()).toBeGreaterThan(0);
 			await vi.advanceTimersByTimeAsync(HOOK_WALL_BUDGET_MS.agent_settled - 1);
 			expect(settled).toBe(false);
@@ -851,7 +862,9 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			await drain;
 			await restoreSettled();
 		}
-	});
+		// 60s: the arming wait is 10s, times PI_LENS_TEST_TIMEOUT_SCALE (3 on the
+		// Windows leg); the 5s default would cut it.
+	}, 60_000);
 
 	it("does not hand a lost-edit advisory to the session that replaced the drain's own (#3748)", async () => {
 		const aRs = path.join(srcDir, "a.rs");
