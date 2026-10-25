@@ -890,7 +890,15 @@ jobs:
           # pi-lens-ignore: zizmor:adhoc-packages
           node "$GITHUB_WORKSPACE/scripts/npm-retry.mjs" install --no-audit --no-fund --ignore-scripts --save-dev typescript@5.9.3
           git add -A && git commit -qm init
-          node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$(command -v pi)"
+          # #4821 / run 40173352720: `command -v pi` is a mise shim, which
+          # resolves its tool through the real HOME; the RPC smoke pins HOME to
+          # a scratch dir, so the shim finds nothing ("pi is not a valid shim").
+          # `mise which` gives the real binary. Its `#!/usr/bin/env node` takes
+          # `node` from PATH, where the mise node shim falls through to the
+          # runner's system node under that pin, so mise's own node goes first.
+          PI_BIN="$(mise which pi)"
+          MISE_NODE_DIR="$(dirname "$(mise which node)")"
+          PATH="$MISE_NODE_DIR:$PATH" node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$PI_BIN"
 
   # PR-gating host-tree lanes (#2613, the #2590 recurrence). #2590's bug (a
   # newer @earendil-works/pi-coding-agent devDependency nesting a
