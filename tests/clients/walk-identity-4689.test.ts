@@ -98,6 +98,7 @@ interface Tree {
 	dirLink: string;
 	libFile: string;
 	outLink: string;
+	outside: string;
 	skipReason?: string;
 }
 
@@ -126,6 +127,7 @@ function tree(prefix: string): Tree {
 		dirLink: pkg.dirLink,
 		libFile: pkg.libFile,
 		outLink: fx.outLink,
+		outside: path.dirname(fx.outsideFile),
 		...(skipReason !== undefined && { skipReason }),
 	};
 }
@@ -265,6 +267,22 @@ describe("#4689 item 6: the shared walk climbs the path identity", () => {
 			realFileAliasRoot: { value: false, dir: real(t.pkgB) },
 			aliasFileRealRoot: { value: false, dir: real(t.pkgB) },
 		});
+	});
+
+	it("a link out of the root reads no config or package from outside the root", (ctx) => {
+		// RECURRENCE GUARDED: the identity start now reaches the target's
+		// directory, so `repo/src/out-link.ts -> outside/ext.ts` climbs
+		// `outside`. The root bound is what keeps a bounded walk from widening:
+		// the nested mutation walk stops at its first step and the language root
+		// falls back to the workspace, never `outside`'s package.
+		const t = tree("out-link");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		writeConfig(t.outside, { format: { enabled: false } });
+		fs.writeFileSync(path.join(t.outside, "package.json"), "{}\n");
+		expect({
+			nested: findNestedProjectMutationValue(noAutoformat, t.outLink, t.repo),
+			languageRoot: resolveLanguageRootForFile(t.outLink, t.repo),
+		}).toEqual({ nested: undefined, languageRoot: t.repo });
 	});
 
 	it("the root's own config keeps the project source under a link-spelled root", (ctx) => {
