@@ -25,6 +25,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	getProjectIgnoreMatcher,
 	invalidateProjectIgnoreMatcherForPath,
 	isPathIgnoredByProject,
 } from "../../clients/file-utils.js";
@@ -256,6 +257,33 @@ describe("project ignore verdict by path identity (#4689)", () => {
 			);
 			expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(false);
 		} finally {
+			tree.cleanup();
+		}
+	});
+
+	it("pays one realpath per directory, not per file, to answer a link spelling", () => {
+		const tree = plantTree("ignore-identity-cost");
+		if (tree === undefined) return;
+		const native = vi.spyOn(fs.realpathSync, "native");
+		try {
+			// Recurrence guarded: the verdict fix must not put a kernel round trip
+			// on every file of a walk (#462: 75x slower on 9p/drvfs).
+			const matcher = getProjectIgnoreMatcher(tree.alias);
+			const dirs = [path.join(tree.alias, "sub"), path.join(tree.alias, "src")];
+			native.mockClear();
+			for (let pass = 0; pass < 2; pass += 1)
+				for (const dir of dirs)
+					for (let index = 0; index < 20; index += 1)
+						matcher.isIgnored(path.join(dir, `f${index}.ts`));
+			expect(native).toHaveBeenCalledTimes(dirs.length);
+			// The root's own spelling is judged by text alone: no kernel round trip.
+			native.mockClear();
+			for (const dir of ["sub", "src"])
+				for (let index = 0; index < 20; index += 1)
+					matcher.isIgnored(path.join(tree.repo, dir, `f${index}.ts`));
+			expect(native).not.toHaveBeenCalled();
+		} finally {
+			native.mockRestore();
 			tree.cleanup();
 		}
 	});
