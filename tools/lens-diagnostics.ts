@@ -1768,13 +1768,15 @@ function projectDiagnosticToWidget(
 // normalization itself now lives in `clients/dispatch/rule-id-normalize.ts` so the
 // inline suppression parser, the project rule-policy matcher, and dedup all apply
 // the same canonical form.
-
+//
+// `fileKey` is the file's path identity (`normalizeMapKey`), never a spelling,
+// so one file reached through a link dedups against its real path (#4689).
 function diagnosticDedupKey(
-	filePath: string,
+	fileKey: string,
 	diagnostic: WidgetDiagnostic,
 ): string {
 	const ruleId = normalizeRuleId(diagnostic.rule ?? diagnostic.tool ?? "");
-	return [normalizeMapKey(filePath), diagnostic.line ?? "?", ruleId].join(":");
+	return [fileKey, diagnostic.line ?? "?", ruleId].join(":");
 }
 
 /**
@@ -2088,7 +2090,7 @@ function mergeDiagnosticsWithWidgetSummaries(
 		const fileKey = normalizeMapKey(filePath);
 		const existing = byFile.get(fileKey);
 		const diagnostics = existing ? [...existing.diagnostics] : [];
-		const key = diagnosticDedupKey(filePath, widgetDiagnostic);
+		const key = diagnosticDedupKey(fileKey, widgetDiagnostic);
 		if (seen.has(key)) return;
 		seen.add(key);
 		diagnostics.push(widgetDiagnostic);
@@ -2146,7 +2148,7 @@ function mergeDiagnosticsWithWidgetSummaries(
 					),
 		);
 		for (const diagnostic of diagnostics) {
-			seen.add(diagnosticDedupKey(filePath, diagnostic));
+			seen.add(diagnosticDedupKey(fileKey, diagnostic));
 		}
 	}
 

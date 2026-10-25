@@ -6022,6 +6022,7 @@ describe("lens_diagnostics mode=full keys one file once across link spellings (#
 				{ diagnostics: [staleBlocker] },
 			),
 		);
+		_setRecentPhasesForTest([]);
 		const result = await run(
 			fullTool([{ filePath: fx.realFile, diagnostics: [], count: 0 }]),
 			{ mode: "full" },
@@ -6033,6 +6034,10 @@ describe("lens_diagnostics mode=full keys one file once across link spellings (#
 		expect(
 			(result.details as { totalBlocking?: number }).totalBlocking ?? 0,
 		).toBe(0);
+		// The retirement is counted by the same identity, so it stays observable.
+		expect(getRecentLoggedPhases().map((entry) => entry.phase)).toContain(
+			"lsp_authoritative_widget_retire",
+		);
 	});
 
 	// RECURRENCE GUARDED: the same split read the other way, a sweep that names
@@ -6155,5 +6160,82 @@ describe("lens_diagnostics mode=full keys one file once across link spellings (#
 			);
 		expect(headers, text).toHaveLength(1);
 		expect(result.details).toMatchObject({ totalBlocking: 2 });
+	});
+
+	// RECURRENCE GUARDED: the unreconciled Set filled by the spelling of the
+	// sweep's result, read by the identity of the stored summary: a sweep that
+	// names the link missed a summary stored under the real path. Both arms
+	// that fill the Set (a rejected write and a write that threw) are driven.
+	for (const [arm, arrange] of [
+		[
+			"a rejected write",
+			() => reconcileScanDiagnosticsMock.mockReturnValue(false),
+		],
+		[
+			"a write that threw",
+			() =>
+				reconcileScanDiagnosticsMock.mockImplementation(() => {
+					throw new Error("store refused");
+				}),
+		],
+	] as const) {
+		it(`marks a retained real-path finding stale when the link's result hit ${arm}`, async (ctx) => {
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			arrange();
+			mockSummaries.push(
+				sum(
+					fx.realFile,
+					{ blocking: 1, errors: 1 },
+					{ diagnostics: [{ ...staleBlocker, message: "retained blocker" }] },
+				),
+			);
+			const result = await run(
+				fullTool([{ filePath: fx.fileLink, diagnostics: [], count: 0 }]),
+				{ mode: "full" },
+				fx.repo,
+			);
+			const text = String(result.content[0].text);
+			expect(text).toContain("retained blocker");
+			expect(text).toContain(STALE_LINE_MARKER);
+		});
+	}
+
+	// RECURRENCE GUARDED: a row the sweep adds under the link spelling opened a
+	// second group beside the widget's group for the same file, because the
+	// per-file map was keyed by the sweep's spelling.
+	it("adds a swept row under the link to the group the widget holds for the real path", async (ctx) => {
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		mockSummaries.push(
+			sum(
+				fx.realFile,
+				{ blocking: 1, errors: 1 },
+				{
+					diagnostics: [
+						{ ...staleBlocker, message: "held under the real path" },
+					],
+				},
+			),
+		);
+		const result = await run(
+			fullTool([
+				{
+					filePath: fx.fileLink,
+					diagnostics: [{ ...lspRow("swept under the link"), code: 9999 }],
+					count: 1,
+					unconfirmedServerIds: ["other-server"],
+				},
+			]),
+			{ mode: "full" },
+			fx.repo,
+		);
+		const text = String(result.content[0].text);
+		expect(text).toContain("held under the real path");
+		expect(text).toContain("swept under the link");
+		const headers = text
+			.split("\n")
+			.filter(
+				(line) => /(real|link)\.ts\b/.test(line) && !line.startsWith(" "),
+			);
+		expect(headers, text).toHaveLength(1);
 	});
 });
