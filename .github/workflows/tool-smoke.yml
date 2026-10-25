@@ -598,6 +598,13 @@ jobs:
             cp --parents clients/lsp/server.ts tests/config/lsp-idle-eviction-reasons.json tests/config/lsp-idle-eviction-registry.test.ts .changelog/3989-lsp-idle-eviction-promote.md "$stage/files/"
             cp "$RUNNER_TEMP/lsp-idle-eviction-promote.md" "$stage/idle-eviction-promote.md"
           fi
+      # `include-hidden-files`: the promotion fragment lands under `.changelog/`,
+      # and upload-artifact v4.4+ drops every name that starts with `.` without
+      # this key, so the artifact arrived without the fragment and the promotion
+      # PR's `git add` died on `pathspec '.changelog/…' did not match any files`
+      # (#3952). `tests/config/lsp-capability-refresh-workflow.test.ts` derives
+      # the staged set of every upload step and reds when one of them drops a
+      # dot path.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && (steps.docs_diff.outputs.changed == 'true' || steps.idle_promote.outputs.promoted == 'true')
         with:
@@ -606,6 +613,7 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 1
+          include-hidden-files: true
 
       - name: Format layer (select + reformat through formatter pipeline)
         id: format_layer
