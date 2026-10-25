@@ -1,9 +1,8 @@
-name: Untriaged issue label check (daily)
+name: Daily repo health
 
-# #3563: a dozen issues filed through the GitHub API on 2026-09-26 carried no
-# TYPE label and no priority:* label -- filing through the API bypasses the
-# issue templates that would otherwise force one. This job fails loud, once a
-# day, whenever any open issue is still missing either.
+# Daily repo health: this file runs two checks. The untriaged-issue label check
+# (#3563) fails when any open issue lacks a TYPE or priority:* label. The
+# required-job p90 check (#4691) warns when a required CI job nears its timeout cap.
 
 on:
   schedule:

@@ -485,4 +485,37 @@ describe("#4714 main() writes the state counts", () => {
 			done();
 		}
 	});
+
+	// #4838 review F3: the merge put the file's recorded keys first, so a count
+	// kept from the file sat ahead of a newer config measured this run, and the
+	// documented regeneration was not byte-identical to the committed table.
+	it("writes kept and measured counts as one sorted map", () => {
+		const { dir, done } = scratch();
+		const logs = captureLogs();
+		try {
+			fakeRepo(dir);
+			const out = join(dir, "table.json");
+			writeFileSync(
+				out,
+				JSON.stringify({ states: { "formal/fam/B.cfg": 20 } }),
+			);
+			const log = join(dir, "shard.log");
+			writeFileSync(
+				log,
+				[
+					"ok   formal/fam/A.cfg: expected pass, got pass (5.0s, 300 distinct states)",
+					"ok   formal/fam/B.cfg: expected pass, got pass (2.0s)",
+				].join("\n"),
+			);
+			expect(main(["--log", log, "--out", out], { root: dir })).toBe(0);
+			const table = JSON.parse(readFileSync(out, "utf8"));
+			expect(Object.keys(table.states)).toEqual([
+				"formal/fam/A.cfg",
+				"formal/fam/B.cfg",
+			]);
+		} finally {
+			logs.restore();
+			done();
+		}
+	});
 });

@@ -2,9 +2,7 @@
 
 ## Status
 
-Proposed — 2026-10-24. The pilot is built and measured; the rollout (more
-families, the full event hook, the CI job) is a separate issue and waits for
-the maintainer's decision on this note.
+Accepted — 2026-10-25 (maintainer). The rollout is #4834: the CI job starts advisory and becomes required after a clean window; later slices follow section 11.
 
 ## Context
 
