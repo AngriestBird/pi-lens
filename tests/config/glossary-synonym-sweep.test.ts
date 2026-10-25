@@ -1001,6 +1001,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/rubocop.ts": 6,
 		// 7 -> 8 (#3968): `path.extname` inside `resolveShellFileDialect` — one
 		// more `path` use, same sense (a path operation).
+		// 8 -> 4 (#4689 item 6): `findShellcheckConfig` delegates to
+		// `findLocalToolConfig`, dropping its `path.join` / `path.resolve` /
+		// `path.dirname` loop and the `fs` pre-check.
 		"clients/dispatch/runners/shellcheck.ts": 4,
 		"clients/dispatch/runners/spellcheck.ts": 6,
 		"clients/dispatch/runners/spotbugs.ts": 4,
@@ -1019,6 +1022,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 30 -> 28 (#4268): `resolveNodeToolCommand` and `resolveLocalFirstAsync`
 		// stop building `.bin` paths by hand and route through the shared lookup.
 		"clients/dispatch/runners/utils/runner-helpers.ts": 28,
+		// 7 -> 3 (#4689 item 6): `findValeConfig` delegates to
+		// `findLocalToolConfig`, dropping its hand-rolled `path` loop.
 		"clients/dispatch/runners/vale.ts": 3,
 		"clients/dispatch/runners/yaml-rule-parser.ts": 7,
 		"clients/dispatch/runners/yamllint.ts": 3,

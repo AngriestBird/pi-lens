@@ -27,6 +27,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveCargoPackageEdition } from "../../clients/cargo-manifest.js";
 import { resolveRunnerPath } from "../../clients/dispatch/runner-context.js";
 import { getPackageRoot } from "../../clients/package-root.js";
+import { findNearestProjectRoot } from "../../clients/startup-scan.js";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import { createDispatchContext } from "../../clients/dispatch/dispatcher.js";
 import { AUXILIARY_LSP_PROFILES } from "../../clients/dispatch/auxiliary-lsp.js";
@@ -666,5 +667,29 @@ describe("#4689 item 6, batch 6: hand-rolled walks folded onto walkUpDirs", () =
 			throughLink: getPackageRoot(url(t.dirLink)),
 			throughTarget: getPackageRoot(url(path.join(t.pkgB, "lib"))),
 		}).toEqual({ throughLink: real(t.pkgB), throughTarget: real(t.pkgB) });
+	});
+
+	it("the startup scan's project root climbs the spelling it was given", (ctx) => {
+		// RECURRENCE GUARDED: `findNearestProjectRoot` stays on the spelling
+		// (`{ spelling: true }`) because its callers compare the root with a
+		// spelled home and cwd. An identity climb through `outer/app -> real/pkg`
+		// answers the fixture root (`real/pkg`'s parents), not `outer`; the four
+		// `startup-scan-*` suites stayed green with the option removed.
+		const env = setupTestEnvironment("pi-lens-4689-walk-scan-");
+		cleanups.push(env.cleanup);
+		const outer = path.join(env.tmpDir, "outer");
+		const sub = path.join(env.tmpDir, "real", "pkg", "sub");
+		fs.mkdirSync(path.join(outer, ".git"), { recursive: true });
+		fs.mkdirSync(sub, { recursive: true });
+		try {
+			fs.symlinkSync(
+				path.join("..", "real", "pkg"),
+				path.join(outer, "app"),
+				"dir",
+			);
+		} catch (err) {
+			return ctx.skip(`cannot create symlinks here: ${String(err)}`);
+		}
+		expect(findNearestProjectRoot(path.join(outer, "app", "sub"))).toBe(outer);
 	});
 });
