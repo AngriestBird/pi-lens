@@ -638,10 +638,7 @@ export function pathsEqual(a: string, b: string): boolean {
 	return normalizeFilePath(a) === normalizeFilePath(b);
 }
 
-/**
- * Check if `child` is under `parent` directory.
- * Separator-agnostic and case-insensitive on Windows.
- */
+/** How {@link walkUpDirs} climbs and where it stops. */
 export interface WalkUpDirsOptions {
 	/**
 	 * Stop before the first directory at or above this home
