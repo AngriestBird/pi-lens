@@ -206,13 +206,15 @@ export function findNearestProjectRoot(startDir: string): string | null {
 	// and the caller's `cwd` with the spelled `homeDir`, and `scanRoot` is
 	// reported beside the spelled `cwd`. An identity climb needs those ends
 	// moved with it; that is its own slice.
+	let root: string | null = null;
 	for (const dir of walkUpDirs(startDir, { spelling: true })) {
 		const entryNames = getDirectoryMarkers(dir).entryNames;
 		if (PROJECT_ROOT_MARKERS.some((marker) => entryNames.has(marker))) {
-			return dir;
+			root = dir;
+			break;
 		}
 	}
-	return null;
+	return root;
 }
 
 interface SourceCountResult {
