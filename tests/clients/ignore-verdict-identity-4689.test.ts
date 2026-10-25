@@ -28,6 +28,7 @@ import {
 	getProjectIgnoreMatcher,
 	invalidateProjectIgnoreMatcherForPath,
 	isPathIgnoredByProject,
+	isWithinPathForm,
 } from "../../clients/file-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
@@ -236,6 +237,126 @@ describe("project ignore verdict by path identity (#4689)", () => {
 		// The directory is an ancestor of the file, not a sibling of the root, so
 		// a file the rules keep stays kept.
 		expect(isPathIgnoredByProject(path.join(odd, "keep.ts"), tree.repo)).toBe(
+			false,
+		);
+	});
+
+	// lane: the Linux and macOS unit shards. A backslash is a legal POSIX
+	// filename character, and a sibling directory literally named `<root>\outside`
+	// cannot exist on win32, where `\` separates.
+	it.skipIf(process.platform === "win32")(
+		"does not read the rules of a sibling directory named `<root>\\outside`",
+		() => {
+			// RECURRENCE GUARDED (#4876 review r2 F1, the CodeRabbit thread): the
+			// containment form folded a literal `\` into a separator on every
+			// platform, so `toPosix("<root>\\outside")` became the child
+			// "<root>/outside" and the ancestor walk left the project root to read
+			// the sibling's own `.gitignore`: an outside file read as an ignored
+			// project file, where the predicate this batch replaced said `false`.
+			const env = setupTestEnvironment("pi-lens-ignore-backslash-");
+			const home = pinFixtureHome("ignore-backslash");
+			cleanups.push(() => {
+				home.restore();
+				env.cleanup();
+			});
+			const repo = path.join(env.tmpDir, "repo");
+			const sibling = path.join(env.tmpDir, `${path.basename(repo)}\\outside`);
+			fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+			fs.mkdirSync(sibling, { recursive: true });
+			fs.writeFileSync(path.join(repo, ".gitignore"), "root-rule.log\n");
+			fs.writeFileSync(path.join(sibling, ".gitignore"), "*.log\n");
+			const outside = path.join(sibling, "x.log");
+			fs.writeFileSync(outside, "noise\n");
+			// The sibling is OUTSIDE the root by text on this host.
+			expect(path.relative(repo, outside)).toBe("../repo\\outside/x.log");
+			expect(isPathIgnoredByProject(outside, repo)).toBe(false);
+			// Control: the root's own rule still runs, so the `false` above is not
+			// "no rule was read at all".
+			expect(
+				isPathIgnoredByProject(path.join(repo, "root-rule.log"), repo),
+			).toBe(true);
+		},
+	);
+
+	it("keys a `..` after a link through the kernel, not through a lexical fold", (ctx) => {
+		// RECURRENCE GUARDED (#4876 review r2 F2): `isIgnored` ran `path.resolve`
+		// before the directory identity could see the link, so the spelling the
+		// changelog advertises was answered for a path that does not exist. The
+		// kernel opens `<root>/shared/x.log`; `path.resolve` folded the spelling
+		// into the never-existing `<root>/src/shared/x.log`.
+		const tree = plantTree("ignore-identity-dotdot-link");
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		fs.writeFileSync(path.join(tree.repo, ".gitignore"), "/shared/*.log\n");
+		// Concatenated: `path.join` would collapse the `..` itself.
+		const spelled = `${tree.repo}/src/linked/../shared/x.log`;
+		expect(
+			isPathIgnoredByProject(
+				path.join(tree.repo, "shared", "x.log"),
+				tree.repo,
+			),
+		).toBe(true);
+		expect(isPathIgnoredByProject(spelled, tree.repo)).toBe(true);
+	});
+
+	it("does not skip a `..` after a link whose lexical fold lands in an ignored directory", (ctx) => {
+		// Same defect, other direction: `path.resolve` folded the spelling into
+		// `<root>/src/shared/x.log`, which `/src/` excludes, while the kernel opens
+		// `<root>/shared/x.log`, which it does not.
+		const tree = plantTree("ignore-identity-dotdot-lexical");
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		fs.writeFileSync(path.join(tree.repo, ".gitignore"), "/src/\n");
+		// Concatenated: `path.join` would collapse the `..` itself.
+		const spelled = `${tree.repo}/src/linked/../shared/x.log`;
+		expect(
+			isPathIgnoredByProject(
+				path.join(tree.repo, "shared", "x.log"),
+				tree.repo,
+			),
+		).toBe(false);
+		expect(isPathIgnoredByProject(spelled, tree.repo)).toBe(false);
+		// A dot segment that ENDS the spelling names the directory itself: the
+		// kernel answers `<root>` for `<root>/src/linked/..`, which `/src/` does
+		// not exclude, while a lexical fold would name `<root>/src`.
+		expect(
+			isPathIgnoredByProject(`${tree.repo}/src/linked/..`, tree.repo, true),
+		).toBe(false);
+	});
+
+	it("evicts a subtree named through a `..` after a link", (ctx) => {
+		// RECURRENCE GUARDED (#4876 review r2 F2, the `invalidateSubtree` half):
+		// the write hook's spelling went through `path.resolve`, so the eviction
+		// named `<root>/src/shared` and left the memoized verdict the nested rules
+		// were rebuilt for.
+		const tree = plantTree("ignore-identity-dotdot-evict");
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		fs.writeFileSync(path.join(tree.repo, ".gitignore"), "root-only-rule\n");
+		const shared = path.join(tree.repo, "shared");
+		fs.writeFileSync(path.join(shared, ".gitignore"), "*.log\n");
+		const target = path.join(shared, "x.log");
+		const matcher = getProjectIgnoreMatcher(tree.repo);
+		expect(matcher.isIgnored(target)).toBe(true);
+		fs.writeFileSync(path.join(shared, ".gitignore"), "!*.log\n");
+		matcher.invalidateSubtree(`${tree.repo}/src/linked/../shared`);
+		expect(matcher.isIgnored(target)).toBe(false);
+	});
+
+	it("folds win32 case in the same form it folds win32 separators", () => {
+		// RECURRENCE GUARDED (#4876 review r2 F4): the new containment form folded
+		// separators but not case, while `path.relative` — the predicate this batch
+		// replaced — folded both on win32, so a write hook that invalidated a
+		// subtree spelled in another case left the memoized verdict standing.
+		// Shape 35: the fold is chosen by the value's SHAPE (`isWindowsPath`), so
+		// pure win32 semantics are exercised on every lane, not only on win32.
+		expect(isWithinPathForm("C:\\Repo\\Sub\\x.log", "C:\\Repo")).toBe(true);
+		expect(isWithinPathForm("C:\\Repo\\Sub\\x.log", "C:\\Repo\\sub")).toBe(
+			true,
+		);
+		expect(isWithinPathForm("C:\\Repo\\Subx\\x.log", "C:\\Repo\\Sub")).toBe(
+			false,
+		);
+		// POSIX keeps its literal backslashes (#4876 F1), so the same shape does
+		// not open a containment the kernel does not have.
+		expect(isWithinPathForm("/tmp/repo\\outside/x.log", "/tmp/repo")).toBe(
 			false,
 		);
 	});

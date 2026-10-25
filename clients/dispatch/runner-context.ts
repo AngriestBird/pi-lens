@@ -3,7 +3,6 @@ import * as path from "node:path";
 import {
 	normalizeHostToolPath,
 	normalizeMapKey,
-	realpathOrResolve,
 	walkUpDirs,
 } from "../path-utils.js";
 
@@ -18,8 +17,10 @@ function resolveAgainstAncestors(cwd: string, filePath: string): string {
 		// (`resolveRunnerPath` normalizes it), so it is this spelling's path
 		// IDENTITY, never `path.resolve`, which folds a `..` after a directory
 		// link lexically: `/repo/link/../f.ts` would name `/repo/f.ts` while the
-		// kernel opens the link target's parent.
-		return realpathOrResolve(filePath);
+		// kernel opens the link target's parent. The identity is paid ONCE, by
+		// `resolveRunnerPath`'s `normalizeMapKey` (#4876 review r2 F3: resolving
+		// here too doubled the kernel reads, 2 per dispatched file).
+		return filePath;
 	}
 
 	const normalizedRelative = filePath.replace(/\\/g, "/");

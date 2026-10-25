@@ -25,11 +25,13 @@ import {
 	homeRelativePath,
 	isExternalOrVendorFile,
 	isUnderDir,
+	isWindowsPath,
 	isWithinForm,
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
 	normalizePathSpelling,
 	realpathOrResolve,
+	splitPathSegments,
 	toPosix,
 	toProjectRelativePath,
 } from "./path-utils.js";
@@ -942,11 +944,37 @@ function readGitignorePatterns(
 	}
 }
 
+/**
+ * Fold one value onto the form {@link isWithinForm} compares on. A
+ * Windows-shaped value folds its separators AND its case, because win32
+ * compares both that way; a POSIX value is already the form the caller holds.
+ *
+ * `isWindowsPath` owns "is this value Windows-shaped", and the SHAPE selects
+ * the fold, not the host (AGENTS shapes 2 and 35): a POSIX filename may
+ * legally contain a backslash, so folding separators unconditionally turned a
+ * sibling directory literally named `<root>\outside` into the child
+ * `<root>/outside` of the root (#4876 review r2 F1). `path.win32.relative` —
+ * the predicate this batch replaced — folded exactly these two axes on win32
+ * and neither on POSIX.
+ */
+function containmentForm(value: string): string {
+	return isWindowsPath(value) ? toPosix(value).toLowerCase() : value;
+}
+
+/**
+ * `child` at or under `parent`, after folding both sides onto ONE containment
+ * form. The one form is the point: `isWithinForm` asks callers to fold both
+ * sides "the same way", and this is that way (#4876 review r2 F1/F4).
+ */
+export function isWithinPathForm(child: string, parent: string): boolean {
+	return isWithinForm(containmentForm(child), containmentForm(parent));
+}
+
 function ancestorDirsBetween(rootDir: string, targetDir: string): string[] {
 	// #4689 batch 7: containment is the owner predicate on one path form. The
 	// hand-rolled `path.relative` test read a directory named `..foo` as outside
 	// the root (its relative path begins with `..`), so its patterns never ran.
-	if (!isWithinForm(toPosix(targetDir), toPosix(rootDir))) return [];
+	if (!isWithinPathForm(targetDir, rootDir)) return [];
 	const relative = path.relative(rootDir, targetDir);
 	const dirs = [rootDir];
 	if (!relative) return dirs;
@@ -1098,10 +1126,10 @@ function buildProjectIgnoreMatcher(
 		// #4689 batch 7: the owner's containment predicate, on one path form. A
 		// verdict for a file under a directory named `..foo` has a relative path
 		// that begins with `..`, and the hand-rolled test kept it (#4861 F2).
-		const subtreeForm = toPosix(path.resolve(subtree));
+		const subtreeForm = path.resolve(subtree);
 		for (const key of patternMemo.keys()) {
 			const memoPath = key.slice(2);
-			if (isWithinForm(toPosix(memoPath), subtreeForm)) {
+			if (isWithinPathForm(memoPath, subtreeForm)) {
 				patternMemo.delete(key);
 			}
 		}
@@ -1123,18 +1151,57 @@ function buildProjectIgnoreMatcher(
 		}
 		return identity;
 	};
+	/**
+	 * Does this caller spelling hold a `.` or `..` segment? Only such a spelling
+	 * has to be resolved by the KERNEL: `path.resolve` folds a dot segment
+	 * lexically, so a `..` after a directory link names a directory that never
+	 * existed (#4876 review r2 F2). `splitPathSegments` is the shared splitter,
+	 * so on POSIX a filename containing a backslash reads as several segments:
+	 * that makes such a name pay one directory read, never a wrong verdict.
+	 */
+	const hasDotSegment = (spelling: string): boolean =>
+		splitPathSegments(spelling).some(
+			(segment) => segment === "." || segment === "..",
+		);
+	/**
+	 * The file's project path key, from the caller's own spelling. A spelling
+	 * with no dot segment keeps the one `path.resolve` and the text compare, so a
+	 * walk pays no kernel round trip per file (#703). A dot-segment spelling takes
+	 * the identity of its DIRECTORY, which this matcher caches per directory, so a
+	 * walk through one link pays one read per directory.
+	 */
+	const projectPathKey = (spelling: string): string => {
+		const absolute = path.resolve(spelling);
+		if (!hasDotSegment(spelling)) {
+			if (isUnderRootText(absolute)) return absolute;
+			return path.join(
+				identityOfDir(path.dirname(absolute)),
+				path.basename(absolute),
+			);
+		}
+		// A dot segment that ENDS the spelling names a directory itself, so there
+		// is no trailing name to keep: the whole spelling takes the kernel's
+		// answer (`<root>/link/..` is the link target's parent, not `<root>`'s
+		// lexically folded sibling).
+		const tail = path.basename(spelling);
+		if (tail === "." || tail === "..") return identityOfDir(spelling);
+		return path.join(identityOfDir(path.dirname(spelling)), tail);
+	};
 	// The textual prefix test keeps the in-root path (every walk of a project
 	// spelled by its identity) at one string compare, with no `path.relative`.
 	// #4689 batch 7: it is the owner's `isWithinForm` on one path form, so the
 	// containment rule has one spelling in the tree (#4861 F2).
-	const rootForm = toPosix(resolvedRoot);
 	const isUnderRootText = (absolute: string): boolean =>
-		isWithinForm(toPosix(absolute), rootForm);
+		isWithinPathForm(absolute, resolvedRoot);
 	const invalidateSubtree = (subtree: string): void => {
 		const absolute = path.resolve(subtree);
-		const local = isUnderRootText(absolute)
-			? absolute
-			: identityOfDir(absolute);
+		// #4876 review r2 F2: a dot-segment spelling resolves through the kernel,
+		// so this eviction reaches the directory the memo is really keyed under.
+		const dotSegmented = hasDotSegment(subtree);
+		const local =
+			!dotSegmented && isUnderRootText(absolute)
+				? absolute
+				: identityOfDir(dotSegmented ? subtree : absolute);
 		dropVerdictsUnder(local);
 		nestedCache.delete(local);
 	};
@@ -1195,13 +1262,7 @@ function buildProjectIgnoreMatcher(
 			// #4689: one verdict per file, whichever name reached it. The memo, the
 			// nested-rule directories and the tracked set all key on the root's own
 			// spelling.
-			const spelled = path.resolve(filePath);
-			const resolved = isUnderRootText(spelled)
-				? spelled
-				: path.join(
-						identityOfDir(path.dirname(spelled)),
-						path.basename(spelled),
-					);
+			const resolved = projectPathKey(filePath);
 			// Two namespaces (D: for directory queries, F: for file queries)
 			// because gitignore semantics differ for trailing-slash patterns.
 			const memoKey = (isDirectory ? "D:" : "F:") + resolved;
@@ -1213,7 +1274,7 @@ function buildProjectIgnoreMatcher(
 				// outside (#4861 F2).
 				if (
 					resolved === resolvedRoot ||
-					!isWithinForm(toPosix(resolved), rootForm)
+					!isWithinPathForm(resolved, resolvedRoot)
 				) {
 					verdict = { ignored: false, layer: undefined };
 				} else {

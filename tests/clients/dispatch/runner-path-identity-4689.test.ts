@@ -21,7 +21,8 @@
  * symlinks skips visibly.
  */
 import * as fs from "node:fs";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveRunnerPath } from "../../../clients/dispatch/runner-context.js";
 import {
 	COLLECT_LATER_THRESHOLD_MS,
 	observeRunnerLatency,
@@ -174,5 +175,21 @@ describe("a runner path keys the file's identity (#4689 batch 7)", () => {
 				.getInlineBlockerDiagnostics(spelled)
 				?.map((finding) => finding.runnerId),
 		).toEqual([INLINE_RUNNER_ID, RUNNER_ID]);
+	});
+
+	it("pays one identity read for an absolute spelling, not two", (ctx) => {
+		// RECURRENCE GUARDED (#2016 cost; #4876 review r2 F3): the absolute branch
+		// called `realpathOrResolve` and `resolveRunnerPath`'s `normalizeMapKey`
+		// paid the same kernel read again, so every dispatched file doubled its
+		// `readlink` count (measured: 5702 -> 11402 per 300 resolves).
+		const fx = createPathIdentityFixture(env.tmpDir);
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		const native = vi.spyOn(fs.realpathSync, "native");
+		try {
+			resolveRunnerPath(fx.repo, fx.sharedFile);
+			expect(native).toHaveBeenCalledTimes(1);
+		} finally {
+			native.mockRestore();
+		}
 	});
 });
