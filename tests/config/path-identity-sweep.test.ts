@@ -292,10 +292,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :562, :812
 	"clients/runtime-coordinator.ts#path-resolve-keyed": {
-		sites: 37,
-		identities: "8ee7c38d168f0903",
+		sites: 8,
+		identities: "0ac5152568baccfe",
 		reason: PRE_4689,
-	}, // :845, :849, :1450, :1451, :1723, :1773, :1784, :1826, :1863, :1900, :1926, :1929, :2003, :2045, :2064, :2066, :2087, :2093, :2124, :2136, :2201, :2225, :2242, :2245, :2271, :2275, :2327, :2344, :2639, :2657, :2705, :2819, :2830, :2857, :2864, :2871, :2878
+	}, // :860 path-resolve-keyed (new Set element), :864 path-resolve-keyed (.has key), :1489 path-resolve-keyed (.get key), :1490 path-resolve-keyed (.set key), :2896 path-resolve-keyed (.get key), :2903 path-resolve-keyed (.set key), :2910 path-resolve-keyed (.set key), :2917 path-resolve-keyed (.delete key)
 	"clients/runtime-tool-result.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "3a38f213298e8a5d",

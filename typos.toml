@@ -73,6 +73,10 @@ extend-ignore-re = [
   # spell a flagged trigram by chance (`abd`, `ded`). Ignore the VALUE, not a
   # word, so a re-pin is not a coin flip and no real trigram is blinded.
   'identities: "[0-9a-f]{16}"',
+  # A backticked hex token with a digit is a commit or digest, not prose:
+  # `3dbe85a2b4e1` (docs/lsp-capability-matrix.md) split into the flagged `dbe`
+  # and redded master after #4848. All-letter words stay checked.
+  '`[0-9a-f]*[0-9][0-9a-f]*`',
 ]
 
 # Dictionary tuning — reaches BOTH lanes (typos-lsp and typos-cli).

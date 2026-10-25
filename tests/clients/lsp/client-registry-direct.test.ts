@@ -1159,6 +1159,27 @@ describe("ClientRegistry.resolveServerRoot (#4449)", () => {
 			),
 		).resolves.toBe(nested); // control: a fresh registry sees the manifest
 	});
+
+	// Recurrence (#4854): a nested Xcode project (buildServer.json, no
+	// Package.swift) under a directory that already hosts a live Swift client was
+	// coalesced into that ancestor, so sourcekit-lsp never read the project's
+	// build settings. buildServer.json must count as a project boundary.
+	it("roots a nested Xcode project at its buildServer.json under an ancestor Swift client", async () => {
+		const monorepo = tempProject("res-xcode", false);
+		const app = path.join(monorepo, "App");
+		const file = path.join(app, "Sources", "View.swift");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(path.join(monorepo, "Package.swift"), "// tools\n");
+		fs.writeFileSync(path.join(app, "buildServer.json"), "{}\n");
+		fs.writeFileSync(file, "print(1)\n");
+		vi.spyOn(process, "cwd").mockReturnValue(monorepo);
+		const registry = new ClientRegistry(makeHooks().hooks);
+		registry.clients.set(keyFor("swift", monorepo), live(monorepo));
+
+		await expect(
+			registry.resolveServerRoot(rootServer("swift", app), file),
+		).resolves.toBe(app);
+	});
 });
 
 // ---------------------------------------------------------------------------

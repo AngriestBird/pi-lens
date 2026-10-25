@@ -267,7 +267,12 @@ fixes its members says so instead of quoting a before and after.
    normalizer each uses; a claim that one normalizer subsumes another is
    measured per transformation (separators, dot segments, case, symlinks,
    existence), never asserted (#3178: four rounds, two inverted arms, one
-   unmeasured swap). Enforced by `tests/config/path-identity-sweep.test.ts`
+   unmeasured swap). Never put `path.resolve` in front of an identity key:
+   it folds `..` lexically before the link resolves, so `/repo/link/../f.ts`
+   keys a different file than the kernel does (three instances on
+   2026-10-25, listed in `HISTORY.md`). Screen: does
+   any spelling reach `normalizeMapKey` or `realpathOrResolve` through a
+   `path.resolve` first? Enforced by `tests/config/path-identity-sweep.test.ts`
    (partial: a raw realpath or a raw `path.resolve` key outside
    `clients/path-utils.ts`).
 

@@ -337,6 +337,7 @@ const PROJECT_BOUNDARY_MARKERS = [
 	"mix.exs",
 	"pubspec.yaml",
 	"Package.swift",
+	"buildServer.json",
 ] as const;
 const PYTHON_BOUNDARY_MARKERS = new Set([
 	"setup.py",
@@ -3932,7 +3933,9 @@ export const SwiftServer = createInteractiveServer({
 	name: "SourceKit-LSP",
 	executesProjectCode: true,
 	extensions: KIND_EXTENSIONS["swift"],
-	root: createRootDetector(["Package.swift"]),
+	// buildServer.json: the BSP config sourcekit-lsp reads for Xcode projects
+	// (xcode-build-server); without it as a root each file is checked alone (#4854).
+	root: createRootDetector(["Package.swift", "buildServer.json"]),
 	language: "swift",
 	command: "sourcekit-lsp",
 });

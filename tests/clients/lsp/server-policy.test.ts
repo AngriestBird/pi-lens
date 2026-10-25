@@ -660,6 +660,28 @@ describe("lsp server policy", () => {
 		expect(await resolver(file)).toBeUndefined();
 	});
 
+	// #4854: an Xcode project has no Package.swift; sourcekit-lsp reads its build
+	// settings from the buildServer.json at the project root (xcode-build-server).
+	// Rooting at the file's directory instead made every cross-file type unknown.
+	it("roots a Swift file at the nearest buildServer.json when there is no Package.swift", async () => {
+		const { SwiftServer } = await import("../../../clients/lsp/server.js");
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-bsp-"));
+		dirs.push(ws);
+
+		const feature = path.join(ws, "App", "Features", "Home");
+		const main = path.join(feature, "HomeView.swift");
+		fs.mkdirSync(feature, { recursive: true });
+		fs.writeFileSync(path.join(ws, "buildServer.json"), "{}\n");
+		fs.writeFileSync(main, "print(1)\n");
+
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
+		try {
+			await expect(SwiftServer.root(main)).resolves.toBe(ws);
+		} finally {
+			cwdSpy.mockRestore();
+		}
+	});
+
 	// #3412: `swift package init` inside a subdirectory of a resolved root. The
 	// nearer marker must win on the next call, for the file that triggered the
 	// first resolution AND for every other file in the same directory (the memo
