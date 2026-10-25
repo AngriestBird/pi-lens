@@ -898,6 +898,7 @@ jobs:
           # runner's system node under that pin, so mise's own node goes first.
           PI_BIN="$(mise which pi)"
           MISE_NODE_DIR="$(dirname "$(mise which node)")"
+          echo "mise-repro: pi=$PI_BIN node=$(PATH="$MISE_NODE_DIR:$PATH" command -v node)"
           PATH="$MISE_NODE_DIR:$PATH" node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$PI_BIN"
 
   # PR-gating host-tree lanes (#2613, the #2590 recurrence). #2590's bug (a
