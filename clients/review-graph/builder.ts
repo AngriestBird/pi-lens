@@ -221,14 +221,14 @@ function normalizeGraphSourcePath(memo: SourcePathMemo, raw: string): string {
 	return normalized;
 }
 
-export function _resetReviewGraphSourcePathMemoForTests(): void {
-	_sourcePathMemos.clear();
-}
-
 /** Test-only: forget the per-language extractors, which hold the shared client
  * they were built on (and its trap registry) for the process's life. */
 export function _resetReviewGraphExtractorCacheForTests(): void {
 	extractorCache.clear();
+}
+
+export function _resetReviewGraphSourcePathMemoForTests(): void {
+	_sourcePathMemos.clear();
 }
 
 // IN-FLIGHT Promise cache: deduplicates CONCURRENT buildOrUpdateGraph calls for

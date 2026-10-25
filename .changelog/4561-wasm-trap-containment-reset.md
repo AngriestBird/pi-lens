@@ -3,4 +3,4 @@ section: Fixed
 audience: internal
 ---
 
-- **Contained-trap tests reset their state per case.** The wasm-trap containment file now clears the review-graph extractor cache and the shared tree-sitter client before each case, so one case's trap charges no longer reach the next (refs #4561).
+- **Shuffle-order isolation for five census members.** The wasm-trap containment file resets the review-graph extractor cache and the shared tree-sitter client per case. The console-channel, LSP real-runner and session-decision-records files restore their shared state per case, and the census ratchet is now empty (refs #4561).
