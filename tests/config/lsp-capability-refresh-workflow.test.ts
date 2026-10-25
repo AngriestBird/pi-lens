@@ -9,6 +9,7 @@ import {
 	scannableRegions,
 	splitSegments,
 	splitWords,
+	stripCommandGroupAndRunnerPrefixes,
 	stripEnvAssignments,
 } from "../../scripts/hooks/guard-bash.mjs";
 import {
@@ -410,14 +411,27 @@ function jobStaging(job: ArtifactJob): Staging {
 		for (const [name, value] of Object.entries(env ?? {}))
 			recordAlias(aliases, name, String(value));
 	};
+	// `FOO=1`, then a keyword or runner prefix (`do`, `then`, `env`, `sudo`,
+	// `time`), then possibly another assignment: the command is what remains,
+	// so a `for ...; do cp ...; done` body is read as the `cp` it runs.
+	const commandWords = (segment: string) => {
+		let current = splitWords(segment);
+		for (let round = 0; round < 3; round++) {
+			const { env, rest } = stripEnvAssignments(current);
+			for (const [name, value] of Object.entries(env))
+				recordAlias(aliases, name, value);
+			const stripped = stripCommandGroupAndRunnerPrefixes(rest);
+			if (stripped.length === current.length) return stripped;
+			current = stripped;
+		}
+		return current;
+	};
 	const scan = (text: string, depth: number) => {
 		for (const region of scannableRegions(text))
 			for (const segment of splitSegments(region)) {
-				const { env, rest } = stripEnvAssignments(splitWords(segment));
-				for (const [name, value] of Object.entries(env))
-					recordAlias(aliases, name, value);
-				const command = rest.length > 0 ? commandBasename(rest[0]) : "";
-				const { operands, targets } = splitRedirects(rest.slice(1));
+				const words = commandWords(segment);
+				const command = words.length > 0 ? commandBasename(words[0]) : "";
+				const { operands, targets } = splitRedirects(words.slice(1));
 				for (const target of targets)
 					for (const expanded of expandWord(target, aliases))
 						recordWrite(expanded);
@@ -669,6 +683,30 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 				'printf "%s\\n" x > "$stage/a.txt"',
 			],
 			uploadPath: "${{ runner.temp }}/.state",
+			expected: 1,
+		},
+		{
+			title: "a dot path staged by rsync, whose source is a directory",
+			staging: staged('rsync -a .changelog/ "$stage/files/"'),
+			expected: 1,
+		},
+		{
+			title: "a dot path staged by install onto a hidden name",
+			staging: staged(
+				'install -Dm644 .changelog/x.md "$stage/files/.changelog/x.md"',
+			),
+			expected: 1,
+		},
+		{
+			title: "a dot path spelled with a leading ./",
+			staging: staged('cp --parents ./.changelog/x.md "$stage/files/"'),
+			expected: 1,
+		},
+		{
+			title: "a dot path reached through a for-loop variable",
+			staging: staged(
+				'for f in .changelog/x.md; do cp --parents "$f" "$stage/files/"; done',
+			),
 			expected: 1,
 		},
 		{
