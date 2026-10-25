@@ -29,6 +29,7 @@ import {
 	findLatencyLoggerGapsForFile,
 	findViMockExportGaps,
 	isLatencyLoggerSpecifier,
+	isProductionModulePath,
 	latencyAdmissionHeader,
 	type ViMockExportFinding,
 } from "../support/vi-mock-export-gate.js";
@@ -1208,6 +1209,50 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	it("reads a fixture on another Windows drive as outside the checkout (#4878 F1)", () => {
+		// Every fixture above lives under `os.tmpdir()`, which on the Windows
+		// runner is another drive: `path.win32.relative` then returns an
+		// ABSOLUTE path, so the `../` arm never matched, `isProductionModule`
+		// answered false, and each positive control in this file asserted `[]`
+		// (26 red on `Unit tests Windows`, head a99db371e).
+		const cwd = "D:\\a\\pi-lens\\pi-lens";
+		const fixture =
+			"C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\pi-lens-vi-mock-x\\module.ts";
+		const relative = path.win32.relative(cwd, fixture);
+		expect(relative).toBe(fixture);
+		expect(isProductionModulePath(relative, path.win32)).toBe(true);
+		// The verdict widens only "outside": a checkout path on the same drive
+		// still answers by its source root.
+		expect(
+			isProductionModulePath(
+				path.win32.relative(
+					cwd,
+					"D:\\a\\pi-lens\\pi-lens\\tests\\support\\x.ts",
+				),
+				path.win32,
+			),
+		).toBe(false);
+		expect(
+			isProductionModulePath(
+				path.win32.relative(
+					cwd,
+					"D:\\a\\pi-lens\\pi-lens\\clients\\lsp\\index.ts",
+				),
+				path.win32,
+			),
+		).toBe(true);
+		// The POSIX shapes the gate has always read keep their verdicts.
+		expect(
+			isProductionModulePath("../tmp/pi-lens-vi-mock-x/module.ts", path.posix),
+		).toBe(true);
+		expect(isProductionModulePath("clients/lsp/index.ts", path.posix)).toBe(
+			true,
+		);
+		expect(isProductionModulePath("tests/support/x.ts", path.posix)).toBe(
+			false,
+		);
 	});
 
 	it("skips node and non-TypeScript mock specifiers", () => {
