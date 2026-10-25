@@ -260,13 +260,21 @@ dependent `a.ts` after one bash command rewrote `a.ts` and the `z.ts` it
 imports:
 - the primary phase (`resyncHeldPrimaries`, `clients/lsp/index.ts`) sends
   `a.ts`'s change (its clear empties the cache and the pending receipt),
-  then `z.ts`'s, then the drain request, on one ordered stream;
+  then `z.ts`'s, on one ordered stream. With `Resend` (#4782 item 1) it then
+  sends `a.ts`'s unchanged bytes again (`ClientSend`): that write empties the
+  cache and the slot and moves the client's version of `a.ts` on. With `Drain`
+  it ends with the drain request; without it (threaded or unmeasured reply
+  ordering, every row that declares `resendRecheck: "rechecks"` today) no
+  drain request goes out;
 - the server publishes `a.ts`'s check against the `z.ts` it holds (ghost
   `zv`): the pre-`z.ts` answer STOPs, the later one is clean;
 - the handler keeps one pending receipt per path in its quiet-window slot
-  (`pendingDiagnostics`) and stores it when the slot's timer fires;
+  (`pendingDiagnostics`) and stores it when the slot's timer fires. With
+  `Versioned`, a publish carries the `a.ts` version the server read, and one
+  older than the client's version is dropped as superseded
+  (`isSupersededPush`);
 - the waiter is the skipped dispatch touch (no baseline). It starts after
-  the drain reply.
+  the drain reply, or, without `Drain`, once the phase wrote its last send.
 
 `PendingGuard` is the fix: neither the early return nor the quiet-window
 settle takes the cache while the slot holds a later receipt. `Republish`
@@ -324,6 +332,14 @@ the three newest invariants it passes all 874.
 | `DependencyMutWidenGuard` | violated NoDroppedAnswer | violated NoDroppedAnswer | 283 | 0 |
 | `DependencyMutRetainSlot` | violated NoCanceledStored | violated NoCanceledStored | 39 | 0 |
 | `DependencyMutRetainSlotBlind` | pass (blindness) | pass | 777 | 0 |
+| `DependencyResend` | pass | pass | 1647 | 0 |
+| `DependencyMutNoResend` | violated NoPhantomFinding | violated NoPhantomFinding | 110 | 0 |
+| `DependencyResendVersionless` | violated NoPhantomFinding (residual) | violated NoPhantomFinding | 286 | 0 |
+
+Every config before `DependencyResend` sets `Resend = FALSE`,
+`Versioned = FALSE` and `Drain = TRUE`, where the three new variables are
+constant, so their counts are the ones they had before the re-send was
+modelled.
 
 **`DependencyPreFix`** is the measured trace:
 1. The server reads `a.ts`'s change and publishes the pre-`z.ts` STOP.
@@ -424,7 +440,39 @@ empties the primary's cache before the merge. `SettleNeedsAnswer` cannot
 express it, because it needs a read-time ghost on the cache `touchFile` reads.
 Unreproduced.
 
+### The re-send (#4782 item 1)
+
+`DependencyLateRepublish` is the residual the drain cannot close: the server
+re-checks `a.ts` only on its own timer after `z.ts`'s change, so the answer
+computed before it is the newest one at the read, and `a.ts`'s version never
+moved. `resyncHeldPrimaries` therefore sends `a.ts` again after `z.ts` to a
+server declared to re-check unchanged bytes. The three configs below model the
+phase as it runs for those servers: `Republish = FALSE` (a timer, not an
+in-order republish) and `Drain = FALSE` (no drain request).
+
+**`DependencyResend`** (pyright: `Versioned = TRUE`) passes all five
+invariants over 1647 states. The re-send's write empties `a.ts`'s cache and
+slot, so nothing stored before it can be read, and every answer the server
+computed before it read the re-send carries version 1 and is dropped as
+superseded. The only answer that can be stored is one computed after the
+server read `z.ts`.
+
+**`DependencyMutNoResend`** is the same config without the re-send. 7 states:
+1. The server reads `a.ts`'s change and publishes the pre-`z.ts` STOP.
+2. The client stores it; the phase has written its last send, so the wait
+   starts, and the early return takes the stored STOP.
+
+**`DependencyResendVersionless`** (typescript-language-server publishes no
+version) is the accepted residual (cell 5): the pre-`z.ts` STOP is published
+before the re-send is written and received after it, and with no version
+nothing can drop it. 8 states: `ServerRead` (a), `ServerPublish`,
+`ClientSend` (the re-send clears), `ClientReceive`, `SlotFire`, `WaitStart`,
+`Read`. The 40 typescript-language-server probe runs after the fix never
+showed it.
+
 Not modelled here: a publish computed before the server read `a.ts`'s own
-change (the #3484 shape above), versioned publishes, the slot's two
-unstored exits (superseded, config-failure refusal; the unit file pins
-both), seed-first-push strategies, and undrained phases.
+change (the #3484 shape above), the slot's unstored exits other than the
+superseded drop (config-failure refusal; the unit file pins it),
+seed-first-push strategies, and a parallel tool's send of `a.ts` during the
+phase (the `#3481` read stamps; `tests/clients/head-move-resync-4493.test.ts`
+pins it).

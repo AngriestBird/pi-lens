@@ -72,6 +72,10 @@ import {
 const primaryOrdering = vi.hoisted(
 	() => new Map<string, "single-task-ordered" | "threaded" | "unmeasured">(),
 );
+/** #4782: each registered repository's primary `resendRecheck` trait. */
+const primaryResend = vi.hoisted(
+	() => new Map<string, "rechecks" | "unmeasured">(),
+);
 const auxiliaries = vi.hoisted(() => new Map<string, unknown>());
 
 /**
@@ -89,8 +93,14 @@ function selectWithAuxiliaries(
 			.map((entry) => entry.server)
 			.map((server) => {
 				for (const [dir, ordering] of primaryOrdering)
-					if (filePath.startsWith(`${dir}${path.sep}`))
-						return { ...server, replyOrdering: ordering };
+					if (filePath.startsWith(`${dir}${path.sep}`)) {
+						const resendRecheck = primaryResend.get(dir);
+						return {
+							...server,
+							replyOrdering: ordering,
+							...(resendRecheck !== undefined && { resendRecheck }),
+						};
+					}
 				return server;
 			});
 		for (const [dir, aux] of auxiliaries)
@@ -1497,6 +1507,136 @@ describe("a bash command's writes reach the primaries before its dispatches (#45
 			{ result: "sent", metadata: { targets: 2, primary: 2 } },
 		]);
 	}, 60_000);
+
+	// Recurrence: #4782 item 1, the async republish. The primary checks a.ts
+	// as soon as it reads a.ts's change, against z.ts's old bytes, and
+	// re-checks its dependents only on a timer after z.ts's change (pyright
+	// and typescript-language-server do, +360..400 ms measured). The drain
+	// reply comes first, no later receipt is pending, and a.ts's version
+	// never moved, so the dispatch read took the answer computed before
+	// z.ts's new bytes: the phantom STOP. The server re-checks a document whose
+	// unchanged bytes are sent again, so the phase sends a.ts again after
+	// z.ts, and the read waits for the answer to that send.
+	it("checks a dependent against its rewritten dependency when the primary re-checks dependents only after the drain reply (push diagnostics)", async () => {
+		const repo = await makeRepo(
+			{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+			NOTES_B,
+			[],
+			{ ...CHECKER, FAKE_LSP_DEFER_DEPENDENTS_MS: "5000" },
+		);
+		primaryResend.set(repo.dir, "rechecks");
+		await hold(repo, ["a.ts", "z.ts"]);
+		const s = session(repo, "s-4782-late-dependents");
+		const mark = (await wire(repo, "z.ts")).length;
+
+		const text = await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+			fs.writeFileSync(repo.file("a.ts"), A1);
+			fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+		});
+
+		expect(text).not.toContain("no exported member");
+		// The wire: a.ts's bytes went out again after z.ts's, and z.ts's once.
+		const sent = (await wire(repo, "z.ts"))
+			.slice(mark)
+			.filter((line) => line.startsWith("text "));
+		expect(sent).toEqual([
+			textLine(repo, "a.ts"),
+			textLine(repo, "z.ts"),
+			textLine(repo, "a.ts"),
+		]);
+	}, 60_000);
+
+	// Recurrence: the re-send above, sent to a server that publishes nothing
+	// for unchanged bytes (clangd 22.1.0, measured; #3405). Its store for a.ts
+	// would be emptied with no answer coming, and every dependent of a burst
+	// would read inconclusive. A server not declared to re-check gets no
+	// re-send.
+	it("sends a dependent once when its primary is not declared to re-check unchanged bytes", async () => {
+		const repo = await makeRepo(
+			{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+			NOTES_B,
+			[],
+			CHECKER,
+		);
+		await hold(repo, ["a.ts", "z.ts"]);
+		const s = session(repo, "s-4782-no-resend");
+		const mark = (await wire(repo, "z.ts")).length;
+
+		await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+			fs.writeFileSync(repo.file("a.ts"), A1);
+			fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+		});
+
+		const sent = (await wire(repo, "z.ts"))
+			.slice(mark)
+			.filter((line) => line.startsWith("text "));
+		expect(sent).toEqual([textLine(repo, "a.ts"), textLine(repo, "z.ts")]);
+	}, 60_000);
+
+	// Recurrence: #4829 CodeRabbit 4368747618, measured on the r1 head (wire
+	// a.ts = A1, A2, A1, A2). pi runs one message's tool calls in parallel by
+	// default, so another tool's post-write sync can send a.ts's newer bytes
+	// (stamped with their read, #3481) while the phase runs. An unstamped send
+	// of the phase's older read then put those older bytes back on the server
+	// until the next sync. Both phase sends carry the stamp taken before their
+	// read, so the queue drops each one a newer read already superseded. The
+	// touch spy only interleaves that other tool's real send at the point the
+	// phase reaches `at`; every send runs through the real service.
+	it.each([
+		["between the phase's send of a.ts and its re-send", "z.ts", ["A1", "A2"]],
+		["before the phase's first send of a.ts", "a.ts", ["A2"]],
+	] as const)(
+		"keeps a parallel tool's newer bytes that land %s",
+		async (_when, at, expected) => {
+			const repo = await makeRepo(
+				{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+				NOTES_B,
+				[],
+				CHECKER,
+			);
+			primaryResend.set(repo.dir, "rechecks");
+			await hold(repo, ["a.ts", "z.ts"]);
+			const s = session(repo, `s-4782-parallel-edit-${at}`);
+			const service = await lspService();
+			const bytes = { A1, A2: `${A1}export const w = 2;\n` };
+			const real = service.touchFile.bind(service);
+			const spy = vi
+				.spyOn(service, "touchFile")
+				.mockImplementation(async (filePath, content, options) => {
+					if (
+						options?.source === "head_move_primary" &&
+						filePath === repo.file(at)
+					) {
+						fs.writeFileSync(repo.file("a.ts"), bytes.A2);
+						await real(repo.file("a.ts"), bytes.A2, {
+							diagnostics: "none",
+							clientScope: "primary",
+							source: "lsp_sync",
+							readStamp: performance.now(),
+						});
+					}
+					return real(filePath, content, options);
+				});
+			const mark = (await wire(repo, "z.ts")).length;
+			try {
+				await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+					fs.writeFileSync(repo.file("a.ts"), A1);
+					fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+				});
+			} finally {
+				spy.mockRestore();
+			}
+
+			const aUri = pathToFileURL(repo.file("a.ts")).href;
+			const sent = (await wire(repo, "z.ts"))
+				.slice(mark)
+				.filter((line) => line.startsWith(`text ${aUri} `));
+			expect(sent).toEqual(
+				expected.map((name) => `text ${aUri} ${sha(bytes[name])}`),
+			);
+		},
+		60_000,
+	);
 
 	// Recurrence: #4528 r1 F1, the second half. A send resolves once its bytes
 	// are in the pipe, not once the server read them. This primary reads its

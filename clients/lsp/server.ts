@@ -83,6 +83,7 @@ import { bounded } from "../deadline-utils.js";
 import {
 	DEFAULT_LSP_SERVER_ROLE,
 	type LspReplyOrdering,
+	type LspResendRecheck,
 	type LspServerRole,
 } from "./server-traits.js";
 import { FRESHNESS_CADENCE_MS } from "../freshness-cadence.js";
@@ -672,6 +673,14 @@ export interface LSPServerInfo {
 	 * evidence and the fail-safe `unmeasured` default.
 	 */
 	replyOrdering?: LspReplyOrdering;
+	/**
+	 * #4782 unchanged-bytes re-check trait: whether a didChange carrying the
+	 * bytes the server holds makes it check the document again. Consumed by the
+	 * bash-write primary phase (`resyncHeldPrimaries` in clients/lsp/index.ts);
+	 * see {@link LspResendRecheck} for the measured evidence and the fail-safe
+	 * `unmeasured` default.
+	 */
+	resendRecheck?: LspResendRecheck;
 	/**
 	 * ID of the preferred language server this server backs up. Primary selection
 	 * already tries language servers in registry order; this marker prevents an
@@ -2900,6 +2909,11 @@ export const TypeScriptServer: LSPServerInfo = {
 	id: "typescript",
 	idleEviction: "transparent",
 	role: "language",
+	// #4782: typescript-language-server 5.3.0 (tsserver 5.9.3) answered every
+	// unchanged-bytes re-send after a delayed dependency 10/10 (measured; see
+	// LspResendRecheck). The native TS 7.0.2 launch is read by pull, which
+	// answers in stream order: 20/20 fresh with the re-send, none inconclusive.
+	resendRecheck: "rechecks",
 	name: "TypeScript Language Server",
 	projectLocalCommand: "typescript-language-server",
 	extensions: JS_TS_LSP_EXTENSIONS,
@@ -3049,6 +3063,13 @@ export const PythonServer: LSPServerInfo = {
 	id: "python",
 	idleEviction: "transparent",
 	role: "language",
+	// #4782: every binary this row launches answers an unchanged-bytes
+	// didChange for its new version (measured; see LspResendRecheck): pyright
+	// 1.1.414, basedpyright 1.40.2 (idle 3/3, burst under load 6/6) and ty
+	// 0.0.91 (idle 3/3, burst 6/6, burst under load 6/6). ty never re-checks a
+	// dependent on its own after the dependency changes, so it needs the re-send
+	// most.
+	resendRecheck: "rechecks",
 	name: "Pyright Language Server",
 	extensions: KIND_EXTENSIONS["python"],
 	root: RootWithFallback(

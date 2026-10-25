@@ -463,14 +463,35 @@ function checkerDiagnostics(uri) {
 // Push mode republishes every open document on each change to a view; pull
 // mode (`FAKE_LSP_NO_DIAGNOSTIC_PROVIDER` unset) answers each pull from the
 // views it holds at that moment.
-function checkEveryOpenDocument() {
+//
+// #4782: `FAKE_LSP_DEFER_DEPENDENTS_MS` re-checks only the document whose
+// change or open triggered the pass (`changedUri`) at once; every other open
+// document is re-checked that many ms later, against the views held then
+// (pyright's and typescript-language-server's dependent re-check is a
+// debounced timer, measured +360..400 ms). A watched-files event names no open
+// document, so it defers them all. A drain reply can then come before the
+// dependents' answers.
+function checkEveryOpenDocument(changedUri) {
 	if (process.env.FAKE_LSP_NO_DIAGNOSTIC_PROVIDER !== "1") return;
-	for (const uri of openDocuments.keys())
+	const publish = (uri) =>
 		send({
 			jsonrpc: "2.0",
 			method: "textDocument/publishDiagnostics",
 			params: { uri, diagnostics: checkerDiagnostics(uri) },
 		});
+	const deferMs = Number(process.env.FAKE_LSP_DEFER_DEPENDENTS_MS ?? "");
+	if (!(Number.isFinite(deferMs) && deferMs > 0)) {
+		for (const uri of openDocuments.keys()) publish(uri);
+		return;
+	}
+	if (changedUri !== undefined) publish(changedUri);
+	const dependents = [...openDocuments.keys()].filter(
+		(uri) => uri !== changedUri,
+	);
+	setTimeout(() => {
+		for (const uri of dependents)
+			if (openDocuments.has(uri)) publish(uri);
+	}, deferMs);
 }
 
 // #4763: opengrep's rule-load window. A `refreshed` element sends the param-less
@@ -1047,7 +1068,8 @@ function handle(raw) {
 		);
 		publishSequenceFor(data.params?.textDocument?.uri);
 		if (STALE_MODULE_LOOKUP) publishModuleLookups(data.params?.textDocument?.uri);
-		if (CLOSED_FILE_CACHE) checkEveryOpenDocument();
+		if (CLOSED_FILE_CACHE)
+			checkEveryOpenDocument(data.params?.textDocument?.uri);
 		if (process.env.FAKE_LSP_PUSH_DIAGNOSTIC === "1") {
 			send({
 				jsonrpc: "2.0",
@@ -1103,7 +1125,8 @@ function handle(raw) {
 			burnCpu(Number(process.env.FAKE_LSP_SLOW_CHANGE_MS ?? "400"));
 		publishSequenceFor(data.params?.textDocument?.uri);
 		if (STALE_MODULE_LOOKUP) publishModuleLookups(data.params?.textDocument?.uri);
-		if (CLOSED_FILE_CACHE) checkEveryOpenDocument();
+		if (CLOSED_FILE_CACHE)
+			checkEveryOpenDocument(data.params?.textDocument?.uri);
 		// #4493 r2: a scanner that re-parses on every change (ast-grep's live
 		// shape). Synchronous, so a request queued behind the changes is answered
 		// only after all of them: what the #1714 aux pacing barrier waits on.
