@@ -193,10 +193,11 @@ describe("nightly LSP capability refresh contract (#4277)", () => {
 // variables resolve through in-job assignments, `env:` blocks, and the symbolic
 // names below; an inner shell invoked as `bash -c`/`sh -c` is rescanned once.
 // A staged path or an uploaded path the grammar cannot place (an unset
-// variable, a command substitution, an option after the first operand) makes
-// the step red instead of passing. A root whose CONTENT no step explains reads
-// clean: most live upload steps stage through a child process this shell
-// grammar cannot see, and the PR body carries them as an accepted residual.
+// variable, a command substitution, an option word the grammar does not
+// admit) makes the step red instead of passing. A root whose CONTENT no step
+// explains reads clean: most live upload steps stage through a child process
+// this shell grammar cannot see, and the PR body carries them as an accepted
+// residual.
 // An upload inside a composite action is refused unless it sets the key,
 // because its staging belongs to the caller's job, a file this one cannot read.
 const UPLOAD_ARTIFACT = "actions/upload-artifact";
@@ -364,90 +365,57 @@ function splitRedirects(words: string[]): {
 }
 
 /**
- * The destination-directory option, for the verbs that have one. `rsync -t`
- * is `--times` and `tee` writes every operand, so neither names one here.
+ * The option words an admitted write verb may carry: one standalone word each,
+ * with no value and no effect on where the copy lands. Every other option word
+ * leaves the write unplaceable, so the step reds instead of reading the last
+ * operand as the destination while the real one drops.
+ *
+ * Round 2 enumerated the destination spellings (`-t DIR`, `-tDIR`,
+ * `--target-directory=DIR`) and each review found the next one — a bundle
+ * whose first letter takes a value (`-Stmp`), a GNU abbreviation
+ * (`--target-dir=`), `rsync -R` — so the gate admits a short list and refuses
+ * everything else (#4869 rounds 1-3; principles, "Gates fail closed").
+ * `rsync -R` is `--relative` and DOES preserve the source path, so `rsync`
+ * admits only the forms its census rows spell. A verb with no admitted set
+ * refuses every option word.
  */
-const DESTINATION_OPTION: Record<string, { long: string; short: string }> = {
-	cp: { long: "--target-directory", short: "-t" },
-	install: { long: "--target-directory", short: "-t" },
-	mv: { long: "--target-directory", short: "-t" },
+const ADMITTED_OPTIONS: Record<string, ReadonlySet<string>> = {
+	cp: new Set(["-a", "-f", "-p", "-r", "-R", "--parents"]),
+	install: new Set(["-a", "-f", "-p", "-r", "-R"]),
+	mv: new Set(["-a", "-f", "-p", "-r", "-R"]),
+	rsync: new Set(["-a", "-r"]),
 };
 
 /**
- * The operands `command` was given, the destination a destination-directory
- * option names ahead of them, and whether `--parents` is set; or the option
- * that leaves the write unplaceable.
- *
- * A destination-directory option is placed wherever it appears, because it
- * alone moves the destination ahead of the sources. Every other option is
- * placed only BEFORE the first operand: GNU getopt permutes, so an option
- * after an operand can take a value that becomes the destination, and reading
- * the last operand as the destination then files the write under a path
- * nothing staged. Both spellings read clean before this parse existed
- * (#4869 round 1: `cp --parents -t DIR src` and `cp --parents src DEST/ -S
- * .bak`, each landing the dot path it was asked about).
+ * The operands `command` was given and whether `--parents` is set; or the
+ * option word that leaves the write unplaceable.
  */
 function parseWriteOperands(
 	command: string,
 	words: string[],
-):
-	| { destinationDir?: string; operands: string[]; parents: boolean }
-	| { unplaced: string } {
-	const dest = DESTINATION_OPTION[command];
+): { operands: string[]; parents: boolean } | { unplaced: string } {
+	const admitted = ADMITTED_OPTIONS[command];
 	const operands: string[] = [];
-	let destinationDir: string | undefined;
 	let parents = false;
-	let optionsEnded = false;
-	for (let index = 0; index < words.length; index++) {
-		const word = words[index];
-		if (optionsEnded || !word.startsWith("-") || word === "-") {
+	for (const word of words) {
+		if (!word.startsWith("-") || word === "-") {
 			operands.push(word);
 			continue;
 		}
-		if (word === "--") {
-			optionsEnded = true;
-			continue;
-		}
-		if (word === "--parents") {
-			parents = true;
-			continue;
-		}
-		if (dest !== undefined) {
-			// A short `t` is the destination wherever it sits in a bundle
-			// (`-t DIR`, `-tDIR`, `-rt DIR`); the letters before it are flags.
-			const letter = dest.short.slice(1);
-			const bundle = word.startsWith("--") ? -1 : word.indexOf(letter, 1);
-			if (word === dest.long || (bundle > 0 && word.slice(bundle + 1) === "")) {
-				const next = words[index + 1];
-				if (next === undefined)
-					return { unplaced: `${word} (a destination option with no value)` };
-				destinationDir = next;
-				index++;
-				continue;
-			}
-			if (word.startsWith(`${dest.long}=`)) {
-				destinationDir = word.slice(dest.long.length + 1);
-				continue;
-			}
-			if (bundle > 0) {
-				destinationDir = word.slice(bundle + 1);
-				continue;
-			}
-		}
-		// A flag before the first operand: its value, if it takes one, can only
-		// widen the source list. After an operand it can be the destination.
-		if (operands.length === 0) continue;
-		return { unplaced: `${word} (an option after an operand)` };
+		if (admitted?.has(word) !== true)
+			return {
+				unplaced: `${word} (an option the write grammar does not admit)`,
+			};
+		if (word === "--parents") parents = true;
 	}
-	return { destinationDir, operands, parents };
+	return { operands, parents };
 }
 
 /**
  * The paths `command` writes, and the destinations it writes them under. A
  * copy into a directory lands the source's own path with `--parents` and only
- * its basename without; a copy onto a name lands that name; a
- * destination-directory option lands every source under it; `tee` writes
- * every operand.
+ * its basename without; a copy onto a name lands that name; `tee` writes every
+ * operand.
  */
 function writeSlots(
 	command: string,
@@ -468,20 +436,22 @@ function writeSlots(
 			slots: [],
 			unplaced: parsed.unplaced,
 		};
-	const sources =
-		parsed.destinationDir === undefined
-			? parsed.operands.slice(0, -1)
-			: parsed.operands;
-	const destinations =
-		parsed.destinationDir === undefined
-			? parsed.operands.slice(-1)
-			: [parsed.destinationDir];
+	const sources = parsed.operands.slice(0, -1);
+	const destinations = parsed.operands.slice(-1);
 	if (sources.length === 0 || destinations.length === 0)
 		return { destinations: [], slots: [] };
 	const slots: Slot[] = [];
 	const placed: string[] = [];
+	// `cp --parents` refuses a destination that is not a directory ("with
+	// --parents, the destination must be a directory"), so a slashless one names
+	// a directory too: `cp --parents .changelog/x.md "$stage/files"` lands
+	// `files/.changelog/x.md`, and reading it as a file slot drops the dot path
+	// (CodeRabbit inline, round 3).
+	const directoryOnly = parsed.parents;
 	for (const word of destinations)
-		for (const target of expandWord(word, aliases)) {
+		for (const expanded of expandWord(word, aliases)) {
+			const target =
+				directoryOnly && !expanded.endsWith("/") ? `${expanded}/` : expanded;
 			placed.push(target);
 			if (!target.endsWith("/")) {
 				slots.push({ file: target });
@@ -614,18 +584,14 @@ function uploadPaths(step: ArtifactStep): string[] {
 const isUpload = (step: ArtifactStep) =>
 	typeof step.uses === "string" && step.uses.startsWith(UPLOAD_ARTIFACT);
 
-/** Every `actions/upload-artifact` step a file holds, in either shape. */
+/** Every `actions/upload-artifact` step a job of this file holds. */
 function uploadSteps(workflow: ArtifactWorkflow): ArtifactStep[] {
-	return [
-		...Object.values(workflow.jobs ?? {}).flatMap((job) =>
-			(job.steps ?? []).filter(isUpload),
-		),
-		...(workflow.runs?.steps ?? []).filter(isUpload),
-	];
+	return Object.values(workflow.jobs ?? {}).flatMap((job) =>
+		(job.steps ?? []).filter(isUpload),
+	);
 }
 
 const hiddenKept = (step: ArtifactStep) =>
-	step.with?.["include-hidden-files"] === true ||
 	String(step.with?.["include-hidden-files"]) === "true";
 
 const uploadLabel = (step: ArtifactStep) =>
@@ -778,47 +744,9 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 			expected: 1,
 		},
 		{
-			// Round 2, CodeRabbit inline: `-t` moves the destination AHEAD of the
-			// sources, so reading the last operand as the destination fails open.
-			title: "a destination named by -t before the sources",
-			staging: staged('cp --parents -t "$stage/files/" .changelog/x.md'),
-			expected: 1,
-		},
-		{
-			title: "a destination named by --target-directory= after the sources",
-			staging: staged(
-				'cp --parents .changelog/x.md --target-directory="$stage/files/"',
-			),
-			expected: 1,
-		},
-		{
-			title: "a destination named by the glued -tDIR form",
-			staging: staged('cp --parents -t"$stage/files/" .changelog/x.md'),
-			expected: 1,
-		},
-		{
-			// GNU reads `t` wherever it sits in a short bundle, so the letters
-			// before it are flags and the value still moves the destination.
-			title: "a destination named by a bundled -rt flag",
-			staging: staged('cp --parents -rt "$stage/files/" .changelog/x.md'),
-			expected: 1,
-		},
-		{
-			// `install` lands only the basename without `--parents` (which it does
-			// not have), so this arm is pinned on `cp` to isolate the option form.
-			title: "a destination named by a separate --target-directory value",
-			staging: staged(
-				'cp --parents --target-directory "$stage/files/" .changelog/x.md',
-			),
-			expected: 1,
-		},
-		{
-			// A value-taking option the grammar does not place, after the
-			// destination: GNU getopt permutes, so `.bak` would be read as the
-			// destination and the dropped dot path would read clean.
 			title:
-				"a value option after the destination, which the grammar cannot place",
-			staging: staged('cp --parents .changelog/x.md "$stage/files/" -S .bak'),
+				"a dot path copied with --parents onto a directory named without a slash",
+			staging: staged('cp --parents .changelog/x.md "$stage/files"'),
 			expected: 1,
 		},
 		{
@@ -874,9 +802,7 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 		},
 		{
 			title: "a dot path staged by install onto a hidden name",
-			staging: staged(
-				'install -Dm644 .changelog/x.md "$stage/files/.changelog/x.md"',
-			),
+			staging: staged('install .changelog/x.md "$stage/files/.changelog/x.md"'),
 			expected: 1,
 		},
 		{
@@ -948,23 +874,115 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 		]);
 	});
 
-	// The fail-closed arms each name their own reason, so a reader repairing the
-	// workflow sees which half failed: an option the grammar cannot place, or a
-	// destination option with nothing after it.
+	// Round 3: the gate admits a short list of standalone no-value option words
+	// and refuses every other option word, so a spelling nobody planned reds
+	// instead of being read as a flag while the real destination drops. Round 2
+	// enumerated the destination spellings and each review found the next one:
+	// `-Stmp` (round 3 N1), `--target-dir=` (N3), `rsync -R` (N5).
 	it.each([
 		[
 			'cp --parents .changelog/x.md "$stage/files/" -t',
-			"-t (a destination option with no value)",
+			"-t (an option the write grammar does not admit)",
 		],
 		[
 			'cp --parents .changelog/x.md "$stage/files/" -S .bak',
-			"-S (an option after an operand)",
+			"-S (an option the write grammar does not admit)",
 		],
 	])("names the option it cannot place: %s", (staging, reason) => {
 		const findings = findingsFor(plant(staged(staging), ROOT_PATH));
 
 		expect(findings).toEqual([
 			`fixture.yml: smoke: pr-inputs: cannot place the write ${reason} against $RUNNER_TEMP/pr-inputs, so what the artifact holds cannot be derived`,
+		]);
+	});
+
+	// Every form below is one a real GNU tool accepts and this scan cannot
+	// place; each must red rather than be skipped as an unknown flag.
+	it.each([
+		[
+			"a -t destination before the sources",
+			'cp --parents -t "$stage/files/" .changelog/x.md',
+		],
+		[
+			"a -t destination named without a trailing slash",
+			'cp --parents -t "$stage/files" .changelog/x.md',
+		],
+		[
+			"a glued -t destination",
+			'cp --parents -t"$stage/files/" .changelog/x.md',
+		],
+		[
+			"a destination inside a short bundle",
+			'cp --parents -rt "$stage/files/" .changelog/x.md',
+		],
+		[
+			"a separated --target-directory value",
+			'cp --parents --target-directory "$stage/files/" .changelog/x.md',
+		],
+		[
+			"an attached --target-directory value",
+			'cp --parents .changelog/x.md --target-directory="$stage/files/"',
+		],
+		[
+			"a GNU long-option abbreviation",
+			'cp --parents --target-dir="$stage/files/" .changelog/x.md',
+		],
+		[
+			"a short bundle whose first letter takes the value",
+			'cp -Stmp --parents .changelog/x.md "$stage/files/"',
+		],
+		[
+			"a bundle install option",
+			'install -Dm644 .changelog/x.md "$stage/files/.changelog/x.md"',
+		],
+		[
+			"the end-of-options marker",
+			'cp --parents -- .changelog/x.md "$stage/files/"',
+		],
+		[
+			"rsync's path-preserving -R, spelled on its own",
+			'rsync -a -R .changelog/x.md "$stage/files/"',
+		],
+		[
+			"rsync's path-preserving -R inside a bundle",
+			'rsync -aR .changelog/x.md "$stage/files/"',
+		],
+	])("refuses the option word it does not admit: %s", (_title, command) => {
+		const findings = findingsFor(plant(staged(command), ROOT_PATH));
+
+		expect(findings).toHaveLength(1);
+		expect(findings[0]).toContain("cannot place the write");
+		expect(findings[0]).toContain("an option the write grammar does not admit");
+	});
+
+	// The admitted words, each pinned through a spelling whose placement is
+	// visible: `--parents` keeps the dot path, so a flag that silently stopped
+	// placement would read clean here.
+	it.each(["-a", "-f", "-p", "-r", "-R"])(
+		"admits the standalone no-value flag %s",
+		(flag) => {
+			const findings = findingsFor(
+				plant(
+					staged(`cp ${flag} --parents .changelog/x.md "$stage/files/"`),
+					ROOT_PATH,
+				),
+			);
+
+			expect(findings).toEqual([
+				"fixture.yml: smoke: pr-inputs: stages $RUNNER_TEMP/pr-inputs/files/.changelog/x.md, a dot path, without include-hidden-files: true",
+			]);
+		},
+	);
+
+	// `rsync -R` is `--relative` and moves the landed path, so rsync admits only
+	// the forms the census rows spell.
+	it("admits the rsync form the census rows spell", () => {
+		const findings = findingsFor(
+			plant(staged('rsync -a .changelog "$stage/files/"'), ROOT_PATH),
+		);
+
+		expect(findings).toEqual([
+			"fixture.yml: smoke: pr-inputs: stages $RUNNER_TEMP/pr-inputs/files/.changelog, a dot path, without include-hidden-files: true",
 		]);
 	});
 
