@@ -243,4 +243,20 @@ describe("project ignore verdict by path identity (#4689)", () => {
 			tree.cleanup();
 		}
 	});
+
+	it("evicts a nested verdict when the write names the directory through a link into it", () => {
+		const tree = plantTree("ignore-identity-invalidate-sublink");
+		if (tree === undefined) return;
+		try {
+			const tmpFile = path.join(tree.sub, "x.tmp");
+			expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(true);
+			fs.writeFileSync(path.join(tree.sub, ".gitignore"), "# cleared\n");
+			invalidateProjectIgnoreMatcherForPath(
+				path.join(tree.subLink, ".gitignore"),
+			);
+			expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(false);
+		} finally {
+			tree.cleanup();
+		}
+	});
 });

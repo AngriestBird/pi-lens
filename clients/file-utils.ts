@@ -1104,8 +1104,8 @@ function buildProjectIgnoreMatcher(
 	}
 	// #4689: `resolvedRoot` is the root's path identity, so a path spelled
 	// through another name for the project (a link to the root, a link into it)
-	// reads as outside the root by text. `toRootNamespace` answers such a path
-	// by the identity of its directory (a file keeps its own name, which is its
+	// reads as outside the root by text. `isIgnored` answers such a path by
+	// the identity of its directory (a file keeps its own name, which is its
 	// tree path), so every spelling of one file shares one memo key, one set of
 	// nested-rule directories and one tracked-set key. Directory identities are
 	// taken once per directory: a walk through a link spelling pays one
@@ -1124,18 +1124,13 @@ function buildProjectIgnoreMatcher(
 		: resolvedRoot + path.sep;
 	// The textual prefix test keeps the in-root path (every walk of a project
 	// spelled by its identity) at one string compare, with no `path.relative`.
-	const toRootNamespace = (absolute: string, isDirectory: boolean): string => {
-		if (absolute === resolvedRoot || absolute.startsWith(rootPrefix))
-			return absolute;
-		return isDirectory
-			? identityOfDir(absolute)
-			: path.join(
-					identityOfDir(path.dirname(absolute)),
-					path.basename(absolute),
-				);
-	};
+	const isUnderRootText = (absolute: string): boolean =>
+		absolute === resolvedRoot || absolute.startsWith(rootPrefix);
 	const invalidateSubtree = (subtree: string): void => {
-		const local = toRootNamespace(path.resolve(subtree), true);
+		const absolute = path.resolve(subtree);
+		const local = isUnderRootText(absolute)
+			? absolute
+			: identityOfDir(absolute);
 		dropVerdictsUnder(local);
 		nestedCache.delete(local);
 	};
@@ -1196,7 +1191,13 @@ function buildProjectIgnoreMatcher(
 			// #4689: one verdict per file, whichever name reached it. The memo, the
 			// nested-rule directories and the tracked set all key on the root's own
 			// spelling.
-			const resolved = toRootNamespace(path.resolve(filePath), isDirectory);
+			const spelled = path.resolve(filePath);
+			const resolved = isUnderRootText(spelled)
+				? spelled
+				: path.join(
+						identityOfDir(path.dirname(spelled)),
+						path.basename(spelled),
+					);
 			// Two namespaces (D: for directory queries, F: for file queries)
 			// because gitignore semantics differ for trailing-slash patterns.
 			const memoKey = (isDirectory ? "D:" : "F:") + resolved;
