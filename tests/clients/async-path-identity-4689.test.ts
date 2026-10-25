@@ -45,6 +45,7 @@ import {
 	validateWorkspaceEdit,
 } from "../../clients/lsp/edits.js";
 import {
+	kernelPathIdentityAsync,
 	realpathOrResolve,
 	realpathOrResolveAsync,
 } from "../../clients/path-utils.js";
@@ -180,6 +181,49 @@ function plantUnresolvable(t: Tree): {
 			skipReason: `this host does not refuse the traversal (measured ${codes.join(", ")})`,
 		};
 	return { paths: [loop, behind], restore };
+}
+
+/**
+ * A spelling whose missing tail folds a `..` INTO an unreadable directory: the
+ * first walk climbs all the way to `<base>/real` on absence alone, the fold then
+ * names `<base>/real/locked/x.ts`, and the settle walk meets the `EACCES` the
+ * first walk never reached. The flag travels from the settle walk to the
+ * containment decision, so this is the only shape that pins the conjunct.
+ */
+function plantUnreadableSettle(t: Tree): {
+	spelling: string;
+	restore: () => void;
+	skipReason?: string;
+} {
+	const realDir = path.join(t.base, "real");
+	const locked = path.join(realDir, "locked");
+	try {
+		fs.mkdirSync(locked, { recursive: true });
+		fs.chmodSync(locked, 0o000);
+	} catch (error) {
+		return {
+			spelling: "",
+			restore: () => {},
+			skipReason: `cannot plant an unreadable directory here: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	const restore = (): void => fs.chmodSync(locked, 0o700);
+	// Before the fixture's own removal: a mode-000 directory cannot be walked.
+	cleanups.unshift(restore);
+	let code = "answered";
+	try {
+		fs.realpathSync.native(path.join(locked, "x.ts"));
+	} catch (error) {
+		code = (error as NodeJS.ErrnoException).code ?? "unknown";
+	}
+	if (code !== "EACCES")
+		return {
+			spelling: "",
+			restore,
+			skipReason: `this host does not refuse this traversal (measured ${code})`,
+		};
+	// Built by concatenation: `path.join` would normalize `ghost/..` away.
+	return { spelling: `${realDir}/ghost/../locked/x.ts`, restore };
 }
 
 /** Enter the real multi-path writer and return the queue keys it took. */
@@ -371,6 +415,68 @@ describe("#4689 batch 10: the async identity seam", () => {
 			path.join(t.repo, "src", "linked", "util.ts"),
 		]);
 		expect(keys).toEqual([once]);
+	});
+
+	it("the settled identity stays unconfirmed when the fold promotes an unreadable directory", async (ctx) => {
+		// RECURRENCE GUARDED (verify round 3, mutation V3 survived): the settle
+		// walk's answer was reported with the FIRST walk's flag, so a fold that
+		// promoted a `..` into a component the settle walk then refused (`EACCES`)
+		// came back `kernelConfirmed: true` — a containment decision would prove
+		// the edit lands under a name the kernel refused to give.
+		const t = tree("settle-confirm");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		const planted = plantUnreadableSettle(t);
+		if (planted.skipReason) return ctx.skip(planted.skipReason);
+		const identity = await kernelPathIdentityAsync(planted.spelling);
+		expect(identity?.kernelConfirmed).toBe(false);
+		// The folded name, not the first walk's answer: the promotion is real.
+		expect(identity?.identity).toBe(
+			path.join(real(t.base), "real", "locked", "x.ts"),
+		);
+		// The no-drop direction: a tail of pure absence stays confirmed, so the
+		// conjunct cannot turn a legitimate missing path into a refusal.
+		expect(
+			(
+				await kernelPathIdentityAsync(
+					path.join(t.base, "real", "not-there", "y.ts"),
+				)
+			)?.kernelConfirmed,
+		).toBe(true);
+	});
+
+	it("a workspace edit refuses a cwd the kernel will not traverse", async (ctx) => {
+		// RECURRENCE GUARDED (verify round 3, mutation V8 survived): the confiner's
+		// ROOT went through `realpathOrResolveAsync`, whose fallback answers a
+		// spelling when a component refuses for a reason other than absence. A cwd
+		// spelled through a self-looping link folded to `<base>/repo`, so the edit
+		// was confined against the very root it escapes — the per-URI half was
+		// mutant-red and this half was not.
+		const t = tree("confine-root");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		const loop = path.join(t.base, "self-loop");
+		try {
+			fs.symlinkSync("self-loop", loop, "file");
+		} catch (error) {
+			return ctx.skip(
+				`cannot create a looping symlink here: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		let code = "answered";
+		try {
+			fs.realpathSync.native(`${loop}/../repo`);
+		} catch (error) {
+			code = (error as NodeJS.ErrnoException).code ?? "unknown";
+		}
+		if (code !== "ELOOP")
+			return ctx.skip(
+				`this host does not refuse this traversal (measured ${code})`,
+			);
+		await expect(
+			validateWorkspaceEdit(
+				createEdit(path.join(t.repo, "new.ts")),
+				`${loop}/../repo`,
+			),
+		).rejects.toThrow(/identity is unresolvable/);
 	});
 
 	it("a workspace edit refuses a target whose identity the kernel never named", async (ctx) => {
