@@ -124,7 +124,11 @@ import {
 	resetClassicTsRepairGuard,
 	resetLspLaunchAvailabilityGeneration,
 } from "./server.js";
-import { isAuxiliary, serverTraits } from "./server-traits.js";
+import {
+	isAuxiliary,
+	type LspLaunchVariant,
+	serverTraits,
+} from "./server-traits.js";
 import {
 	auxWaitBudgetMs,
 	readEnvAuxGraceMs,
@@ -7085,7 +7089,7 @@ export class LSPService {
 		// with a PerServerEntry; raceToCompletion collects them as they finish.
 		type PerServerEntry = {
 			serverId: string;
-			launchVariant?: "classic" | "native-ts7";
+			launchVariant?: LspLaunchVariant;
 			waitMs: number;
 			diagnosticCount: number;
 			diagnostics: import("./client.js").LSPDiagnostic[];

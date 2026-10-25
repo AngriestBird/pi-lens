@@ -82,6 +82,7 @@ import {
 import { bounded } from "../deadline-utils.js";
 import {
 	DEFAULT_LSP_SERVER_ROLE,
+	type LspLaunchVariant,
 	type LspReplyOrdering,
 	type LspResendRecheck,
 	type LspServerRole,
@@ -446,7 +447,14 @@ export function enforceLspRootCeiling(
 	if (filePath && !isSameOrWithin(resolvedCwd, pathApi.resolve(filePath))) {
 		return resolvedRoot;
 	}
-	if (isSameOrWithin(resolvedCwd, resolvedRoot)) return resolvedRoot;
+	// #4689: the root walks return the root's path identity, and a session cwd
+	// may be spelled through a link, so a root outside the cwd's spelling can be
+	// inside the cwd itself. The identity arm runs only after the spelling miss.
+	if (
+		isSameOrWithin(resolvedCwd, resolvedRoot) ||
+		isUnderDir(resolvedRoot, resolvedCwd)
+	)
+		return resolvedRoot;
 
 	const logKey = `${normalizeMapKey(resolvedCwd)}:${normalizeMapKey(resolvedRoot)}`;
 	if (!loggedRootCeilingClamps.has(logKey)) {
@@ -787,7 +795,7 @@ export interface LSPServerInfo {
 				 * variant-carrying server that hasn't been updated to report one yet;
 				 * treat as the classic/default behavior (fail-safe).
 				 */
-				launchVariant?: "classic" | "native-ts7";
+				launchVariant?: LspLaunchVariant;
 		  }
 		| undefined
 	>;
@@ -1670,8 +1678,10 @@ function IgnoreHomeRoot(primary: RootFunction): RootFunction {
 	// separator alone; both sides of the comparison below go through the same
 	// derivation, so adding the seam's slash fold cannot change the verdict for
 	// any spelling the old copy already agreed on, and it makes a mixed-separator
-	// root agree with the home directory it names.
-	const homeKey = normalizeEphemeralMapKey(path.resolve(os.homedir()));
+	// root agree with the home directory it names. #4689: the primary returns
+	// the root's path identity, so the home is taken as its identity too; a
+	// home spelled through a link (`/home -> var/home`) is still refused.
+	const homeKey = normalizeEphemeralMapKey(realpathOrResolve(os.homedir()));
 	return withRootMarkers(async (file: string): Promise<string | undefined> => {
 		const root = await primary(file);
 		if (!root) return undefined;
@@ -2061,9 +2071,14 @@ export function NearestRoot(
 	}
 
 	return withRootMarkers(async (file: string): Promise<string | undefined> => {
-		// Cache key is the resolved directory — all files in the same dir share a root.
-		const startDir = path.resolve(path.dirname(file));
-		const dirKey = normalizeMapKey(startDir);
+		// #4689: the walk starts at the directory of the file's path identity,
+		// the one the kernel opens, so a link spelling and its target climb the
+		// same parents. That directory is also the cache key: every file in it
+		// shares a root, and one identity is one key whatever the spelling. It is
+		// already an identity, so the key needs only the syntactic fold.
+		const identity = realpathOrResolve(file);
+		const startDir = path.dirname(identity);
+		const dirKey = normalizeEphemeralMapKey(startDir);
 
 		// Fast path: already resolved for this directory, nothing the walk looked at
 		// has changed since, and the entry is younger than the shared re-check
@@ -2098,7 +2113,10 @@ export function NearestRoot(
 		const promise = (async (): Promise<string | undefined> => {
 			let currentDir = startDir;
 			const fsRoot = path.parse(currentDir).root;
-			const stop = stopDir ? path.resolve(stopDir) : fsRoot;
+			// #4689: the stop is the walk's other end, so it is an identity too; a
+			// stop spelled through a link (a junction or subst cwd) never contains
+			// an identity and the walk would break on its first step.
+			const stop = stopDir ? realpathOrResolve(stopDir) : fsRoot;
 
 			while (true) {
 				if (
@@ -2148,10 +2166,14 @@ export function NearestRoot(
 				for (const pattern of includePatterns) {
 					if (
 						(await markerExists(currentDir, pattern)) &&
-						(pattern !== ".git" || currentDir !== os.tmpdir()) &&
+						(pattern !== ".git" ||
+							currentDir !== realpathOrResolve(os.tmpdir())) &&
 						!(await isExcludedLspRoot(currentDir))
 					) {
-						return enforceLspRootCeiling(currentDir, process.cwd(), file);
+						// The identity, not the spelling: the memo stores this answer
+						// under the identity's directory, so it may depend on nothing
+						// the spelling adds.
+						return enforceLspRootCeiling(currentDir, process.cwd(), identity);
 					}
 				}
 
@@ -2825,8 +2847,18 @@ async function findExtensionBoundedRoot(
 	file: string,
 	extensionRootKey: string,
 ): Promise<string | undefined> {
-	const startDir = path.resolve(path.dirname(file));
-	let currentDir = startDir;
+	// #4689: climb the file's path identity when it lives inside the extensions
+	// root, bounded by that root's identity (a `~/.pi` linked from a dotfiles
+	// checkout spells the boundary its identity never contains). A linked
+	// extension (`extensions/myext -> ~/code/myext`) lives outside the root, so
+	// only its spelled chain meets the boundary; it keeps that chain instead of
+	// climbing to whatever manifest sits above the checkout.
+	const identity = realpathOrResolve(file);
+	const insideBoundary = isUnderDir(identity, extensionRootKey);
+	const boundaryKey = insideBoundary
+		? normalizeEphemeralMapKey(realpathOrResolve(extensionRootKey))
+		: extensionRootKey;
+	let currentDir = path.dirname(insideBoundary ? identity : path.resolve(file));
 	const configMarkers = tsConfigMarkersForFile(file);
 	while (true) {
 		for (const pattern of configMarkers) {
@@ -2848,7 +2880,7 @@ async function findExtensionBoundedRoot(
 		// Stop at or beyond the extensions root — never walk into the
 		// pi-agent-wide scope.
 		const currentKey = normalizeEphemeralMapKey(path.resolve(currentDir));
-		if (currentKey === extensionRootKey) return undefined;
+		if (currentKey === boundaryKey) return undefined;
 		const parent = path.dirname(currentDir);
 		if (parent === currentDir) return undefined;
 		currentDir = parent;
@@ -2880,7 +2912,14 @@ async function hasAgentLevelProjectMarker(
 
 const TypeScriptRoot: RootFunction = withRootMarkers(
 	DenoExcludeRoot(async (file) => {
-		const extensionRootKey = piAgentExtensionsRootKey(file);
+		// #4689: a file spelled outside the boundary whose identity is inside it
+		// (`checkout/packages/myext -> ~/.pi/agent/extensions/myext`) takes the
+		// boundary from its identity; the walks below climb that identity, and
+		// without the boundary they adopt `~/.pi/agent` (#123). `FileDirRoot`
+		// keeps its spelled boundary: it bounds a climb of the spelling.
+		const extensionRootKey =
+			piAgentExtensionsRootKey(file) ??
+			piAgentExtensionsRootKey(realpathOrResolve(file));
 		if (extensionRootKey) {
 			// Bounded walk so we never adopt a parent (e.g. ~/.pi/agent/) as the
 			// LSP root.

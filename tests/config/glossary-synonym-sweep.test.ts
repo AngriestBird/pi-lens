@@ -1130,7 +1130,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// removing the early-return resolve and the parent-directory lookup.
 		// 123 -> 124 (#4806): the bounded project-file search joins each
 		// subdirectory with `path.join`, a filesystem path call.
-		"clients/lsp/server.ts": 124,
+		// 124 -> 121 (#4689 item 6): the root walks take their start, stop and
+		// refused home through `realpathOrResolve`, replacing three
+		// `path.resolve` calls; the extensions walk keeps its count.
+		"clients/lsp/server.ts": 121,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).

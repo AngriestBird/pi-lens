@@ -417,19 +417,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-agent-end.ts#handleAgentEnd:8f9b56ae~24a830f2": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"#3830: the whole-package fixer's restore of agent edits, awaited " +
-			"after the drain's hold on the target is released. It waits for " +
-			"pi's queue entry of each sibling it restores (held only by an edit, " +
-			"an LSP edit or another pipeline's hold, none of which waits for " +
-			"this restore) and does local file I/O. The phase above it is the " +
-			"`runAutofix` await registered below, which has no aggregate bound " +
-			"either.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-agent-end.ts#handleAgentEnd:aeec4a09~51275360": {
 		family: "hook-await",
 		site: "agent_settled",
@@ -2892,6 +2879,11 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"The AMBIENT turn abort signal, set for the whole tool_result path and " +
 		"absent only in a bare unit harness. PI_LENS_LSP_SYNC_BUDGET_MS is the " +
 		"bound that is always live.",
+	"call:clients/runtime-agent-end.ts#handleAgentEnd:6ec6083f~93eae0ad":
+		"AgentEndDeps.signal is the agent_settled ctx.signal passed by index.ts; " +
+		"it can be absent in a standalone harness. The shared agent_settled " +
+		"wall budget remains live. Only the restore wait is bounded; the original " +
+		"restore and its single loss-delivery continuation still settle later.",
 	"call:clients/runtime-agent-end.ts#handleAgentEnd:fc644b89~26fd2489":
 		"The drain's post-exit resync of a formatter its own bound gave up on " +
 		"runs OFF the hook (the `void`-launched task starts only after " +

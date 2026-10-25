@@ -78,7 +78,11 @@ import {
 import { exceedsLspSyncLimits } from "./content-limits.js";
 import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
-import { isAuxiliary, type LspServerRole } from "./server-traits.js";
+import {
+	isAuxiliary,
+	type LspLaunchVariant,
+	type LspServerRole,
+} from "./server-traits.js";
 import {
 	FILE_CHANGED,
 	FILE_CREATED,
@@ -529,7 +533,7 @@ export interface LSPClientInfo {
 	 *  binary/protocol variant this client instance is actually running.
 	 *  Undefined = single-variant server or not yet reported (fail-safe:
 	 *  consumers must treat that as classic/default behavior). */
-	getLaunchVariant(): "classic" | "native-ts7" | undefined;
+	getLaunchVariant(): LspLaunchVariant | undefined;
 	/**
 	 * Run a server command via workspace/executeCommand. Hardened: the command
 	 * MUST be in the server's advertised list or this rejects without sending.
@@ -1422,7 +1426,7 @@ export interface LSPClientState {
 	readonly startedAtMs?: number;
 	/** See `LSPServerInfo.spawn`'s `launchVariant` (server.ts). Undefined =
 	 *  single-variant server or not yet reported. */
-	readonly launchVariant?: "classic" | "native-ts7";
+	readonly launchVariant?: LspLaunchVariant;
 	readonly root: string;
 	readonly lspProcess: LSPProcess;
 	/**
@@ -6661,7 +6665,7 @@ export async function createLSPClient(options: {
 	 *  binary/protocol variant was launched for this server id. Undefined =
 	 *  single-variant server or not yet reported; consumers must treat that as
 	 *  the classic/default behavior (fail-safe). */
-	launchVariant?: "classic" | "native-ts7";
+	launchVariant?: LspLaunchVariant;
 	/** See `LSPServerInfo.settingsSection` (server.ts): the section name
 	 *  under which `initialization` answers `workspace/configuration`. */
 	settingsSection?: string;
