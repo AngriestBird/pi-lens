@@ -7348,3 +7348,92 @@ describe("the prescan root reaches the send and the recognized set (#4504 r1)", 
 		}
 	});
 });
+
+/**
+ * #1884 item 3: `tool_call` records a resolution basis only for a mutation and
+ * `read` (`attributesMutationTarget` in `clients/runtime-tool-call.ts`). A
+ * read-family tool that takes a RELATIVE path — `lsp_navigation` among them —
+ * therefore reached the `path_attribution_missing` refusal and returned before
+ * `details.searchReads` was registered, so the lines the navigation SHOWED the
+ * agent were blocked on the follow-up edit. A `searchReads` entry carries its
+ * own path, so the refusal (a rule about the call's named path) never had a
+ * reason to cost those lines.
+ */
+describe("searchReads survive the path-attribution refusal (#1884)", () => {
+	it("registers an lsp_navigation result's shown lines when its relative path has no attribution (#1884)", async () => {
+		const env = setupTestEnvironment("pi-lens-1884-nav-searchreads-");
+		try {
+			const filePath = path.join(env.tmpDir, "src", "app.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(
+				filePath,
+				Array.from({ length: 120 }, (_, i) => `line${i + 1}`).join("\n") + "\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const cacheManager = new CacheManager(false);
+			// Production order: the call, then its result. `lsp_navigation`
+			// declares `path` (not `filePath`), and `tool_call` attributes no
+			// resolution basis for a tool that is neither a mutation nor `read`,
+			// so this result arrives with a relative path and no basis under it.
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "lsp_navigation",
+						toolCallId: "1884-nav",
+						input: { operation: "references", path: "src/app.ts", line: 42 },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: (name: string) => name === "no-lsp",
+					dbg: () => {},
+					runtime,
+					cacheManager,
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as never),
+			);
+
+			const dbg = vi.fn();
+			await handleToolResult({
+				event: {
+					toolName: "lsp_navigation",
+					toolCallId: "1884-nav",
+					input: { operation: "references", path: "src/app.ts", line: 42 },
+					content: [{ type: "text", text: `${filePath}:42: line42` }],
+					details: {
+						operation: "references",
+						searchReads: [{ file: filePath, startLine: 42, endLine: 42 }],
+					},
+				},
+				getFlag: () => false,
+				dbg,
+				runtime,
+				cacheManager,
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as never);
+
+			// The refusal still fires: nothing path-keyed ran for the call's own
+			// relative path, so turn state and dispatch stay fail-closed.
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("path_attribution_missing"),
+			);
+			// ...and the line the navigation SHOWED counts as read, so the
+			// follow-up edit to it is not blocked.
+			expect(runtime.readGuard.checkEdit(filePath, [42, 42]).action).toBe(
+				"allow",
+			);
+			// Only the shown line: a region the result never delivered is still
+			// guarded (#1904).
+			expect(runtime.readGuard.checkEdit(filePath, [100, 100]).action).toBe(
+				"block",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});

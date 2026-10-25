@@ -2154,6 +2154,49 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		});
 	}
 
+	// Search tools reveal specific lines (file:line) the agent then edits — register
+	// those shown lines (± context) as reads so the follow-up edit isn't blocked (#169).
+	// Our tools attach locations as `details.searchReads`; bash grep is parsed from
+	// `grep -n` output. Only shown lines are registered, never the whole file.
+	//
+	// #1884: this runs BEFORE the `path_attribution_missing` refusal below, because
+	// the two answer different questions. The refusal answers for the call's NAMED
+	// path, which no attribution can resolve, and keeps every path-keyed step
+	// closed; a `searchReads` entry carries its own path, so the lines a
+	// relative-path `lsp_navigation` result showed are delivered evidence either
+	// way. Registered after the refusal, they were dropped, and the agent's
+	// follow-up edit to a line it had just been shown was blocked.
+	if (deps.readGuard && event.isError !== true && !getFlag("no-read-guard")) {
+		const searchReads: SearchReadLocation[] = [];
+		const detailSearchReads = (
+			event.details as { searchReads?: SearchReadLocation[] }
+		)?.searchReads;
+		if (Array.isArray(detailSearchReads))
+			searchReads.push(...detailSearchReads);
+		if (
+			event.toolName === "bash" &&
+			typeof (event.input as { command?: unknown }).command === "string"
+		) {
+			const command = (event.input as { command: string }).command;
+			const output = event.content
+				.map((part) => (typeof part.text === "string" ? part.text : ""))
+				.join("\n");
+			searchReads.push(
+				...extractGrepSearchReadsFromOutput(command, workspaceRoot, output),
+			);
+		}
+		if (searchReads.length > 0) {
+			registerSearchReads(deps.readGuard, searchReads, {
+				projectRoot: workspaceRoot,
+				turnIndex: runtime.turnIndex,
+				writeIndex: runtime.peekWriteIndex(),
+				...(readEvidenceToolCallId !== undefined && {
+					toolCallId: readEvidenceToolCallId,
+				}),
+			});
+		}
+	}
+
 	let resolutionBasis: string;
 	if (attribution) {
 		resolutionBasis = attribution.originCwd;
@@ -3057,41 +3100,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					dbg(`tool_result: external-delete notify failed for ${dp}: ${err}`);
 				});
 			}
-		}
-	}
-
-	// Search tools reveal specific lines (file:line) the agent then edits — register
-	// those shown lines (± context) as reads so the follow-up edit isn't blocked (#169).
-	// Our tools attach locations as `details.searchReads`; bash grep is parsed from
-	// `grep -n` output. Only shown lines are registered, never the whole file.
-	if (deps.readGuard && event.isError !== true && !getFlag("no-read-guard")) {
-		const searchReads: SearchReadLocation[] = [];
-		const detailSearchReads = (
-			event.details as { searchReads?: SearchReadLocation[] }
-		)?.searchReads;
-		if (Array.isArray(detailSearchReads))
-			searchReads.push(...detailSearchReads);
-		if (
-			event.toolName === "bash" &&
-			typeof (event.input as { command?: unknown }).command === "string"
-		) {
-			const command = (event.input as { command: string }).command;
-			const output = event.content
-				.map((part) => (typeof part.text === "string" ? part.text : ""))
-				.join("\n");
-			searchReads.push(
-				...extractGrepSearchReadsFromOutput(command, workspaceRoot, output),
-			);
-		}
-		if (searchReads.length > 0) {
-			registerSearchReads(deps.readGuard, searchReads, {
-				projectRoot: workspaceRoot,
-				turnIndex: runtime.turnIndex,
-				writeIndex: runtime.peekWriteIndex(),
-				...(readEvidenceToolCallId !== undefined && {
-					toolCallId: readEvidenceToolCallId,
-				}),
-			});
 		}
 	}
 
