@@ -42,6 +42,8 @@ import {
 	vi,
 } from "vitest";
 import extension from "../index.js";
+import { waitFor } from "./clients/interleaving-kit.js";
+import { scaledTestTimeout } from "./support/test-timeout-scale.js";
 import { makeLspServiceDouble } from "./support/lsp-service-double.js";
 import {
 	installLspService,
@@ -91,6 +93,11 @@ import {
 // to latency.log, and beforeEach truncates latency.log. The harness's
 // per-worker PI_LENS_HOME (#3721) keeps those writes off every other worker's
 // sink; the loggers bind their paths at load, so the home is the harness's.
+
+// #4830: `sidecarSettled` waits up to 10s (scaled) for the fire-and-forget
+// sidecar write, which the 5s default test timeout would cut off with a
+// message that names no wait. Keep the test budget above that deadline.
+vi.setConfig({ testTimeout: scaledTestTimeout(30_000) });
 
 /**
  * #3613: the dispatch pipeline is doubled at its boundary for the S4 turn
@@ -433,9 +440,20 @@ async function sidecarSettled(sessionId: string): Promise<void> {
 		"sessions",
 		`${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`,
 	);
-	for (let i = 0; i < 5000 && !fs.existsSync(file); i++)
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(fs.existsSync(file), `sidecar ${file}`).toBe(true);
+	// Recurrence: #4830, where a 5000-turn spin ended before the write landed on
+	// a loaded CI runner. Wait on a real-clock deadline instead; the yield stays
+	// `setImmediate` (no timer). That settles only while `setImmediate` and
+	// `Date` stay real: under a default `vi.useFakeTimers()` both are faked and
+	// the wait could neither yield nor reach its deadline. It holds under a
+	// narrow `toFake` list such as `["setTimeout", "clearTimeout"]`.
+	await waitFor(
+		() => (fs.existsSync(file) ? "present" : `sidecar absent: ${file}`),
+		(state) => state === "present",
+		{
+			timeoutMs: 10_000,
+			yieldControl: () => new Promise<void>((resolve) => setImmediate(resolve)),
+		},
+	);
 }
 
 /** pi-lens persists its sidecar at turn_end; emit one the way pi does. */
