@@ -28,16 +28,19 @@ import {
 import { realpathOrResolve } from "../../../clients/path-utils.js";
 import {
 	createPathIdentityFixture,
+	pinFixtureHome,
 	plantPackageLink,
 	setupTestEnvironment,
 } from "../test-utils.js";
 
 const cleanups: Array<() => void> = [];
 
+// The environment and the mocks are restored before the fixture roots are
+// removed, so nothing the case left behind still points into a deleted root.
 afterEach(() => {
-	for (const cleanup of cleanups.splice(0)) cleanup();
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
+	for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
 interface Layout {
@@ -224,32 +227,44 @@ describe("#4689 item 6: the refused directories are compared on the identity axi
 	// home, which never equals the spelled one, and the home's tsconfig
 	// became the root of every file below it.
 	it("the home directory is refused under both spellings of a link-spelled home", async (ctx) => {
-		const env = setupTestEnvironment("pi-lens-4689-lsp-home-");
-		cleanups.push(env.cleanup);
-		const base = env.tmpDir;
-		const home = path.join(base, "home-real");
-		const homeLink = path.join(base, "home-link");
-		write(path.join(base, "package.json"));
-		write(path.join(home, "tsconfig.json"));
-		write(path.join(home, "proj", "src", "x.ts"), "export {};\n");
+		// The fixture HOME lives outside the deletable test root (#4591): a
+		// straggler that inherits HOME must never re-create a removed root.
+		const { home: pinnedHome, restore } = pinFixtureHome(
+			"pi-lens-4689-lsp-home",
+		);
 		try {
-			link("home-real", homeLink);
-		} catch (err) {
-			return ctx.skip(`cannot create symlinks here: ${String(err)}`);
-		}
-		vi.stubEnv("HOME", homeLink);
-		vi.stubEnv("USERPROFILE", homeLink);
-		vi.spyOn(process, "cwd").mockReturnValue(base);
-		// The home is read when the server table is built.
-		vi.resetModules();
-		const server = await import("../../../clients/lsp/server.js");
+			const base = path.join(pinnedHome, "project");
+			const home = path.join(base, "home-real");
+			const homeLink = path.join(base, "home-link");
+			write(path.join(base, "package.json"));
+			write(path.join(home, "tsconfig.json"));
+			write(path.join(home, "proj", "src", "x.ts"), "export {};\n");
+			try {
+				link("home-real", homeLink);
+			} catch (err) {
+				return ctx.skip(`cannot create symlinks here: ${String(err)}`);
+			}
+			vi.stubEnv("HOME", homeLink);
+			vi.stubEnv("USERPROFILE", homeLink);
+			vi.spyOn(process, "cwd").mockReturnValue(base);
+			// The home is read when the server table is built.
+			vi.resetModules();
+			const server = await import("../../../clients/lsp/server.js");
 
-		for (const file of [
-			path.join(homeLink, "proj", "src", "x.ts"),
-			path.join(home, "proj", "src", "x.ts"),
-		]) {
-			const found = await server.TypeScriptServer.root(file);
-			expect(found && realpathOrResolve(found), file).toBe(base);
+			for (const file of [
+				path.join(homeLink, "proj", "src", "x.ts"),
+				path.join(home, "proj", "src", "x.ts"),
+			]) {
+				const found = await server.TypeScriptServer.root(file);
+				expect(found && realpathOrResolve(found), file).toBe(
+					realpathOrResolve(base),
+				);
+			}
+		} finally {
+			// The stubs recorded the pinned home as their original, so they are
+			// undone first and the pin's own undo then restores the real HOME.
+			vi.unstubAllEnvs();
+			restore();
 		}
 	});
 
@@ -372,5 +387,35 @@ describe("#4689 item 6: the extensions-bounded walk", () => {
 
 		const found = await TypeScriptServer.root(file);
 		expect(found && realpathOrResolve(found)).not.toBe(agentReal);
+	});
+
+	// RECURRENCE GUARDED: review r1 F1 on #4844. A checkout links an extension
+	// in (`checkout/packages/myext -> ~/.pi/agent/extensions/myext`). The
+	// spelling has no extensions segment, so the boundary was never chosen and
+	// the identity climb adopted pi's own `~/.pi/agent/package.json` (#123),
+	// which the session ceiling then widened to the whole session.
+	it("an extension linked into a checkout never roots at ~/.pi/agent", async (ctx) => {
+		const env = setupTestEnvironment("pi-lens-4689-lsp-ext-inward-");
+		cleanups.push(env.cleanup);
+		const base = env.tmpDir;
+		const agent = path.join(base, "home", ".pi", "agent");
+		write(path.join(agent, "package.json"));
+		const ext = path.join(agent, "extensions", "myext");
+		write(path.join(ext, "src", "x.ts"), "export {};\n");
+		const work = path.join(base, "work");
+		const checkout = path.join(work, "checkout");
+		write(path.join(checkout, "package.json"));
+		try {
+			link(ext, path.join(checkout, "packages", "myext"));
+		} catch (err) {
+			return ctx.skip(`cannot create symlinks here: ${String(err)}`);
+		}
+		vi.spyOn(process, "cwd").mockReturnValue(work);
+		const file = path.join(checkout, "packages", "myext", "src", "x.ts");
+
+		const found = await TypeScriptServer.root(file);
+		expect(found && realpathOrResolve(found)).toBe(realpathOrResolve(checkout));
+		const cwd = await resolveLspServerCwd(TypeScriptServer, file, work);
+		expect(cwd && realpathOrResolve(cwd)).toBe(realpathOrResolve(checkout));
 	});
 });

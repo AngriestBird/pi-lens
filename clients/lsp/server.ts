@@ -2911,7 +2911,14 @@ async function hasAgentLevelProjectMarker(
 
 const TypeScriptRoot: RootFunction = withRootMarkers(
 	DenoExcludeRoot(async (file) => {
-		const extensionRootKey = piAgentExtensionsRootKey(file);
+		// #4689: a file spelled outside the boundary whose identity is inside it
+		// (`checkout/packages/myext -> ~/.pi/agent/extensions/myext`) takes the
+		// boundary from its identity; the walks below climb that identity, and
+		// without the boundary they adopt `~/.pi/agent` (#123). `FileDirRoot`
+		// keeps its spelled boundary: it bounds a climb of the spelling.
+		const extensionRootKey =
+			piAgentExtensionsRootKey(file) ??
+			piAgentExtensionsRootKey(realpathOrResolve(file));
 		if (extensionRootKey) {
 			// Bounded walk so we never adopt a parent (e.g. ~/.pi/agent/) as the
 			// LSP root.
