@@ -1518,6 +1518,108 @@ describe("test-runner-client", () => {
 			});
 		});
 
+		// #4689 batch 2 (clients/test-runner-client.ts `canonicalFailedPath`): the
+		// failed-target maps key by the path identity, so a failure recorded
+		// through a link spelling is retired by a pass through the real spelling.
+		// The cell pins the identity key once the redundant inner realpath is gone;
+		// it passes on master too (`normalizeMapKey` already resolved), so the
+		// mutation row, not a red-first run, is its proof.
+		it("retires a failure recorded through a link spelling when the real spelling passes (#4689)", async (ctx) => {
+			const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-tests-4689-");
+			const aliasRoot = `${tmpDir}-alias`;
+			try {
+				fs.symlinkSync(
+					tmpDir,
+					aliasRoot,
+					process.platform === "win32" ? "junction" : "dir",
+				);
+			} catch (error) {
+				cleanup();
+				return ctx.skip(`symlinks unavailable: ${String(error)}`);
+			}
+			cleanups.push(
+				() => fs.rmSync(aliasRoot, { recursive: true, force: true }),
+				cleanup,
+			);
+			fs.writeFileSync(path.join(tmpDir, "go.mod"), "module example.com/tmp\n");
+			const sourceFile = path.join(tmpDir, "widget.go");
+			const testFile = path.join(tmpDir, "widget_test.go");
+			fs.writeFileSync(sourceFile, "package widget\n");
+			fs.writeFileSync(testFile, "package widget\n");
+			const passingConfig = {
+				...failingNodeConfig,
+				args: (target: string) => [
+					"-e",
+					"console.log('ok  \texample.com/tmp\t0.001s');",
+					target,
+				],
+			};
+
+			const client = new TestRunnerClient(false);
+			const failed = await client.runTestFileAsync(
+				path.join(aliasRoot, "widget_test.go"),
+				aliasRoot,
+				"go",
+				failingNodeConfig,
+			);
+			expect(failed.failed).toBe(1);
+			expect(client.getTestRunTarget(sourceFile, tmpDir)?.strategy).toBe(
+				"failed-first",
+			);
+
+			const passed = await client.runTestFileAsync(
+				testFile,
+				tmpDir,
+				"go",
+				passingConfig,
+			);
+			expect(passed.failed).toBe(0);
+			expect(client.getTestRunTarget(sourceFile, tmpDir)?.strategy).not.toBe(
+				"failed-first",
+			);
+		});
+
+		// #4689 batch 2 round 2: a project root spelled `proj/lnk/..` (lnk ->
+		// deep/inner) is the kernel's `deep`; `path.resolve` folded it to `proj`
+		// first, so a failure recorded under it was invisible from `deep`. Only the
+		// root reaches `canonicalFailedPath` unfolded (`runTestFileAsync` resolves
+		// its test file first). Recurrence: #4853 F1, the same shape.
+		it("finds a failure recorded under a root spelled with `..` after a link from the kernel's spelling of that root (#4689)", async (ctx) => {
+			const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-tests-4689-");
+			cleanups.push(cleanup);
+			const proj = path.join(tmpDir, "proj");
+			const deep = path.join(tmpDir, "deep");
+			fs.mkdirSync(proj);
+			fs.mkdirSync(path.join(deep, "inner"), { recursive: true });
+			try {
+				fs.symlinkSync(
+					path.join(deep, "inner"),
+					path.join(proj, "lnk"),
+					process.platform === "win32" ? "junction" : "dir",
+				);
+			} catch (error) {
+				return ctx.skip(`symlinks unavailable: ${String(error)}`);
+			}
+			fs.writeFileSync(path.join(deep, "go.mod"), "module example.com/tmp\n");
+			fs.writeFileSync(path.join(deep, "widget.go"), "package widget\n");
+			fs.writeFileSync(path.join(deep, "x_test.go"), "package widget\n");
+			// not path.join: it folds the `..` lexically, which is the defect
+			const dotDotRoot = [proj, "lnk", ".."].join(path.sep);
+
+			const client = new TestRunnerClient(false);
+			const failed = await client.runTestFileAsync(
+				path.join(deep, "x_test.go"),
+				dotDotRoot,
+				"go",
+				failingNodeConfig,
+			);
+			expect(failed.failed).toBe(1);
+
+			expect(
+				client.getTestRunTarget(path.join(deep, "widget.go"), deep),
+			).toMatchObject({ strategy: "failed-first", runner: "go" });
+		});
+
 		it("retains indeterminate paths and writes bounded real telemetry", async () => {
 			const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-tests-2044-");
 			cleanups.push(cleanup);

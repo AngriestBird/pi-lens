@@ -49,6 +49,7 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,
+	realpathOrResolve,
 	toPosix,
 } from "./path-utils.js";
 import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
@@ -734,27 +735,22 @@ interface TestResultRecord {
 }
 
 function canonicalFailedPath(filePath: string): string {
-	const absolute = path.resolve(filePath);
-	try {
-		return normalizeMapKey(fs.realpathSync.native(absolute));
-	} catch {
-		return normalizeMapKey(absolute);
-	}
+	// The kernel's identity of the spelling as written (#4689): no lexical `..`
+	// fold first, which would name a path the kernel never opens.
+	return normalizeMapKey(realpathOrResolve(filePath));
 }
 
 function canonicalProjectRoot(cwd: string): {
 	key: string;
 	resolved: boolean;
 } {
-	const absolute = path.resolve(cwd);
-	try {
-		return {
-			key: normalizeEphemeralMapKey(fs.realpathSync.native(absolute)),
-			resolved: true,
-		};
-	} catch {
-		return { key: normalizeEphemeralMapKey(absolute), resolved: false };
-	}
+	return {
+		key: normalizeEphemeralMapKey(realpathOrResolve(cwd)),
+		// A cwd that is not on disk still has an identity (its nearest existing
+		// ancestor plus the tail), but is a guess about a path that may later be
+		// a link: `getCanonicalProjectRoot` memoizes only a resolved one (#2077).
+		resolved: fs.existsSync(cwd),
+	};
 }
 
 export const MAX_CANONICAL_ROOT_MEMO_ENTRIES = 512;
@@ -843,10 +839,10 @@ export class TestRunnerClient {
 	// never memoized (#2077): the fallback key is a guess about a path that does
 	// not exist yet, so memoizing it would pin an alias probed before its
 	// symlink was created to a stale verdict for the instance's life. Re-probing
-	// costs one failing realpath per call, and only for a cwd that does not
-	// resolve — a state where `detectRunner` already walks node_modules on every
-	// call. Keep the memo bounded so pathological spelling churn cannot grow it
-	// without limit.
+	// costs one failing existence probe plus the ancestor walk per call, and only
+	// for a cwd that does not resolve — a state where `detectRunner` already
+	// walks node_modules on every call. Keep the memo bounded so pathological
+	// spelling churn cannot grow it without limit.
 	private canonicalRootMemo = new BoundedFifoMap<string, string>(
 		MAX_CANONICAL_ROOT_MEMO_ENTRIES,
 	);

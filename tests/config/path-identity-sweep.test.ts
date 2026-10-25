@@ -99,6 +99,9 @@ const BIN_CONTAINMENT =
 const MUTATION_QUEUE =
 	"the per-file mutation queue keys by the async kernel realpath (fs/promises), which the seam has no async form for; a file not created yet under a directory link keys by its spelling here and by identity in normalizeMapKey, a later #4689 slice";
 
+const INSTALL_SELF_CONTAINED =
+	"clients/install-diagnostics.ts is the paste-able report for an install whose runtime dependencies did not resolve (#285/#335) and imports nothing from clients/: clients/path-utils.ts imports minimatch, so routing its one realpath (the symlinked-install probe, which compares the kernel-real package dir with the spelled one on purpose) through realpathOrResolve would stop the report loading exactly when it is needed; the import census in tests/clients/install-diagnostics.test.ts refuses any relative or bare specifier there, so that swap reds it";
+
 interface Pin {
 	sites: number;
 	identities: string;
@@ -111,11 +114,6 @@ interface Pin {
  * rows. Re-pin only downward; a row that grows needs its reason restated.
  */
 const PINS: Readonly<Record<string, Pin>> = {
-	"clients/actionable-warnings.ts#raw-realpath": {
-		sites: 2,
-		identities: "18c69cbc7e77f887",
-		reason: PRE_4689,
-	}, // :2247, :2249
 	"clients/dead-code-client.ts#path-resolve-keyed": {
 		sites: 4,
 		identities: "a6ddbdf02c6f7761",
@@ -179,7 +177,7 @@ const PINS: Readonly<Record<string, Pin>> = {
 	"clients/install-diagnostics.ts#raw-realpath": {
 		sites: 1,
 		identities: "1e68f8fa901aa8c4",
-		reason: PRE_4689,
+		reason: INSTALL_SELF_CONTAINED,
 	}, // :157
 	"clients/installer/index.ts#path-resolve-keyed": {
 		sites: 2,
@@ -312,10 +310,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :60
 	"clients/test-runner-client.ts#raw-realpath": {
-		sites: 6,
-		identities: "18ded036a3d116e6",
+		sites: 4,
+		identities: "c1a06e8a6462ff6b",
 		reason: PRE_4689,
-	}, // :300, :321, :322, :337, :733, :746
+	}, // :306, :327, :328, :343
 	"clients/test-runner-client.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "3aedefc29eced70b",

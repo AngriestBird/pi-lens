@@ -496,6 +496,76 @@ describe("helm-render rendered-manifest checks", () => {
 		expect(result.diagnostics[0].message).toContain("deployment.yaml:4");
 	});
 
+	// #4689 batch 2 (clients/dispatch/runners/helm-render.ts, the trivy-target
+	// lookup): the map of rendered manifests is a `PathKeyedMap(normalizeMapKey)`,
+	// so a target that spells the scratch directory through a link must find the
+	// manifest the walk recorded under its real path. The `path.resolve` around
+	// that lookup is a join, not an identity derivation, so it stays (the map
+	// derives the identity); the cell passes on master and the mutation row in
+	// the PR body (plain `Map`) is its proof.
+	it("maps a trivy target that spells the scratch directory through a link (#4689)", async (ctx) => {
+		const chart = installChart("valid-chart");
+		optIn({
+			helm: { renderValidation: { enabled: true } },
+			trivy: { enabled: true },
+		});
+		const renderedRelative = path.join(
+			"pi-lens-render-valid",
+			"templates",
+			"deployment.yaml",
+		);
+		const outputLink = path.join(workspace, "scratch-link");
+		let linkTarget: string | undefined;
+		stubSpawns({
+			render: (outputDir) => {
+				writeRendered(outputDir, renderedRelative, RENDERED_DEPLOYMENT);
+				try {
+					fs.symlinkSync(outputDir, outputLink, "dir");
+					linkTarget = path.join(outputLink, renderedRelative);
+				} catch {
+					// the cell skips below
+				}
+				return { status: 0, stdout: "", stderr: "" };
+			},
+			scan: {
+				status: 0,
+				get stdout() {
+					return JSON.stringify({
+						Results: [
+							{
+								Target: linkTarget,
+								Misconfigurations: [
+									{
+										ID: "KSV011",
+										Title: "CPU not limited",
+										Severity: "HIGH",
+										CauseMetadata: { StartLine: 4 },
+									},
+								],
+							},
+						],
+					});
+				},
+				stderr: "",
+			},
+		});
+
+		const result = await helmRenderRunner.run(
+			makeRunnerCtx(
+				path.join(chart, "templates", "deployment.yaml"),
+				workspace,
+				{ kind: "yaml", projectRoot: workspace },
+			),
+		);
+
+		if (linkTarget === undefined) return ctx.skip("symlinks unavailable");
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.diagnostics[0]).toMatchObject({
+			filePath: path.join(chart, "templates", "deployment.yaml"),
+			rule: "KSV011",
+		});
+	});
+
 	it("flags a rendered document that is not a Kubernetes object", async () => {
 		const chart = installChart("valid-chart");
 		optIn({ helm: { renderValidation: { enabled: true } } });

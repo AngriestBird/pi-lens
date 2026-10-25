@@ -1331,7 +1331,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// operations, not delivery lanes; the census measures every use.
 		// 66 -> 74 (#3871 r2): text-runner display rebasing uses path operations
 		// for pytest, PHPUnit, Mix, and generic runner locations.
-		"clients/test-runner-client.ts": 74,
+		// 74 -> 72 (#4689 batch 2): two `path.resolve` locals dropped from the root and
+		// failed-target keys.
+		"clients/test-runner-client.ts": 72,
 		"clients/todo-scanner.ts": 3,
 		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
 		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,
