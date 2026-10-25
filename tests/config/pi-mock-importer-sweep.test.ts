@@ -48,6 +48,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const TESTS_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -96,46 +97,50 @@ function usesPiMock(source: string): boolean {
 }
 
 describe("pi-mock importer ratchet (#4632, recurrence #4631)", () => {
-	it("no row is stale and no scanned file uses the double off the list", () => {
-		const files = listSourceFiles(TESTS_ROOT, {
-			extensions: [
-				".ts",
-				".mts",
-				".cts",
-				".tsx",
-				".js",
-				".mjs",
-				".cjs",
-				".jsx",
-			],
-		}).filter((file) => relativePosix(TESTS_ROOT, file) !== SELF);
-		const flagged: string[] = [];
-		for (const { file, source } of readWalkedFiles(files)) {
-			const rel = relativePosix(TESTS_ROOT, file);
-			// The double itself names its own entry points.
-			if (rel === "support/pi-mock.ts") continue;
-			if (usesPiMock(source)) flagged.push(rel);
-		}
-		// Calibration 2026-10-20: ~1,300 files under tests/. Half rounds to 650.
-		// A dead walk with a non-empty list already reds as stale rows; this floor
-		// is for the day the list is empty and a dead scan would read as clean.
-		assertNonEmptyScan("pi-mock sweep: files scanned", files.length, 650);
-		const audit = auditRegistry({
-			sweepName: "pi-mock importer ratchet",
-			flagged,
-			registered: [],
-			exemptions: { ...PI_MOCK_IMPORTERS },
-			minReasonLength: 10,
-			remediation:
-				"A test file may not load tests/support/pi-mock.ts unless it is on " +
-				"PI_MOCK_IMPORTERS (tests/support/pi-mock-importers.ts); the double throws " +
-				"at load otherwise. Host-semantics cases go through tier 1 " +
-				"(tests/support/pi-runner.ts) or tier 2 (tests/support/pi-session.ts); " +
-				"AGENTS.md 'Test requirements' says which. A row for a file that no longer uses " +
-				"the double must be deleted.",
-		});
-		expect(audit.problems).toEqual([]);
-	});
+	it(
+		"no row is stale and no scanned file uses the double off the list",
+		() => {
+			const files = listSourceFiles(TESTS_ROOT, {
+				extensions: [
+					".ts",
+					".mts",
+					".cts",
+					".tsx",
+					".js",
+					".mjs",
+					".cjs",
+					".jsx",
+				],
+			}).filter((file) => relativePosix(TESTS_ROOT, file) !== SELF);
+			const flagged: string[] = [];
+			for (const { file, source } of readWalkedFiles(files)) {
+				const rel = relativePosix(TESTS_ROOT, file);
+				// The double itself names its own entry points.
+				if (rel === "support/pi-mock.ts") continue;
+				if (usesPiMock(source)) flagged.push(rel);
+			}
+			// Calibration 2026-10-20: ~1,300 files under tests/. Half rounds to 650.
+			// A dead walk with a non-empty list already reds as stale rows; this floor
+			// is for the day the list is empty and a dead scan would read as clean.
+			assertNonEmptyScan("pi-mock sweep: files scanned", files.length, 650);
+			const audit = auditRegistry({
+				sweepName: "pi-mock importer ratchet",
+				flagged,
+				registered: [],
+				exemptions: { ...PI_MOCK_IMPORTERS },
+				minReasonLength: 10,
+				remediation:
+					"A test file may not load tests/support/pi-mock.ts unless it is on " +
+					"PI_MOCK_IMPORTERS (tests/support/pi-mock-importers.ts); the double throws " +
+					"at load otherwise. Host-semantics cases go through tier 1 " +
+					"(tests/support/pi-runner.ts) or tier 2 (tests/support/pi-session.ts); " +
+					"AGENTS.md 'Test requirements' says which. A row for a file that no longer uses " +
+					"the double must be deleted.",
+			});
+			expect(audit.problems).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("every importer row names a class from the #4632 vocabulary", () => {
 		const bad = Object.entries(PI_MOCK_IMPORTERS)

@@ -836,6 +836,27 @@ file-scoped worklist and receives no project-wide scanner output.
     (a pinned `PI_LENS_HOME` whose `bin` links out is refused). Instances and
     dates: `HISTORY.md`.
 
+85. **Default-budget tree census:** a test whose callback walks the repo tree (a
+    whole-tree walker, a `git ls-files` spawn, a recursive directory walk, or a
+    suite-level population it reads) keeps vitest's 5 s default, and a walk that
+    costs 0.7 s on Linux costs several times that on the Windows unit leg and
+    times out there. The gate enforces that the third argument is an identifier
+    named `TREE_WALK_TIMEOUT_MS` (the shared constant, read by name, not by
+    binding) or a `scaledTestTimeout(...)` call (the reason goes in a comment the
+    gate does not read). A raw number or a file-local constant does not follow
+    the lane's timeout scale and is refused; a same-named local constant is
+    admitted and an import alias of the shared one is refused (no live member
+    either way). Screen: does this case call a walker or read a binding one
+    produced, and is its third argument one of those two forms? Census: 151 in
+    `tests/config`, all budgeted; 79 outside it still keep the default (a probe,
+    not a command). Enforcer: `tests/config/tree-census-timeout.test.ts` (it
+    derives the declaration callee from the file's vitest imports, resolves
+    walker aliases, and counts a test-shaped call it cannot trace as a census).
+    It does not read a walker reached through a helper in another module, a
+    variable-bound arrow-function walker, a local spawn wrapper, or a walk named
+    only by an enclosing `describe.each` or loop; `Unit tests Windows` is the
+    backstop. Instances and dates: `HISTORY.md`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">

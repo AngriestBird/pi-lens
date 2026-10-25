@@ -98,6 +98,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -347,36 +348,48 @@ const CASE_FOLD_PINS: Readonly<Record<string, number>> = {
 };
 
 describe("path transformation single-source-of-truth (#1193)", () => {
-	it("has no unpinned raw separator fold outside the canonical leaf", () => {
-		const { slashFolds, scanned } = census();
-		assertNonEmptyScan("clients/tools/mcp/index.ts source files", scanned, 400);
-		const audit = auditSymbolCounts({
-			sweepName: "raw separator fold (#1193 shape A)",
-			counts: slashFolds,
-			pinned: SLASH_FOLD_PINS,
-			remediation: REMEDIATION,
-		});
-		expect(audit.problems).toEqual([]);
-		expect(
-			stalePins(slashFolds, SLASH_FOLD_PINS),
-			"a pinned separator fold is gone — good, now shrink the pin",
-		).toEqual([]);
-	}, 30_000);
+	it(
+		"has no unpinned raw separator fold outside the canonical leaf",
+		() => {
+			const { slashFolds, scanned } = census();
+			assertNonEmptyScan(
+				"clients/tools/mcp/index.ts source files",
+				scanned,
+				400,
+			);
+			const audit = auditSymbolCounts({
+				sweepName: "raw separator fold (#1193 shape A)",
+				counts: slashFolds,
+				pinned: SLASH_FOLD_PINS,
+				remediation: REMEDIATION,
+			});
+			expect(audit.problems).toEqual([]);
+			expect(
+				stalePins(slashFolds, SLASH_FOLD_PINS),
+				"a pinned separator fold is gone — good, now shrink the pin",
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("has no unpinned path-key case fold outside the canonical leaf", () => {
-		const { caseFolds } = census();
-		const audit = auditSymbolCounts({
-			sweepName: "path-key case fold (#1193 shape B)",
-			counts: caseFolds,
-			pinned: CASE_FOLD_PINS,
-			remediation: REMEDIATION,
-		});
-		expect(audit.problems).toEqual([]);
-		expect(
-			stalePins(caseFolds, CASE_FOLD_PINS),
-			"a pinned path-key case fold is gone — good, now shrink the pin",
-		).toEqual([]);
-	}, 30_000);
+	it(
+		"has no unpinned path-key case fold outside the canonical leaf",
+		() => {
+			const { caseFolds } = census();
+			const audit = auditSymbolCounts({
+				sweepName: "path-key case fold (#1193 shape B)",
+				counts: caseFolds,
+				pinned: CASE_FOLD_PINS,
+				remediation: REMEDIATION,
+			});
+			expect(audit.problems).toEqual([]);
+			expect(
+				stalePins(caseFolds, CASE_FOLD_PINS),
+				"a pinned path-key case fold is gone — good, now shrink the pin",
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	it("the canonical leaf still owns both transformations", () => {
 		const raw = readFileSync(path.join(REPO_ROOT, CANONICAL_FILE), "utf8");

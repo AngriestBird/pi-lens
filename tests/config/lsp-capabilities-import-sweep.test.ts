@@ -16,6 +16,7 @@ import {
 	readWalkedFiles,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const ALLOWLIST = new Set(["clients/lsp/capabilities.ts"]);
@@ -32,24 +33,28 @@ function productionFiles(): string[] {
 }
 
 describe("#2372 grouped LSP capability facade import ratchet", () => {
-	it("has no direct production LSPService-module imports outside the adapter", () => {
-		const files = productionFiles();
-		assertNonEmptyScan("production LSP caller population", files.length);
-		const walked = readWalkedFiles(files);
-		const direct: string[] = [];
-		for (const { file, source } of walked) {
-			const relative = relativePosix(REPO_ROOT, file);
-			// Import-module evidence is the deliberate string-literal exception:
-			// comments are still blanked, but the module specifier must remain.
-			const stripped = stripSource(source, { strings: "keep" });
-			if (
-				/from\s*["'][^"']*\/lsp\/index\.js|import\(\s*["'][^"']*\/lsp\/index\.js/.test(
-					stripped,
-				)
-			) {
-				if (!ALLOWLIST.has(relative)) direct.push(relative);
+	it(
+		"has no direct production LSPService-module imports outside the adapter",
+		() => {
+			const files = productionFiles();
+			assertNonEmptyScan("production LSP caller population", files.length);
+			const walked = readWalkedFiles(files);
+			const direct: string[] = [];
+			for (const { file, source } of walked) {
+				const relative = relativePosix(REPO_ROOT, file);
+				// Import-module evidence is the deliberate string-literal exception:
+				// comments are still blanked, but the module specifier must remain.
+				const stripped = stripSource(source, { strings: "keep" });
+				if (
+					/from\s*["'][^"']*\/lsp\/index\.js|import\(\s*["'][^"']*\/lsp\/index\.js/.test(
+						stripped,
+					)
+				) {
+					if (!ALLOWLIST.has(relative)) direct.push(relative);
+				}
 			}
-		}
-		expect(direct).toEqual([]);
-	});
+			expect(direct).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 });

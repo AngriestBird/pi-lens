@@ -34,6 +34,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { assertNonEmptyScan, listSourceFiles } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const SELF = path.relative(REPO_ROOT, import.meta.filename);
@@ -188,28 +189,32 @@ function danglingCitations(
 }
 
 describe("AGENTS.md section citations resolve (#4361 C8)", () => {
-	it("every quoted AGENTS.md section cited under the swept roots is a live heading", () => {
-		const headings = liveHeadings();
-		const sweptFiles = sweptSources();
-		const citations = sweptFiles.flatMap((file) =>
-			citationsIn(file).map((hit) => ({
-				file: path.relative(REPO_ROOT, file),
-				...hit,
-			})),
-		);
+	it(
+		"every quoted AGENTS.md section cited under the swept roots is a live heading",
+		() => {
+			const headings = liveHeadings();
+			const sweptFiles = sweptSources();
+			const citations = sweptFiles.flatMap((file) =>
+				citationsIn(file).map((hit) => ({
+					file: path.relative(REPO_ROOT, file),
+					...hit,
+				})),
+			);
 
-		// A dead sweep passes everything: the headings, the files and the
-		// citations must all be read. The citation floor catches a matcher
-		// neutered to match nothing, which the other two floors cannot see.
-		assertNonEmptyScan("AGENTS.md headings read", headings.size, 20);
-		assertNonEmptyScan("citation sweep files", sweptFiles.length, 500);
-		assertNonEmptyScan("AGENTS.md citations read", citations.length, 15);
+			// A dead sweep passes everything: the headings, the files and the
+			// citations must all be read. The citation floor catches a matcher
+			// neutered to match nothing, which the other two floors cannot see.
+			assertNonEmptyScan("AGENTS.md headings read", headings.size, 20);
+			assertNonEmptyScan("citation sweep files", sweptFiles.length, 500);
+			assertNonEmptyScan("AGENTS.md citations read", citations.length, 15);
 
-		expect(
-			danglingCitations(citations, headings),
-			"dangling AGENTS.md section citations",
-		).toEqual([]);
-	});
+			expect(
+				danglingCitations(citations, headings),
+				"dangling AGENTS.md section citations",
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
 	// Recurrence (CodeRabbit, PR 4767 round 3): C8 derives its population from
 	// the tree. A matcher or resolver that silently reports nothing keeps the
