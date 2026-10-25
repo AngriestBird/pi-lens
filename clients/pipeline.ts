@@ -20,6 +20,7 @@ import {
 	findNearestContaining,
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
+	realpathOrResolve,
 } from "./path-utils.js";
 import {
 	inlineBlockerLines,
@@ -943,9 +944,12 @@ async function tryRustClippyFix(
 	const check = await probeToolAsync("cargo", ["--version"], { timeout: 5000 });
 	if (check.error || check.status !== 0) return none;
 
-	const cargoDir = findNearestContaining(path.dirname(path.resolve(filePath)), [
-		"Cargo.toml",
-	]);
+	// #4689 item 6: the crate the file lives in, from its identity; the
+	// directory of a file link is the link's crate.
+	const cargoDir = findNearestContaining(
+		path.dirname(realpathOrResolve(filePath)),
+		["Cargo.toml"],
+	);
 	if (!cargoDir) return none;
 	if (writeHold) await writeHold.acquire();
 
@@ -973,7 +977,7 @@ async function tryDartFix(
 	if (check.error || check.status !== 0) return none;
 
 	const pubspecDir = findNearestContaining(
-		path.dirname(path.resolve(filePath)),
+		path.dirname(realpathOrResolve(filePath)),
 		["pubspec.yaml"],
 	);
 	if (!pubspecDir) return none;

@@ -90,8 +90,12 @@ export function* projectLocalBinDirs(
 	dir: string,
 	home: string = os.homedir(),
 ): Generator<string> {
-	for (const ancestor of walkUpDirs(dir)) {
-		if (isAtOrAboveHomeDir(ancestor, home)) return;
+	// Spelled by design (#4689 item 6): this is the trust classifier's half of
+	// the resolver/classifier pair (`localBinMatches` climbs the same axis). An
+	// identity bin dir holds neither the alias spelling of a project shim nor
+	// the shim's target, so the project's own binary would stop counting as
+	// project-local and the trust refusal keyed on it would stop applying.
+	for (const ancestor of walkUpDirs(dir, { spelling: true, homeDir: home })) {
 		for (const binDir of PROJECT_LOCAL_BIN_DIRS)
 			yield path.join(ancestor, binDir);
 	}

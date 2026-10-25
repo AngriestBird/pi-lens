@@ -709,7 +709,9 @@ function* localBinMatches(
 		ceiling = true,
 	} = options;
 	const names = expandCandidateNames(tools, windowsExt, isWindows);
-	for (const dir of walkUpDirs(startDir)) {
+	// Spelled by design (#4689 item 6): the resolver climbs the axis its trust
+	// classifier (`projectLocalBinDirs`) climbs; see there.
+	for (const dir of walkUpDirs(startDir, { spelling: true })) {
 		// Tool-resolution walker, not a config lookup (#2514/#2517 policy):
 		// escaping the project upward past HOME means STOP, not keep reading. A
 		// config-file lookup (`findLocalToolConfig`) keeps climbing past HOME
