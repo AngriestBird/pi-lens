@@ -153,6 +153,13 @@ function getToolCallRawFilePath(
 	}
 
 	if (toolName === "lsp_navigation") {
+		// #3650: the tool declares its target as `path`
+		// (`tools/lsp-navigation.ts:863`). Reading `filePath` first left every
+		// read-only navigation call with no path at all, so nothing resolved and
+		// every path-keyed step below (`if (!filePath) return;` included) was
+		// skipped for a file the call had just named. `filePath` stays as the
+		// fallback the branch already accepted, in the same order as `read`.
+		if (typeof inputObj.path === "string") return inputObj.path;
 		return typeof inputObj.filePath === "string"
 			? inputObj.filePath
 			: undefined;
