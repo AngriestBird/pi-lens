@@ -292,10 +292,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :562, :812
 	"clients/runtime-coordinator.ts#path-resolve-keyed": {
-		sites: 30,
-		identities: "77ba3222cbbbb861",
+		sites: 8,
+		identities: "0ac5152568baccfe",
 		reason: PRE_4689,
-	}, // :856 path-resolve-keyed (new Set element), :860 path-resolve-keyed (.has key), :1485 path-resolve-keyed (.get key), :1486 path-resolve-keyed (.set key), :1808 path-resolve-keyed (.get key), :1819 path-resolve-keyed (.set key), :1898 path-resolve-keyed (.set key), :1935 path-resolve-keyed (.get key), :1961 path-resolve-keyed (.delete key), :1964 path-resolve-keyed (.set key), :2099 path-resolve-keyed (.get key), :2101 path-resolve-keyed (.set key), :2122 path-resolve-keyed (.get key), :2128 path-resolve-keyed (.set key), :2159 path-resolve-keyed (.get key), :2171 path-resolve-keyed (.set key), :2236 path-resolve-keyed (.get key), :2260 path-resolve-keyed (.get key), :2277 path-resolve-keyed (.get key), :2280 path-resolve-keyed (.set key), :2306 path-resolve-keyed (.get key), :2310 path-resolve-keyed (.delete key), :2362 path-resolve-keyed (.get key), :2379 path-resolve-keyed (.delete key), :2674 path-resolve-keyed (.get key), :2692 path-resolve-keyed (.set key), :2892 path-resolve-keyed (.get key), :2899 path-resolve-keyed (.set key), :2906 path-resolve-keyed (.set key), :2913 path-resolve-keyed (.delete key)
+	}, // :860 path-resolve-keyed (new Set element), :864 path-resolve-keyed (.has key), :1489 path-resolve-keyed (.get key), :1490 path-resolve-keyed (.set key), :2896 path-resolve-keyed (.get key), :2903 path-resolve-keyed (.set key), :2910 path-resolve-keyed (.set key), :2917 path-resolve-keyed (.delete key)
 	"clients/runtime-tool-result.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "3a38f213298e8a5d",

@@ -25,7 +25,11 @@ import {
 	inlineBlockerSources,
 } from "./inline-blocker-fields.js";
 import type { MutationKind } from "./mutating-tool.js";
-import { normalizeMapKey, pathsEqual } from "./path-utils.js";
+import {
+	normalizeMapKey,
+	pathsEqual,
+	realpathOrResolve,
+} from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { BoundedFifoMap, BoundedLruCache } from "./bounded-cache.js";
 import { type AnalysisAnchor, owedByContentOnly } from "./line-alignment.js";
@@ -1804,7 +1808,7 @@ export class RuntimeCoordinator {
 			contentBaseline?: { size: number; sha256: string };
 		},
 	): number {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (existing && !existing.diagnostics) return 0;
 		// #4484 round 5 (K3): not the id. A carry that moves a blocker's line
@@ -1892,7 +1896,7 @@ export class RuntimeCoordinator {
 		const existing = this._pendingInlineBlockers.get(filePath);
 		if (existing) {
 			// The display key every record writer uses.
-			const key = path.resolve(filePath);
+			const key = filePath;
 			const { analysisAnchor: _dropped, ...rest } = existing;
 			this._pendingInlineBlockers.set(
 				key,
@@ -1931,7 +1935,7 @@ export class RuntimeCoordinator {
 			unconfirmedServerIds?: readonly string[];
 		},
 	): number {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (
 			!existing?.diagnostics ||
@@ -2095,7 +2099,7 @@ export class RuntimeCoordinator {
 		filePath: string,
 		reason: "dependency-drift" | "past-eof" = "dependency-drift",
 	): boolean {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing || existing.stale) return false;
 		this._pendingInlineBlockers.set(key, {
@@ -2118,7 +2122,7 @@ export class RuntimeCoordinator {
 	 * transition, so the caller logs/resyncs exactly once per edge.
 	 */
 	setInlineBlockerPastEofStale(filePath: string, isPastEof: boolean): boolean {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing) return false;
 		if (existing.stale && existing.staleReason !== "past-eof") return false;
@@ -2155,7 +2159,7 @@ export class RuntimeCoordinator {
 		filePath: string,
 		isSelfDrift: boolean,
 	): boolean {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing) return false;
 		if (existing.stale && existing.staleReason !== "self-drift") return false;
@@ -2232,7 +2236,7 @@ export class RuntimeCoordinator {
 		deadLines: readonly number[],
 	): string | undefined {
 		if (deadLines.length === 0) return undefined;
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing) return undefined;
 		// Only this gate's own demotion. A dependency-drift demotion (#1631)
@@ -2256,7 +2260,7 @@ export class RuntimeCoordinator {
 	 * content is NOT being suppressed.
 	 */
 	peekInlineBlockerStaleDeliveryCount(filePath: string): number {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		return this._pendingInlineBlockers.get(key)?.staleDeliveryCount ?? 0;
 	}
 
@@ -2273,7 +2277,7 @@ export class RuntimeCoordinator {
 	 * or never recorded).
 	 */
 	incrementInlineBlockerStaleDelivery(filePath: string): number {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing) return 0;
 		const next = (existing.staleDeliveryCount ?? 0) + 1;
@@ -2302,7 +2306,7 @@ export class RuntimeCoordinator {
 	 * suppression is never silent (#1432 Gap 1).
 	 */
 	retireDemotedDependencyDriftBlocker(filePath: string): boolean {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing) return false;
 		if (!existing.stale) return false;
@@ -2358,7 +2362,7 @@ export class RuntimeCoordinator {
 		confirmedAtWriteOrder?: number,
 		coveredSources?: readonly string[],
 	): boolean {
-		const key = path.resolve(filePath);
+		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing) return false;
 		if (
@@ -2668,7 +2672,7 @@ export class RuntimeCoordinator {
 		analysisRootMode: AnalysisRootMode = "session",
 	): boolean {
 		if (!canWriteAnalysisRoot(analysisRootMode)) return false;
-		const key = path.resolve(filePath);
+		const key = realpathOrResolve(filePath);
 		const now = Date.now();
 		const resolvedOriginCwd = originCwd ?? turnStateCwd;
 		const existing = this._pendingDeferredMutations.get(key);
