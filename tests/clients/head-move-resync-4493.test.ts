@@ -24,6 +24,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	afterAll,
+	afterEach,
 	beforeAll,
 	beforeEach,
 	describe,
@@ -32,6 +33,7 @@ import {
 	vi,
 } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { resetLSPService } from "../../clients/lsp/capabilities.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
 import { workspaceFileCreatedAtFor } from "../../clients/lsp/workspace-diagnostics-session.js";
 import { flushLatencyLog } from "../../clients/latency-logger.js";
@@ -570,6 +572,13 @@ afterAll(async () => {
 
 beforeEach(() => {
 	resetOpaqueMutationState();
+});
+
+afterEach(() => {
+	// #4831: removing an auxiliary's selection entry does not retire its
+	// client. No case shares held documents with another; retire every client
+	// so a slow auxiliary cannot consume a later case's resync drain budget.
+	resetLSPService();
 });
 
 describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
