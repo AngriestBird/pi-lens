@@ -1,5 +1,9 @@
 # HISTORY
 
+## 2026-10-25 — turn-count wait for real I/O (shape 86)
+
+Two tests waited for real I/O by counting event-loop turns. #4850 waited for the loss-notice bound in `tests/clients/fix-run-restore.test.ts`. #4830 did the same in `tests/index-3521-fork-tree-witness.test.ts`. Both went red on loaded CI runners, and #4852 moved both onto `waitFor`'s real-clock deadline. Master run 40191426869 went red on the #4850 cell before #4852 landed. The detector is tracked in #4865.
+
 ## 2026-10-25 — `path.resolve` in front of an identity key (shape 1)
 
 Three members surfaced in one day during the #4689 census. #4853's review
