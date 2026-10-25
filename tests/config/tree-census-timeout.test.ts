@@ -9,8 +9,9 @@
  * walk produced at module or describe scope (a suite-level `files` list is a
  * walk even though the callback never names the walker), or an `it.each` /
  * `it.for` over such a table. The gate enforces one rule on every census: its
- * third argument is the shared `TREE_WALK_TIMEOUT_MS`
- * (`tests/support/test-timeout-scale.ts`), or a `scaledTestTimeout(...)` call
+ * third argument is an identifier named `TREE_WALK_TIMEOUT_MS`
+ * (the shared constant in `tests/support/test-timeout-scale.ts`; the gate reads
+ * the name, not the binding), or a `scaledTestTimeout(...)` call
  * for a census that needs more than the shared ceiling (name the reason in a
  * comment; the gate does not read it). The default two arguments, a raw number, a
  * file-local constant, an options object or any other expression is refused,
@@ -43,7 +44,10 @@
  * reached only through a helper in another module; a recursive walker spelled as
  * a variable-bound arrow function; a walker or spawner reached through a local
  * wrapper function; and a walk named by an enclosing `describe.each` table or
- * `for...of` loop instead of by the case.
+ * `for...of` loop instead of by the case. The budget is admitted by name, not by
+ * binding (accepted residual, live population 0 each way): a same-named local
+ * `const TREE_WALK_TIMEOUT_MS = 5000` is admitted, and an import alias of the
+ * shared constant is refused.
  */
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
