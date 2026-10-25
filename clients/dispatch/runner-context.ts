@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { normalizeMapKey, normalizeHostToolPath } from "../path-utils.js";
+import {
+	normalizeHostToolPath,
+	normalizeMapKey,
+	walkUpDirs,
+} from "../path-utils.js";
 
 function resolveAgainstAncestors(cwd: string, filePath: string): string {
 	// #4576: a runner reports the path it was given, and that path may be a
@@ -36,16 +40,14 @@ function resolveAgainstAncestors(cwd: string, filePath: string): string {
 		return directCandidate;
 	}
 
-	let current = path.resolve(cwd);
-	const { root } = path.parse(current);
-	while (current !== root) {
-		const parent = path.dirname(current);
-		if (parent === current) break;
-		const candidate = path.resolve(parent, filePath);
+	// #4689 item 6: the cwd's path identity and its ancestors, the directories
+	// a tool run from `cwd` resolves `..` through. The cwd itself repeats
+	// `directCandidate`, which has just been refused.
+	for (const dir of walkUpDirs(cwd)) {
+		const candidate = path.resolve(dir, filePath);
 		if (fs.existsSync(candidate)) {
 			return candidate;
 		}
-		current = parent;
 	}
 
 	return directCandidate;

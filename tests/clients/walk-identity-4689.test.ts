@@ -22,7 +22,11 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveCargoPackageEdition } from "../../clients/cargo-manifest.js";
+import { resolveRunnerPath } from "../../clients/dispatch/runner-context.js";
+import { getPackageRoot } from "../../clients/package-root.js";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import { createDispatchContext } from "../../clients/dispatch/dispatcher.js";
 import { AUXILIARY_LSP_PROFILES } from "../../clients/dispatch/auxiliary-lsp.js";
@@ -40,6 +44,7 @@ import {
 import {
 	findLocalToolConfig,
 	isAtOrAboveHomeDir,
+	normalizeMapKey,
 } from "../../clients/path-utils.js";
 import { runAutofix } from "../../clients/pipeline.js";
 import {
@@ -555,5 +560,111 @@ describe("#4689 item 6: the project-local bin resolver and its classifier stay o
 			shimIsLocal: true,
 			foundIsLocal: true,
 		});
+	});
+});
+
+describe("#4689 item 6, batch 6: hand-rolled walks folded onto walkUpDirs", () => {
+	// Pure refactors with no new cell: `shellcheck.ts` and `vale.ts` (their
+	// `cwd` is the dispatch context's / `resolveToolCwd`'s identity before the
+	// walk starts, pinned by the dispatch cells above), `sg-runner.ts`
+	// (`process.cwd()` is the kernel's own path) and `startup-scan.ts` (kept
+	// spelled with `{ spelling: true }`, its stop rule unchanged).
+
+	it("a Cargo workspace above a link-spelled home is still out of reach", async (ctx) => {
+		// RECURRENCE GUARDED: the inherited-edition climb compared its identity
+		// directory (`findNearestMarkerRoot` returns one) with the home's
+		// SPELLING, so with `$HOME` a link the climb never met the home and
+		// read the `[workspace.package]` of a manifest above it.
+		const env = setupTestEnvironment("pi-lens-4689-walk-cargo-");
+		cleanups.push(env.cleanup);
+		// The link lives under a sibling directory: the workspace directory is
+		// not an ancestor of its spelling, so the lexical home test cannot stop
+		// the climb there by accident.
+		const wsDir = path.join(env.tmpDir, "ws");
+		const homeReal = path.join(wsDir, "home-real");
+		const homeLink = path.join(env.tmpDir, "elsewhere", "home-link");
+		fs.mkdirSync(path.dirname(homeLink), { recursive: true });
+		fs.mkdirSync(wsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(wsDir, "Cargo.toml"),
+			'[workspace]\nmembers = ["home-real/project"]\n\n[workspace.package]\nedition = "2018"\n',
+		);
+		const member = path.join(homeReal, "project");
+		fs.mkdirSync(path.join(member, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(member, "Cargo.toml"),
+			'[package]\nname = "demo"\nversion = "0.1.0"\nedition.workspace = true\n',
+		);
+		const file = path.join(member, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+		try {
+			fs.symlinkSync(homeReal, homeLink, "dir");
+		} catch (err) {
+			return ctx.skip(`cannot create symlinks here: ${String(err)}`);
+		}
+		expect({
+			realHome: await resolveCargoPackageEdition(file, homeReal),
+			linkHome: await resolveCargoPackageEdition(file, homeLink),
+		}).toEqual({ realHome: undefined, linkHome: undefined });
+	});
+
+	it("the Cargo workspace climb keeps its 64-directory cap", async () => {
+		// RECURRENCE GUARDED: the fold onto `walkUpDirs` must carry the climb's
+		// own depth cap (`maxDepth: 64`); without it a package nested deeper
+		// than the cap reads a workspace manifest the hand-rolled loop never
+		// reached.
+		const env = setupTestEnvironment("pi-lens-4689-walk-cargo-depth-");
+		cleanups.push(env.cleanup);
+		fs.writeFileSync(
+			path.join(env.tmpDir, "Cargo.toml"),
+			'[workspace]\n\n[workspace.package]\nedition = "2018"\n',
+		);
+		const deep = path.join(env.tmpDir, ...Array<string>(70).fill("d"));
+		fs.mkdirSync(path.join(deep, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(deep, "Cargo.toml"),
+			'[package]\nname = "demo"\nversion = "0.1.0"\nedition.workspace = true\n',
+		);
+		const file = path.join(deep, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+		const beyondCap = await resolveCargoPackageEdition(file);
+		// A workspace 60 directories up is inside the cap: found.
+		fs.writeFileSync(
+			path.join(env.tmpDir, ...Array<string>(10).fill("d"), "Cargo.toml"),
+			'[workspace]\n\n[workspace.package]\nedition = "2021"\n',
+		);
+		expect({
+			beyondCap,
+			inside: await resolveCargoPackageEdition(file),
+		}).toEqual({ beyondCap: undefined, inside: "2021" });
+	});
+
+	it("a relative runner path resolves against the ancestors of a link-spelled cwd's target", (ctx) => {
+		// RECURRENCE GUARDED: `resolveAgainstAncestors` climbed the cwd's
+		// spelling, so a tool run in `pkg-a/lib -> pkg-b/lib` that reported
+		// `marker.txt` was credited to `pkg-a/marker.txt`, a file of the other
+		// package; the kernel resolves the tool's `..` through `pkg-b`.
+		const t = tree("runner-path");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		fs.writeFileSync(path.join(t.pkgA, "marker.txt"), "a\n");
+		fs.writeFileSync(path.join(t.pkgB, "marker.txt"), "b\n");
+		const expected = normalizeMapKey(path.join(real(t.pkgB), "marker.txt"));
+		expect({
+			throughLink: resolveRunnerPath(t.dirLink, "marker.txt"),
+			throughTarget: resolveRunnerPath(path.join(t.pkgB, "lib"), "marker.txt"),
+		}).toEqual({ throughLink: expected, throughTarget: expected });
+	});
+
+	it("the package root of a module reached through a directory link is the target's", (ctx) => {
+		// RECURRENCE GUARDED: `getPackageRoot` climbed the URL's spelling, so a
+		// module at `pkg-a/lib/x.js -> pkg-b/lib/x.js` rooted at `pkg-a` and
+		// read the other package's rules, grammars and configs.
+		const t = tree("package-root");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		const url = (dir: string) => pathToFileURL(path.join(dir, "x.js")).href;
+		expect({
+			throughLink: getPackageRoot(url(t.dirLink)),
+			throughTarget: getPackageRoot(url(path.join(t.pkgB, "lib"))),
+		}).toEqual({ throughLink: real(t.pkgB), throughTarget: real(t.pkgB) });
 	});
 });
