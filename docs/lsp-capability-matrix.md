@@ -281,6 +281,60 @@ and were characterized `push-only` in the run above).
   is not the bottleneck. The cost on a clean with-auxiliary touch is the *silent
   primary* (typescript), a pre-existing Tier-3 cost independent of ast-grep.
 
+## Save-triggered servers: per-server verdict (#3405)
+
+Population: every server that declares `textDocumentSync.save` in
+`docs/servercapabilities.md` (15 `save`, 5 `save+text`), plus zizmor, which
+registers `textDocument/didSave` dynamically. Verdicts are moved from the #4768
+PR body (merged as 11cf30f8d) and re-read on origin/master d21f7d267: each
+server's registry entry is in `clients/lsp/server.ts`, and each save declaration
+matches `docs/servercapabilities.md`. `publishes after save only` is `no` when
+the server publishes without a save, `yes` when only a save publishes, and
+`unknown` when nothing was measured. A `source` row cites an external
+repository at the pinned commit; those commits were not re-fetched here.
+
+| server | save as declared | publishes after save only | verdict | evidence |
+|---|---|---|---|---|
+| expert | `save` | no | Measured: answers with no `didSave` once the seed is under `lib/`. Gated (`lspGate: true`). | #4768 arms A, B, C; nightly run 39852672584 (answered on call 6, 10955 ms); `tests/fixtures/nightly-floors/expert-readiness.json` |
+| cpp (clangd 22.1.0) | `save` | no | Measured: publishes on `didOpen` alone (97 ms, 3 diagnostics). Gated. Open conflict with #4527, see note 2. | #4768 local probe; #4527 wire scenario (issue comment) |
+| lua | `save` | no | Measured: the first publish carries 6 diagnostics at 135 ms; a save adds a late republish at 3.7 s. Gated. | #4768 local probe |
+| python-jedi | `save` | no | Measured: publishes on `didOpen` alone (about 1 s). Gated. | #4768 local probe; `clients/python-environment.ts:421` (id) |
+| opengrep (aux) | `save` | no | Measured: a save rescans and republishes (#3482); it also publishes on open once its rules load. Auxiliary, not gated. | `clients/lsp/wait-policy/strategies.ts:100`; Key findings above (#4763) |
+| gleam | `save` | no | Source: a save only marks the project changed and drops the in-memory cache; the publish comes from `CompilePlease`. Gated. | gleam-lang/gleam `0d9fa18ddb69`, `language-server/src/server.rs` (`SourceFileSaved`, `discard_in_memory_cache`, `compile_please`) |
+| go (gopls) | `save` | no | Source: `DidSave` calls `didModifyFiles`, the path a change takes. Gated. | golang/tools `02c9e4cb4c2f`, `gopls/internal/server/text_synchronization.go` |
+| zig (zls) | `save` | no | Source: a save runs the build-on-save watch update and autofix; ast-check diagnostics come from changes. Gated. | zigtools/zls `82ba5351ca8a`, `src/Server.zig` (`saveDocumentHandler`) |
+| rust (rust-analyzer) | `save` | no | Source: a save starts flycheck (`cargo check`); native diagnostics come from pull mode and do not wait for it. Exempt: runner availability. | rust-lang/rust-analyzer `0c4d74686b21`, `crates/rust-analyzer/src/handlers/notification.rs` (`handle_did_save_text_document`); matrix tier 1 |
+| terraform | `save` | no | Source: `terraform validate` runs on save only with the experimental `ValidateOnSave`, off by default. Gated. | hashicorp/terraform-ls `3dbe85a2b4e1`, `internal/langserver/handlers/did_save.go` |
+| fsharp | `save+text` | no | Source: a save holds the source and refreshes code lenses; diagnostics come from open and change checks. Exempt: 0 findings in every run. | ionide/FsAutoComplete `8f011f1395a4`, `src/FsAutoComplete/LspServers/AdaptiveFSharpLspServer.fs` (`TextDocumentDidSave`); nightly run 39845687189 |
+| zizmor (dynamic) | not declared (`textDocumentSync` only) | no | Source: `didSave` is registered dynamically and pi-lens does not map that registration, so no save is sent. Auxiliary. | zizmor `crates/zizmor/src/lsp.rs` (`initialized`); `clients/lsp/wait-policy/strategies.ts:400-410` (#3548) |
+| clojure | `save+text` | unknown | Unverified: not measured. Gated; one save per write. | none |
+| fish | `save+text` | unknown | Unverified: not measured. Gated; one save per write. | none |
+| tinymist | `save` | unknown | Unverified: not measured. Gated (typst fixture); one save per write. | none |
+| cue | `save` | unknown | Unverified: not measured. Gated; one save per write. | none |
+| csharp | `save+text` | unknown | Unverified: not measured. Pull mode, so diagnostics are requested and a save is unlikely to be the only trigger. Gated. | matrix row (csharp-ls, tier 1) |
+| deno | `save` | unknown | Unverified: not measured. Pull mode. Gated. | matrix row (deno, tier 1) |
+| svelte | `save` | unknown | Unverified: not measured. Pull mode. Gated. | matrix row (svelte-language-server, tier 1) |
+| powershell | `save+text` | unknown | Unverified: not measured. Exempt: intermittent. | none |
+| cmake | `save` | unknown | Unverified: the local probe published nothing in either arm (12 s each) with an `if(` seed, so inconclusive. Exempt: upstream documents no diagnostics. | #4768 local probe (no named command) |
+
+Notes.
+
+1. Probe. The only command #4768 names is `node scripts/smoke-tools.mjs --lsp-gate`
+   (the nightly `tool-smoke.yml` step "LSP diagnostics clean-gate"). It runs
+   the gated fixture rows and does not write per-server save verdicts. The local
+   probes behind the cpp, lua, python-jedi and cmake rows, and the Expert arms
+   run outside CI, are not named in #4768's body, so no command regenerates this
+   table. Each row cites its own evidence instead.
+2. Open conflict, cpp. #4527 records a clangd 22.1.0 wire scenario in which the
+   save sender changes the outcome (base 1 of 5, head 5 of 5). #4768 records clangd
+   publishing on `didOpen` alone. The two records are not reconciled here; the row
+   keeps #4768's verdict.
+3. Citations corrected against master. #4768 cites `clients/lsp/client.ts:4410`
+   for `sendDidSave`; it is at `clients/lsp/client.ts:4909`, with the save-capability
+   gate at line 4917. The opengrep rescan claim is at
+   `clients/lsp/wait-policy/strategies.ts:100`; line 345 is the
+   `emptyUntilRulesRefreshed` hold.
+
 ## Completing the matrix
 The fixtures (`tests/fixtures/tool-smoke/<lang>/`) are durable and cover every
 registered server. `mode` is read from the server's advertised capabilities at
