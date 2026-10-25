@@ -946,8 +946,9 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 	it("refuses an upload a composite action hides from its caller", () => {
 		const findings = findingsFor(compositePlant());
 
-		expect(findings).toHaveLength(1);
-		expect(findings[0]).toContain("composite action");
+		expect(findings).toEqual([
+			"fixture.yml: runs.steps: pr-inputs: an upload step inside a composite action is staged by its calling job, so whether it drops a dot path cannot be derived here; set include-hidden-files: true",
+		]);
 	});
 
 	it("admits a composite action upload that sets the key", () => {
