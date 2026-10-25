@@ -90,15 +90,6 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => {
 	};
 });
 
-vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/dispatch/integration.js")
-	>()),
-	dispatchLintWithResult: vi.fn(),
-	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
-}));
-import { dispatchLintWithResult } from "../../clients/dispatch/integration.js";
-
 const ORIGINAL = "fn main() { let x = 1; }\n";
 const TOOL_FIXED = "fn main() { let _x = 1; }\n";
 
@@ -139,18 +130,6 @@ describe("pipeline changed-file discriminator keys by path identity (#4689)", ()
 		}
 		aliasMain = path.join(tmpDir, "crate-alias", "src", "main.rs");
 		await installLspServiceDouble(null);
-		vi.mocked(dispatchLintWithResult).mockReset();
-		vi.mocked(dispatchLintWithResult).mockResolvedValue({
-			diagnostics: [],
-			blockers: [],
-			warnings: [],
-			baselineWarningCount: 0,
-			fixed: [],
-			resolvedCount: 0,
-			output: "",
-			blockerOutput: "",
-			hasBlockers: false,
-		});
 	});
 
 	afterEach(() => {
