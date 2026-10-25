@@ -32,6 +32,7 @@ import {
 	mkdtempSync,
 	openSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 	unlinkSync,
@@ -2650,6 +2651,143 @@ describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () =>
 				expect(result.status).toBe(2);
 			},
 		);
+
+		// #4057: bash expands node's file word from the shell's own variables
+		// before an inline prefix applies, as it does git's (#3997), while node
+		// reads PI_LENS_HOME from its own environment, prefix included. Measured
+		// on /bin/bash 3.2: with R=a in the shell, `R=b PI_LENS_HOME=/h node
+		// $R/dist/x.js` ran a's script, and the script saw PI_LENS_HOME=/h. Each
+		// row sets the hook's ambient value itself and runs the real hook.
+		it.each([
+			{
+				label: "an inline HOME= does not move ~ out of this repository",
+				command: "HOME=@OTHER@ node ~/clients/probe.mjs",
+				ambient: { HOME: "@REPO@" },
+				rule: "probe",
+			},
+			{
+				label: "an inline HOME= does not move ~ into this repository",
+				command: "HOME=@REPO@ node ~/clients/probe.mjs",
+				ambient: { HOME: "@OTHER@" },
+				rule: null,
+			},
+			{
+				label:
+					"an inline VAR= does not move a $VAR file out of this repository",
+				command: "LANE_4057=@OTHER@ node $LANE_4057/dist/cli.js",
+				ambient: { LANE_4057: "@REPO@" },
+				rule: "probe",
+			},
+			{
+				label: "an inline VAR= does not move a $VAR file into this repository",
+				command: "LANE_4057=@REPO@ node $LANE_4057/dist/cli.js",
+				ambient: { LANE_4057: "@OTHER@" },
+				rule: null,
+			},
+			{
+				label: "an inline PI_LENS_HOME= still pins the probe node runs",
+				command:
+					"PI_LENS_HOME=/x/.probe-home LANE_4057=@OTHER@ node $LANE_4057/clients/probe.mjs",
+				ambient: { LANE_4057: "@REPO@" },
+				rule: null,
+			},
+		] as Array<{
+			label: string;
+			command: string;
+			ambient: Record<string, string>;
+			rule: DenyRule | null;
+		}>)("$label (#4057)", ({ command, ambient, rule }) => {
+			const fill = (text: string) =>
+				text.replaceAll("@REPO@", repoRoot).replaceAll("@OTHER@", otherRepo);
+			const result = runHook(
+				fill(command),
+				{
+					...BASE_ENV,
+					...Object.fromEntries(
+						Object.entries(ambient).map(([key, value]) => [key, fill(value)]),
+					),
+				},
+				foreignDir,
+			);
+			expect(result.stderr).toBe(
+				rule === null ? "" : `${RULE_MESSAGES[rule]}\n`,
+			);
+			expect(result.status).toBe(rule === null ? 0 : 2);
+		});
+
+		// #4057 accepted residual: neither the shell nor the hook's env has
+		// LANE_4057, so bash expands `$LANE_4057` to the empty string and node
+		// runs `/clients/probe.mjs`. expandShellWord leaves an unknown `$NAME` in
+		// place, and loadsPiLensRuntime resolves that leftover under this
+		// repository, so the hook denies, as master does for the same word with no
+		// prefix. Master allowed the prefixed form only by expanding the prefix.
+		it.each([
+			{
+				label: "an inline VAR= does not resolve an unknown $VAR file word",
+				command:
+					"LANE_4057=/home/dev/guard-bash-4057-lane node $LANE_4057/clients/probe.mjs",
+			},
+			{
+				label: "an unknown $VAR file word with no prefix",
+				command: "node $LANE_4057/clients/probe.mjs",
+			},
+		])("$label reads as relative to this repository (#4057)", ({ command }) => {
+			const result = runHook(
+				command,
+				Object.fromEntries(
+					Object.entries(BASE_ENV).filter(([key]) => key !== "LANE_4057"),
+				),
+				repoRoot,
+			);
+			expect(result.stderr).toBe(`${RULE_MESSAGES.probe}\n`);
+			expect(result.status).toBe(2);
+		});
+
+		// Recurrence (#4826 review r1 F1): an inline `S=` prefix used to cover
+		// `$S` after an absolute head only because the prefix was expanded into
+		// the word. The shell has no S, so bash hands node `<repo>/clients/…` and
+		// the file loads. The word has two readings, as written and with the
+		// references it cannot resolve removed; either one loading this
+		// repository's runtime denies.
+		it.each([
+			{
+				label: "an unset $S after ${PWD}, S only in the prefix",
+				command: "S= node ${PWD}$S/clients/probe.mjs",
+				rule: "probe" as DenyRule | null,
+			},
+			{
+				label: "an unset $S after ${PWD} with no prefix",
+				command: "node ${PWD}$S/clients/probe.mjs",
+				rule: "probe" as DenyRule | null,
+			},
+			{
+				label: "an unset $S after a resolved $R",
+				command: "R=@REPO@; S= node $R$S/dist/x.js",
+				rule: "probe" as DenyRule | null,
+			},
+			{
+				label: "a ${S:-} after ${PWD}",
+				command: "node ${PWD}${S:-}/clients/probe.mjs",
+				rule: "probe" as DenyRule | null,
+			},
+			{
+				label: "an unset $S after ${PWD} for a file outside clients/ and dist/",
+				command: "S= node ${PWD}$S/scripts/x.mjs",
+				rule: null,
+			},
+		])("$label (#4057)", ({ command, rule }) => {
+			const result = runHook(
+				command.replaceAll("@REPO@", repoRoot),
+				Object.fromEntries(
+					Object.entries(BASE_ENV).filter(([key]) => key !== "S"),
+				),
+				repoRoot,
+			);
+			expect(result.stderr).toBe(
+				rule === null ? "" : `${RULE_MESSAGES[rule]}\n`,
+			);
+			expect(result.status).toBe(rule === null ? 0 : 2);
+		});
 	});
 });
 
@@ -4045,6 +4183,460 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 		});
 		expect(offTmp.stderr).toBe("");
 		expect(offTmp.status).toBe(0);
+	});
+
+	// #4057: mktemp has two TMPDIRs. A word the agent typed (a template, a
+	// `-p` or `--tmpdir=` value, a `~`) is expanded by bash from the shell's own
+	// variables before the inline prefix applies, as git's words are (#3997).
+	// GNU mktemp's own default directory (no template, `-t`, bare `--tmpdir`) is
+	// read from mktemp's environment, so the prefix moves it. The rule models
+	// GNU coreutils mktemp as #3526 measured it (9.4); this change did not re-run
+	// GNU mktemp. Measured on macOS 26.5 (/bin/bash 3.2.57, BSD mktemp from
+	// shell_cmds-329, whose man page lists `-p tmpdir, --tmpdir[=tmpdir]`) with
+	// TMPDIR=a in the shell: `TMPDIR=b mktemp -d $TMPDIR/x.XXXXXX`, `-p $TMPDIR
+	// x.XXXXXX` and `--tmpdir=$TMPDIR x.XXXXXX` landed in a, bare `--tmpdir
+	// x.XXXXXX` landed in b, and no template and `-t` landed in the per-user
+	// temp directory, in neither, so only the GNU model backs those two rows.
+	// Each row sets the hook's ambient TMPDIR (or HOME) itself, so the runner's
+	// own value never decides it, and names only absent directories, which the
+	// hook judges as spelled on every platform.
+	describe("an inline TMPDIR= moves only mktemp's own default (#4057)", () => {
+		const AMBIENT_TMP = "/tmp/guard-bash-4057-ambient";
+		const AMBIENT_OFF = "/home/dev/guard-bash-4057-ambient";
+		const INLINE_TMP = "/tmp/guard-bash-4057-inline";
+		const INLINE_OFF = "/home/dev/guard-bash-4057-inline";
+		// Recurrence (#4826 review r1 F2): the gate admitted a closed list of
+		// spellings that can expand to nothing and was widened twice; each of
+		// these is a parameter expansion bash makes empty for an unset D and the
+		// list missed. Any reference the hook cannot resolve takes both readings.
+		const EMPTY_SPELLINGS = [
+			"${D:-}",
+			"${D-}",
+			"${D%x}",
+			"${D#x}",
+			"${D:+x}",
+			"${D:0:0}",
+			"${D:-${E}}",
+		];
+		// mktemp's own /tmp fallback lands in /tmp itself, which exists. Where
+		// /tmp is a real directory (Linux, CI) the rule denies it. On macOS /tmp
+		// resolves to /private/tmp, which the rule does not count as /tmp
+		// (Accepted residual), so there the same rows pin the allow, as the bare
+		// `mktemp -d` row above shows by failing.
+		const TMP_FALLBACK_RULE: DenyRule | null =
+			realpathSync("/tmp") === "/tmp" ? "tmpCheckout" : null;
+		const ROWS: Array<{
+			label: string;
+			command: string;
+			ambient: Record<string, string>;
+			rule: DenyRule | null;
+		}> = [
+			{
+				label: "a $TMPDIR/ template follows the shell's TMPDIR under /tmp",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d $TMPDIR/x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a $TMPDIR/ template follows the shell's TMPDIR off /tmp",
+				command: `TMPDIR=${INLINE_TMP} mktemp -d $TMPDIR/x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: null,
+			},
+			{
+				label: "a -p $TMPDIR value follows the shell's TMPDIR under /tmp",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d -p $TMPDIR x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label:
+					"a bundled -dp $TMPDIR value follows the shell's TMPDIR off /tmp",
+				command: `TMPDIR=${INLINE_TMP} mktemp -dp "$TMPDIR" x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: null,
+			},
+			{
+				label: "a --tmpdir=$TMPDIR value follows the shell's TMPDIR under /tmp",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d --tmpdir=$TMPDIR x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a --tmpdir=$TMPDIR value follows the shell's TMPDIR off /tmp",
+				command: `TMPDIR=${INLINE_TMP} mktemp -d --tmpdir=$TMPDIR x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: null,
+			},
+			{
+				label: "a ~/ template follows the shell's HOME under /tmp",
+				command: "HOME=/home/dev/guard-bash-4057-home mktemp -d ~/x.XXXXXX",
+				ambient: { HOME: "/tmp/guard-bash-4057-home" },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a ~/ template follows the shell's HOME off /tmp",
+				command: "HOME=/tmp/guard-bash-4057-home mktemp -d ~/x.XXXXXX",
+				ambient: { HOME: "/home/dev/guard-bash-4057-home" },
+				rule: null,
+			},
+			{
+				// The shell has no T, so bash hands mktemp `//x.XXXXXX`.
+				label: "a variable only the prefix sets stays unexpanded in a template",
+				command: "T=tmp/guard-bash-4057 mktemp -d /$T/x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: null,
+			},
+			{
+				label: "an earlier export is the shell's TMPDIR for a typed word",
+				command: `export TMPDIR=/tmp/guard-bash-4057-exported; TMPDIR=${INLINE_OFF} mktemp -d $TMPDIR/x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			// Accepted residual: TMPDIR is unset in the shell and in the hook's env.
+			// Bash expands a typed `$TMPDIR` to the empty string, so mktemp gets
+			// `/guard-bash-4057-unset/…`, but the hook reads lookupShellVariable's
+			// `/tmp` default, as git's words do. The prefix is not consulted. The
+			// absent subdirectory keeps macOS's /tmp symlink out of the verdict.
+			{
+				label: "an unset shell TMPDIR in a template reads the /tmp default",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d $TMPDIR/guard-bash-4057-unset/x.XXXXXX`,
+				ambient: {},
+				rule: "tmpCheckout",
+			},
+			{
+				label: "an unset shell TMPDIR in a -p value reads the /tmp default",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d -p $TMPDIR/guard-bash-4057-unset x.XXXXXX`,
+				ambient: {},
+				rule: "tmpCheckout",
+			},
+			// A `-p`/`--tmpdir=` value or a template that is one variable the shell
+			// does not have expands to nothing. GNU mktemp reads an empty `-p ''` or
+			// `--tmpdir=` as its own `$TMPDIR`, else /tmp (coreutils mktemp.c), and a
+			// vanished template leaves none, which defaults there too. The prefix's
+			// `D` never reaches the word. The ambient TMPDIR is an absent directory,
+			// so macOS's /tmp symlink stays out of the verdict.
+			{
+				label: "-p $D, D only in the prefix: mktemp's TMPDIR under /tmp",
+				command: "D=/tmp/guard-bash-4057-lane mktemp -d -p $D x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "$D", D only in the prefix: mktemp\'s TMPDIR under /tmp',
+				command: 'D=/tmp/guard-bash-4057-lane mktemp -d -p "$D" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "-p ${D}, D only in the prefix: mktemp's TMPDIR under /tmp",
+				command: "D=/tmp/guard-bash-4057-lane mktemp -d -p ${D} x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "--tmpdir=$D, D only in the prefix: mktemp's TMPDIR under /tmp",
+				command: "D=/tmp/guard-bash-4057-lane mktemp -d --tmpdir=$D x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label:
+					"a $D template, D only in the prefix: mktemp's TMPDIR under /tmp",
+				command: "D=/tmp/guard-bash-4057-lane mktemp -d $D",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: 'an empty-assigned -p "$D" reads mktemp\'s TMPDIR under /tmp',
+				command: 'D=; mktemp -d -p "$D" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "-p \"$D\" follows mktemp's TMPDIR off /tmp, not the prefix's D",
+				command: 'D=/tmp/guard-bash-4057-lane mktemp -d -p "$D" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: null,
+			},
+			{
+				label: '-p "$D" with D unset reads the prefix\'s TMPDIR under /tmp',
+				command: `TMPDIR=${INLINE_TMP} mktemp -d -p "$D" x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			// The same holds for any word made only of references the hook cannot
+			// resolve and bash can expand to empty: a positional parameter (the
+			// hook's command has none), `$*`, `$!` before any background job, and a
+			// concatenation of unset variables. `$0` is always set, and a resolved
+			// part keeps the word non-empty, so neither gets the empty reading.
+			{
+				label: '-p "$1", no parameters: mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "$1" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "${1}", no parameters: mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "${1}" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "$*", no parameters: mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "$*" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "$!", no background job: mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "$!" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "--tmpdir=$D$E, both unset: mktemp's TMPDIR under /tmp",
+				command: "mktemp -d --tmpdir=$D$E x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a $D$E template, both unset: mktemp's TMPDIR under /tmp",
+				command: "mktemp -d $D$E",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "$0" is never empty: it stays relative to the cwd',
+				command: 'mktemp -d -p "$0" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			{
+				label: '-p "$X$D" with X off /tmp is never empty',
+				command: 'X=/home/dev/guard-bash-4057-x; mktemp -d -p "$X$D" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			// Recurrence (#4826 review r1 F1): moving the typed words off the prefix
+			// env removed the only cover for an absolute head followed by a variable
+			// the shell lacks. `S` is unset in the shell, so bash hands mktemp
+			// `/tmp/…` and the directory lands under /tmp; the prefix's S is never
+			// read. The unprefixed spelling was already allowed on master.
+			{
+				label: "a /tmp$S template, S only in the prefix, lands under /tmp",
+				command: "S= mktemp -d /tmp$S/guard-bash-4057-f1/x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a /tmp$S template with no prefix lands under /tmp",
+				command: "mktemp -d /tmp$S/guard-bash-4057-f1/x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "-p /tmp$S, S only in the prefix, lands under /tmp",
+				command: "S= mktemp -d -p /tmp$S/guard-bash-4057-f1 x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "--tmpdir=/tmp$S, S only in the prefix, lands under /tmp",
+				command: "S= mktemp -d --tmpdir=/tmp$S/guard-bash-4057-f1 x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a /home$S template stays off /tmp",
+				command: "S= mktemp -d /home$S/dev/guard-bash-4057-f1/x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			// Recurrence (#4826 review r1 F2): see EMPTY_SPELLINGS. Quotes are gone
+			// by the time the hook reads the word, so the quoted spelling stands for
+			// the unquoted one too.
+			...EMPTY_SPELLINGS.flatMap((spelling) => [
+				{
+					label: `-p "${spelling}" reads mktemp's TMPDIR under /tmp`,
+					command: `mktemp -d -p "${spelling}" x.XXXXXX`,
+					ambient: { TMPDIR: AMBIENT_TMP },
+					rule: "tmpCheckout" as DenyRule | null,
+				},
+				{
+					label: `-p "${spelling}" follows mktemp's TMPDIR off /tmp`,
+					command: `mktemp -d -p "${spelling}" x.XXXXXX`,
+					ambient: { TMPDIR: AMBIENT_OFF },
+					rule: null as DenyRule | null,
+				},
+			]),
+			{
+				label: '--tmpdir="${D-}" reads mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d --tmpdir="${D-}" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: 'a "${D-}" template reads mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d "${D-}"',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label:
+					'a quoted backtick -p "`true`" reads mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "`true`" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			// Parser-hostile words: an unterminated or unparseable reference is a
+			// reference the hook cannot resolve, so it neither throws nor allows.
+			{
+				label: "-p '${' (unterminated brace) reads mktemp's TMPDIR under /tmp",
+				command: "mktemp -d -p '${' x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label:
+					"-p '$((1+1' (unterminated arithmetic) reads mktemp's TMPDIR under /tmp",
+				command: "mktemp -d -p '$((1+1' x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: '-p "${!D}" (indirection) reads mktemp\'s TMPDIR under /tmp',
+				command: 'mktemp -d -p "${!D}" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label:
+					"-p ~nosuch (unresolvable ~user) reads mktemp's TMPDIR under /tmp",
+				command: "mktemp -d -p ~guardbash4057nosuch x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a lone backtick in a -p value reads mktemp's TMPDIR under /tmp",
+				command: "mktemp -d -p '`' x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: "tmpCheckout",
+			},
+			// GNU mktemp reads TMPDIR only when it is set and non-empty, else
+			// /tmp (coreutils mktemp.c: `env && *env`), so an empty TMPDIR in
+			// mktemp's own env, from the prefix or the ambient env, is /tmp for its
+			// default directory (TMP_FALLBACK_RULE).
+			{
+				label: "an empty TMPDIR= with no template falls back to /tmp",
+				command: "TMPDIR= mktemp -d",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: "an empty TMPDIR= with -t falls back to /tmp",
+				command: "TMPDIR= mktemp -d -t x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: "an empty TMPDIR= with bare --tmpdir falls back to /tmp",
+				command: "TMPDIR= mktemp -d --tmpdir x.XXXXXX",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: 'an empty TMPDIR= with -p "" falls back to /tmp',
+				command: 'TMPDIR= mktemp -d -p "" x.XXXXXX',
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: "an empty TMPDIR (ambient) with no template falls back to /tmp",
+				command: "mktemp -d",
+				ambient: { TMPDIR: "" },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label: "an empty TMPDIR from TMPDIR=$X, X unset, falls back to /tmp",
+				command: "TMPDIR=$X mktemp -d",
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label:
+					"an empty TMPDIR (ambient) with bare --tmpdir falls back to /tmp",
+				command: "mktemp -d --tmpdir x.XXXXXX",
+				ambient: { TMPDIR: "" },
+				rule: TMP_FALLBACK_RULE,
+			},
+			{
+				label:
+					"a non-empty prefix over an empty TMPDIR (ambient) follows the prefix",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d`,
+				ambient: { TMPDIR: "" },
+				rule: null,
+			},
+			{
+				label: "no template lands in the prefix's TMPDIR under /tmp",
+				command: `TMPDIR=${INLINE_TMP} mktemp -d`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "no template lands in the prefix's TMPDIR off /tmp",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d`,
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			{
+				label: "-t lands in the prefix's TMPDIR under /tmp",
+				command: `TMPDIR=${INLINE_TMP} mktemp -d -t x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "-t lands in the prefix's TMPDIR off /tmp",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d -t x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			{
+				label: "a bundled -dt lands in the prefix's TMPDIR under /tmp",
+				command: `TMPDIR=${INLINE_TMP} mktemp -dt x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "a bundled -dt lands in the prefix's TMPDIR off /tmp",
+				command: `TMPDIR=${INLINE_OFF} mktemp -dt x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+			{
+				label: "bare --tmpdir lands in the prefix's TMPDIR under /tmp",
+				command: `TMPDIR=${INLINE_TMP} mktemp -d --tmpdir x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_OFF },
+				rule: "tmpCheckout",
+			},
+			{
+				label: "bare --tmpdir lands in the prefix's TMPDIR off /tmp",
+				command: `TMPDIR=${INLINE_OFF} mktemp -d --tmpdir x.XXXXXX`,
+				ambient: { TMPDIR: AMBIENT_TMP },
+				rule: null,
+			},
+		];
+
+		it.each(ROWS)("$label", ({ command, ambient, rule }) => {
+			const result = runHook(command, {
+				...NO_AMBIENT_TMPDIR_ENV,
+				...ambient,
+			});
+			expect(result.stderr).toBe(
+				rule === null ? "" : `${RULE_MESSAGES[rule]}\n`,
+			);
+			expect(result.status).toBe(rule === null ? 0 : 2);
+		});
 	});
 
 	it("a /tmp string inside a comment, a heredoc body, or echo text never trips the rule -- this rule reads argv WORDS, not raw text", () => {

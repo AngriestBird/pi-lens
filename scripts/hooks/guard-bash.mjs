@@ -126,11 +126,13 @@
  * are expanded the way bash would before the program sees them, then a relative
  * result resolves against the command's EFFECTIVE cwd (a preceding `cd`, a
  * `git -C`, else the payload cwd; a `cd` inside `( … )` does not leak out).
- * Bash expands git's path words before an inline `VAR=val` prefix applies,
- * so they are expanded without it, while git's own env check (`HUSKY=0`)
- * still sees it (#3997; `mktemp` and `node` words still see the prefix, as
- * on master). A path git or mktemp hands the kernel is resolved
- * physically, a `cd` target logically (#3997 H3). A path that cannot be
+ * Bash expands git's, mktemp's and node's path words before an inline
+ * `VAR=val` prefix applies, so they are expanded without it, while what the
+ * program reads from its own env still sees it: git's hook-bypass check
+ * (`HUSKY=0`), GNU mktemp's default `$TMPDIR` (no template, `-t`, bare
+ * `--tmpdir`; the rule models GNU mktemp), and node's `PI_LENS_HOME` (#3997,
+ * #4057). A path git or mktemp hands the kernel is resolved physically, a
+ * `cd` target logically (#3997 H3). A path that cannot be
  * resolved statically (`$(…)`/backticks, `~user`, a variable with no known
  * value, a glob, a cwd made unknown by an unresolvable `cd`) makes
  * `git worktree remove` fail CLOSED (`worktreeUnresolved`); the tmp-checkout
@@ -1220,8 +1222,9 @@ const SUBSTITUTION_MARK = String.fromCharCode(0xe000);
  * The value `$NAME` expands to, or `undefined` when this static scan cannot
  * know it. `PWD` is the command's effective cwd. The command's variables
  * (`env`: the `export` and standalone `VAR=val` segments carried forward in
- * `sharedEnv`, #2699 review round 2 F2, plus the inline prefix for `mktemp`
- * and `node`; never for git's words, #3997 F4) win; then THIS hook's `process.env`,
+ * `sharedEnv`, #2699 review round 2 F2, plus the inline prefix only for
+ * GNU mktemp's own default `$TMPDIR`; never for a word bash expanded, #3997 F4,
+ * #4057) win; then THIS hook's `process.env`,
  * because the guard runs as a real child process inheriting the shell's
  * ambient environment (measured: a bare `mktemp -d` with an ambient,
  * non-command-text `TMPDIR` pointed off /tmp must allow). `TMPDIR`/`TMP`/
@@ -2011,6 +2014,13 @@ function classifyNpm(cmd, args, cwd, env) {
  *   - No template at all -- lands in `$TMPDIR`, or `/tmp` when unset
  *     (measured); folded through the same `$TMPDIR`-sentinel path.
  *
+ * The `$TMPDIR` sentinel (no template, `-t` with a relative template, bare
+ * `--tmpdir`) is GNU mktemp's own env read, so it expands with the inline
+ * `TMPDIR=` prefix, and an empty TMPDIR falls back to /tmp as an unset one
+ * does. Every word the command typed (a template, a
+ * `-p`/`--tmpdir=` value) was expanded by bash before that prefix applied, so
+ * it expands without it (#4057).
+ *
  * @param {string[]} args
  * @param {string | undefined} cwd
  * @param {Record<string, string>} env
@@ -2050,17 +2060,68 @@ function forEachBundledMktempFlag(a, handlers) {
 }
 
 /**
+ * The readings of a typed word (#4057, #4826): {@link expandShellWord}'s text
+ * as written, and, when that text still holds a reference this scan cannot
+ * resolve, the same text with each such reference removed, as if bash had
+ * expanded it to nothing. A rule that judges where the word lands reads both
+ * and denies when either denies, as {@link findDeny} reads a substitution
+ * (#3997). The gate admits no list of spellings that can be empty: a reference
+ * left unresolved after expansion is unknown, whatever its form. Removed: any
+ * `$NAME`, `${ … }` (nested braces too; an unterminated one runs to the end of
+ * the word), `$( … )` and `$(( … ))`, a positional `$1`-`$9`, `$@`, `$*`,
+ * `$!`, a backtick span, and a `~user`/`~+`/`~-` tilde. Kept as written: `$0`,
+ * `$#`, `$$`, `$?`, `$-` and a lone `$`, which bash always sets to something.
+ *
+ * @param {string} word
+ * @param {string | null | undefined} cwd
+ * @param {Record<string, string>} env see {@link lookupShellVariable}
+ * @returns {string[]} one reading, or two when the word holds an unresolved reference
+ */
+function expandShellReadings(word, cwd, env) {
+	const { text } = expandShellWord(word, cwd, env);
+	const unresolved = text.replace(/^~[^/]*/, "");
+	let bare = "";
+	for (let i = 0; i < unresolved.length; i++) {
+		const ch = unresolved[i];
+		const next = unresolved[i + 1] ?? "";
+		if (ch === "`") {
+			const close = unresolved.indexOf("`", i + 1);
+			i = close === -1 ? unresolved.length : close;
+		} else if (ch === "$" && (next === "{" || next === "(")) {
+			const close = next === "{" ? "}" : ")";
+			let depth = 0;
+			let end = i + 1;
+			for (; end < unresolved.length; end++) {
+				if (unresolved[end] === next) depth++;
+				else if (unresolved[end] === close && --depth === 0) break;
+			}
+			i = end;
+		} else if (ch === "$" && /[A-Za-z_]/.test(next)) {
+			i++;
+			while (/[A-Za-z0-9_]/.test(unresolved[i + 1] ?? "")) i++;
+		} else if (ch === "$" && /[1-9@*!]/.test(next)) {
+			i++;
+		} else bare += ch;
+	}
+	return bare === text ? [text] : [text, bare];
+}
+
+/**
  * Classify an `mktemp` invocation's args for #3526's `tmpCheckout` rule.
  * File-mode (no `-d`/`--directory`, bundled or not) always allows.
  *
  * @param {string[]} args
  * @param {string | undefined} cwd
- * @param {Record<string, string>} env
+ * @param {Record<string, string>} env mktemp's own env, inline `VAR=val` prefix included (GNU mktemp's default `$TMPDIR` reads it)
+ * @param {Record<string, string>} [expansionEnv] the shell variables bash expanded the typed words with: the inline prefix applies only after expansion (#4057)
  * @returns {DenyRule | null}
  */
-function classifyMktemp(args, cwd, env) {
+function classifyMktemp(args, cwd, env, expansionEnv = env) {
 	let isDir = false;
-	/** @type {string | undefined} */
+	// The `-p`/`--tmpdir` directory and the variables it expands with: a typed
+	// value is a word bash expanded, and bare `--tmpdir` is GNU mktemp's own
+	// `$TMPDIR`, read from its own env (#4057).
+	/** @type {{ dir: string | undefined; env: Record<string, string> } | undefined} */
 	let tmpdirOverride;
 	/** @type {string | undefined} */
 	let template;
@@ -2075,12 +2136,15 @@ function classifyMktemp(args, cwd, env) {
 		const a = args[i];
 		if (a === "--tmpdir") {
 			// Bare form (no "="): GNU mktemp's own "use $TMPDIR" spelling.
-			tmpdirOverride = "$TMPDIR";
+			tmpdirOverride = { dir: "$TMPDIR", env };
 			i++;
 			continue;
 		}
 		if (a.startsWith("--tmpdir=")) {
-			tmpdirOverride = a.slice("--tmpdir=".length);
+			tmpdirOverride = {
+				dir: a.slice("--tmpdir=".length),
+				env: expansionEnv,
+			};
 			i++;
 			continue;
 		}
@@ -2100,7 +2164,7 @@ function classifyMktemp(args, cwd, env) {
 			});
 			i++;
 			if (needsTmpdirValue) {
-				tmpdirOverride = args[i];
+				tmpdirOverride = { dir: args[i], env: expansionEnv };
 				i++;
 			}
 			continue;
@@ -2117,19 +2181,45 @@ function classifyMktemp(args, cwd, env) {
 		i++;
 	}
 	if (!isDir) return null;
-	// #3988: bash expands `~`/`$TMPDIR`/`$HOME` in the template BEFORE mktemp
-	// sees it, so `$TMPDIR/x.XXXXXX` is an ABSOLUTE template, not a relative
-	// one that lands in cwd.
-	if (template !== undefined)
-		template = expandShellWord(template, cwd, env).text;
-	/** @type {string} */
-	let targetDir;
-	if (tmpdirOverride !== undefined) targetDir = tmpdirOverride;
-	else if (template !== undefined && isAbsolute(template))
-		targetDir = dirname(template);
-	else if (template === undefined || forceTmpdirRelative) targetDir = "$TMPDIR";
-	else targetDir = cwd ?? process.cwd();
-	return isUnderTmpRoot(resolveShellPath(targetDir, cwd, env).path)
+	// Where the directory can land, every reading of every word that decides
+	// it ({@link expandShellReadings}; the first reading that lands under /tmp
+	// denies). #3988: bash expands `~`/`$TMPDIR`/`$HOME` in a typed word
+	// BEFORE mktemp sees it, so `$TMPDIR/x.XXXXXX` is an ABSOLUTE template, not
+	// a relative one that lands in cwd; it expands them before an inline
+	// prefix applies (#4057). A reading that is empty lands in mktemp's own
+	// default directory: GNU mktemp takes an empty `-p ''`/`--tmpdir=` as its
+	// `$TMPDIR`, and takes an empty or unset `$TMPDIR` as /tmp (coreutils
+	// mktemp.c: `env && *env ? env : "/tmp"`). Quotes are gone by now, so
+	// `-p "$D"` and `-p $D` read alike.
+	const defaultDirs = () =>
+		expandShellReadings("$TMPDIR", cwd, env).map((dir) =>
+			dir === "" ? TMP_ROOT : dir,
+		);
+	/** @type {string[]} */
+	let targetDirs;
+	if (tmpdirOverride?.dir !== undefined)
+		targetDirs = expandShellReadings(
+			tmpdirOverride.dir,
+			cwd,
+			tmpdirOverride.env,
+		).flatMap((dir) => (dir === "" ? defaultDirs() : [dir]));
+	else if (template === undefined) targetDirs = defaultDirs();
+	else
+		targetDirs = expandShellReadings(template, cwd, expansionEnv).flatMap(
+			(text) => {
+				if (isAbsolute(text)) return [dirname(text)];
+				// `-t` roots a relative template at $TMPDIR; so does a template
+				// that vanished. Otherwise it lands in mktemp's cwd.
+				return forceTmpdirRelative || text === ""
+					? defaultDirs()
+					: [cwd ?? process.cwd()];
+			},
+		);
+	// The words are expanded already; what is left in them is unresolved in
+	// every environment, so the prefix is never consulted again (#4057).
+	return targetDirs.some((dir) =>
+		isUnderTmpRoot(resolveShellPath(dir, cwd, {}).path),
+	)
 		? "tmpCheckout"
 		: null;
 }
@@ -2509,13 +2599,21 @@ const RUNTIME_LOAD_PATTERN =
  * own env assignments nor `process.env` carries `PI_LENS_HOME`.
  *
  * @param {string[]} args
- * @param {Record<string, string>} env
+ * @param {Record<string, string>} env node's own env, inline `VAR=val` prefix included (the `PI_LENS_HOME` check reads it)
  * @param {string} rawSegment
  * @param {string | null | undefined} cwd
  * @param {string | undefined} initialIdentity
+ * @param {Record<string, string>} [expansionEnv] the shell variables bash expanded the file word with: the inline prefix applies only after expansion (#4057)
  * @returns {DenyRule | null}
  */
-function classifyNode(args, env, rawSegment, cwd, initialIdentity) {
+function classifyNode(
+	args,
+	env,
+	rawSegment,
+	cwd,
+	initialIdentity,
+	expansionEnv = env,
+) {
 	const hasFlag = args.some(
 		(a) =>
 			a === "-e" ||
@@ -2528,16 +2626,20 @@ function classifyNode(args, env, rawSegment, cwd, initialIdentity) {
 		(a) => !a.startsWith("-") && /\.(?:mjs|js)$/.test(a),
 	);
 	// #3988: the FILE argument is a shell word (`~/r/dist/x.mjs`, `$HOME/…`),
-	// so it is expanded like every other path argument; an `-e` payload's
-	// specifiers are JavaScript, which no shell expansion reaches.
-	const fileArg =
-		fileArgWord === undefined
-			? undefined
-			: expandShellWord(fileArgWord, cwd, env).text;
+	// so it is expanded like every other path argument, before an inline
+	// prefix applies (#4057). Two words are not expanded here, as on master:
+	// the `-e`/`-p` payload is matched as raw segment text, though bash still
+	// expands a `$NAME` inside a double-quoted payload, and an attached
+	// `--require=`/`--import=`/`--loader=` value is a flag to this scan, never
+	// the file word.
 	const fileArgLoadsRuntimeCode =
-		fileArg !== undefined &&
-		(fileArgUnderDir(fileArg, "clients") || fileArgUnderDir(fileArg, "dist")) &&
-		loadsPiLensRuntime(fileArg, cwd, initialIdentity);
+		fileArgWord !== undefined &&
+		expandShellReadings(fileArgWord, cwd, expansionEnv).some(
+			(fileArg) =>
+				(fileArgUnderDir(fileArg, "clients") ||
+					fileArgUnderDir(fileArg, "dist")) &&
+				loadsPiLensRuntime(fileArg, cwd, initialIdentity),
+		);
 	const evalPayloadLoadsRuntimeCode =
 		hasFlag &&
 		[...rawSegment.matchAll(RUNTIME_LOAD_PATTERN)].some((match) =>
@@ -2762,8 +2864,9 @@ export function classifySegment(
 	const effectiveEnv = { ...sharedEnv, ...segmentEnv };
 	const cmd = commandBasename(rest[0]);
 	const args = rest.slice(1);
-	// git reads its env with the inline prefix (`HUSKY=0 git commit`), but bash
-	// expanded git's path words before that prefix applied (#3997 H1, F4).
+	// git, node and mktemp read their env with the inline prefix (`HUSKY=0 git
+	// commit`, `PI_LENS_HOME=…`, GNU mktemp's default `$TMPDIR`), but bash expanded
+	// their path words before that prefix applied (#3997 H1, F4; #4057).
 	if (cmd === "git") return classifyGit(args, cwd, effectiveEnv, sharedEnv);
 	if (cmd === "node" || cmd === "nodejs")
 		return classifyNode(
@@ -2772,6 +2875,7 @@ export function classifySegment(
 			rawSegment,
 			cwd,
 			repositoryIdentity(repositoryRoot(originCwd)),
+			sharedEnv,
 		);
 	// #4044: a `cd` this scan could not resolve leaves `cwd === null`. The
 	// node_modules rules then judge the PAYLOAD cwd, failing closed: a linked
@@ -2782,7 +2886,8 @@ export function classifySegment(
 		return classifyNpm(cmd, args, projectCwd, sharedEnv);
 	if (cmd === "find" || DELETE_COMMANDS.has(cmd))
 		return classifyNodeModulesDelete(cmd, args, projectCwd, sharedEnv);
-	if (cmd === "mktemp") return classifyMktemp(args, cwd, effectiveEnv);
+	if (cmd === "mktemp")
+		return classifyMktemp(args, cwd, effectiveEnv, sharedEnv);
 	if (SHARED_KILL_COMMANDS.has(cmd))
 		return classifyPkillKillall(cmd, args, cwd);
 	return null;
