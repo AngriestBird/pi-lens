@@ -130,6 +130,7 @@ import { dispatchLintWithResult } from "../../clients/dispatch/integration.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 import { readNdjsonRows } from "../support/ndjson-rows.js";
+import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 
 function gate() {
 	let open!: () => void;
@@ -747,124 +748,131 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 	// Recurrence: #3915 verify round 2 (F6). The case above never fires the
 	// bound, so the post-bound path where a throwing notify was swallowed with
 	// no record was proven only by probe. This variant holds a.rs past the bound.
-	it("records the loss-notice failure once when the bound fired first (#3915)", async () => {
-		const aRs = path.join(srcDir, "a.rs");
-		const started = gate();
-		const proceed = gate();
-		const held = gate();
-		const release = gate();
-		fake.clippy = async () => {
-			started.open();
-			await proceed.p;
-			return 0;
-		};
-		const runtime = new RuntimeCoordinator();
-		runtime.projectRoot = tmpDir;
-		runtime.deferMutation(mainRs, tmpDir, "edit", tmpDir, "autofix");
-		let settled = false;
-		let holder: Promise<void> | undefined;
-		const previousTestMode = process.env.PI_LENS_TEST_MODE;
-		await latencyLogger.flushLatencyLog();
-		const logPath = latencyLogger.getLatencyLogPath();
-		const fromByte = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
-		const drain = handleAgentEnd({
-			ctxCwd: tmpDir,
-			getFlag: (name: string) => name === "no-lsp",
-			notify: () => {
-				throw new Error("notify exploded");
-			},
-			dbg: () => {},
-			runtime,
-			cacheManager: { addModifiedRange: vi.fn() } as never,
-			biomeClient: {} as never,
-			ruffClient: {} as never,
-			getFormatService: () =>
-				({
-					recordRead: () => {},
-					formatFile: async (filePath: string) => ({
-						filePath,
-						formatters: [],
-						anyChanged: false,
-						allSucceeded: true,
-					}),
-				}) as never,
-		}).then(() => {
-			settled = true;
-		});
-		try {
-			// These assertions read the real sink, suppressed by default in Vitest.
-			process.env.PI_LENS_TEST_MODE = "0";
-			await started.p;
-			const edit = agentEdit(aRs, "let AGENT = 1;");
-			edit.write();
-			fs.writeFileSync(aRs, TOOL_FIXED);
-			await edit.deliver();
-			holder = withFileMutationQueue(aRs, async () => {
-				held.open();
-				await release.p;
-			});
-			await held.p;
-			// Fake only the timer APIs. Keep fs and setImmediate real.
-			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-			proceed.open();
-			// A real queue witness: the drain released its target hold.
-			await withFileMutationQueue(mainRs, async () => {});
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			expect(settled).toBe(false);
-			// The bound is armed after the drain's real I/O (the fixer's restore),
-			// which no production event announces. Recurrence: #4850, where a
-			// 100-turn spin ended before that I/O did on a loaded CI host. Wait on
-			// real time instead: `setTimeout` is faked here, so the kit's wait
-			// yields on `setImmediate`, and its deadline reads the real clock.
-			await waitFor(
-				() => vi.getTimerCount(),
-				(count) => count > 0,
-				{
-					timeoutMs: 10_000,
-					yieldControl: () =>
-						new Promise<void>((resolve) => setImmediate(resolve)),
-				},
-			);
-			expect(vi.getTimerCount()).toBeGreaterThan(0);
-			await vi.advanceTimersByTimeAsync(HOOK_WALL_BUDGET_MS.agent_settled - 1);
-			expect(settled).toBe(false);
-			await vi.advanceTimersByTimeAsync(1);
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			expect(settled).toBe(true);
-			vi.useRealTimers();
-			release.open();
-			await holder;
-			await drain;
-			await restoreSettled();
-			expect(
-				getDegradationSummary().find(
-					(candidate) => candidate.kind === "fix-run-loss-notice-failed",
-				)?.count,
-			).toBe(1);
+	it(
+		"records the loss-notice failure once when the bound fired first (#3915)",
+		// The arming wait is 10s times PI_LENS_TEST_TIMEOUT_SCALE; the budget scales
+		// with it, and the 5s default would cut the wait.
+		{ timeout: scaledTestTimeout(60_000) },
+		async () => {
+			const aRs = path.join(srcDir, "a.rs");
+			const started = gate();
+			const proceed = gate();
+			const held = gate();
+			const release = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				return 0;
+			};
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = tmpDir;
+			runtime.deferMutation(mainRs, tmpDir, "edit", tmpDir, "autofix");
+			let settled = false;
+			let holder: Promise<void> | undefined;
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
 			await latencyLogger.flushLatencyLog();
-			const read = readNdjsonRows(logPath, fromByte);
-			expect(read.skipped).toBe(0);
-			const rows = read.rows.filter((row) => {
-				const meta = row.metadata as Record<string, unknown> | undefined;
-				return (
-					row.phase === "degradation_ledger" &&
-					meta?.kind === "fix-run-loss-notice-failed"
-				);
+			const logPath = latencyLogger.getLatencyLogPath();
+			const fromByte = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
+			const drain = handleAgentEnd({
+				ctxCwd: tmpDir,
+				getFlag: (name: string) => name === "no-lsp",
+				notify: () => {
+					throw new Error("notify exploded");
+				},
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: vi.fn() } as never,
+				biomeClient: {} as never,
+				ruffClient: {} as never,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile: async (filePath: string) => ({
+							filePath,
+							formatters: [],
+							anyChanged: false,
+							allSucceeded: true,
+						}),
+					}) as never,
+			}).then(() => {
+				settled = true;
 			});
-			expect(rows).toHaveLength(1);
-		} finally {
-			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
-			else process.env.PI_LENS_TEST_MODE = previousTestMode;
-			vi.useRealTimers();
-			proceed.open();
-			release.open();
-			await holder;
-			await drain;
-			await restoreSettled();
-		}
-		// 60s: the arming wait is 10s, times PI_LENS_TEST_TIMEOUT_SCALE (3 on the
-		// Windows leg); the 5s default would cut it.
-	}, 60_000);
+			try {
+				// These assertions read the real sink, suppressed by default in Vitest.
+				process.env.PI_LENS_TEST_MODE = "0";
+				await started.p;
+				const edit = agentEdit(aRs, "let AGENT = 1;");
+				edit.write();
+				fs.writeFileSync(aRs, TOOL_FIXED);
+				await edit.deliver();
+				holder = withFileMutationQueue(aRs, async () => {
+					held.open();
+					await release.p;
+				});
+				await held.p;
+				// Fake only the timer APIs. Keep fs and setImmediate real.
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+				proceed.open();
+				// A real queue witness: the drain released its target hold.
+				await withFileMutationQueue(mainRs, async () => {});
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				expect(settled).toBe(false);
+				// The bound is armed after the drain's real I/O (the fixer's restore),
+				// which no production event announces. Recurrence: #4850, where a
+				// 100-turn spin ended before that I/O did on a loaded CI host. Wait on
+				// real time instead: `setTimeout` is faked here, so the kit's wait
+				// yields on `setImmediate`, and its deadline reads the real clock.
+				await waitFor(
+					() => vi.getTimerCount(),
+					(count) => count > 0,
+					{
+						timeoutMs: 10_000,
+						yieldControl: () =>
+							new Promise<void>((resolve) => setImmediate(resolve)),
+					},
+				);
+				expect(vi.getTimerCount()).toBeGreaterThan(0);
+				await vi.advanceTimersByTimeAsync(
+					HOOK_WALL_BUDGET_MS.agent_settled - 1,
+				);
+				expect(settled).toBe(false);
+				await vi.advanceTimersByTimeAsync(1);
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				expect(settled).toBe(true);
+				vi.useRealTimers();
+				release.open();
+				await holder;
+				await drain;
+				await restoreSettled();
+				expect(
+					getDegradationSummary().find(
+						(candidate) => candidate.kind === "fix-run-loss-notice-failed",
+					)?.count,
+				).toBe(1);
+				await latencyLogger.flushLatencyLog();
+				const read = readNdjsonRows(logPath, fromByte);
+				expect(read.skipped).toBe(0);
+				const rows = read.rows.filter((row) => {
+					const meta = row.metadata as Record<string, unknown> | undefined;
+					return (
+						row.phase === "degradation_ledger" &&
+						meta?.kind === "fix-run-loss-notice-failed"
+					);
+				});
+				expect(rows).toHaveLength(1);
+			} finally {
+				if (previousTestMode === undefined)
+					delete process.env.PI_LENS_TEST_MODE;
+				else process.env.PI_LENS_TEST_MODE = previousTestMode;
+				vi.useRealTimers();
+				proceed.open();
+				release.open();
+				await holder;
+				await drain;
+				await restoreSettled();
+			}
+		},
+	);
 
 	it("does not hand a lost-edit advisory to the session that replaced the drain's own (#3748)", async () => {
 		const aRs = path.join(srcDir, "a.rs");

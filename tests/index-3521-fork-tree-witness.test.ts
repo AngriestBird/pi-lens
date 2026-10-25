@@ -442,7 +442,10 @@ async function sidecarSettled(sessionId: string): Promise<void> {
 	);
 	// Recurrence: #4830, where a 5000-turn spin ended before the write landed on
 	// a loaded CI runner. Wait on a real-clock deadline instead; the yield stays
-	// `setImmediate` (no timer), which also holds under `vi.useFakeTimers()`.
+	// `setImmediate` (no timer). That settles only while `setImmediate` and
+	// `Date` stay real: under a default `vi.useFakeTimers()` both are faked and
+	// the wait could neither yield nor reach its deadline. It holds under a
+	// narrow `toFake` list such as `["setTimeout", "clearTimeout"]`.
 	await waitFor(
 		() => (fs.existsSync(file) ? "present" : `sidecar absent: ${file}`),
 		(state) => state === "present",
