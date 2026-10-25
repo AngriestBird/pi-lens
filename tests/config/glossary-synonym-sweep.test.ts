@@ -1250,7 +1250,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 33 -> 34 (#4535): the bulk mutation writer resolves each path into the
 		// durable change-log entry, the same `path.resolve` the single writer
 		// uses, so the log's spelling does not depend on which form recorded it.
-		"clients/runtime-coordinator.ts": 34,
+		// 34 -> 28 (#4689 batch 1): the six `path.resolve` wrappers on the
+		// PathKeyedMap keys (inline blockers, deferred format) go. Every caller
+		// passes an already-resolved path, so the wrapper was a no-op there.
+		"clients/runtime-coordinator.ts": 28,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).
