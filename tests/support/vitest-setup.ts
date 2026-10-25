@@ -20,6 +20,7 @@ import {
 	formatTmpRootSweep,
 	getTmpRootRegistry,
 	installTmpRootInterposer,
+	REPO_ROOT_CREATE_PREFIX,
 	sampleTmpRoots,
 	sweepTmpRoots,
 	type TmpRootFsTarget,
@@ -112,6 +113,10 @@ delete process.env.PI_LENS_STARTUP_MODE;
 // owner observes the same namespace as production. Workers report additions;
 // the serialized owner removes entries after its assertion.
 const tmpHygieneRealTmp = os.tmpdir();
+/** The checkout root a worker runs in (#4864): the same default
+ *  `unadmittedRepoRootEntries` judges, captured once so a case that `chdir`s
+ *  into its own fixture repo cannot move which parent is judged. */
+const tmpHygieneRepoRoot = process.cwd();
 
 const tmpHygieneHome = process.env.PI_LENS_HOME
 	? path.resolve(process.env.PI_LENS_HOME)
@@ -301,6 +306,23 @@ export function flushTmpRootCreatorsForTests(): void {
 	flushTmpRootCreators();
 }
 
+/**
+ * #4864: the directories a test process NAMED directly at the repository root
+ * this run, keyed by entry name with the creating file. Read from the same
+ * per-run record as `tmpHygieneCreators`, on the `repo-root:` prefix that
+ * marks the kind, so a transient fixture counts: the leftover census above
+ * cannot see one that its own cell removed before the run ended.
+ */
+export function tmpHygieneRepoRootCreates(
+	creatorsPath: string = tmpHygieneCreatorsPath,
+): Map<string, string> {
+	const creates = new Map<string, string>();
+	for (const [entry, file] of tmpHygieneCreators(creatorsPath))
+		if (entry.startsWith(REPO_ROOT_CREATE_PREFIX))
+			creates.set(entry.slice(REPO_ROOT_CREATE_PREFIX.length), file);
+	return creates;
+}
+
 /** The observed creator of each leaked entry, keyed by entry name. An EMPTY map
  *  means nothing was recorded (a dead run, an unwritable home, or every entry
  *  made outside a test process), and the owner then labels the entry by both
@@ -423,6 +445,11 @@ installTmpRootInterposer(
 	nodeFs as unknown as TmpRootFsTarget,
 	tmpHygieneRealTmp,
 	() => tmpHygieneOwnFile,
+	// #4864: the repository root is judged by the same rule as the tmp root, so
+	// a fixture NAMED there is recorded and the hygiene owner can fail it. It
+	// is the worker's own working directory, which is the checkout root (the
+	// same default `unadmittedRepoRootEntries` reads).
+	tmpHygieneRepoRoot,
 );
 syncBuiltinESMExports();
 const tmpRootIo = {

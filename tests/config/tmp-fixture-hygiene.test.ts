@@ -21,6 +21,7 @@ import {
 	tmpHygieneExcludeLiveOwnerEntries,
 	tmpHygieneForeignRunEntries,
 	tmpHygieneRunFiles,
+	tmpHygieneRepoRootCreates,
 	tmpHygieneCreators,
 	formatTmpHygieneLeakEntry,
 	tmpHygieneSweepableEntries,
@@ -67,6 +68,10 @@ const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../..",
 );
+
+/** This file as the shared creators record spells it: the repo-relative path
+ *  inside `tests/` (`tmpHygieneFileOf`). */
+const OWN_FILE = "config/tmp-fixture-hygiene.test.ts";
 
 // #3186 round 3: this worker's own owner marker, the one the setup writes and
 // the lifecycle hooks beat.
@@ -564,6 +569,24 @@ describe("tmp-fixture-hygiene", () => {
 			process.stderr.write(
 				`[tmp-hygiene] repo-root census could not run: ${rootCensus.unknown}\n`,
 			);
+		// #4864: the leftover census above cannot see a fixture its own cell
+		// removed before the run ended, and that is the shape that raced: PR
+		// #4859's shard 3 listed `.probe-language-roots/packages/css/vite.config.ts`
+		// and then ENOENTed when `tests/clients/tool-cwd.test.ts` removed the tree
+		// mid-walk. The interposer records NAMED creations at this root, so judge
+		// the creation, not the leftover. A `mkdtemp` root is not recorded: its
+		// name is unique per call and its creating file removes it (the admission
+		// `tests/config/tmp-fixture-hygiene-baseline.json`'s mkdtemp-parent sweep
+		// documents); a named directory has neither property.
+		const repoRootCreated = [...tmpHygieneRepoRootCreates()].filter(
+			// This file's own cells plant a stray at the root to drive the census in
+			// `names the entries a run added`, so its plants are the subject, not a
+			// fixture; its record lands at its own teardown, after this assertion.
+			([, creator]) => creator !== OWN_FILE,
+		);
+		const repoRootCreateLeaks = untrackedUnignoredEntries(
+			repoRootCreated.map(([name]) => name),
+		);
 		// #4560: a write at the tmp root (`path.join(<fixture>, "..")`) is now in
 		// the census, not only `pi-lens-` names. A host process's tmp file is not
 		// asserted; it is counted on the census line (`observed`) beside the judged
@@ -601,6 +624,14 @@ describe("tmp-fixture-hygiene", () => {
 						.join(
 							"; ",
 						)}. Remove them and fix the producer: a fixture belongs under os.tmpdir() or in a directory the file removes.`,
+				).toEqual([]);
+				expect(
+					repoRootCreateLeaks,
+					`[tmp-hygiene] a test process created ${repoRootCreateLeaks === undefined ? "entries git could not classify" : `${repoRootCreateLeaks.length} directory/directories`} directly at the repository root: ${repoRootCreated
+						.map(([name, creator]) => `${name} (created by tests/${creator})`)
+						.join(
+							"; ",
+						)}. A repo-walking scan on a sibling worker lists that tree and then ENOENTs when the cell removes it mid-walk (#4864, PR #4859 shard 3). Build the fixture under a per-test temp root (setupTestEnvironment) or name it with mkdtemp, and remove it in a finally.`,
 				).toEqual([]);
 			}
 		} finally {

@@ -25,7 +25,9 @@ import {
 	formatTmpRootSweep,
 	getTmpRootRegistry,
 	installTmpRootInterposer,
+	recordedRepoRootDirs,
 	recordedTmpRootCreators,
+	registerRepoRootDir,
 	registerTmpRoot,
 	registerTmpSibling,
 	sampleTmpRoots,
@@ -168,6 +170,21 @@ describe("tmp-root registry decisions (#2912)", () => {
 			"[tmp-hygiene-sweep] tests/a.test.ts via=SIGTERM registered=1 stragglers=1 failed=1 dropped=0\n",
 		);
 	});
+	// #4864: the ledger is keyed by NAME, not path -- two workers that build the
+	// same fixture name are the collision it records -- and the first creator
+	// wins, exactly like the tmp-root entries.
+	it("keeps one record per named repository-root directory (#4864)", () => {
+		const registry = createTmpRootRegistry();
+		registerRepoRootDir(registry, "/repo/.probe-a", "a.test.ts");
+		registerRepoRootDir(registry, "/repo/.probe-a", "b.test.ts");
+		registerRepoRootDir(registry, "/repo/.probe-b");
+		expect(recordedRepoRootDirs(registry)).toEqual(
+			new Map([
+				[".probe-a", "a.test.ts"],
+				[".probe-b", undefined],
+			]),
+		);
+	});
 });
 
 describe("tmp-root interposer (#2912)", () => {
@@ -291,6 +308,44 @@ describe("tmp-root interposer (#2912)", () => {
 			]);
 		} finally {
 			env.cleanup();
+		}
+	});
+
+	// #4864: a directory NAMED directly at the repository root is recorded, so the
+	// serialized owner can fail the CREATION even when the cell removes it before
+	// the run ends (the leftover census cannot see a transient tree). A `mkdtemp`
+	// root is not recorded: its name is unique per call and its file removes it.
+	it("records a directory named directly at the watched repository root (#4864)", () => {
+		const registry = createTmpRootRegistry();
+		const { target } = fakeTarget();
+		const repoRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-4864-root-"),
+		);
+		try {
+			installTmpRootInterposer(
+				registry,
+				target,
+				"/var/tmp",
+				() => "named.test.ts",
+				repoRoot,
+			);
+			const mkdirSync = target.mkdirSync as (dir: string) => string;
+			mkdirSync(path.join(repoRoot, ".probe-language-roots"));
+			// Not the repository root: a child of that fixture, a tmp-root sibling,
+			// and a `mkdtemp` root all stay out of the ledger.
+			mkdirSync(path.join(repoRoot, ".probe-language-roots", "packages"));
+			mkdirSync("/var/tmp/capture");
+			(target.mkdtempSync as (p: string) => string)(
+				path.join(repoRoot, "pi-lens-unique-"),
+			);
+			expect(recordedRepoRootDirs(registry)).toEqual(
+				new Map([[".probe-language-roots", "named.test.ts"]]),
+			);
+			expect(formatTmpRootCreators(registry)).toBe(
+				"capture\tnamed.test.ts\nrepo-root:.probe-language-roots\tnamed.test.ts\n",
+			);
+		} finally {
+			fs.rmSync(repoRoot, { recursive: true, force: true });
 		}
 	});
 
