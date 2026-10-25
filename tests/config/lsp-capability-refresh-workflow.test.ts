@@ -419,7 +419,8 @@ function parseWriteOperands(
 			const bundle = word.startsWith("--") ? -1 : word.indexOf(letter, 1);
 			if (word === dest.long || (bundle > 0 && word.slice(bundle + 1) === "")) {
 				const next = words[index + 1];
-				if (next === undefined) return { unplaced: word };
+				if (next === undefined)
+					return { unplaced: `${word} (a destination option with no value)` };
 				destinationDir = next;
 				index++;
 				continue;
@@ -436,7 +437,7 @@ function parseWriteOperands(
 		// A flag before the first operand: its value, if it takes one, can only
 		// widen the source list. After an operand it can be the destination.
 		if (operands.length === 0) continue;
-		return { unplaced: word };
+		return { unplaced: `${word} (an option after an operand)` };
 	}
 	return { destinationDir, operands, parents };
 }
@@ -465,7 +466,7 @@ function writeSlots(
 		return {
 			destinations: [],
 			slots: [],
-			unplaced: `${parsed.unplaced} (an option after an operand)`,
+			unplaced: parsed.unplaced,
 		};
 	const sources =
 		parsed.destinationDir === undefined
@@ -944,6 +945,26 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 
 		expect(findings).toEqual([
 			"fixture.yml: smoke: pr-inputs: stages $RUNNER_TEMP/pr-inputs/files/.changelog/x.md, a dot path, without include-hidden-files: true",
+		]);
+	});
+
+	// The fail-closed arms each name their own reason, so a reader repairing the
+	// workflow sees which half failed: an option the grammar cannot place, or a
+	// destination option with nothing after it.
+	it.each([
+		[
+			'cp --parents .changelog/x.md "$stage/files/" -t',
+			"-t (a destination option with no value)",
+		],
+		[
+			'cp --parents .changelog/x.md "$stage/files/" -S .bak',
+			"-S (an option after an operand)",
+		],
+	])("names the option it cannot place: %s", (staging, reason) => {
+		const findings = findingsFor(plant(staged(staging), ROOT_PATH));
+
+		expect(findings).toEqual([
+			`fixture.yml: smoke: pr-inputs: cannot place the write ${reason} against $RUNNER_TEMP/pr-inputs, so what the artifact holds cannot be derived`,
 		]);
 	});
 
