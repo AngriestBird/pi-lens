@@ -1194,7 +1194,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `realpathOrResolve(startDir)` and `realpathOrResolve(homeDir)`.
 		"clients/path-utils.ts": 33,
 		"clients/php-cs-fixer-config.ts": 4,
-		"clients/pipeline.ts": 26,
+		// 26 -> 24 (#4689 batch 3): the changed-file set is a PathKeyedMap, so two
+		// `path.resolve` calls are gone. 24 -> 22: the postMutation gate compares
+		// through `normalizeMapKey`, two more.
+		"clients/pipeline.ts": 22,
 		// 10 -> 12 (#4530): machineStateDir moved here from file-utils.ts.
 		"clients/probe-home-state.ts": 12,
 		"clients/project-changes.ts": 5,

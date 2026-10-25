@@ -252,10 +252,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :444
 	"clients/pipeline.ts#path-resolve-keyed": {
-		sites: 5,
-		identities: "a02a55f7f6e6fc48",
+		sites: 2,
+		identities: "f25de8a73a269e45",
 		reason: PRE_4689,
-	}, // :212, :1022, :2259, :2330, :2374
+	}, // :215, :1054
 	"clients/probe-home-state.ts#raw-realpath": {
 		sites: 1,
 		identities: "480c8b119f83ad12",
