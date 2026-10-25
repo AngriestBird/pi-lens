@@ -624,11 +624,22 @@ export async function handleAgentEnd({
 			await bounded(
 				restoring.then((loss) => {
 					if (loss.lost.length > 0 || loss.possiblyLost.length > 0) {
-						// Keep the captured session: a late advisory must not reach
-						// the session that replaced this drain.
-						const text = renderFixRunLoss(loss);
-						queueAgentAdvisory(text, session);
-						notify(`pi-lens: ${text}`, "warning");
+						try {
+							// Keep the captured session: a late advisory must not reach
+							// the session that replaced this drain.
+							const text = renderFixRunLoss(loss);
+							queueAgentAdvisory(text, session);
+							notify(`pi-lens: ${text}`, "warning");
+						} catch (err) {
+							// #3915: `bounded()` boxes this rejection and swallows it once
+							// its deadline fired, so the loss notice failure is recorded.
+							const message = err instanceof Error ? err.message : String(err);
+							recordDegradationOnce({
+								kind: "fix-run-loss-notice-failed",
+								subject: filePath,
+								reason: `the deferred autofix loss notice failed: ${message}`,
+							});
+						}
 					}
 				}),
 				{

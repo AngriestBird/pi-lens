@@ -687,6 +687,60 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		expect(nudge?.messages[0]?.content).toContain("a.rs");
 	});
 
+	// Recurrence: #3915 review. The loss notice runs in the promise `bounded()`
+	// awaits, so a `notify` that throws there rejected the whole agent_end drain
+	// (or, once the deadline had fired, was swallowed by the boxed handler) and
+	// left no trace of the lost notice. The failure is a degradation record.
+	it("records a degradation when the loss notice's notify throws (#3915)", async () => {
+		const aRs = path.join(srcDir, "a.rs");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			return 0;
+		};
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = tmpDir;
+		runtime.deferMutation(mainRs, tmpDir, "edit", tmpDir, "autofix");
+
+		const drain = handleAgentEnd({
+			ctxCwd: tmpDir,
+			getFlag: (name: string) => name === "no-lsp",
+			notify: () => {
+				throw new Error("notify exploded");
+			},
+			dbg: () => {},
+			runtime,
+			cacheManager: { addModifiedRange: vi.fn() } as never,
+			biomeClient: {} as never,
+			ruffClient: {} as never,
+			getFormatService: () =>
+				({
+					recordRead: () => {},
+					formatFile: async (filePath: string) => ({
+						filePath,
+						formatters: [],
+						anyChanged: false,
+						allSucceeded: true,
+					}),
+				}) as never,
+		});
+		await started.p;
+		const edit = agentEdit(aRs, "let AGENT = 1;");
+		edit.write();
+		fs.writeFileSync(aRs, TOOL_FIXED);
+		await edit.deliver();
+		proceed.open();
+		await drain;
+
+		const group = getDegradationSummary().find(
+			(candidate) => candidate.kind === "fix-run-loss-notice-failed",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons.at(-1)?.reason).toContain("notify exploded");
+	});
+
 	it("does not hand a lost-edit advisory to the session that replaced the drain's own (#3748)", async () => {
 		const aRs = path.join(srcDir, "a.rs");
 		const started = gate();

@@ -393,6 +393,14 @@ export type DegradationKind =
 	 * Subject is the tool.
 	 */
 	| "fix-run-agent-edit-overwritten"
+	/**
+	 * #3915: the deferred autofix drain's loss notice threw while reporting a
+	 * restore's loss — the advisory queue, the renderer, or the host `notify` —
+	 * so the notice never reached the session. Recorded instead of letting the
+	 * rejection reach `bounded()`'s boxed handler, which swallows it once the
+	 * deadline has fired. Subject is the drained file; once per file.
+	 */
+	| "fix-run-loss-notice-failed"
 	/** A bounded pre-run call was not carried into a fixer run (#3830). */
 	| "fix-run-pending-call-cap"
 	/**
