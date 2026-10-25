@@ -1,6 +1,6 @@
 import { access, readFile } from "node:fs/promises";
 import os from "node:os";
-import path, { dirname, join, resolve } from "node:path";
+import path, { dirname, join } from "node:path";
 import {
 	extractTomlTableSection,
 	hasTomlTable,
@@ -10,8 +10,8 @@ import {
 import { resolveLanguage } from "./language-registry.js";
 import { parseJsonc } from "./review-graph/tsconfig-paths.js";
 import {
-	isAtOrAboveHomeDir,
 	matchesWorkspaceMemberPattern,
+	realpathOrResolve,
 	toPosix,
 	UV_WORKSPACE_EXCLUDE_DIALECT,
 	UV_WORKSPACE_MEMBERS_DIALECT,
@@ -78,9 +78,7 @@ async function findUvWorkspace(
 ): Promise<UvWorkspace | undefined> {
 	const resolvedStart = path.resolve(startDir);
 	let nearestProject: string | undefined;
-	for (const dir of walkUpDirs(startDir)) {
-		if (isAtOrAboveHomeDir(dir, homeDir)) break;
-
+	for (const dir of walkUpDirs(startDir, { homeDir })) {
 		let content: string;
 		try {
 			content = await readFile(path.join(dir, "pyproject.toml"), "utf8");
@@ -215,10 +213,10 @@ export async function detectPythonEnvironment(
 	homeDir: string = os.homedir(),
 	options: { allowAmbient?: boolean } = {},
 ): Promise<PythonEnvironment | undefined> {
-	// `path.resolve` once at the seam entry so `isStartDir` below compares like
-	// with like: `walkUpDirs` resolves its input, a caller's argument need not
-	// be normalized.
-	const root = path.resolve(projectRoot);
+	// The path identity once at the seam entry so `isStartDir` below compares
+	// like with like: `walkUpDirs` climbs its input's identity (#4689 item 6),
+	// and the member and containment checks below read the same axis.
+	const root = realpathOrResolve(projectRoot);
 	const uvWorkspace = await findUvWorkspace(root, homeDir);
 	// `UV_PROJECT_ENVIRONMENT` and the workspace `.venv` are uv PROJECT
 	// settings. uv applies them to a directory only when that directory IS the
@@ -875,8 +873,11 @@ export async function detectPythonTargetVersion(
 ): Promise<PythonTargetVersion | undefined> {
 	if (resolveLanguage(filePath)?.id !== "python") return undefined;
 	const open = new Set(PYTHON_DECLARATION_SOURCES);
-	for (const dir of walkUpDirs(dirname(resolve(filePath)))) {
-		if (isAtOrAboveHomeDir(dir, homeDir)) return undefined;
+	// #4689 item 6: from the module's identity, so a module linked in from
+	// another project reads that project's declaration.
+	for (const dir of walkUpDirs(dirname(realpathOrResolve(filePath)), {
+		homeDir,
+	})) {
 		const { declaration, closed } = await readPythonDeclarationInDirectory(
 			dir,
 			open,

@@ -1074,7 +1074,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// instead of taking a `path.relative` of two spellings.
 		"clients/language-profile.ts": 12,
 		"clients/latency-logger.ts": 2,
-		"clients/lens-config.ts": 6,
+		"clients/lens-config.ts": 3,
 		"clients/lens-engine.ts": 6,
 		"clients/lens-flag-registry.ts": 13,
 		"clients/lens-map.ts": 14,
@@ -1189,9 +1189,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the kernel as it is, with no `path.isAbsolute`/`path.resolve` first.
 		// 38 -> 34 (#4689 item 6): the two marker walks start at
 		// `realpathOrResolve(startDir)` and `realpathOrResolve(homeDir)`.
-		"clients/path-utils.ts": 34,
+		"clients/path-utils.ts": 33,
 		"clients/php-cs-fixer-config.ts": 4,
-		"clients/pipeline.ts": 28,
+		"clients/pipeline.ts": 26,
 		// 10 -> 12 (#4530): machineStateDir moved here from file-utils.ts.
 		"clients/probe-home-state.ts": 12,
 		"clients/project-changes.ts": 5,
@@ -1209,13 +1209,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/runner-adapters/runner-findings.ts": 4,
 		"clients/project-diagnostics/runner-adapters/trivy.ts": 5,
 		"clients/project-diagnostics/scanner.ts": 4,
-		"clients/project-lens-config.ts": 21,
+		"clients/project-lens-config.ts": 19,
 		"clients/project-report.ts": 5,
 		"clients/project-snapshot.ts": 15,
 		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
 		// path operations at the shared Python resolver seam; r3 restored the
 		// `path.isAbsolute` leg that rejects another Windows drive (V1).
-		"clients/python-environment.ts": 22,
+		"clients/python-environment.ts": 21,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,

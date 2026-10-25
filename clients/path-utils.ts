@@ -642,19 +642,48 @@ export function pathsEqual(a: string, b: string): boolean {
  * Check if `child` is under `parent` directory.
  * Separator-agnostic and case-insensitive on Windows.
  */
+export interface WalkUpDirsOptions {
+	/**
+	 * Stop before the first directory at or above this home
+	 * (`isAtOrAboveHomeDir`), compared on the axis the walk climbs: the home's
+	 * identity for an identity walk, its spelling for a spelled one.
+	 */
+	homeDir?: string;
+	/**
+	 * Climb the caller's spelling instead of the path identity. Only for a walk
+	 * whose answer is compared with spelled paths by design, named at the call.
+	 */
+	spelling?: boolean;
+}
+
 /**
  * Yield each directory from `startDir` up to (and including) the filesystem
  * root. Terminates when `path.dirname(current) === current` so it works on
  * Windows drive roots and POSIX `/` alike.
+ *
+ * The climb starts at the PATH IDENTITY of `startDir` (`realpathOrResolve`,
+ * #4689 item 6): a directory reached through a link walks up its target's
+ * parents, the ones the kernel opens, not the link's. A start derived from a
+ * FILE comes from that file's identity (`path.dirname(realpathOrResolve(f))`),
+ * because the directory holding a file link is a real directory. The home
+ * ceiling and every other end a caller compares a yielded directory with sit
+ * on the same axis.
  *
  * Single source of truth for the half-dozen "walk up the directory tree
  * looking for X" loops that have accumulated across the codebase. Callers
  * that need an "is there a file named Y anywhere on the way up" check
  * should use `findNearestContaining` instead.
  */
-export function* walkUpDirs(startDir: string): Generator<string> {
-	let current = path.resolve(startDir);
+export function* walkUpDirs(
+	startDir: string,
+	options: WalkUpDirsOptions = {},
+): Generator<string> {
+	const axis = options.spelling ? path.resolve : realpathOrResolve;
+	let current = axis(startDir);
+	const home =
+		options.homeDir === undefined ? undefined : axis(options.homeDir);
 	while (true) {
+		if (home !== undefined && isAtOrAboveHomeDir(current, home)) return;
 		yield current;
 		const parent = path.dirname(current);
 		if (parent === current) return;
@@ -726,12 +755,7 @@ export function findLocalToolConfig(
 	names: readonly string[],
 	options: { homeDir?: string } = {},
 ): string | undefined {
-	const homeDir =
-		options.homeDir !== undefined ? path.resolve(options.homeDir) : undefined;
-	for (const dir of walkUpDirs(startDir || process.cwd())) {
-		if (homeDir !== undefined && isAtOrAboveHomeDir(dir, homeDir)) {
-			return undefined;
-		}
+	for (const dir of walkUpDirs(startDir || process.cwd(), options)) {
 		for (const name of names) {
 			const candidate = path.join(dir, name);
 			if (existsSync(candidate)) return candidate;
