@@ -1100,9 +1100,13 @@ export const OVERRIDE_COPY_TRAITS: {
 /** The kept traits of a catalog row; every key the table does not keep is absent. */
 function keptOverrideTraits(server: LSPServerInfo): Record<string, unknown> {
 	const kept: Record<string, unknown> = {};
-	for (const [trait, decision] of Object.entries(OVERRIDE_COPY_TRAITS)) {
-		if (decision.keep && Object.hasOwn(server, trait)) {
-			kept[trait] = (server as unknown as Record<string, unknown>)[trait];
+	for (const [trait, value] of Object.entries(server)) {
+		// A key the table does not name is dropped, not copied (fail closed).
+		if (
+			Object.hasOwn(OVERRIDE_COPY_TRAITS, trait) &&
+			OVERRIDE_COPY_TRAITS[trait as keyof LSPServerInfo].keep
+		) {
+			kept[trait] = value;
 		}
 	}
 	return kept;
