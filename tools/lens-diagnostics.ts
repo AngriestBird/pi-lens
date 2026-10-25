@@ -2129,7 +2129,15 @@ function mergeDiagnosticsWithWidgetSummaries(
 		// Two stored summaries for one file (a writer that missed an entry point,
 		// #4689) fold into the first by the same dedup the later producers use,
 		// never overwrite it: an overwrite would drop the earlier rows.
-		if (byFile.has(fileKey)) {
+		const prior = byFile.get(fileKey);
+		if (prior) {
+			// The merged group is final only when both summaries are.
+			byFile.set(fileKey, {
+				...prior,
+				hasFinalSnapshot:
+					(prior.hasFinalSnapshot ?? true) &&
+					(summary.hasFinalSnapshot ?? true),
+			});
 			for (const diagnostic of diagnostics) addDiagnostic(filePath, diagnostic);
 			continue;
 		}

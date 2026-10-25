@@ -6272,4 +6272,40 @@ describe("lens_diagnostics mode=full keys one file once across link spellings (#
 		expect(text).not.toContain("swept under the link");
 		expect(result.details).toMatchObject({ totalBlocking: 1 });
 	});
+
+	// RECURRENCE GUARDED: folding two stored summaries of one file kept the
+	// first one's `hasFinalSnapshot`, so a final link summary swallowed a
+	// non-final real-path summary and the group lost its `(pending)` marker.
+	it("keeps the pending marker when a non-final summary folds into a final one", async (ctx) => {
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		mockSummaries.push(
+			sum(
+				fx.fileLink,
+				{ blocking: 1, errors: 1 },
+				{
+					diagnostics: [
+						{ ...staleBlocker, message: "final row under the link" },
+					],
+				},
+			),
+			sum(
+				fx.realFile,
+				{ blocking: 1, errors: 1 },
+				{
+					hasFinalSnapshot: false,
+					diagnostics: [
+						{
+							...staleBlocker,
+							rule: "ts:9999",
+							message: "pending row under the real path",
+						},
+					],
+				},
+			),
+		);
+		const result = await run(fullTool([]), { mode: "full" }, fx.repo);
+		const text = String(result.content[0].text);
+		expect(text).toContain("pending row under the real path");
+		expect(text).toContain("(pending)");
+	});
 });
