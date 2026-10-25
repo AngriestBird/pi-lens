@@ -1518,6 +1518,67 @@ describe("test-runner-client", () => {
 			});
 		});
 
+		// #4689 batch 2 (clients/test-runner-client.ts `canonicalFailedPath`): the
+		// failed-target maps key by the path identity, so a failure recorded
+		// through a link spelling is retired by a pass through the real spelling.
+		// The cell pins the identity key once the redundant inner realpath is gone;
+		// it passes on master too (`normalizeMapKey` already resolved), so the
+		// mutation row, not a red-first run, is its proof.
+		it("retires a failure recorded through a link spelling when the real spelling passes (#4689)", async (ctx) => {
+			const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-tests-4689-");
+			const aliasRoot = `${tmpDir}-alias`;
+			try {
+				fs.symlinkSync(
+					tmpDir,
+					aliasRoot,
+					process.platform === "win32" ? "junction" : "dir",
+				);
+			} catch (error) {
+				cleanup();
+				return ctx.skip(`symlinks unavailable: ${String(error)}`);
+			}
+			cleanups.push(
+				() => fs.rmSync(aliasRoot, { recursive: true, force: true }),
+				cleanup,
+			);
+			fs.writeFileSync(path.join(tmpDir, "go.mod"), "module example.com/tmp\n");
+			const sourceFile = path.join(tmpDir, "widget.go");
+			const testFile = path.join(tmpDir, "widget_test.go");
+			fs.writeFileSync(sourceFile, "package widget\n");
+			fs.writeFileSync(testFile, "package widget\n");
+			const passingConfig = {
+				...failingNodeConfig,
+				args: (target: string) => [
+					"-e",
+					"console.log('ok  \texample.com/tmp\t0.001s');",
+					target,
+				],
+			};
+
+			const client = new TestRunnerClient(false);
+			const failed = await client.runTestFileAsync(
+				path.join(aliasRoot, "widget_test.go"),
+				aliasRoot,
+				"go",
+				failingNodeConfig,
+			);
+			expect(failed.failed).toBe(1);
+			expect(client.getTestRunTarget(sourceFile, tmpDir)?.strategy).toBe(
+				"failed-first",
+			);
+
+			const passed = await client.runTestFileAsync(
+				testFile,
+				tmpDir,
+				"go",
+				passingConfig,
+			);
+			expect(passed.failed).toBe(0);
+			expect(client.getTestRunTarget(sourceFile, tmpDir)?.strategy).not.toBe(
+				"failed-first",
+			);
+		});
+
 		it("retains indeterminate paths and writes bounded real telemetry", async () => {
 			const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-tests-2044-");
 			cleanups.push(cleanup);

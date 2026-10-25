@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { normalizeEphemeralMapKey } from "../../clients/path-utils.js";
 import { TestRunnerClient } from "../../clients/test-runner-client.js";
 
 const tempRoots: string[] = [];
@@ -109,6 +110,30 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 			"export default { test: { include: ['changed/**/*.test.ts'] } }\n",
 		);
 		expect(client.parseVitestTestGlobs(alias)).toEqual(rootGlobs);
+	});
+
+	// #4689 batch 2: a cwd that does not exist yet has no realpath, so the key
+	// came from its spelling and a link spelling of the same future directory
+	// split from the real one. The identity of the nearest existing ancestor
+	// plus the missing tail (`realpathOrResolve`) names both spellings alike.
+	// Recurrence: master keys `alias/later` and `root/later` apart.
+	it("keys a cwd that does not exist yet by its path identity, through either spelling (#4689)", () => {
+		const { root, alias } = makeProject();
+		const client = new TestRunnerClient();
+
+		const viaAlias = client._getCanonicalProjectRootForTests(
+			path.join(alias, "later"),
+		);
+		const viaRoot = client._getCanonicalProjectRootForTests(
+			path.join(root, "later"),
+		);
+
+		expect(viaAlias).toBe(viaRoot);
+		expect(viaAlias).toBe(
+			normalizeEphemeralMapKey(
+				path.join(fs.realpathSync.native(root), "later"),
+			),
+		);
 	});
 
 	it("shares caches across a confirmed Windows separator and case alias", (ctx) => {
