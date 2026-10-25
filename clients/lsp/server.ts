@@ -4435,7 +4435,7 @@ export const DockerServer: LSPServerInfo = {
  */
 export const DockerOfficialServer: LSPServerInfo = {
 	id: "docker-official",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	role: "language",
 	name: "Docker Language Server (official)",
 	fallbackFor: "docker",
@@ -4970,7 +4970,7 @@ const ZIZMOR_EXTENSIONS: readonly string[] = KIND_EXTENSIONS["yaml"];
 
 export const ZizmorServer: LSPServerInfo = {
 	id: "zizmor",
-	idleEviction: "unmeasured",
+	idleEviction: "transparent",
 	role: "auxiliary",
 	name: "zizmor Actions Security Scanner",
 	extensions: ZIZMOR_EXTENSIONS,
