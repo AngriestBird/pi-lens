@@ -76,9 +76,13 @@ async function findUvWorkspace(
 	startDir: string,
 	homeDir: string,
 ): Promise<UvWorkspace | undefined> {
-	const resolvedStart = path.resolve(startDir);
+	// `isStartDir` compares with the walk's own first directory, so the start
+	// and the project it finds share the walk's axis whatever the caller
+	// passes (#4847 review F5).
+	let walkStart: string | undefined;
 	let nearestProject: string | undefined;
 	for (const dir of walkUpDirs(startDir, { homeDir })) {
+		walkStart ??= dir;
 		let content: string;
 		try {
 			content = await readFile(path.join(dir, "pyproject.toml"), "utf8");
@@ -96,7 +100,7 @@ async function findUvWorkspace(
 				root: dir,
 				explicit: true,
 				projectRoot: nearestProject,
-				isStartDir: nearestProject === resolvedStart,
+				isStartDir: nearestProject === walkStart,
 				members: parseTomlStringArray(workspaceTable, "members"),
 				exclude: parseTomlStringArray(workspaceTable, "exclude"),
 			};
@@ -108,7 +112,7 @@ async function findUvWorkspace(
 				root: nearestProject,
 				explicit: false,
 				projectRoot: nearestProject,
-				isStartDir: nearestProject === resolvedStart,
+				isStartDir: nearestProject === walkStart,
 				members: [],
 				exclude: [],
 			}
@@ -246,7 +250,9 @@ export async function detectPythonEnvironment(
 	// without a stable project marker or explicit path, they remain undiscoverable.
 	const allowAmbient = options.allowAmbient ?? true;
 	const isWithinProjectRoot = (candidateRoot: string): boolean => {
-		const relative = path.relative(root, path.resolve(candidateRoot));
+		// Both sides are identities (#4847 review F1): an ambient root spelled
+		// through a link to the project is inside it.
+		const relative = path.relative(root, realpathOrResolve(candidateRoot));
 		return (
 			relative !== ".." &&
 			!relative.startsWith(`..${path.sep}`) &&

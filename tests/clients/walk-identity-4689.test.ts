@@ -106,6 +106,7 @@ const cleanups: Array<() => void> = [];
 afterEach(() => {
 	resetProjectLensConfigCache();
 	resetProjectTrust();
+	vi.unstubAllEnvs();
 	spawned.cwds.length = 0;
 	for (const cleanup of cleanups.splice(0)) cleanup();
 });
@@ -353,6 +354,29 @@ describe("#4689 item 6: the shared walk climbs the path identity", () => {
 		["cargo clippy --fix", "Cargo.toml", '[package]\nname = "x"\n', "f.rs"],
 		["dart fix --apply", "pubspec.yaml", "name: x\n", "f.dart"],
 	];
+	it("an alias-spelled VIRTUAL_ENV inside the project is the project's own environment", async (ctx) => {
+		// RECURRENCE GUARDED (#4847 review F1): the environment root became an
+		// identity while the ambient containment check resolved the candidate
+		// lexically, so `VIRTUAL_ENV=<alias>/.venv312` read as outside the
+		// project and was dropped under `allowAmbient: false`, the pytest
+		// own-install path (`test-runner-client.ts`).
+		const t = tree("venv-alias");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		const venvBin = path.join(t.repo, ".venv312", "bin");
+		fs.mkdirSync(venvBin, { recursive: true });
+		fs.writeFileSync(path.join(venvBin, "python"), "");
+		vi.stubEnv("VIRTUAL_ENV", viaAlias(t, path.join(t.repo, ".venv312")));
+		vi.stubEnv("CONDA_PREFIX", undefined);
+		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
+		const source = async (root: string) =>
+			(await detectPythonEnvironment(root, t.base, { allowAmbient: false }))
+				?.source;
+		expect({
+			aliasRoot: await source(t.alias),
+			realRoot: await source(t.repo),
+		}).toEqual({ aliasRoot: "virtual-env", realRoot: "virtual-env" });
+	});
+
 	it.for(wholePackageFixers)(
 		"%s for a linked file runs in the file's own package",
 		async ([, manifest, body, name], ctx) => {
@@ -457,6 +481,47 @@ describe("#4689 item 6: a home ceiling is compared on the axis the walk climbs",
 			}).toEqual({ realStart: false, linkStart: false });
 		},
 	);
+
+	it("a link inside the home to a folder outside it reads configs where the folder lives", (ctx) => {
+		// RECURRENCE GUARDED (#4847 review F2; the maintainer kept the identity
+		// ceiling on 2026-10-25): the walk climbs the link's target, so a
+		// checkout linked in from outside the home reads the configs above
+		// the target, the same answer its real spelling gets. A spelled
+		// start would climb the home subtree and read none of them.
+		const { homeReal } = homeTree(ctx);
+		const other = path.join(path.dirname(homeReal), "other");
+		const outside = path.join(other, "outside");
+		fs.mkdirSync(outside, { recursive: true });
+		fs.writeFileSync(path.join(other, "typos.toml"), "");
+		const link = path.join(homeReal, "proj", "share");
+		fs.symlinkSync(outside, link, "dir");
+		const typos = (start: string) =>
+			findLocalToolConfig(start, ["typos.toml"], { homeDir: homeReal });
+		expect({
+			viaLink: typos(link),
+			viaTarget: typos(outside),
+			dirs: configSearchDirs(link, homeReal),
+		}).toEqual({
+			viaLink: path.join(real(other), "typos.toml"),
+			viaTarget: path.join(real(other), "typos.toml"),
+			dirs: [real(outside), real(other)],
+		});
+	});
+
+	it("a link to the home itself reads nothing the home holds", (ctx) => {
+		// RECURRENCE GUARDED (#4847 review F2): a start that IS the home under
+		// another name yields no directory, as the home's own spelling does.
+		// On master the spelled climb read `proj/up/typos.toml`, the home's own
+		// file, through the link: the adoption the ceiling exists to stop.
+		const { homeReal } = homeTree(ctx);
+		const up = path.join(homeReal, "proj", "up");
+		fs.symlinkSync(homeReal, up, "dir");
+		expect({
+			viaLink: configSearchDirs(up, homeReal),
+			viaHome: configSearchDirs(homeReal, homeReal),
+			typos: findLocalToolConfig(up, ["typos.toml"], { homeDir: homeReal }),
+		}).toEqual({ viaLink: [], viaHome: [], typos: undefined });
+	});
 });
 
 describe("#4689 item 6: the project-local bin resolver and its classifier stay on the spelling", () => {

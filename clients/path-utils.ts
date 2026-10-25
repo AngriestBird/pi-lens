@@ -643,7 +643,9 @@ export interface WalkUpDirsOptions {
 	/**
 	 * Stop before the first directory at or above this home
 	 * (`isAtOrAboveHomeDir`), compared on the axis the walk climbs: the home's
-	 * identity for an identity walk, its spelling for a spelled one.
+	 * identity for an identity walk, its spelling for a spelled one. The
+	 * ceiling is the home's identity, so a link under the home to a folder
+	 * outside it climbs the folder's ancestors (#4847 review F2).
 	 */
 	homeDir?: string;
 	/**

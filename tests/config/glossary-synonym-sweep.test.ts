@@ -1218,7 +1218,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
 		// path operations at the shared Python resolver seam; r3 restored the
 		// `path.isAbsolute` leg that rejects another Windows drive (V1).
-		"clients/python-environment.ts": 21,
+		"clients/python-environment.ts": 19,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
