@@ -137,7 +137,25 @@ describe("pipeline changed-file discriminator keys by path identity (#4689)", ()
 		cleanup();
 	});
 
-	function deps(): PipelineDeps {
+	/** A formatter double that reports a change and leaves the bytes alone. */
+	const formattingService = () =>
+		({
+			recordRead: () => {},
+			formatFile: async () => ({
+				formatters: [
+					{
+						name: "rustfmt",
+						outcome: "formatted",
+						changed: true,
+						success: true,
+					},
+				],
+				anyChanged: true,
+				allSucceeded: true,
+			}),
+		}) as never;
+
+	function deps(getFormatService: () => never = () => ({}) as never) {
 		return {
 			biomeClient: {
 				isSupportedFile: () => true,
@@ -150,17 +168,17 @@ describe("pipeline changed-file discriminator keys by path identity (#4689)", ()
 			} as unknown as RuffClient,
 			testRunnerClient: new TestRunnerClient(),
 			metricsClient: new MetricsClient(),
-			getFormatService: () => ({}) as never,
+			getFormatService,
 			fixedThisTurn: new Set(),
 		} as PipelineDeps;
 	}
 
-	function context(filePath: string): PipelineContext {
+	function context(filePath: string, immediateFormat = false): PipelineContext {
 		return {
 			filePath,
 			cwd: tmpDir,
 			toolName: "write",
-			getFlag: () => false,
+			getFlag: (name: string) => immediateFormat && name === "immediate-format",
 			dbg: () => {},
 		};
 	}
@@ -172,15 +190,25 @@ describe("pipeline changed-file discriminator keys by path identity (#4689)", ()
 			return 0;
 		};
 
-		const result = await runPipeline(context(aliasMain), deps());
+		// Immediate format on: the format phase adds the alias spelling and the
+		// fixer adds the real one, so the published list can name the file twice.
+		const result = await runPipeline(
+			context(aliasMain, true),
+			deps(formattingService),
+		);
 
 		expect(fs.readFileSync(realMain, "utf-8")).toBe(TOOL_FIXED);
 		// The discriminator: the target changed, so the post-write state hash is
 		// drawn from the bytes pi-lens left (#2499).
 		expect(result.fileModified).toBe(true);
 		expect(result.postWriteStateHash).toBeTypeOf("string");
-		// The fixer's own spelling of the file it changed.
+		// Recurrence: the notice named one file twice, once per spelling.
+		expect(result.postAutofixNotice?.changedFiles).toHaveLength(1);
+		// The fixer's own spelling of the file it changed, listed once.
 		expect(result.changedFiles).toEqual([fs.realpathSync(realMain)]);
+		// The postMutation gate reads the same fixer report: the model gets the
+		// authoritative content of a file pi-lens rewrote, whatever its spelling.
+		expect(result.postMutation?.content).toBe(TOOL_FIXED);
 	}, 10000);
 
 	it("answers the same through the real path", async () => {
@@ -193,6 +221,7 @@ describe("pipeline changed-file discriminator keys by path identity (#4689)", ()
 
 		expect(result.postWriteStateHash).toBeTypeOf("string");
 		expect(result.changedFiles).toEqual([fs.realpathSync(realMain)]);
+		expect(result.postMutation?.content).toBe(TOOL_FIXED);
 	}, 10000);
 });
 

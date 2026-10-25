@@ -2929,7 +2929,7 @@ async function analysePipeline(
 		postMutation:
 			ctx.autofixMode !== "deferred" &&
 			autofixChangedFiles.some(
-				(f) => path.resolve(f) === path.resolve(filePath),
+				(f) => normalizeMapKey(f) === normalizeMapKey(filePath),
 			) &&
 			fileContent !== undefined
 				? {
