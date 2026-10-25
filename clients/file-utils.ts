@@ -25,10 +25,12 @@ import {
 	homeRelativePath,
 	isExternalOrVendorFile,
 	isUnderDir,
+	isWithinForm,
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
 	normalizePathSpelling,
 	realpathOrResolve,
+	toPosix,
 	toProjectRelativePath,
 } from "./path-utils.js";
 import { STAGE_TMP_PATTERN, stagePathFor } from "./atomic-write-staging.js";
@@ -941,8 +943,11 @@ function readGitignorePatterns(
 }
 
 function ancestorDirsBetween(rootDir: string, targetDir: string): string[] {
+	// #4689 batch 7: containment is the owner predicate on one path form. The
+	// hand-rolled `path.relative` test read a directory named `..foo` as outside
+	// the root (its relative path begins with `..`), so its patterns never ran.
+	if (!isWithinForm(toPosix(targetDir), toPosix(rootDir))) return [];
 	const relative = path.relative(rootDir, targetDir);
-	if (relative.startsWith("..") || path.isAbsolute(relative)) return [];
 	const dirs = [rootDir];
 	if (!relative) return dirs;
 	let current = rootDir;
@@ -1090,14 +1095,13 @@ function buildProjectIgnoreMatcher(
 	 * path, where the caller knows the source changed but has not re-read it.
 	 */
 	function dropVerdictsUnder(subtree: string): void {
-		const resolvedSubtree = path.resolve(subtree);
+		// #4689 batch 7: the owner's containment predicate, on one path form. A
+		// verdict for a file under a directory named `..foo` has a relative path
+		// that begins with `..`, and the hand-rolled test kept it (#4861 F2).
+		const subtreeForm = toPosix(path.resolve(subtree));
 		for (const key of patternMemo.keys()) {
 			const memoPath = key.slice(2);
-			const relative = path.relative(resolvedSubtree, memoPath);
-			if (
-				!relative ||
-				(!relative.startsWith("..") && !path.isAbsolute(relative))
-			) {
+			if (isWithinForm(toPosix(memoPath), subtreeForm)) {
 				patternMemo.delete(key);
 			}
 		}
@@ -1119,13 +1123,13 @@ function buildProjectIgnoreMatcher(
 		}
 		return identity;
 	};
-	const rootPrefix = resolvedRoot.endsWith(path.sep)
-		? resolvedRoot
-		: resolvedRoot + path.sep;
 	// The textual prefix test keeps the in-root path (every walk of a project
 	// spelled by its identity) at one string compare, with no `path.relative`.
+	// #4689 batch 7: it is the owner's `isWithinForm` on one path form, so the
+	// containment rule has one spelling in the tree (#4861 F2).
+	const rootForm = toPosix(resolvedRoot);
 	const isUnderRootText = (absolute: string): boolean =>
-		absolute === resolvedRoot || absolute.startsWith(rootPrefix);
+		isWithinForm(toPosix(absolute), rootForm);
 	const invalidateSubtree = (subtree: string): void => {
 		const absolute = path.resolve(subtree);
 		const local = isUnderRootText(absolute)
@@ -1203,11 +1207,13 @@ function buildProjectIgnoreMatcher(
 			const memoKey = (isDirectory ? "D:" : "F:") + resolved;
 			let verdict = patternMemo.get(memoKey);
 			if (verdict === undefined) {
-				const rootRelative = path.relative(resolvedRoot, resolved);
+				// #4689 batch 7: at-or-above the root is `!isWithinForm`, so a name
+				// beginning with `..` stays inside the root it belongs to. The dropped
+				// second test (`rootRelative.startsWith("..")`) treated `..foo/x` as
+				// outside (#4861 F2).
 				if (
-					!rootRelative ||
-					rootRelative.startsWith("..") ||
-					path.isAbsolute(rootRelative)
+					resolved === resolvedRoot ||
+					!isWithinForm(toPosix(resolved), rootForm)
 				) {
 					verdict = { ignored: false, layer: undefined };
 				} else {

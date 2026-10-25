@@ -557,6 +557,12 @@ describe("#3409 compiled host — bare specifier unresolvable", () => {
 			cause: "write-dir-unwritable",
 		});
 		expect(record.message).toContain(readOnly);
+		// #4689 batch 7: the probe is the nearest EXISTING ancestor of the
+		// grammars dir, so the verdict carries that directory's own errno. The
+		// hand-rolled `path.dirname` loop and the shared identity walk
+		// (`walkUpDirs`) answer the same code here, and a walk that stopped at the
+		// missing directory instead would report ENOENT.
+		expect(record.message).toContain("(EACCES)");
 		expect(record.message).not.toContain("approve-builds");
 		fs.chmodSync(readOnly, 0o700);
 	});

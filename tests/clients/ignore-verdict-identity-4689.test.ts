@@ -220,6 +220,26 @@ describe("project ignore verdict by path identity (#4689)", () => {
 		expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(false);
 	});
 
+	it("ignores a file in a directory whose name begins with two dots", (ctx) => {
+		// RECURRENCE GUARDED (#4861 F2): the containment test was
+		// `!relative || relative.startsWith("..") || isAbsolute(relative)`, and
+		// `ancestorDirsBetween` repeated it, so the relative path of
+		// `repo/..foo/x.log` ("..foo/x.log") read as OUTSIDE the root: the
+		// repository's `*.log` rule never ran and a gitignored file dispatched.
+		const tree = plantTree("ignore-identity-dotdot-name");
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		const odd = path.join(tree.repo, "..foo");
+		fs.mkdirSync(odd, { recursive: true });
+		const log = path.join(odd, "x.log");
+		fs.writeFileSync(log, "noise\n");
+		expect(isPathIgnoredByProject(log, tree.repo)).toBe(true);
+		// The directory is an ancestor of the file, not a sibling of the root, so
+		// a file the rules keep stays kept.
+		expect(isPathIgnoredByProject(path.join(odd, "keep.ts"), tree.repo)).toBe(
+			false,
+		);
+	});
+
 	it("pays one realpath per directory, not per file, to answer a link spelling", (ctx) => {
 		const tree = plantTree("ignore-identity-cost");
 		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
