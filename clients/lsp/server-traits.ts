@@ -73,6 +73,20 @@ const ROLE_MEMBERS: { readonly [K in LspServerRole]: K } = {
 export const DEFAULT_LSP_SERVER_ROLE: LspServerRole = "language";
 
 /**
+ * Which concrete binary/protocol variant a launched server id is (#4833: the
+ * ONE spelling; seven sites each repeated the two-member union).
+ *
+ * `"classic"` / `"native-ts7"` = the two launches of the `typescript` row.
+ * `"override"` = the process came from a user's `serverOverrides.<id>.command`
+ * (clients/lsp/config.ts). Per-server behavioural knowledge keyed by server id
+ * (`wait-policy/strategies.ts`) was measured on the catalog binary, so
+ * `getStrategy` answers an `"override"` launch with the default strategy.
+ * Undefined = single-variant server or not yet reported; consumers read it as
+ * the classic/default behaviour.
+ */
+export type LspLaunchVariant = "classic" | "native-ts7" | "override";
+
+/**
  * Anything carrying a declared role: a registry row, a `ResolvedLspServer`, a
  * config record, or a race descriptor. `unknown` rather than `LspServerRole`
  * so the ONE predicate also serves the untyped config path in

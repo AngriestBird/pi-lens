@@ -82,6 +82,7 @@ import {
 import { bounded } from "../deadline-utils.js";
 import {
 	DEFAULT_LSP_SERVER_ROLE,
+	type LspLaunchVariant,
 	type LspReplyOrdering,
 	type LspResendRecheck,
 	type LspServerRole,
@@ -787,7 +788,7 @@ export interface LSPServerInfo {
 				 * variant-carrying server that hasn't been updated to report one yet;
 				 * treat as the classic/default behavior (fail-safe).
 				 */
-				launchVariant?: "classic" | "native-ts7";
+				launchVariant?: LspLaunchVariant;
 		  }
 		| undefined
 	>;

@@ -14,6 +14,7 @@
  */
 
 import { createRequire } from "node:module";
+import type { LspLaunchVariant } from "../server-traits.js";
 
 const _require = createRequire(import.meta.url);
 
@@ -654,8 +655,14 @@ const DEFAULT_STRATEGY: DiagnosticStrategy = {
 
 export function getStrategy(
 	serverId: string,
-	launchVariant?: "classic" | "native-ts7",
+	launchVariant?: LspLaunchVariant,
 ): DiagnosticStrategy {
+	// #4833: every row above was measured on the CATALOG binary for that id. A
+	// `serverOverrides.<id>.command` launch runs another binary, so none of the
+	// row's facts (silentOnClean, emptyFirstPublish, diagnosticsFence,
+	// workspaceIndexing, the budgets, the re-sync quirks) are known for it: it
+	// takes the default row, whatever its server id.
+	if (launchVariant === "override") return DEFAULT_STRATEGY;
 	if (serverId === "typescript" && launchVariant === "native-ts7") {
 		return NATIVE_TS7_DIAGNOSTIC_STRATEGY;
 	}
