@@ -292,9 +292,9 @@ describe("compiled LSP registry trust boundary (#2372)", () => {
 	// (the field-level half is tests/clients/lsp/lsp-override-traits.test.ts).
 	// What only the spawn can show: a launch from the override reports
 	// `launchVariant: "override"`, and the wait policy keyed by the catalog
-	// server id (`getStrategy`: silentOnClean, emptyFirstPublish,
-	// diagnosticsFence, workspaceIndexing) answers it with the default row.
-	it("starts a command override on the default wait strategy, not the catalog id's row", async () => {
+	// server id (`getStrategy`) resets its optimistic claims (silentOnClean,
+	// workspaceIndexing) and keeps its protocol workarounds (reopenOnResync).
+	it("starts a command override on the override wait strategy, not the catalog id's row", async () => {
 		const { LSP_SERVERS } = await import("../../../clients/lsp/server.js");
 		const { getStrategy, SERVER_DIAGNOSTIC_STRATEGIES } =
 			await import("../../../clients/lsp/wait-policy/strategies.js");
@@ -334,16 +334,24 @@ describe("compiled LSP registry trust boundary (#2372)", () => {
 			config.__provenance,
 		).registeredServers;
 		const byId = new Map(compiled.map((entry) => [entry.id, entry]));
-		const defaultStrategy = getStrategy("an-id-with-no-strategy-row");
 		for (const server of withRow) {
 			const spawned = await byId.get(server.id)!.spawn(project);
 			expect(spawned?.launchVariant, server.id).toBe("override");
 			// What `ClientRegistry.spawnClient` hands the client and wait policy.
-			expect(
-				getStrategy(server.id, spawned?.launchVariant),
-				`${server.id} strategy`,
-			).toEqual(defaultStrategy);
+			const strategy = getStrategy(server.id, spawned?.launchVariant);
+			expect(strategy.silentOnClean, `${server.id} silentOnClean`).toBe(
+				undefined,
+			);
+			expect(strategy.workspaceIndexing, `${server.id} workspaceIndexing`).toBe(
+				undefined,
+			);
 		}
+		// #4833 review F1: the opengrep override keeps its restrictive
+		// workarounds, or an edit after the first touch is never scanned.
+		const opengrep = await byId.get("opengrep")!.spawn(project);
+		expect(
+			getStrategy("opengrep", opengrep?.launchVariant).reopenOnResync,
+		).toBe(true);
 		// The catalog row itself keeps its measurement.
 		expect(getStrategy("typescript", "classic").silentOnClean).toBe(true);
 	});

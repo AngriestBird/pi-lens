@@ -23,8 +23,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { OVERRIDE_COPY_TRAITS } from "../../clients/lsp/config.js";
-import { SERVER_DIAGNOSTIC_STRATEGIES } from "../../clients/lsp/wait-policy/strategies.js";
-import { getStrategy } from "../../clients/lsp/wait-policy/strategies.js";
+import {
+	getStrategy,
+	OVERRIDE_STRATEGY_FIELDS,
+	SERVER_DIAGNOSTIC_STRATEGIES,
+} from "../../clients/lsp/wait-policy/strategies.js";
 import { parseRoot, walkAst } from "../support/ast-census.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
@@ -32,6 +35,15 @@ const SERVER_TS = path.resolve(
 	import.meta.dirname,
 	"../../clients/lsp/server.ts",
 );
+const STRATEGIES_TS = path.resolve(
+	import.meta.dirname,
+	"../../clients/lsp/wait-policy/strategies.ts",
+);
+
+/** One field of a strategy object, by name. */
+function valueOf(object: object, field: string): unknown {
+	return Object.entries(object).find(([key]) => key === field)?.[1];
+}
 
 /** Member names of `interface <name>`, or a thrown refusal for any unread form. */
 function declaredMembers(source: string, name: string): string[] {
@@ -118,13 +130,90 @@ describe("#4833 — every LSPServerInfo trait has an override-copy decision", ()
 		}
 	});
 
-	it("resets every server-id-keyed strategy row for an override launch", () => {
+	it("decides exactly the DiagnosticStrategy fields the interface declares, with a reason", () => {
+		const declared = declaredMembers(
+			fs.readFileSync(STRATEGIES_TS, "utf8"),
+			"DiagnosticStrategy",
+		);
+		assertNonEmptyScan("DiagnosticStrategy fields", declared.length, 10);
+		const decided = Object.keys(OVERRIDE_STRATEGY_FIELDS);
+		expect(
+			declared.filter((m) => !decided.includes(m)),
+			"declared on DiagnosticStrategy with no decision in OVERRIDE_STRATEGY_FIELDS",
+		).toEqual([]);
+		expect(
+			decided.filter((m) => !declared.includes(m)),
+			"decided in OVERRIDE_STRATEGY_FIELDS but no longer declared",
+		).toEqual([]);
+		for (const [field, decision] of Object.entries(OVERRIDE_STRATEGY_FIELDS)) {
+			expect(["inherit", "reset", "longer"], `${field} decision`).toContain(
+				decision.keep,
+			);
+			expect(decision.why.length, `${field} reason`).toBeGreaterThanOrEqual(20);
+		}
+	});
+
+	// #4833 review F1/F2: the first cut reset the whole row, which turned
+	// opengrep's reopenOnResync and emptyUntilRulesRefreshed workarounds into a
+	// false "confirmed clean" and pinned that regression with a whole-row
+	// equality. Each field now has a direction; this applies it to every row.
+	it("applies each field's decision to every catalog row, field by field", () => {
 		const ids = Object.keys(SERVER_DIAGNOSTIC_STRATEGIES);
 		assertNonEmptyScan("wait strategy rows", ids.length, 10);
 		const fallback = getStrategy("an-id-with-no-strategy-row");
+		const seen = { inherit: 0, reset: 0, longer: 0 };
 		for (const id of ids) {
-			expect(getStrategy(id, "override"), id).toBe(fallback);
+			const row = SERVER_DIAGNOSTIC_STRATEGIES[id]!;
+			const effective = getStrategy(id, "override");
+			for (const [field, decision] of Object.entries(
+				OVERRIDE_STRATEGY_FIELDS,
+			)) {
+				const catalogValue = valueOf(row, field);
+				const defaultValue = valueOf(fallback, field);
+				const got = valueOf(effective, field);
+				if (catalogValue !== undefined) seen[decision.keep] += 1;
+				if (decision.keep === "inherit") {
+					expect(got, `${id}.${field}`).toEqual(catalogValue ?? defaultValue);
+				} else if (decision.keep === "reset") {
+					expect(got, `${id}.${field}`).toEqual(defaultValue);
+				} else {
+					expect(got, `${id}.${field}`).toBe(
+						Math.max(Number(catalogValue ?? 0), Number(defaultValue)),
+					);
+				}
+			}
 		}
+		// Non-vacuous: every decision kind met real catalog values.
+		assertNonEmptyScan("inherit field values", seen.inherit, 5);
+		assertNonEmptyScan("reset field values", seen.reset, 5);
+		assertNonEmptyScan("longer field values", seen.longer, 5);
+	});
+
+	// The direction, named: the catalog rows below carry the workaround or the
+	// optimistic claim the fields above are decided by. Flipping a row's value
+	// (a marker lost from the catalog) reds here though the table still agrees
+	// with the row.
+	it("keeps the restrictive workarounds and resets the optimistic claims", () => {
+		const kept = (id: string) => getStrategy(id, "override");
+		expect(kept("opengrep").reopenOnResync).toBe(true);
+		expect(kept("opengrep").rescansOnSave).toBe(true);
+		expect(kept("opengrep").emptyUntilRulesRefreshed).toBe(true);
+		expect(kept("opengrep").aggregateWaitMs).toBeGreaterThanOrEqual(3500);
+		expect(kept("typos").publishesOnClose).toBe(true);
+		expect(kept("php").emptyFirstPublish).toBe("indexing");
+		expect(kept("php").diagnosticsFence).toBe("reply-first");
+		expect(kept("rust-analyzer").expectSemanticSecondPush).toBe(true);
+		expect(kept("csharp").aggregateWaitMs).toBeGreaterThanOrEqual(6000);
+		expect(kept("typescript").silentOnClean).toBeUndefined();
+		expect(kept("marksman").silentOnClean).toBeUndefined();
+		expect(kept("marksman").workspaceIndexing).toBeUndefined();
+		expect(kept("marksman").workspaceIndexingWarmWaitMs).toBeUndefined();
+		expect(kept("python").seedFirstPush).toBe(false);
+		// An id with no row is the default object; the catalog launch is untouched.
+		expect(getStrategy("an-id-with-no-strategy-row", "override")).toBe(
+			getStrategy("an-id-with-no-strategy-row"),
+		);
+		expect(getStrategy("typescript", "classic").silentOnClean).toBe(true);
 	});
 
 	// The detector's own refusals: three spellings its author did not design
