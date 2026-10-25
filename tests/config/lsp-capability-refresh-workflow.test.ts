@@ -413,10 +413,14 @@ function parseWriteOperands(
 			continue;
 		}
 		if (dest !== undefined) {
-			if (word === dest.short || word === dest.long) {
-				const value = words[index + 1];
-				if (value === undefined) return { unplaced: word };
-				destinationDir = value;
+			// A short `t` is the destination wherever it sits in a bundle
+			// (`-t DIR`, `-tDIR`, `-rt DIR`); the letters before it are flags.
+			const letter = dest.short.slice(1);
+			const bundle = word.startsWith("--") ? -1 : word.indexOf(letter, 1);
+			if (word === dest.long || (bundle > 0 && word.slice(bundle + 1) === "")) {
+				const next = words[index + 1];
+				if (next === undefined) return { unplaced: word };
+				destinationDir = next;
 				index++;
 				continue;
 			}
@@ -424,8 +428,8 @@ function parseWriteOperands(
 				destinationDir = word.slice(dest.long.length + 1);
 				continue;
 			}
-			if (word.startsWith(dest.short)) {
-				destinationDir = word.slice(dest.short.length);
+			if (bundle > 0) {
+				destinationDir = word.slice(bundle + 1);
 				continue;
 			}
 		}
@@ -789,6 +793,13 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 		{
 			title: "a destination named by the glued -tDIR form",
 			staging: staged('cp --parents -t"$stage/files/" .changelog/x.md'),
+			expected: 1,
+		},
+		{
+			// GNU reads `t` wherever it sits in a short bundle, so the letters
+			// before it are flags and the value still moves the destination.
+			title: "a destination named by a bundled -rt flag",
+			staging: staged('cp --parents -rt "$stage/files/" .changelog/x.md'),
 			expected: 1,
 		},
 		{
