@@ -787,6 +787,20 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 			expected: 1,
 		},
 		{
+			title: "a destination named by the glued -tDIR form",
+			staging: staged('cp --parents -t"$stage/files/" .changelog/x.md'),
+			expected: 1,
+		},
+		{
+			// `install` lands only the basename without `--parents` (which it does
+			// not have), so this arm is pinned on `cp` to isolate the option form.
+			title: "a destination named by a separate --target-directory value",
+			staging: staged(
+				'cp --parents --target-directory "$stage/files/" .changelog/x.md',
+			),
+			expected: 1,
+		},
+		{
 			// A value-taking option the grammar does not place, after the
 			// destination: GNU getopt permutes, so `.bak` would be read as the
 			// destination and the dropped dot path would read clean.
