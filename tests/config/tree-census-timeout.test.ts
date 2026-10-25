@@ -609,6 +609,14 @@ describe("tree census timeout (#4828)", () => {
 		});
 	});
 
+	it("plants: refuses a third argument on an unclassified census", () => {
+		// Recurrence (#4828 verify r4 F9): the unclassified branch took the budget
+		// rule with no witness, so `args.length === 2` there stayed green.
+		const source = `${VITEST}censusTest("c", () => { listSourceFiles(ROOT); }, 5000);`;
+		expect(censuses(source)).toHaveLength(1);
+		expect(defaultBudget(source)).toEqual(['"c"']);
+	});
+
 	it.each([
 		["the shared constant", "TREE_WALK_TIMEOUT_MS"],
 		["a scaled call with a reason", "scaledTestTimeout(60_000)"],
