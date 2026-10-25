@@ -857,8 +857,18 @@ describe("#3873 O4: a scope's end and a gap demotion", () => {
 		await startRuntime(SessionManager.inMemory(cwd));
 		await startRuntime(SessionManager.inMemory(cwd));
 
+		// Only this case's own starts and the absence of a demote row. An `end`
+		// row for the process's module-load primary (index.ts `runtime`) is
+		// written by whichever case starts a runtime first, not by this one.
 		const transitions = await rows("session_scope_transition");
-		expect(transitions.map((row) => [row.transition, row.role])).toEqual([
+		expect(transitions.filter((row) => row.transition === "demote")).toEqual(
+			[],
+		);
+		expect(
+			transitions
+				.filter((row) => row.transition === "start")
+				.map((row) => [row.transition, row.role]),
+		).toEqual([
 			["start", "primary"],
 			["start", "secondary"],
 		]);
@@ -915,8 +925,14 @@ describe("#3873 O5: the fence rollup", () => {
 
 	it("folds sources past the declaration cap into one (other) entry instead of growing the tally", async () => {
 		// `declare` keeps 128 names; 130 more guarantee the last are undeclared.
+		// Fill a second module copy's table: the declared-source Set is process
+		// lifetime, and filling the static copy's would make later cases tally
+		// their own source as `(other)`.
+		vi.resetModules();
+		const fresh = await import("../clients/generation-guard.js");
 		for (let i = 0; i < 130; i += 1)
-			createGenerationSource(`fence-cap-probe-${i}`)
+			fresh
+				.createGenerationSource(`fence-cap-probe-${i}`)
 				.capture()
 				.guardedWrite("w", () => i);
 
