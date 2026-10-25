@@ -12,7 +12,13 @@ valid:
         g = int(s)
     except ValueError:
         pass
+  - |
+    # #4840: round() and len() already return numbers.
+    a = float(round(v, 3))
+    b = int(len(xs))
 invalid:
   - 'int("42")'
   - 'float("3.14")'
   - 'int(user_input)'
+  - 'int(s.strip())'
+  - 'float(round_trip(s))'

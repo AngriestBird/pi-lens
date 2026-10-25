@@ -38,8 +38,12 @@ rule:
     - kind: function_definition
     - has:
         kind: yield
+        # A nested def or a generator lambda (`lambda: (yield)`) is its own
+        # generator; its yield does not make the enclosing function one (#4840).
         stopBy:
-          kind: function_definition
+          any:
+            - kind: function_definition
+            - kind: lambda
     - has:
         kind: return_statement
         regex: 'return\s+\S'

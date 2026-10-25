@@ -42,3 +42,6 @@ rule:
               - pattern: Decimal($$$)
               - pattern: int($$$)
               - pattern: float($$$)
+              # #4840: round() and len() always return a number.
+              - pattern: round($$$)
+              - pattern: len($$$)
