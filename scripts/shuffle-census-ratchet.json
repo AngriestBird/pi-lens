@@ -8,12 +8,6 @@
 			"test": "LSP dispatch runner — real server (#873) > maps a genuine server error to a 1-indexed blocking diagnostic"
 		},
 		{
-			"file": "tests/clients/review-graph/wasm-trap-containment.test.ts",
-			"seam": "tree-sitter-wasm-state",
-			"seed": 202,
-			"test": "review graph after a contained trap (#3605 F2, F3) > re-extracts a file a one-off trap cost on the next build"
-		},
-		{
 			"file": "tests/index-3873-session-decision-records.test.ts",
 			"seam": "index-activation-state",
 			"seed": 202,
