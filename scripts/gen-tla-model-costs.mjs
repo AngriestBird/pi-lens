@@ -227,7 +227,15 @@ export function main(
 			return 2;
 		}
 	}
-	const kept = { ...recorded, ...states };
+	// Sorted like `files` (#4838 review F3): the spread put the recorded keys
+	// first, so the regeneration was not byte-identical to its own output.
+	const merged = { ...recorded, ...states };
+	const kept = {};
+	for (const config of Object.keys(merged).sort((a, b) =>
+		a < b ? -1 : a > b ? 1 : 0,
+	)) {
+		kept[config] = merged[config];
+	}
 	const payload = {
 		generatedBy:
 			"node scripts/gen-tla-model-costs.mjs --source <run-id> ... --log <job-log> ... (logs from `gh run view <run-id> --log --job <shard-job-id>`)",
