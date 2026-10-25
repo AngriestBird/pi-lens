@@ -224,6 +224,22 @@ describe("#1756 stage 1 — declared server trait table", () => {
 			30,
 		);
 		expect(rechecks).toEqual(["python", "typescript"]);
+		// #4829 verify r3 F5: the re-send's model (DependencyResend.cfg) sets
+		// `Drain = FALSE` because the phase drains only `single-task-ordered`
+		// clients. A re-checking row that turned ordered would drain, and the
+		// model would keep proving the undrained design.
+		const orderedRechecks = LSP_SERVERS.filter((server) => {
+			const traits = serverTraits(server);
+			return (
+				traits.resendRecheck === "rechecks" &&
+				traits.replyOrdering === "single-task-ordered"
+			);
+		}).map((server) => server.id);
+		expect(
+			orderedRechecks,
+			"A re-checking row is single-task-ordered, so the phase drains it; " +
+				"model the drain (Drain = TRUE) in the DependencyResend configs first.",
+		).toEqual([]);
 	});
 
 	it("orders the notify-inflight trait declaration, then environment, then default", () => {
