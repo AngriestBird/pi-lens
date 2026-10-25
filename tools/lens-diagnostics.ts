@@ -1774,7 +1774,7 @@ function diagnosticDedupKey(
 	diagnostic: WidgetDiagnostic,
 ): string {
 	const ruleId = normalizeRuleId(diagnostic.rule ?? diagnostic.tool ?? "");
-	return [path.resolve(filePath), diagnostic.line ?? "?", ruleId].join(":");
+	return [normalizeMapKey(filePath), diagnostic.line ?? "?", ruleId].join(":");
 }
 
 /**
@@ -2081,15 +2081,37 @@ function mergeDiagnosticsWithWidgetSummaries(
 	const byFile = new Map<string, FileDiagnosticSummary>();
 	const seen = new Set<string>();
 
+	const addDiagnostic = (
+		filePath: string,
+		widgetDiagnostic: WidgetDiagnostic,
+	) => {
+		const fileKey = normalizeMapKey(filePath);
+		const existing = byFile.get(fileKey);
+		const diagnostics = existing ? [...existing.diagnostics] : [];
+		const key = diagnosticDedupKey(filePath, widgetDiagnostic);
+		if (seen.has(key)) return;
+		seen.add(key);
+		diagnostics.push(widgetDiagnostic);
+		byFile.set(
+			fileKey,
+			summarizeDiagnostics(
+				existing?.filePath ?? filePath,
+				diagnostics,
+				existing?.hasFinalSnapshot ?? true,
+			),
+		);
+	};
+
 	for (const summary of widgetSummaries) {
 		const filePath = path.resolve(summary.filePath);
+		const fileKey = normalizeMapKey(summary.filePath);
 		// NOTE (#1993 review): dispositions recorded against a CACHED copy's
 		// message text may not match this file's fresh sweep copy (weak
 		// anchors key on message). Both copies derive from the same LSP
 		// diagnostic via convertLspDiagnostics, so identity is stable in
 		// practice; inline pi-lens-ignore comments are the primary
 		// suppression mechanism.
-		if (authoritativeLspFiles?.has(filePath)) continue;
+		if (authoritativeLspFiles?.has(fileKey)) continue;
 		const retained = summary.diagnostics ?? [];
 		const diagnostics = retained
 			.filter(
@@ -2102,8 +2124,15 @@ function mergeDiagnosticsWithWidgetSummaries(
 					) !== "retire",
 			)
 			.map((d) => ({ ...d }));
+		// Two stored summaries for one file (a writer that missed an entry point,
+		// #4689) fold into the first by the same dedup the later producers use,
+		// never overwrite it: an overwrite would drop the earlier rows.
+		if (byFile.has(fileKey)) {
+			for (const diagnostic of diagnostics) addDiagnostic(filePath, diagnostic);
+			continue;
+		}
 		byFile.set(
-			filePath,
+			fileKey,
 			// #2154 v4: when the filter retires rows, the stored tallies describe
 			// diagnostics that are no longer delivered — full mode rendered
 			// `main.go 1W … 1 warning` with no row under it. Recompute from what
@@ -2120,26 +2149,6 @@ function mergeDiagnosticsWithWidgetSummaries(
 			seen.add(diagnosticDedupKey(filePath, diagnostic));
 		}
 	}
-
-	const addDiagnostic = (
-		filePath: string,
-		widgetDiagnostic: WidgetDiagnostic,
-	) => {
-		const existing = byFile.get(filePath);
-		const diagnostics = existing ? [...existing.diagnostics] : [];
-		const key = diagnosticDedupKey(filePath, widgetDiagnostic);
-		if (seen.has(key)) return;
-		seen.add(key);
-		diagnostics.push(widgetDiagnostic);
-		byFile.set(
-			filePath,
-			summarizeDiagnostics(
-				filePath,
-				diagnostics,
-				existing?.hasFinalSnapshot ?? true,
-			),
-		);
-	};
 
 	for (const result of lspResults) {
 		const filePath = path.resolve(result.filePath);
@@ -2630,6 +2639,10 @@ async function formatFullMode(
 	// footer cache. A footer write is never allowed to fail the tool call, so
 	// any unexpected throw is swallowed.
 	for (const result of fullyCoveredLspResults) {
+		// The sweep names a file by its path identity and the widget store by the
+		// writer's spelling, so both Sets and their readers key by identity
+		// (#4689).
+		const fileKey = normalizeMapKey(result.filePath);
 		try {
 			// #692: provenance label ONLY — must never affect `rule`/identity (see
 			// `ConvertLspDiagnosticsOptions.scanOrigin`'s doc comment).
@@ -2695,9 +2708,9 @@ async function formatFullMode(
 			// Strict `=== true`: `undefined` (a double that predates the boolean
 			// return) takes the unreconciled arm, never the retiring one.
 			if (retired === true) {
-				authoritativeLspFiles.add(path.resolve(result.filePath));
+				authoritativeLspFiles.add(fileKey);
 			} else {
-				unreconciledFiles.add(path.resolve(result.filePath));
+				unreconciledFiles.add(fileKey);
 				recordDegradationOnce({
 					kind: "diagnostic-retained-unreconciled",
 					subject: `${path.resolve(result.filePath)}:lsp`,
@@ -2707,7 +2720,7 @@ async function formatFullMode(
 			}
 		} catch {
 			// Never let a footer-reconciliation hiccup fail the scan itself.
-			unreconciledFiles.add(path.resolve(result.filePath));
+			unreconciledFiles.add(fileKey);
 			recordDegradationOnce({
 				kind: "diagnostic-retained-unreconciled",
 				subject: `${path.resolve(result.filePath)}:lsp`,
@@ -2773,7 +2786,7 @@ async function formatFullMode(
 	const authoritativeRetiredCount = getFileDiagnosticSummaries().filter(
 		(summary) =>
 			includeFile(summary.filePath) &&
-			authoritativeLspFiles.has(path.resolve(summary.filePath)) &&
+			authoritativeLspFiles.has(normalizeMapKey(summary.filePath)) &&
 			(summary.diagnostics?.length ?? 0) > 0,
 	).length;
 	if (authoritativeRetiredCount > 0) {
@@ -2872,7 +2885,7 @@ async function formatFullMode(
 	);
 	if (unreconciledFiles.size > 0) {
 		summaries = summaries.map((summary) =>
-			unreconciledFiles.has(path.resolve(summary.filePath))
+			unreconciledFiles.has(normalizeMapKey(summary.filePath))
 				? summarizeDiagnostics(
 						summary.filePath,
 						markUnreconciledFindings(summary.diagnostics),

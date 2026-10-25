@@ -1355,7 +1355,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `toProjectRelativePath`, not a `path.relative` of two axes.
 		// 26 -> 25 (#4689 r3): mode=delta's group renders through
 		// `toProjectRelativePath` too.
-		"tools/lens-diagnostics.ts": 25,
+		// 25 -> 19 (#4689 batch 4): mode=full's merge keys its Sets, dedup key and
+		// per-file map by `normalizeMapKey`, dropping six `path.resolve` calls.
+		"tools/lens-diagnostics.ts": 19,
 		// 10 -> 8 (#4577 M2): the scalar and batch `path`/`paths` arguments fold
 		// onto `resolveHostToolPath`, dropping one `path.resolve` each.
 		"tools/lsp-diagnostics.ts": 8,
