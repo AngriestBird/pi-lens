@@ -1161,6 +1161,59 @@ describe("LSP auto-touch skip path folding (#1193)", () => {
 	});
 });
 
+/**
+ * #3650: `lsp_navigation` declares its target as `path`
+ * (`tools/lsp-navigation.ts:863`), and the call-side reader in this file read
+ * `filePath` alone. For a read-only operation the classifier returns no
+ * mutation, so the raw path never resolved: `handleToolCall` returned at
+ * `if (!filePath) return;` and every path-keyed step of the call site was
+ * skipped for a file the agent had just named — the LSP config init for its
+ * root, the nav auto-touch (`source: "tool_call:lsp_navigation"`), the
+ * once-per-file complexity baseline, and the eligibility and gitignore
+ * verdicts. Proven through the real `handleToolCall`, observed on the LSP
+ * seam's `touchFile`.
+ *
+ * The `lsp_navigation` tool warms the file itself before its own request
+ * (`openFileBestEffort`, `tools/lsp-navigation.ts:785`), so this call-site
+ * touch is not the only warm: what the case pins is that the CALL's declared
+ * path resolves at all, which is the seam the fix repairs.
+ */
+describe("lsp_navigation call-side path field (#3650)", () => {
+	it("auto-touches the file an lsp_navigation call names in `path`", async () => {
+		touchFileMock.mockClear();
+		const env = setupTestEnvironment("pi-lens-3650-nav-path-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "export {};\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: {
+							toolName: "lsp_navigation",
+							toolCallId: "call-nav-path",
+							input: {
+								operation: "references",
+								path: "src/app.ts",
+								line: 1,
+							},
+						},
+						ctx: { cwd: env.tmpDir },
+					}),
+				),
+			);
+			expect(touchFileMock).toHaveBeenCalledWith(
+				filePath,
+				expect.any(String),
+				expect.objectContaining({ source: "tool_call:lsp_navigation" }),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
 // ---------------------------------------------------------------------------
 // #4187 R4-1 — the licensed set is the set the call NAMED, never the wider set
 // it wrote. Third recurrence of "named path vs written set" on this seam

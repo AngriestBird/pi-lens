@@ -1291,7 +1291,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the single-path branches, and with them the `input.path` read.
 		// 22 -> 21 (#2657): the LSP config root for an edit is no longer a
 		// `path.dirname(filePath)`; `resolveSessionConfigRoot` answers it.
-		"clients/runtime-tool-call.ts": 21,
+		// 21 -> 23 (#3650): the `lsp_navigation` branch reads the `path` field
+		// the tool declares, in its condition and its return.
+		"clients/runtime-tool-call.ts": 23,
 		// 22 -> 20 (#3650): the tool_result path read is routed through
 		// readToolResultPathField; the open-coded input.path cast is gone.
 		// 19 -> 18 (#4576): the tool_result path resolves through
