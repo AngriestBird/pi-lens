@@ -136,6 +136,31 @@ describe("TestRunnerClient project-root caches (#2048)", () => {
 		);
 	});
 
+	// #4689 batch 2 round 2: `path.resolve` folds `..` before the identity is
+	// derived, so `lnk/../pkg` (lnk -> deep/inner) keyed `parent/pkg` while the
+	// kernel opens `deep/pkg`. Recurrence: #4853 F1, the same shape in the
+	// coordinator, and CodeRabbit's note on this file's `canonicalFailedPath`.
+	it("keys a cwd spelled with `..` after a link by the kernel's identity (#4689)", () => {
+		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4689-dd-"));
+		tempRoots.push(parent);
+		fs.mkdirSync(path.join(parent, "deep", "inner"), { recursive: true });
+		fs.mkdirSync(path.join(parent, "deep", "pkg"));
+		fs.mkdirSync(path.join(parent, "pkg"));
+		linkAlias(path.join(parent, "deep", "inner"), path.join(parent, "lnk"));
+		const client = new TestRunnerClient();
+
+		const key = client._getCanonicalProjectRootForTests(
+			// not path.join: it folds the `..` lexically, which is the defect
+			[parent, "lnk", "..", "pkg"].join(path.sep),
+		);
+
+		expect(key).toBe(
+			normalizeEphemeralMapKey(
+				path.join(fs.realpathSync.native(parent), "deep", "pkg"),
+			),
+		);
+	});
+
 	it("shares caches across a confirmed Windows separator and case alias", (ctx) => {
 		const { root } = makeProject();
 		const alias = existingWindowsAlias(root);

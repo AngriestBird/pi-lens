@@ -735,21 +735,21 @@ interface TestResultRecord {
 }
 
 function canonicalFailedPath(filePath: string): string {
-	// `normalizeMapKey` is the path identity (#4689), a missing file included.
-	return normalizeMapKey(path.resolve(filePath));
+	// The kernel's identity of the spelling as written (#4689): no lexical `..`
+	// fold first, which would name a path the kernel never opens.
+	return normalizeMapKey(realpathOrResolve(filePath));
 }
 
 function canonicalProjectRoot(cwd: string): {
 	key: string;
 	resolved: boolean;
 } {
-	const absolute = path.resolve(cwd);
 	return {
-		key: normalizeEphemeralMapKey(realpathOrResolve(absolute)),
+		key: normalizeEphemeralMapKey(realpathOrResolve(cwd)),
 		// A cwd that is not on disk still has an identity (its nearest existing
 		// ancestor plus the tail), but is a guess about a path that may later be
 		// a link: `getCanonicalProjectRoot` memoizes only a resolved one (#2077).
-		resolved: fs.existsSync(absolute),
+		resolved: fs.existsSync(cwd),
 	};
 }
 

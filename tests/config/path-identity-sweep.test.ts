@@ -100,7 +100,7 @@ const MUTATION_QUEUE =
 	"the per-file mutation queue keys by the async kernel realpath (fs/promises), which the seam has no async form for; a file not created yet under a directory link keys by its spelling here and by identity in normalizeMapKey, a later #4689 slice";
 
 const INSTALL_SELF_CONTAINED =
-	"clients/install-diagnostics.ts is the paste-able report for an install whose runtime dependencies did not resolve (#285/#335) and imports nothing from clients/: clients/path-utils.ts imports minimatch, so routing its one realpath (the symlinked-install probe, which compares the kernel-real package dir with the spelled one on purpose) through realpathOrResolve would stop the report loading exactly when it is needed; tests/clients/install-diagnostics.test.ts loads it with minimatch unresolvable";
+	"clients/install-diagnostics.ts is the paste-able report for an install whose runtime dependencies did not resolve (#285/#335) and imports nothing from clients/: clients/path-utils.ts imports minimatch, so routing its one realpath (the symlinked-install probe, which compares the kernel-real package dir with the spelled one on purpose) through realpathOrResolve would stop the report loading exactly when it is needed; the import census in tests/clients/install-diagnostics.test.ts refuses any relative or bare specifier there, so that swap reds it";
 
 interface Pin {
 	sites: number;
