@@ -39,9 +39,18 @@ vi.mock("../clients/pipeline.js", () => pipeline);
 // The latency sink fixes its path when it loads, so the redirect to a private
 // home runs hoisted, before any import (the #3521 witness's shape): the row
 // assertion below reads the REAL sink and must not read a sibling run's rows.
-const witnessHome = vi.hoisted(() => {
+//
+// #4864: the parent is `os.tmpdir()`, never `.`. A `process.env.TMPDIR ?? "."`
+// parent resolves to the CHECKOUT ROOT on every runner that leaves TMPDIR
+// unset (CI does), which makes this home a directory NAMED at the repository
+// root: a repo-walking scan on a sibling worker lists it and then ENOENTs when
+// this file's afterAll removes it. `os.tmpdir()` reads the same variable with
+// the OS fallback, so the parent is never the checkout.
+const witnessHome = await vi.hoisted(async () => {
 	const previous = process.env.PI_LENS_HOME;
-	const home = `${process.env.TMPDIR ?? "."}/pi-lens-3814-witness-home-${process.pid}`;
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const home = join(tmpdir(), `pi-lens-3814-witness-home-${process.pid}`);
 	process.env.PI_LENS_HOME = home;
 	return { home, previous };
 });

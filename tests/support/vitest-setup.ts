@@ -957,9 +957,18 @@ export function repoRootBaseline(): readonly string[] | undefined {
 export function untrackedUnignoredEntries(
 	names: readonly string[],
 	root: string = process.cwd(),
+	/** Names the caller KNOWS are directories. The repo-root ledger records a
+	 *  `mkdir` creation, so its entries are directories even though the creating
+	 *  cell has usually removed the bytes by judgment time. A directory-only
+	 *  ignore rule (`coverage/`, `dist/`, `.probe-home/`) matches only when git is
+	 *  asked with a trailing slash or the directory is still on disk, so
+	 *  re-deriving the kind from `lstatSync` reports an admitted creation as a
+	 *  leak once it is gone (#4864 F4). */
+	directories?: ReadonlySet<string>,
 ): string[] | undefined {
 	if (names.length === 0) return [];
 	const withSlash = names.map((name) => {
+		if (directories?.has(name)) return `${name}/`;
 		const stat = fs.lstatSync(path.join(root, name), { throwIfNoEntry: false });
 		return stat?.isDirectory() ? `${name}/` : name;
 	});

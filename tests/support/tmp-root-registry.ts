@@ -118,12 +118,18 @@ export function registerTmpRoot(
 	registry.roots.set(dir, { kind, sawAbsent: false, createdBy });
 }
 
-/** Record a directory a TEST PROCESS made at the tmp root with `mkdir`, for
- *  creator attribution only (never a sweep member, #4560). */
 /** Record a directory a TEST PROCESS created by name directly under the
  *  repository root (#4864). Keyed by entry NAME, not path: two workers that
  *  build the same fixture name are the collision this records. Creator
- *  attribution only, like `siblings`. */
+ *  attribution only, like `siblings`.
+ *
+ *  The RULE this serves is the OUTCOME, not the syscall: no directory created
+ *  directly at the checkout root, whatever made it. The RECORDED writers are
+ *  `mkdirSync`, `mkdir` and `promises.mkdir` (the three `noteSibling` call
+ *  sites in `installTmpRootInterposer`). The rest of the population is
+ *  admitted silently today and is named under the PR's `## Accepted
+ *  residuals` (AGENTS.md shape 69): `cpSync`, `renameSync`, a child process's
+ *  `mkdir`, and the `mkdtemp` roots named at this root (#4867). */
 export function registerRepoRootDir(
 	registry: TmpRootRegistry,
 	dir: string,
@@ -160,6 +166,8 @@ export function recordedRepoRootDirs(
 	return dirs;
 }
 
+/** Record a directory a TEST PROCESS made at the tmp root with `mkdir`, for
+ *  creator attribution only (never a sweep member, #4560). */
 export function registerTmpSibling(
 	registry: TmpRootRegistry,
 	dir: string,
@@ -401,9 +409,12 @@ export function installTmpRootInterposer(
 			registerTmpSibling(registry, made, createdBy?.());
 			return;
 		}
-		// A `mkdtemp` root never reaches here: it is recorded by `note` above, its
-		// name is unique per call, and its creating file removes it. A NAMED
-		// directory has neither property, so it is recorded for the judgment.
+		// The rule is the OUTCOME: a directory NAMED directly at the checkout root
+		// is the shape a repo-walking scan loses. This branch sees the `mkdir`
+		// writers only. A `mkdtemp` root never reaches here (it is recorded by
+		// `note` above for the tmp root, and not recorded at all at the checkout
+		// root), so it is the admitted remainder this rule still covers (#4867),
+		// beside `cpSync`, `renameSync` and a child process's `mkdir`.
 		if (isDirectRepoRootChild(made))
 			registerRepoRootDir(registry, made, createdBy?.());
 	};

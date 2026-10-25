@@ -574,18 +574,25 @@ describe("tmp-fixture-hygiene", () => {
 		// #4859's shard 3 listed `.probe-language-roots/packages/css/vite.config.ts`
 		// and then ENOENTed when `tests/clients/tool-cwd.test.ts` removed the tree
 		// mid-walk. The interposer records NAMED creations at this root, so judge
-		// the creation, not the leftover. A `mkdtemp` root is not recorded: its
-		// name is unique per call and its creating file removes it (the admission
-		// `tests/config/tmp-fixture-hygiene-baseline.json`'s mkdtemp-parent sweep
-		// documents); a named directory has neither property.
+		// the creation, not the leftover. The rule is the OUTCOME (no directory
+		// named at the checkout root, whatever made it); the recorded writers are
+		// `mkdirSync`, `mkdir` and `promises.mkdir`, and the rest of the population
+		// (`mkdtemp` roots, #4867, plus `cpSync`, `renameSync` and a child
+		// process's `mkdir`) is the admitted remainder the PR body names.
 		const repoRootCreated = [...tmpHygieneRepoRootCreates()].filter(
 			// This file's own cells plant a stray at the root to drive the census in
 			// `names the entries a run added`, so its plants are the subject, not a
 			// fixture; its record lands at its own teardown, after this assertion.
 			([, creator]) => creator !== OWN_FILE,
 		);
+		const repoRootCreateNames = repoRootCreated.map(([name]) => name);
 		const repoRootCreateLeaks = untrackedUnignoredEntries(
-			repoRootCreated.map(([name]) => name),
+			repoRootCreateNames,
+			process.cwd(),
+			// The ledger records a `mkdir` creation, so every entry IS a directory
+			// even though the creating cell has removed the bytes by now: a
+			// directory-only ignore rule must still admit it (#4864 F4).
+			new Set(repoRootCreateNames),
 		);
 		// #4560: a write at the tmp root (`path.join(<fixture>, "..")`) is now in
 		// the census, not only `pi-lens-` names. A host process's tmp file is not
@@ -890,6 +897,37 @@ describe("tmp-fixture-hygiene", () => {
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	// #4864 F4 (CodeRabbit's thread): the repo-root ledger records a `mkdir`
+	// creation, so the entry is a DIRECTORY even though the creating cell has
+	// removed its bytes by judgment time. A directory-only ignore rule matches
+	// only when git is asked with a trailing slash or the directory is still on
+	// disk, so re-deriving the kind from `lstatSync` reports a legitimately
+	// ignored creation as a leak precisely in the population the new arm
+	// targets. The A/B runs against the real checkout, as the reviewer's probe
+	// did: every name below carries a directory-only rule, and the cell picks one
+	// the checkout does not currently hold, so the measured case is the removed
+	// directory (a stray one in a developer's tree cannot satisfy or break it).
+	it("admits a recorded directory through a directory-only ignore rule after its bytes are gone (#4864)", () => {
+		const absentIgnoredDir = [
+			".pack-backup",
+			"coverage",
+			"reports",
+			"out",
+		].find((name) => !fs.existsSync(path.join(REPO_ROOT, name)));
+		expect(
+			absentIgnoredDir,
+			"every candidate directory-only rule has a directory in this checkout",
+		).toBeDefined();
+		const name = absentIgnoredDir as string;
+		// No kind and no bytes: git cannot match the directory-only rule, which is
+		// the pre-fix answer this arm keeps beside the fix.
+		expect(untrackedUnignoredEntries([name], REPO_ROOT)).toEqual([name]);
+		// The ledger's kind: the same name is admitted.
+		expect(
+			untrackedUnignoredEntries([name], REPO_ROOT, new Set([name])),
+		).toEqual([]);
 	});
 
 	it("the run's real baseline sees a stray planted in the repo root, and not once it is removed", () => {
