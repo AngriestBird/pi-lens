@@ -1,6 +1,0 @@
----
-section: Fixed
-audience: user
----
-
-- **`lens_diagnostics` mode=full no longer keeps a stale blocker beside a clean sweep through a symlink** — the sweep names a file by its real path while the widget store holds the writer's spelling, so the fresh result did not retire the stored row, did not mark an unreconciled one stale, and rendered one file twice. The merge now keys both sides by the file's path identity.

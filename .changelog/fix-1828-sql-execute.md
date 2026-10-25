@@ -1,6 +1,0 @@
----
-section: Added
-audience: user
----
-
-- **`no-sql-in-code-execute` reports `.execute()` SQL as advisory (closes #1828)** — a `db.execute(...)` or `db?.execute(...)` call whose first argument is built by string concatenation or `${...}` substitution and starts with a SQL statement now flags under the new rules `no-sql-in-code-execute` and `no-sql-in-code-execute-js`, at `severity: warning`. The `.query` arms stay in `no-sql-in-code` / `no-sql-in-code-js` at `severity: error`, with the matching unchanged. The `.execute` arms use the statement-prefix test the TypeScript `sql-injection` rule gained for #2909, with three changes: `SELECT` and `WITH` must be whole words, the escapes `\n`, `\r` and `\t` (exactly those, case-sensitive) before the statement are skipped like real whitespace, and a `--` comment before it may end at an escaped `\n` or `\r`. Statement-shaped English such as `acl.execute("grant " + role)` still flags, which is why the tier is advisory; `runner.execute("delete " + id)`, literal SQL, parameterized `execute(sql, [id])` calls and tagged templates such as Drizzle's `sql` stay quiet. All three rules exceed the per-edit rule-complexity cap, so these findings arrive from the full analysis (`pilens_analyze`), not the per-edit pass.
