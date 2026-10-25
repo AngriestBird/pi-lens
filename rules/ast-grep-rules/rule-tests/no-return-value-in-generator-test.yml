@@ -22,6 +22,12 @@ valid:
     def make():
         f = lambda: (yield)
         return f
+  - |
+    # #1806 shape: the only yield is in a nested def; return 2 is not a generator return.
+    def outer():
+        def inner():
+            yield 1
+        return 2
 invalid:
   - |
     def gen():
