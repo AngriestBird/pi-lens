@@ -482,13 +482,13 @@ Thanks goes to these wonderful people:
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Antrakos"><img src="https://avatars.githubusercontent.com/u/13787714?v=4" width="100px;" alt=""/><br /><sub><b>Taras Zubrei</b></sub></a><br /><a href="#ideas-Antrakos" title="Ideas & Planning">🤔</a></td>
     </tr>
     <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/pandas9"><img src="https://avatars.githubusercontent.com/u/81386636?v=4" width="100px;" alt=""/><br /><sub><b>pandas9</b></sub></a><br /><a href="#bug-pandas9" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/pandas9"><img src="https://avatars.githubusercontent.com/u/81386636?v=4" width="100px;" alt=""/><br /><sub><b>pandas9</b></sub></a><br /><a href="#bug-pandas9" title="Bug reports">🐛</a> <a href="#code-pandas9" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/renzooliveira"><img src="https://avatars.githubusercontent.com/u/10881850?v=4" width="100px;" alt=""/><br /><sub><b>Renzo Oliveira</b></sub></a><br /><a href="#ideas-renzooliveira" title="Ideas & Planning">🤔</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/rastarr"><img src="https://avatars.githubusercontent.com/u/2160922?v=4" width="100px;" alt=""/><br /><sub><b>Martin</b></sub></a><br /><a href="#bug-rastarr" title="Bug reports">🐛</a> <a href="#ideas-rastarr" title="Ideas & Planning">🤔</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/LiangNiang"><img src="https://avatars.githubusercontent.com/u/20347803?v=4" width="100px;" alt=""/><br /><sub><b>Hershel Hale</b></sub></a><br /><a href="#code-LiangNiang" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/loishi"><img src="https://avatars.githubusercontent.com/u/59756145?v=4" width="100px;" alt=""/><br /><sub><b>Loishi</b></sub></a><br /><a href="#code-loishi" title="Code">💻</a> <a href="#bug-loishi" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/gkgoat1"><img src="https://avatars.githubusercontent.com/u/65402989?v=4" width="100px;" alt=""/><br /><sub><b>gkgoat</b></sub></a><br /><a href="#code-gkgoat1" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/op15066212"><img src="https://avatars.githubusercontent.com/u/108321891?v=4" width="100px;" alt=""/><br /><sub><b>15066212pp</b></sub></a><br /><a href="#bug-op15066212" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/op15066212"><img src="https://avatars.githubusercontent.com/u/108321891?v=4" width="100px;" alt=""/><br /><sub><b>15066212pp</b></sub></a><br /><a href="#bug-op15066212" title="Bug reports">🐛</a> <a href="#ideas-op15066212" title="Ideas & Planning">🤔</a></td>
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/SlanyCukr"><img src="https://avatars.githubusercontent.com/u/35649784?v=4" width="100px;" alt=""/><br /><sub><b>Marek Hovadík</b></sub></a><br /><a href="#bug-SlanyCukr" title="Bug reports">🐛</a></td>
@@ -497,6 +497,14 @@ Thanks goes to these wonderful people:
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/VladimirGVP"><img src="https://avatars.githubusercontent.com/u/322008768?v=4" width="100px;" alt=""/><br /><sub><b>VladimirGVP</b></sub></a><br /><a href="#bug-VladimirGVP" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/bear0328"><img src="https://avatars.githubusercontent.com/u/32119214?v=4" width="100px;" alt=""/><br /><sub><b>bear0328</b></sub></a><br /><a href="#bug-bear0328" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/beardrux"><img src="https://avatars.githubusercontent.com/u/310295749?v=4" width="100px;" alt=""/><br /><sub><b>beardrux</b></sub></a><br /><a href="#bug-beardrux" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Nyarlathoteppppp"><img src="https://avatars.githubusercontent.com/u/126082256?v=4" width="100px;" alt=""/><br /><sub><b>bowen xu</b></sub></a><br /><a href="#code-Nyarlathoteppppp" title="Code">💻</a> <a href="https://github.com/apmantza/pi-lens/commits?author=Nyarlathoteppppp" title="Tests">⚠️</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/dmae97"><img src="https://avatars.githubusercontent.com/u/146327957?v=4" width="100px;" alt=""/><br /><sub><b>dmae97</b></sub></a><br /><a href="#code-dmae97" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Battlelamb"><img src="https://avatars.githubusercontent.com/u/12995996?v=4" width="100px;" alt=""/><br /><sub><b>Battlelamb</b></sub></a><br /><a href="#code-Battlelamb" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://wayneh.tw/"><img src="https://avatars.githubusercontent.com/u/5166321?v=4" width="100px;" alt=""/><br /><sub><b>WeiHung</b></sub></a><br /><a href="#code-wayne930242" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/wertyMSD"><img src="https://avatars.githubusercontent.com/u/130595241?v=4" width="100px;" alt=""/><br /><sub><b>wertyMSD</b></sub></a><br /><a href="#bug-wertyMSD" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/rcdailey"><img src="https://avatars.githubusercontent.com/u/1768054?v=4" width="100px;" alt=""/><br /><sub><b>Robert Dailey</b></sub></a><br /><a href="#bug-rcdailey" title="Bug reports">🐛</a></td>
     </tr>
   </tbody>
 </table>
