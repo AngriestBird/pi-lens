@@ -390,7 +390,8 @@ export function installTmpRootInterposer(
 			path.basename(path.resolve(dir)).startsWith("pi-lens-")
 		)
 			registerTmpRoot(registry, dir, "observed", createdBy?.());
-	}; // A fixture SIBLING (any name) is the #4560 population; `mkdtemp`'s
+	};
+	// A fixture SIBLING (any name) is the #4560 population; `mkdtemp`'s
 	// namespace rule above stays as it was.
 	//
 	// Judge what the call CREATED, not what it requested (#4560 F3). A recursive
