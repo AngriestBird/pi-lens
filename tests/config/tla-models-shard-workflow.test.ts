@@ -170,7 +170,7 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		const table = loadModelCosts(ROOT);
 		// Every lookup goes through `modelCostId`, the production key seam: a
 		// hand-built `resolve(config).slice(ROOT.length + 1)` keeps the HOST
-		// separator, so on a Windows runner every one of the 811 lookups misses,
+		// separator, so on a Windows runner every lookup in the corpus misses,
 		// every config falls back to `table.max`, and the balance assertion below
 		// is then 1.00x by construction -- vacuous (F1, docs/pi-lens-reviewer.md "Windows path
 		// shapes"). The miss guard is what keeps that from passing silently.
@@ -191,7 +191,7 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		assertNonEmptyScan("measured shard costs", byShard.length, 2);
 		const heaviest = Math.max(...byShard);
 		const lightest = Math.min(...byShard);
-		// Greedy LPT on 811 configs lands within a few seconds of the ideal; 5%
+		// Greedy LPT on the full corpus (833 configs at #4714) lands within a few seconds of the ideal; 5%
 		// admits one regenerated table's rounding without admitting a real tail.
 		expect(heaviest / lightest).toBeLessThan(1.05);
 		// And the counterfactual the fix exists for: the count-based round-robin
@@ -327,8 +327,9 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 	// printed `COST-TABLE DRIFT` on a healthy run, one shard of four. A warning
 	// that cries wolf is worse than none: no shard of this run may print it.
 	// The ratios are re-pinned on each cost-table regeneration (#4714 regen from
-	// run 40147263648): they are the table's own projection over these fixed
-	// configs, so they move with the table. The pin still asserts no DRIFT line.
+	// run 40147263648): each is this fixture run's measured shard seconds over
+	// the seconds the table projects for that shard, so a new table or a new
+	// fixture run moves it. The pin still asserts no DRIFT line.
 	it.each([
 		["1of4", "0.65x"],
 		["2of4", "1.65x"],
