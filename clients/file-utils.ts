@@ -806,7 +806,11 @@ type ProjectIgnoreMatcherWithFreshness = ProjectIgnoreMatcher & {
 };
 
 function resolveGitIgnoreRoot(startDir: string): string {
-	const fallback = path.resolve(startDir);
+	// #4689: the walk climbs the directory's path identity, so a link spelling
+	// of a project (or a link into one of its subdirectories) reaches the same
+	// `.git` and the same matcher as the real path. Every ignore verdict and
+	// cache key below is taken against this identity root.
+	const fallback = realpathOrResolve(startDir);
 	let current = fallback;
 	while (true) {
 		if (fs.existsSync(path.join(current, ".git"))) return current;
@@ -1098,9 +1102,37 @@ function buildProjectIgnoreMatcher(
 			}
 		}
 	}
+	// #4689: `resolvedRoot` is the root's path identity, so a path spelled
+	// through another name for the project (a link to the root, a link into it)
+	// reads as outside the root by text. `isIgnored` answers such a path by
+	// the identity of its directory (a file keeps its own name, which is its
+	// tree path), so every spelling of one file shares one memo key, one set of
+	// nested-rule directories and one tracked-set key. Directory identities are
+	// taken once per directory: a walk through a link spelling pays one
+	// `realpath` per directory, not per file.
+	const dirIdentities = new Map<string, string>();
+	const identityOfDir = (dir: string): string => {
+		let identity = dirIdentities.get(dir);
+		if (identity === undefined) {
+			identity = realpathOrResolve(dir);
+			dirIdentities.set(dir, identity);
+		}
+		return identity;
+	};
+	const rootPrefix = resolvedRoot.endsWith(path.sep)
+		? resolvedRoot
+		: resolvedRoot + path.sep;
+	// The textual prefix test keeps the in-root path (every walk of a project
+	// spelled by its identity) at one string compare, with no `path.relative`.
+	const isUnderRootText = (absolute: string): boolean =>
+		absolute === resolvedRoot || absolute.startsWith(rootPrefix);
 	const invalidateSubtree = (subtree: string): void => {
-		dropVerdictsUnder(subtree);
-		nestedCache.delete(path.resolve(subtree));
+		const absolute = path.resolve(subtree);
+		const local = isUnderRootText(absolute)
+			? absolute
+			: identityOfDir(absolute);
+		dropVerdictsUnder(local);
+		nestedCache.delete(local);
 	};
 
 	// Compile expanded gitignore globs once per matcher instance. Relative-path
@@ -1156,7 +1188,16 @@ function buildProjectIgnoreMatcher(
 			return collectTrackedFiles(resolvedRoot).then(() => undefined);
 		},
 		isIgnored(filePath: string, isDirectory = false): boolean {
-			const resolved = path.resolve(filePath);
+			// #4689: one verdict per file, whichever name reached it. The memo, the
+			// nested-rule directories and the tracked set all key on the root's own
+			// spelling.
+			const spelled = path.resolve(filePath);
+			const resolved = isUnderRootText(spelled)
+				? spelled
+				: path.join(
+						identityOfDir(path.dirname(spelled)),
+						path.basename(spelled),
+					);
 			// Two namespaces (D: for directory queries, F: for file queries)
 			// because gitignore semantics differ for trailing-slash patterns.
 			const memoKey = (isDirectory ? "D:" : "F:") + resolved;

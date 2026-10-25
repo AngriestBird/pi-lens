@@ -167,10 +167,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :433 (r6: keyed by its function, renamed to dataDirCanonicalRoot)
 	"clients/file-utils.ts#path-resolve-keyed": {
-		sites: 3,
-		identities: "28e866f9b5baf0dd",
+		sites: 2,
+		identities: "7e723fe52bc1e91e",
 		reason: SPELLING_MEMO,
-	}, // :894, :1268, :1279
+	}, // :1518, :1529
 	"clients/inline-blocker-dispositions.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "22f213e6ea043ad8",
@@ -252,10 +252,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :444
 	"clients/pipeline.ts#path-resolve-keyed": {
-		sites: 5,
-		identities: "a02a55f7f6e6fc48",
+		sites: 2,
+		identities: "f25de8a73a269e45",
 		reason: PRE_4689,
-	}, // :212, :1022, :2259, :2330, :2374
+	}, // :215, :1054
 	"clients/probe-home-state.ts#raw-realpath": {
 		sites: 1,
 		identities: "480c8b119f83ad12",
@@ -332,10 +332,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: SPELLING_MEMO,
 	}, // :219, :267, :272
 	"tools/lens-diagnostics.ts#path-resolve-keyed": {
-		sites: 9,
-		identities: "88eb117a49e95f43",
+		sites: 2,
+		identities: "223a7ec2d1f4172c",
 		reason: PRE_4689,
-	}, // :855, :857, :2049, :2063, :2606, :2608, :2618, :2684, :2783
+	}, // :895, :897 (a per-call bucket; `getDeltaFileGroup` keys the group by identity)
 	"mcp/server.ts#path-resolve-keyed": {
 		sites: 1,
 		identities: "95f9ef6922e0457e",

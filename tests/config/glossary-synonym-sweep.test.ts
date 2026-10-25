@@ -1036,8 +1036,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 61 -> 68 (#4689 r4): the data-dir adoption joins its walk with the
 		// node `path` module (no `path` binding of its own). 68 -> 70 (r5): the
 		// done-marker's path and its parent. 70 -> 68 (#4530): machineStateDir
-		// moved to probe-home-state.ts, below the spawn seam.
-		"clients/file-utils.ts": 68,
+		// moved to probe-home-state.ts, below the spawn seam. 68 -> 72 (#4689
+		// batch 5): the ignore matcher's off-root namespace joins the identity of
+		// a directory with the node `path` module (`path.join`, `dirname`,
+		// `basename`, `sep`); no `path` binding of its own.
+		"clients/file-utils.ts": 72,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realpathOrResolve`,
@@ -1194,7 +1197,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `realpathOrResolve(startDir)` and `realpathOrResolve(homeDir)`.
 		"clients/path-utils.ts": 33,
 		"clients/php-cs-fixer-config.ts": 4,
-		"clients/pipeline.ts": 26,
+		// 26 -> 24 (#4689 batch 3): the changed-file set is a PathKeyedMap, so two
+		// `path.resolve` calls are gone. 24 -> 22: the postMutation gate compares
+		// through `normalizeMapKey`, two more.
+		"clients/pipeline.ts": 22,
 		// 10 -> 12 (#4530): machineStateDir moved here from file-utils.ts.
 		"clients/probe-home-state.ts": 12,
 		"clients/project-changes.ts": 5,
@@ -1360,7 +1366,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `toProjectRelativePath`, not a `path.relative` of two axes.
 		// 26 -> 25 (#4689 r3): mode=delta's group renders through
 		// `toProjectRelativePath` too.
-		"tools/lens-diagnostics.ts": 25,
+		// 25 -> 19 (#4689 batch 4): mode=full's merge keys its Sets, dedup key and
+		// per-file map by `normalizeMapKey`, dropping six `path.resolve` calls.
+		"tools/lens-diagnostics.ts": 19,
 		// 10 -> 8 (#4577 M2): the scalar and batch `path`/`paths` arguments fold
 		// onto `resolveHostToolPath`, dropping one `path.resolve` each.
 		"tools/lsp-diagnostics.ts": 8,
