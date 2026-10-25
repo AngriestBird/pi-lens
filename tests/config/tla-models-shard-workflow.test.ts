@@ -326,11 +326,14 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 	// per-shard sum sit 0.64x apart on shard 1/4 -- so the published line
 	// printed `COST-TABLE DRIFT` on a healthy run, one shard of four. A warning
 	// that cries wolf is worse than none: no shard of this run may print it.
+	// The ratios are re-pinned on each cost-table regeneration (#4714 regen from
+	// run 40147263648): they are the table's own projection over these fixed
+	// configs, so they move with the table. The pin still asserts no DRIFT line.
 	it.each([
-		["1of4", "0.64x"],
-		["2of4", "1.14x"],
-		["3of4", "1.05x"],
-		["4of4", "1.03x"],
+		["1of4", "0.65x"],
+		["2of4", "1.65x"],
+		["3of4", "1.00x"],
+		["4of4", "1.47x"],
 	] as const)(
 		"does not call the table stale for shard %s of the healthy run 39435284236",
 		(shard, ratio) => {
