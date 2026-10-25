@@ -332,10 +332,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: SPELLING_MEMO,
 	}, // :219, :267, :272
 	"tools/lens-diagnostics.ts#path-resolve-keyed": {
-		sites: 9,
-		identities: "88eb117a49e95f43",
+		sites: 2,
+		identities: "223a7ec2d1f4172c",
 		reason: PRE_4689,
-	}, // :855, :857, :2049, :2063, :2606, :2608, :2618, :2684, :2783
+	}, // :895, :897 (a per-call bucket; `getDeltaFileGroup` keys the group by identity)
 	"mcp/server.ts#path-resolve-keyed": {
 		sites: 1,
 		identities: "95f9ef6922e0457e",
