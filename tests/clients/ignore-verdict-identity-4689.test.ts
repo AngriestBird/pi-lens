@@ -23,7 +23,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	getProjectIgnoreMatcher,
 	invalidateProjectIgnoreMatcherForPath,
@@ -31,17 +31,12 @@ import {
 } from "../../clients/file-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
-import { runPipeline } from "../../clients/pipeline.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
 	createPathIdentityFixture,
 	pinFixtureHome,
 	setupTestEnvironment,
 } from "./test-utils.js";
-
-vi.mock("../../clients/pipeline.js", () => ({
-	runPipeline: vi.fn(),
-}));
 
 interface Tree {
 	/** The real project. */
@@ -54,19 +49,33 @@ interface Tree {
 	subLink: string;
 	/** A project-looking sibling no `.gitignore` here governs. */
 	outside: string;
-	cleanup: () => void;
+	/** Set when this host cannot create symlinks; the cell must skip visibly. */
+	skipReason?: string;
 }
 
+const cleanups: Array<() => void> = [];
+afterEach(() => {
+	for (const cleanup of cleanups.splice(0)) cleanup();
+});
+
 /** A git root (`.git`, `*.log`), one nested `.gitignore` (`*.tmp`) and links. */
-function plantTree(slug: string): Tree | undefined {
+function plantTree(slug: string): Tree {
 	const env = setupTestEnvironment(`pi-lens-${slug}-`);
 	const home = pinFixtureHome(slug);
-	const fixture = createPathIdentityFixture(env.tmpDir);
-	if (fixture.skipReason !== undefined) {
+	cleanups.push(() => {
 		home.restore();
 		env.cleanup();
-		return undefined;
-	}
+	});
+	const fixture = createPathIdentityFixture(env.tmpDir);
+	if (fixture.skipReason !== undefined)
+		return {
+			repo: fixture.repo,
+			alias: fixture.aliasRoot,
+			sub: "",
+			subLink: "",
+			outside: "",
+			skipReason: fixture.skipReason,
+		};
 	const sub = path.join(fixture.repo, "sub");
 	fs.mkdirSync(path.join(fixture.repo, ".git"), { recursive: true });
 	fs.mkdirSync(sub, { recursive: true });
@@ -80,190 +89,140 @@ function plantTree(slug: string): Tree | undefined {
 		sub,
 		subLink,
 		outside: path.dirname(fixture.outsideFile),
-		cleanup: () => {
-			home.restore();
-			env.cleanup();
-		},
 	};
 }
 
+/** The `tool_result` handler's deps for one mutation event, nothing mocked. */
+function toolResultDeps(
+	runtime: RuntimeCoordinator,
+	dbg: (message: string) => void,
+	input: Record<string, unknown>,
+) {
+	return {
+		event: { toolName: "write", input, content: [] },
+		getFlag: (name: string) => name === "no-lsp",
+		dbg,
+		runtime,
+		cacheManager: new CacheManager(false),
+		biomeClient: {},
+		ruffClient: {},
+		metricsClient: {},
+		resetLSPService: () => {},
+		agentBehaviorRecord: () => [],
+		formatBehaviorWarnings: () => "",
+	} as never;
+}
+
 describe("project ignore verdict by path identity (#4689)", () => {
-	beforeEach(() => {
-		vi.mocked(runPipeline).mockReset();
-		vi.mocked(runPipeline).mockResolvedValue({
-			output: "",
-			hasBlockers: false,
-			isError: false,
-			fileModified: false,
-			checkedClean: false,
-		});
-	});
-
-	it("tool_result skips a gitignored file whichever way the path is spelled", async () => {
+	it("tool_result skips a gitignored file whichever way the path is spelled", async (ctx) => {
 		const tree = plantTree("ignore-identity-tool-result");
-		if (tree === undefined) return;
-		try {
-			const runtime = new RuntimeCoordinator();
-			runtime.projectRoot = tree.repo;
-			fs.writeFileSync(path.join(tree.repo, "a.log"), "noise\n");
-			for (const spelled of [
-				path.join(tree.repo, "a.log"),
-				path.join(tree.alias, "a.log"),
-			]) {
-				vi.mocked(runPipeline).mockClear();
-				const dbg = vi.fn();
-				await handleToolResult({
-					event: {
-						toolName: "write",
-						input: { path: spelled, content: "noise\n" },
-						content: [],
-					},
-					getFlag: () => false,
-					dbg,
-					runtime,
-					cacheManager: new CacheManager(false),
-					biomeClient: {},
-					ruffClient: {},
-					metricsClient: {},
-					resetLSPService: () => {},
-					agentBehaviorRecord: () => [],
-					formatBehaviorWarnings: () => "",
-				} as never);
-				expect(dbg).toHaveBeenCalledWith(
-					`tool_result: skipping gitignored file ${spelled}`,
-				);
-				expect(vi.mocked(runPipeline)).not.toHaveBeenCalled();
-			}
-		} finally {
-			tree.cleanup();
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = tree.repo;
+		fs.writeFileSync(path.join(tree.repo, "a.log"), "noise\n");
+		for (const spelled of [
+			path.join(tree.repo, "a.log"),
+			path.join(tree.alias, "a.log"),
+		]) {
+			const dbg = vi.fn();
+			await handleToolResult(
+				toolResultDeps(runtime, dbg, { path: spelled, content: "noise\n" }),
+			);
+			expect(dbg).toHaveBeenCalledWith(
+				`tool_result: skipping gitignored file ${spelled}`,
+			);
 		}
 	});
 
-	it("answers one verdict for the root and the file in any spelling pair", () => {
+	it("answers one verdict for the root and the file in any spelling pair", (ctx) => {
 		const tree = plantTree("ignore-identity-pairs");
-		if (tree === undefined) return;
-		try {
-			for (const root of [tree.repo, tree.alias]) {
-				for (const base of [tree.repo, tree.alias]) {
-					const where = `root ${root} file under ${base}`;
-					expect(
-						isPathIgnoredByProject(path.join(base, "a.log"), root),
-						`${where}: root rule`,
-					).toBe(true);
-					expect(
-						isPathIgnoredByProject(path.join(base, "sub", "b.tmp"), root),
-						`${where}: nested rule`,
-					).toBe(true);
-					expect(
-						isPathIgnoredByProject(path.join(base, "sub", "keep.ts"), root),
-						`${where}: kept file`,
-					).toBe(false);
-				}
-			}
-		} finally {
-			tree.cleanup();
-		}
-	});
-
-	it("does not ignore a file that is in neither spelling of the root", () => {
-		const tree = plantTree("ignore-identity-outside");
-		if (tree === undefined) return;
-		try {
-			for (const root of [tree.repo, tree.alias]) {
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		for (const root of [tree.repo, tree.alias]) {
+			for (const base of [tree.repo, tree.alias]) {
+				const where = `root ${root} file under ${base}`;
 				expect(
-					isPathIgnoredByProject(path.join(tree.outside, "a.log"), root),
+					isPathIgnoredByProject(path.join(base, "a.log"), root),
+					`${where}: root rule`,
+				).toBe(true);
+				expect(
+					isPathIgnoredByProject(path.join(base, "sub", "b.tmp"), root),
+					`${where}: nested rule`,
+				).toBe(true);
+				expect(
+					isPathIgnoredByProject(path.join(base, "sub", "keep.ts"), root),
+					`${where}: kept file`,
 				).toBe(false);
 			}
-		} finally {
-			tree.cleanup();
 		}
 	});
 
-	it("applies the repository's rules to a root that is a link into a subdirectory", () => {
+	it("does not ignore a file that is in neither spelling of the root", (ctx) => {
+		const tree = plantTree("ignore-identity-outside");
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		for (const root of [tree.repo, tree.alias]) {
+			expect(
+				isPathIgnoredByProject(path.join(tree.outside, "a.log"), root),
+			).toBe(false);
+		}
+	});
+
+	it("applies the repository's rules to a root that is a link into a subdirectory", (ctx) => {
 		const tree = plantTree("ignore-identity-sublink");
-		if (tree === undefined) return;
-		try {
-			const real = path.join(tree.sub, "a.log");
-			expect(isPathIgnoredByProject(real, tree.repo)).toBe(true);
-			expect(isPathIgnoredByProject(real, tree.subLink)).toBe(true);
-			expect(
-				isPathIgnoredByProject(path.join(tree.subLink, "a.log"), tree.repo),
-			).toBe(true);
-			expect(
-				isPathIgnoredByProject(path.join(tree.subLink, "a.log"), tree.subLink),
-			).toBe(true);
-		} finally {
-			tree.cleanup();
-		}
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		const real = path.join(tree.sub, "a.log");
+		expect(isPathIgnoredByProject(real, tree.repo)).toBe(true);
+		expect(isPathIgnoredByProject(real, tree.subLink)).toBe(true);
+		expect(
+			isPathIgnoredByProject(path.join(tree.subLink, "a.log"), tree.repo),
+		).toBe(true);
+		expect(
+			isPathIgnoredByProject(path.join(tree.subLink, "a.log"), tree.subLink),
+		).toBe(true);
 	});
 
-	it("a pi-authored nested .gitignore write evicts the verdict through another spelling", async () => {
+	it("a pi-authored nested .gitignore write evicts the verdict through another spelling", async (ctx) => {
 		const tree = plantTree("ignore-identity-invalidate");
-		if (tree === undefined) return;
-		try {
-			const runtime = new RuntimeCoordinator();
-			runtime.projectRoot = tree.repo;
-			const tmpFile = path.join(tree.sub, "x.tmp");
-			// Prime: the verdict is memoized and the nested rules are frozen for the
-			// cadence window, so only an eviction can change the answer inside it.
-			expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(true);
-			fs.writeFileSync(path.join(tree.sub, ".gitignore"), "# cleared\n");
-			await handleToolResult({
-				event: {
-					toolName: "write",
-					input: { path: path.join(tree.alias, "sub", ".gitignore") },
-					content: [],
-				},
-				getFlag: () => false,
-				dbg: () => {},
-				runtime,
-				cacheManager: new CacheManager(false),
-				biomeClient: {},
-				ruffClient: {},
-				metricsClient: {},
-				resetLSPService: () => {},
-				agentBehaviorRecord: () => [],
-				formatBehaviorWarnings: () => "",
-			} as never);
-			expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(false);
-		} finally {
-			tree.cleanup();
-		}
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = tree.repo;
+		const tmpFile = path.join(tree.sub, "x.tmp");
+		// Prime: the verdict is memoized and the nested rules are frozen for the
+		// cadence window, so only an eviction can change the answer inside it.
+		expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(true);
+		fs.writeFileSync(path.join(tree.sub, ".gitignore"), "# cleared\n");
+		await handleToolResult(
+			toolResultDeps(runtime, () => {}, {
+				path: path.join(tree.alias, "sub", ".gitignore"),
+			}),
+		);
+		expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(false);
 	});
 
-	it("evicts the verdicts of a spelled root the write named by the real path", () => {
+	it("evicts the verdicts of a spelled root the write named by the real path", (ctx) => {
 		const tree = plantTree("ignore-identity-invalidate-reverse");
-		if (tree === undefined) return;
-		try {
-			const tmpViaAlias = path.join(tree.alias, "sub", "x.tmp");
-			expect(isPathIgnoredByProject(tmpViaAlias, tree.alias)).toBe(true);
-			fs.writeFileSync(path.join(tree.sub, ".gitignore"), "# cleared\n");
-			invalidateProjectIgnoreMatcherForPath(path.join(tree.sub, ".gitignore"));
-			expect(isPathIgnoredByProject(tmpViaAlias, tree.alias)).toBe(false);
-		} finally {
-			tree.cleanup();
-		}
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		const tmpViaAlias = path.join(tree.alias, "sub", "x.tmp");
+		expect(isPathIgnoredByProject(tmpViaAlias, tree.alias)).toBe(true);
+		fs.writeFileSync(path.join(tree.sub, ".gitignore"), "# cleared\n");
+		invalidateProjectIgnoreMatcherForPath(path.join(tree.sub, ".gitignore"));
+		expect(isPathIgnoredByProject(tmpViaAlias, tree.alias)).toBe(false);
 	});
 
-	it("evicts a nested verdict when the write names the directory through a link into it", () => {
+	it("evicts a nested verdict when the write names the directory through a link into it", (ctx) => {
 		const tree = plantTree("ignore-identity-invalidate-sublink");
-		if (tree === undefined) return;
-		try {
-			const tmpFile = path.join(tree.sub, "x.tmp");
-			expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(true);
-			fs.writeFileSync(path.join(tree.sub, ".gitignore"), "# cleared\n");
-			invalidateProjectIgnoreMatcherForPath(
-				path.join(tree.subLink, ".gitignore"),
-			);
-			expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(false);
-		} finally {
-			tree.cleanup();
-		}
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
+		const tmpFile = path.join(tree.sub, "x.tmp");
+		expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(true);
+		fs.writeFileSync(path.join(tree.sub, ".gitignore"), "# cleared\n");
+		invalidateProjectIgnoreMatcherForPath(
+			path.join(tree.subLink, ".gitignore"),
+		);
+		expect(isPathIgnoredByProject(tmpFile, tree.repo)).toBe(false);
 	});
 
-	it("pays one realpath per directory, not per file, to answer a link spelling", () => {
+	it("pays one realpath per directory, not per file, to answer a link spelling", (ctx) => {
 		const tree = plantTree("ignore-identity-cost");
-		if (tree === undefined) return;
+		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
 		const native = vi.spyOn(fs.realpathSync, "native");
 		try {
 			// Recurrence guarded: the verdict fix must not put a kernel round trip
@@ -284,7 +243,6 @@ describe("project ignore verdict by path identity (#4689)", () => {
 			expect(native).not.toHaveBeenCalled();
 		} finally {
 			native.mockRestore();
-			tree.cleanup();
 		}
 	});
 });
