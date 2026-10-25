@@ -400,7 +400,7 @@ function* identityCandidates(
  * ledger's read-time fold. Either way the identity is decided by the nearest
  * ancestor the kernel can resolve.
  */
-function noteIdentityRefusal(refusal: unknown, candidate: string): void {
+function recordIdentityRefusal(refusal: unknown, candidate: string): void {
 	const code = (refusal as NodeJS.ErrnoException | undefined)?.code;
 	if (code !== "ENOENT" && code !== "ENOTDIR")
 		recordPathIdentityFallback(code ?? "unknown", candidate);
@@ -425,7 +425,7 @@ function kernelRealPath(
 			const real = realpathSync.native(candidate);
 			return missing.length === 0 ? real : p.join(real, ...missing.reverse());
 		} catch (refusal) {
-			noteIdentityRefusal(refusal, candidate);
+			recordIdentityRefusal(refusal, candidate);
 		}
 	}
 	return undefined;
@@ -472,7 +472,7 @@ export async function realpathOrResolveAsync(
 				? real
 				: path.join(real, ...missing.reverse());
 		} catch (refusal) {
-			noteIdentityRefusal(refusal, candidate);
+			recordIdentityRefusal(refusal, candidate);
 		}
 	}
 	return path.resolve(filePath);

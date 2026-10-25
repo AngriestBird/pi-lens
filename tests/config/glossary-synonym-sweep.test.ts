@@ -1092,7 +1092,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/config.ts": 3,
 		// #4346: resolves a Go importer's package directory to announce its peers.
 		"clients/lsp/created-import-targets.ts": 3,
-		"clients/lsp/edits.ts": 23,
+		// 23 -> 19 (#4689 batch 10): `resolveExistingAncestor`'s own upward walk
+		// (`path.resolve` / `path.dirname` / `path.basename` / `path.join`) is
+		// deleted; the confinement asks `realpathOrResolveAsync` for the root and
+		// each URI's identity, so four `path` uses leave the module.
+		"clients/lsp/edits.ts": 19,
 		// #4532: the environment-gap gate resolves its walk-up from the file's
 		// own directory, so these are real filesystem `path` calls. 5 -> 8
 		// (#4532 round 5): the manifest walk-up reads `package.json` at each
@@ -1192,7 +1196,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the kernel as it is, with no `path.isAbsolute`/`path.resolve` first.
 		// 38 -> 34 (#4689 item 6): the two marker walks start at
 		// `realpathOrResolve(startDir)` and `realpathOrResolve(homeDir)`.
-		"clients/path-utils.ts": 33,
+		// 33 -> 37 (#4689 batch 10): the async twin of the identity walk adds
+		// its own `path` uses (the `typeof path.posix` parameter, the `path`
+		// argument `identityCandidates` parses with, the missing tail's
+		// `path.join` and the `path.resolve` fallback). Three are the same
+		// senses the sync walk already carries; the fourth is the seam's own
+		// fallback.
+		"clients/path-utils.ts": 37,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 26,
 		// 10 -> 12 (#4530): machineStateDir moved here from file-utils.ts.
