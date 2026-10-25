@@ -463,8 +463,8 @@ operator's private notes, so a different orchestrator can run the same train.
     (so `Ast-grep self-scan` or `Audit production dependencies` reads as what
     it is, not as a test failure), its `FAIL` and assertion lines and the
     `Tests` summary with the ANSI codes stripped, the gating and advisory
-    counts on separate lines (advisory reds never gate, and are read before
-    merging), and the remedy hint: `gh run rerun <run>` for a cancelled or
+    counts on separate lines (an advisory red gates only when master is green
+    on that lane, and every red is read before merging), and the remedy hint: `gh run rerun <run>` for a cancelled or
     superseded run, the `gh api -X POST .../approve` command for fork
     approval, `gh pr update-branch <pr>` when the failed merge's base is no
     longer master's head (a rerun replays the old merge commit, #3660). A job
@@ -511,7 +511,7 @@ operator's private notes, so a different orchestrator can run the same train.
   Apart from `--approve-fork`, `--rerun-cancelled` and `--sync-main`, which you
   pass by name, it never approves, reruns or updates a branch: it prints the
   command.
-- **Read the advisory rows before merging, even though they never gate
+- **Read the advisory rows before merging, even where they do not gate
   (2026-09-12).** The exit-code rule above is right and stays: never text-match
   the verdict table for `failure`, because advisory rows print `failure` on a
   green PR. But "does not gate" is not "carries no information", and filtering
@@ -802,7 +802,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | Matching a flake on text that CI never prints | The unmatched CI output was noticed during review; the matcher test should have used a captured CI transcript. The flake matcher now keys on the classifier's actual output. |
 | Letting keyword-title lint contradict the repository convention | The title gate review found the contradiction; the title-convention test should have pinned the accepted form. The lint rule now follows the repository's title convention. |
 | Relaying a shard failure to a fixer without mirroring it on the PR | The fixer noticed the missing scope record; the scope-mirror hook should have rejected the handoff. The handoff path now records the scope on the PR before dispatch. |
-| Treating a repeatedly red advisory lane as harmless | The maintainer's retrospective found the 21% flake after a misleading PR draw; the advisory policy and newest-master comparison should have held the PR. `land.sh` now holds a PR-red/master-green advisory unless `ADVISORY_OK=1`. |
+| Treating a repeatedly red advisory lane as harmless | The maintainer's retrospective found the 21% flake after a misleading PR draw. The advisory policy and newest-master comparison should have held the PR. `merge-on-green.sh` now holds any advisory check red on the PR and green on master. `ADVISORY_OK='<lane>: <reason>'` must name the judgment; it refuses a bare `1`. #4540 (2026-10-17) and #4848 (2026-10-25) landed past such a red. |
 | Forgetting to arm the landing chain after a trailing fix | A later PR-GREEN event exposed that the fix was waiting unarmed; the trailing-fix command should have verified arming. Rule: after a trailing fix, arm `land.sh` in the same step (not yet mechanised). |
 | Accepting an identity trade-off without a complete timing-cell table | Cloud verification found primary-item loss after the trade-off was accepted from prose; the fixer's state table and review should have enumerated every timing cell. The brief now requires the complete state table before accepting the trade-off. |
 | Letting a scoped test exceed Vitest's default timeout | A repeated cloud review caught the timeout; the local targeted run should have exercised the test under its default timeout. Rule: a scoped review runs new tests under the default Vitest timeout before passing them (not yet mechanised). |
@@ -850,4 +850,3 @@ Each row cost a lane at least once; the prose above carries the record.
 | Linting a PR body in the main checkout | The main checkout sits on another branch, so citations resolved against the wrong tree; three edits needed a hand-built head tree (2026-10-25). `pr-body.sh edit` without `--tree` now builds a temp tree at the PR head |
 | Guessing issue labels (`area:ci`, `area:formal`, `chore`) | Three filings were refused, and the refusal listed only priority labels (2026-10-25). `file-issue.sh` now lists the known type, area and priority labels |
 | Reaping a lane whose issue is closed while its ledger row is live | Two maintainer-ordered lanes on closed issues (#4714, #4691) were flagged for TaskStop (2026-10-25). `agent-reap.sh` now skips a closed issue with a live ledger row |
-| Landing past a red advisory that is green on master | `land.sh` printed `red advisory checks: typos (advisory)` and merged #4848, so master went red (2026-10-25; #4540 was the first, 2026-10-17). `merge-on-green.sh` now holds any advisory check red on the PR and green on master unless `ADVISORY_OK` names the judgment |
