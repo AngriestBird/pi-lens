@@ -192,10 +192,13 @@ describe("nightly LSP capability refresh contract (#4277)", () => {
 // `mv`, `install`, `rsync` and `tee` operands and through `>`/`>>` redirects;
 // variables resolve through in-job assignments, `env:` blocks, and the symbolic
 // names below; an inner shell invoked as `bash -c`/`sh -c` is rescanned once.
-// A staged path the grammar cannot place (an unset variable, a command
-// substitution) makes the step red instead of passing, and every uploaded
-// root must be named by a step of its own job, so an upload whose content no
-// step explains reds rather than reading clean.
+// A staged path or an uploaded path the grammar cannot place (an unset
+// variable, a command substitution, an option after the first operand) makes
+// the step red instead of passing. A root whose CONTENT no step explains reads
+// clean: most live upload steps stage through a child process this shell
+// grammar cannot see, and the PR body carries them as an accepted residual.
+// An upload inside a composite action is refused unless it sets the key,
+// because its staging belongs to the caller's job, a file this one cannot read.
 const UPLOAD_ARTIFACT = "actions/upload-artifact";
 
 /** The verbs whose operands the scan follows as staged paths. */
@@ -230,7 +233,11 @@ type ArtifactStep = {
 	env?: Record<string, unknown>;
 };
 type ArtifactJob = { env?: Record<string, unknown>; steps?: ArtifactStep[] };
-type ArtifactWorkflow = { jobs?: Record<string, ArtifactJob> };
+type ArtifactWorkflow = {
+	jobs?: Record<string, ArtifactJob>;
+	/** A composite action's steps, which run inside the caller's job. */
+	runs?: { steps?: ArtifactStep[] };
+};
 
 /** A path one of the job's shell commands writes. */
 type Slot = { file: string };
@@ -357,41 +364,133 @@ function splitRedirects(words: string[]): {
 }
 
 /**
+ * The destination-directory option, for the verbs that have one. `rsync -t`
+ * is `--times` and `tee` writes every operand, so neither names one here.
+ */
+const DESTINATION_OPTION: Record<string, { long: string; short: string }> = {
+	cp: { long: "--target-directory", short: "-t" },
+	install: { long: "--target-directory", short: "-t" },
+	mv: { long: "--target-directory", short: "-t" },
+};
+
+/**
+ * The operands `command` was given, the destination a destination-directory
+ * option names ahead of them, and whether `--parents` is set; or the option
+ * that leaves the write unplaceable.
+ *
+ * A destination-directory option is placed wherever it appears, because it
+ * alone moves the destination ahead of the sources. Every other option is
+ * placed only BEFORE the first operand: GNU getopt permutes, so an option
+ * after an operand can take a value that becomes the destination, and reading
+ * the last operand as the destination then files the write under a path
+ * nothing staged. Both spellings read clean before this parse existed
+ * (#4869 round 1: `cp --parents -t DIR src` and `cp --parents src DEST/ -S
+ * .bak`, each landing the dot path it was asked about).
+ */
+function parseWriteOperands(
+	command: string,
+	words: string[],
+):
+	| { destinationDir?: string; operands: string[]; parents: boolean }
+	| { unplaced: string } {
+	const dest = DESTINATION_OPTION[command];
+	const operands: string[] = [];
+	let destinationDir: string | undefined;
+	let parents = false;
+	let optionsEnded = false;
+	for (let index = 0; index < words.length; index++) {
+		const word = words[index];
+		if (optionsEnded || !word.startsWith("-") || word === "-") {
+			operands.push(word);
+			continue;
+		}
+		if (word === "--") {
+			optionsEnded = true;
+			continue;
+		}
+		if (word === "--parents") {
+			parents = true;
+			continue;
+		}
+		if (dest !== undefined) {
+			if (word === dest.short || word === dest.long) {
+				const value = words[index + 1];
+				if (value === undefined) return { unplaced: word };
+				destinationDir = value;
+				index++;
+				continue;
+			}
+			if (word.startsWith(`${dest.long}=`)) {
+				destinationDir = word.slice(dest.long.length + 1);
+				continue;
+			}
+			if (word.startsWith(dest.short)) {
+				destinationDir = word.slice(dest.short.length);
+				continue;
+			}
+		}
+		// A flag before the first operand: its value, if it takes one, can only
+		// widen the source list. After an operand it can be the destination.
+		if (operands.length === 0) continue;
+		return { unplaced: word };
+	}
+	return { destinationDir, operands, parents };
+}
+
+/**
  * The paths `command` writes, and the destinations it writes them under. A
  * copy into a directory lands the source's own path with `--parents` and only
- * its basename without; a copy onto a name lands that name. `tee` writes
+ * its basename without; a copy onto a name lands that name; a
+ * destination-directory option lands every source under it; `tee` writes
  * every operand.
  */
 function writeSlots(
 	command: string,
 	operands: string[],
 	aliases: Aliases,
-): { slots: Slot[]; destinations: string[] } {
-	const targets = operands.filter((word) => !word.startsWith("-"));
-	if (command === "tee")
+): { destinations: string[]; slots: Slot[]; unplaced?: string } {
+	if (command === "tee") {
+		const targets = operands.filter((word) => !word.startsWith("-"));
 		return {
-			slots: targets.flatMap((target) => filesOf(target, aliases)),
 			destinations: targets.flatMap((target) => expandWord(target, aliases)),
+			slots: targets.flatMap((target) => filesOf(target, aliases)),
 		};
-	if (targets.length < 2) return { slots: [], destinations: [] };
-	const sources = targets.slice(0, -1);
-	const parents = operands.includes("--parents");
-	const slots: Slot[] = [];
-	const destinations = expandWord(targets[targets.length - 1], aliases);
-	for (const target of destinations) {
-		if (!target.endsWith("/")) {
-			slots.push({ file: target });
-			continue;
-		}
-		for (const source of sources)
-			for (const from of expandWord(source, aliases))
-				slots.push({
-					file: parents
-						? `${target}${from.replace(/^\/+/, "")}`
-						: `${target}${from.replace(/\/+$/, "").split("/").pop() ?? ""}`,
-				});
 	}
-	return { slots, destinations };
+	const parsed = parseWriteOperands(command, operands);
+	if ("unplaced" in parsed)
+		return {
+			destinations: [],
+			slots: [],
+			unplaced: `${parsed.unplaced} (an option after an operand)`,
+		};
+	const sources =
+		parsed.destinationDir === undefined
+			? parsed.operands.slice(0, -1)
+			: parsed.operands;
+	const destinations =
+		parsed.destinationDir === undefined
+			? parsed.operands.slice(-1)
+			: [parsed.destinationDir];
+	if (sources.length === 0 || destinations.length === 0)
+		return { destinations: [], slots: [] };
+	const slots: Slot[] = [];
+	const placed: string[] = [];
+	for (const word of destinations)
+		for (const target of expandWord(word, aliases)) {
+			placed.push(target);
+			if (!target.endsWith("/")) {
+				slots.push({ file: target });
+				continue;
+			}
+			for (const source of sources)
+				for (const from of expandWord(source, aliases))
+					slots.push({
+						file: parsed.parents
+							? `${target}${from.replace(/^\/+/, "")}`
+							: `${target}${from.replace(/\/+$/, "").split("/").pop() ?? ""}`,
+					});
+		}
+	return { destinations: placed, slots };
 }
 
 /** Every path one job's shell writes, and the destinations it cannot place. */
@@ -437,6 +536,8 @@ function jobStaging(job: ArtifactJob): Staging {
 						recordWrite(expanded);
 				if (ADMITTED_WRITES.has(command)) {
 					const written = writeSlots(command, operands, aliases);
+					if (written.unplaced !== undefined)
+						unplaceable.push(written.unplaced);
 					for (const destination of written.destinations)
 						if (unresolvedComponents(destination).length > 0)
 							unplaceable.push(destination);
@@ -508,6 +609,25 @@ function uploadPaths(step: ArtifactStep): string[] {
 const isUpload = (step: ArtifactStep) =>
 	typeof step.uses === "string" && step.uses.startsWith(UPLOAD_ARTIFACT);
 
+/** Every `actions/upload-artifact` step a file holds, in either shape. */
+function uploadSteps(workflow: ArtifactWorkflow): ArtifactStep[] {
+	return [
+		...Object.values(workflow.jobs ?? {}).flatMap((job) =>
+			(job.steps ?? []).filter(isUpload),
+		),
+		...(workflow.runs?.steps ?? []).filter(isUpload),
+	];
+}
+
+const hiddenKept = (step: ArtifactStep) =>
+	step.with?.["include-hidden-files"] === true ||
+	String(step.with?.["include-hidden-files"]) === "true";
+
+const uploadLabel = (step: ArtifactStep) =>
+	typeof step.name === "string"
+		? step.name
+		: String(step.with?.name ?? "upload-artifact");
+
 /**
  * One finding per upload step that drops a staged dot path, or whose staged
  * set the read grammar cannot place. Empty means every upload keeps what its
@@ -518,19 +638,22 @@ function hiddenUploadFindings(
 	workflow: ArtifactWorkflow,
 ): string[] {
 	const findings: string[] = [];
+	// A composite action's steps run inside the CALLER's job, so its staged set
+	// belongs to a file this one cannot read: an upload here is refused unless
+	// it keeps hidden files (review round 1 F1 — `runs.steps` sat outside the
+	// population while the scan claimed every `.github/actions/*/action.yml`).
+	for (const upload of (workflow.runs?.steps ?? []).filter(isUpload))
+		if (!hiddenKept(upload))
+			findings.push(
+				`${fileName}: runs.steps: ${uploadLabel(upload)}: an upload step inside a composite action is staged by its calling job, so whether it drops a dot path cannot be derived here; set include-hidden-files: true`,
+			);
 	for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
 		const uploads = (job.steps ?? []).filter(isUpload);
 		if (uploads.length === 0) continue;
 		const { slots, unplaceable } = jobStaging(job);
 		for (const upload of uploads) {
-			const label = `${fileName}: ${jobName}: ${
-				typeof upload.name === "string"
-					? upload.name
-					: String(upload.with?.name ?? "upload-artifact")
-			}`;
-			const keySet =
-				upload.with?.["include-hidden-files"] === true ||
-				String(upload.with?.["include-hidden-files"]) === "true";
+			const label = `${fileName}: ${jobName}: ${uploadLabel(upload)}`;
+			const keySet = hiddenKept(upload);
 			for (const entry of uploadPaths(upload)) {
 				const root = uploadRoot(entry);
 				if (root.prefix.length === 0) {
@@ -581,9 +704,7 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 				) as ArtifactWorkflow,
 			}));
 			const uploads = workflows.flatMap(({ workflow }) =>
-				Object.values(workflow.jobs ?? {}).flatMap((job) =>
-					(job.steps ?? []).filter(isUpload),
-				),
+				uploadSteps(workflow),
 			);
 			assertNonEmptyScan("actions/upload-artifact steps", uploads.length, 10);
 
@@ -652,6 +773,29 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 			expected: 1,
 		},
 		{
+			// Round 2, CodeRabbit inline: `-t` moves the destination AHEAD of the
+			// sources, so reading the last operand as the destination fails open.
+			title: "a destination named by -t before the sources",
+			staging: staged('cp --parents -t "$stage/files/" .changelog/x.md'),
+			expected: 1,
+		},
+		{
+			title: "a destination named by --target-directory= after the sources",
+			staging: staged(
+				'cp --parents .changelog/x.md --target-directory="$stage/files/"',
+			),
+			expected: 1,
+		},
+		{
+			// A value-taking option the grammar does not place, after the
+			// destination: GNU getopt permutes, so `.bak` would be read as the
+			// destination and the dropped dot path would read clean.
+			title:
+				"a value option after the destination, which the grammar cannot place",
+			staging: staged('cp --parents .changelog/x.md "$stage/files/" -S .bak'),
+			expected: 1,
+		},
+		{
 			title: "a dot path reached through another binding",
 			staging: staged(
 				'file=.changelog/x.md\ncp --parents "$file" "$stage/files/"',
@@ -695,8 +839,11 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 			expected: 1,
 		},
 		{
+			// `rsync -a .changelog/ DEST/` copies the DIRECTORY'S CONTENTS and
+			// really lands `DEST/x.md`; the no-trailing-slash spelling below is
+			// the one that lands `.changelog/` (review round 1 F2).
 			title: "a dot path staged by rsync, whose source is a directory",
-			staging: staged('rsync -a .changelog/ "$stage/files/"'),
+			staging: staged('rsync -a .changelog "$stage/files/"'),
 			expected: 1,
 		},
 		{
@@ -773,5 +920,39 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 		expect(findings).toEqual([
 			"fixture.yml: smoke: pr-inputs: stages $RUNNER_TEMP/pr-inputs/files/.changelog/x.md, a dot path, without include-hidden-files: true",
 		]);
+	});
+
+	// Review round 1 F1: an upload inside a composite action is staged by its
+	// CALLER's job, a file this scan cannot read, so the guard refuses it
+	// instead of reading the uploaded root as clean. `.github/actions/*` is in
+	// the walk, and a `runs.steps` upload was invisible to it.
+	const compositePlant = (extra: string[] = []) =>
+		[
+			"name: Fixture action",
+			"description: fixture",
+			"runs:",
+			"  using: composite",
+			"  steps:",
+			"    - name: Stage the inputs",
+			"      shell: bash",
+			'      run: cp --parents .changelog/x.md "$RUNNER_TEMP/pr-inputs/files/"',
+			"    - uses: actions/upload-artifact@v7",
+			"      with:",
+			"        name: pr-inputs",
+			`        path: ${ROOT_PATH}`,
+			...extra.map((line) => `        ${line}`),
+		].join("\n");
+
+	it("refuses an upload a composite action hides from its caller", () => {
+		const findings = findingsFor(compositePlant());
+
+		expect(findings).toHaveLength(1);
+		expect(findings[0]).toContain("composite action");
+	});
+
+	it("admits a composite action upload that sets the key", () => {
+		expect(findingsFor(compositePlant(["include-hidden-files: true"]))).toEqual(
+			[],
+		);
 	});
 });
