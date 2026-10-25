@@ -936,7 +936,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// duplicated path operations with one owner.
 		"clients/cache/rule-cache.ts": 5,
 		"clients/call-graph.ts": 4,
-		"clients/cargo-manifest.ts": 7,
+		"clients/cargo-manifest.ts": 6,
 		"clients/cascade-logger.ts": 2,
 		"clients/code-quality-warnings.ts": 5,
 		// 5 -> 4 (#4689 r2): the entry's file is rendered by
@@ -971,7 +971,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/integration.ts": 1,
 		"clients/dispatch/rule-id-normalize.ts": 2,
 		"clients/dispatch/rule-ignores.ts": 3,
-		"clients/dispatch/runner-context.ts": 14,
+		"clients/dispatch/runner-context.ts": 11,
 		"clients/dispatch/runners/actionlint.ts": 4,
 		"clients/dispatch/runners/ast-grep-napi.ts": 4,
 		"clients/dispatch/runners/biome-check.ts": 6,
@@ -1001,7 +1001,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/rubocop.ts": 6,
 		// 7 -> 8 (#3968): `path.extname` inside `resolveShellFileDialect` — one
 		// more `path` use, same sense (a path operation).
-		"clients/dispatch/runners/shellcheck.ts": 8,
+		// 8 -> 4 (#4689 item 6): `findShellcheckConfig` delegates to
+		// `findLocalToolConfig`, dropping its `path.join` / `path.resolve` /
+		// `path.dirname` loop and the `fs` pre-check.
+		"clients/dispatch/runners/shellcheck.ts": 4,
 		"clients/dispatch/runners/spellcheck.ts": 6,
 		"clients/dispatch/runners/spotbugs.ts": 4,
 		"clients/dispatch/runners/sqlfluff.ts": 3,
@@ -1019,7 +1022,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 30 -> 28 (#4268): `resolveNodeToolCommand` and `resolveLocalFirstAsync`
 		// stop building `.bin` paths by hand and route through the shared lookup.
 		"clients/dispatch/runners/utils/runner-helpers.ts": 28,
-		"clients/dispatch/runners/vale.ts": 7,
+		// 7 -> 3 (#4689 item 6): `findValeConfig` delegates to
+		// `findLocalToolConfig`, dropping its hand-rolled `path` loop.
+		"clients/dispatch/runners/vale.ts": 3,
 		"clients/dispatch/runners/yaml-rule-parser.ts": 7,
 		"clients/dispatch/runners/yamllint.ts": 3,
 		"clients/dispatch/runners/zig-check.ts": 4,
@@ -1154,7 +1159,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/ipc.ts": 7,
 		"clients/mcp/session.ts": 3,
 		"clients/metrics-client.ts": 6,
-		"clients/metrics-history.ts": 12,
+		"clients/metrics-history.ts": 7,
 		"clients/module-report.ts": 30,
 		// 6 -> 9 (#3650): MutationLineResult.path field, the adapter-declared
 		// preference, and the readToolResultPathField return.
@@ -1185,7 +1190,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 23 -> 16 (#4530): the bin layouts and their walk moved to
 		// session-repository.ts, below the spawn seam.
 		"clients/package-manager.ts": 16,
-		"clients/package-root.ts": 5,
+		"clients/package-root.ts": 4,
 		"clients/path-keyed-map.ts": 11,
 		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
 		// path locals; the legacy walker body is back to its pre-#3649 text.
@@ -1305,7 +1310,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/session-repository.ts": 9,
 		"clients/session-state-store.ts": 3,
 		"clients/sessionstart-logger.ts": 2,
-		"clients/sg-runner.ts": 12,
+		"clients/sg-runner.ts": 11,
 		// 26 -> 25 (#3930 r2): the shared user rule-root seam removes one
 		// duplicated path construction.
 		// 25 -> 26 (#3930 r4): the cycle-memo key is derived with
@@ -1320,7 +1325,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the target with `path.basename`, the same call every walker path uses.
 		"clients/source-walker.ts": 4,
 		"clients/spawn-timeout-cooldown.ts": 3,
-		"clients/startup-scan.ts": 11,
+		"clients/startup-scan.ts": 9,
 		// 61 -> 66: filesystem ownership/discovery operations plus the alias
 		// exception's physical policy-relative path (R4). These remain filesystem
 		// operations, not delivery lanes; the census measures every use.

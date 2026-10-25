@@ -967,6 +967,24 @@ describe("walkUpDirs / findNearestContaining (#122)", () => {
 		}
 	});
 
+	it("walkUpDirs stops after maxDepth directories", () => {
+		// RECURRENCE GUARDED: two hand-rolled climbs keep their own depth cap
+		// (Cargo's 64, the ast-grep search's 5); folding them onto `walkUpDirs`
+		// without the cap would let them climb to the filesystem root.
+		const env = setupTestEnvironment("pi-lens-walkup-depth-");
+		try {
+			const startDir = path.join(env.tmpDir, "a", "b", "c");
+			fs.mkdirSync(startDir, { recursive: true });
+			expect([...walkUpDirs(startDir, { maxDepth: 2 })]).toEqual([
+				fs.realpathSync.native(startDir),
+				fs.realpathSync.native(path.dirname(startDir)),
+			]);
+			expect([...walkUpDirs(startDir, { maxDepth: 0 })]).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("findNearestContaining returns the nearest containing directory, not a higher one", () => {
 		const env = setupTestEnvironment("pi-lens-find-nearest-");
 		try {

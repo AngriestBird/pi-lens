@@ -318,3 +318,70 @@ describe("metrics-history missing target directory (#2099)", () => {
 	);
 });
 // flake-shape: real-process-spawn — real git children emit stderr bytes whose metrics classification cannot be observed in-process
+
+describe("metrics-history repository guard through a directory link (#4689 item 6)", () => {
+	it.skipIf(!hasGit())(
+		"records the repository commit of a file reached through a link out of a non-repository directory",
+		(ctx) => {
+			// RECURRENCE GUARDED: `isInsideGitRepo` climbed the link's spelling,
+			// found no `.git` above `app/`, and recorded `unknown` for a file git
+			// itself places in `repo-real` (the walk is now `walkUpDirs`, which
+			// climbs the path identity).
+			const tmp = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-metrics-history-link-"),
+			);
+			const fixtureEnv = gitFixtureEnv(tmp);
+			fixtureEnv.PI_LENS_SKIP_HOOKS = "1";
+			const repo = path.join(tmp, "repo-real");
+			const app = path.join(tmp, "app");
+			const runGit = (args: string[], encoding?: "utf-8") =>
+				gitExecFileSync("git", args, {
+					cwd: repo,
+					...(encoding ? { encoding } : { stdio: "ignore" as const }),
+					env: fixtureEnv,
+				});
+			try {
+				fs.mkdirSync(path.join(repo, "lib"), { recursive: true });
+				fs.mkdirSync(app);
+				try {
+					fs.symlinkSync(path.join(repo, "lib"), path.join(app, "lib"), "dir");
+				} catch (err) {
+					return ctx.skip(`cannot create symlinks here: ${String(err)}`);
+				}
+				runGit(["init", "-q"]);
+				runGit(["config", "user.email", "test@example.com"]);
+				runGit(["config", "user.name", "pi-lens test"]);
+				fs.writeFileSync(path.join(repo, "lib", "l.ts"), "const l = 1;\n");
+				runGit(["add", "."]);
+				runGit(["commit", "-qm", "linked"]);
+				const expected = (
+					runGit(["rev-parse", "--short", "HEAD"], "utf-8") as string
+				).trim();
+				const script = [
+					`process.chdir(${JSON.stringify(app)});`,
+					`const { captureSnapshots } = require(${JSON.stringify(METRICS_HISTORY_JS)});`,
+					`const files = ${JSON.stringify([path.join(app, "lib", "l.ts"), path.join(repo, "lib", "l.ts")])};`,
+					"const history = captureSnapshots(files.map((filePath) => ({ filePath, metrics: {",
+					"  maintainabilityIndex: 90, cognitiveComplexity: 1, maxNestingDepth: 1,",
+					"  linesOfCode: 10, maxCyclomatic: 1, entropy: 1,",
+					"} })));",
+					"process.stdout.write(JSON.stringify(files.map((filePath) => history.files[require('node:path').relative(process.cwd(), filePath)].latest.commit)));",
+				].join("\n");
+				const result = spawnSync(process.execPath, ["-e", script], {
+					cwd: app,
+					encoding: "utf-8",
+					env: {
+						...fixtureEnv,
+						PILENS_DATA_DIR: path.join(tmp, ".pilens-data"),
+					},
+				});
+				expect(result.error).toBeUndefined();
+				expect(result.status).toBe(0);
+				expect(JSON.parse(result.stdout)).toEqual([expected, expected]);
+			} finally {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+});

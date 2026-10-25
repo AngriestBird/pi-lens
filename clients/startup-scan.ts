@@ -16,7 +16,7 @@ import {
 	getProjectIgnoreMatcher,
 	type ProjectIgnoreMatcher,
 } from "./file-utils.js";
-import { isAtOrAboveHomeDir } from "./path-utils.js";
+import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
 import { getStartupScanMaxSourceFilesDerived } from "./project-scale.js";
 import {
 	shouldRecurseIntoDir,
@@ -202,16 +202,19 @@ export function isStartupScanVerdictFresh(
  * pre-#807 behavior exactly.
  */
 export function findNearestProjectRoot(startDir: string): string | null {
-	let current = path.resolve(startDir);
-	while (true) {
-		const entryNames = getDirectoryMarkers(current).entryNames;
+	// Spelled on purpose (#4689 item 6): the verdicts below compare this root
+	// and the caller's `cwd` with the spelled `homeDir`, and `scanRoot` is
+	// reported beside the spelled `cwd`. An identity climb needs those ends
+	// moved with it; that is its own slice.
+	let root: string | null = null;
+	for (const dir of walkUpDirs(startDir, { spelling: true })) {
+		const entryNames = getDirectoryMarkers(dir).entryNames;
 		if (PROJECT_ROOT_MARKERS.some((marker) => entryNames.has(marker))) {
-			return current;
+			root = dir;
+			break;
 		}
-		const parent = path.dirname(current);
-		if (parent === current) return null;
-		current = parent;
 	}
+	return root;
 }
 
 interface SourceCountResult {
