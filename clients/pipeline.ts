@@ -16,6 +16,7 @@ import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
 import { hashFileBytes, stampContentBytes } from "./content-stamp.js";
+import { PathKeyedMap } from "./path-keyed-map.js";
 import {
 	findNearestContaining,
 	normalizeEphemeralMapKey,
@@ -2249,7 +2250,11 @@ async function analysePipeline(
 	let formatChanged = false;
 	let formattersUsed: string[] = [];
 	let formatFailures: string[] = [];
-	const piChangedFiles = new Set<string>();
+	// #4689: keyed by the path identity. The target arrives in the agent's
+	// spelling, while a whole-package fixer reports from a walk that starts at
+	// the crate's identity directory; the ownership probe below must see both
+	// as one file. `keys()` yields the display path last written.
+	const piChangedFiles = new PathKeyedMap<true>(normalizeMapKey);
 	const autoformatDisabled =
 		resolveAnalysisRoot(filePath, ctx.projectRoot ?? cwd) === "adopted" ||
 		!!getFlag("no-autoformat", filePath);
@@ -2294,7 +2299,7 @@ async function analysePipeline(
 		analysisReadAtMs = formatResult.fileReadAtMs;
 		if (formatChanged) {
 			const absPath = path.resolve(filePath);
-			piChangedFiles.add(absPath);
+			piChangedFiles.set(filePath, true);
 			publishFilesTouched({
 				reason: "format",
 				paths: [absPath],
@@ -2365,7 +2370,7 @@ async function analysePipeline(
 	// drain's.
 	if (autofixRestoring) deliverFixRunLoss(autofixRestoring, ctx);
 	for (const changedFile of autofixChangedFiles) {
-		piChangedFiles.add(path.resolve(changedFile));
+		piChangedFiles.set(changedFile, true);
 	}
 	if (autofixChangedFiles.length > 0) {
 		// autofixTools entries are "tool:count" (e.g. "ruff:3"); runAutofix runs
@@ -2409,7 +2414,7 @@ async function analysePipeline(
 	// files, so target membership is the discriminator for pipeline ownership
 	// (#2499).
 	const fileModified = formatChanged || fixedCount > 0;
-	const targetFileModified = piChangedFiles.has(path.resolve(filePath));
+	const targetFileModified = piChangedFiles.has(filePath);
 	const postWriteStateHash =
 		fileModified && targetFileModified
 			? (() => {
@@ -2760,7 +2765,7 @@ async function analysePipeline(
 		formatChanged || fixedCount > 0
 			? {
 					targetPath: toRunnerDisplayPath(cwd, filePath),
-					changedFiles: [...piChangedFiles].map((changedFile) =>
+					changedFiles: [...piChangedFiles.keys()].map((changedFile) =>
 						toRunnerDisplayPath(cwd, changedFile),
 					),
 				}
@@ -2848,7 +2853,7 @@ async function analysePipeline(
 
 	phase.end("total", { hasOutput: !!output });
 
-	const changedFiles = [...piChangedFiles];
+	const changedFiles = [...piChangedFiles.keys()];
 	emitLensAnalysisComplete({
 		cwd,
 		filePath,
