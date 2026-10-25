@@ -575,10 +575,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :55
 	"clients/file-mutation-queue.ts": {
-		silent: 2,
-		identities: "c27b672b48b38606",
+		silent: 1,
+		identities: "ff8063b5aa2abd0d",
 		reason: PRE_RULE,
-	}, // :104, :141
+	}, // :103
 	"clients/file-time.ts": {
 		silent: 2,
 		identities: "cef7af043e4732be",
@@ -790,10 +790,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :537, :619, :634, :684, :712
 	"clients/lsp/edits.ts": {
-		silent: 3,
-		identities: "09a1a8f35510f0a5",
+		silent: 2,
+		identities: "fe66130669c23fb1",
 		reason: PRE_RULE,
-	}, // :1023, :1055, :1103
+	}, // :1248, :1280
 	// 42, re-pinned (#3734 r3): the willRenameFiles catch in `renameFile`
 	// (:7890) now returns its own failed flag; no handler added or removed.
 	"clients/lsp/index.ts": {

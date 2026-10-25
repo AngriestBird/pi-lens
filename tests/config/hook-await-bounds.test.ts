@@ -2632,6 +2632,23 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/out-of-band-changes.ts": 10,
 	"clients/package-manager.ts": 8,
 	"clients/partial-edit-apply.ts": 2,
+	// #4689 batch 10: 0 -> 1. `realpathOrResolveAsync` awaits the kernel
+	// `realpath` of the step the identity walk is on, the async form of the seam
+	// the host mutation queue and the LSP workspace-edit preflight now need.
+	// This module is a pure path utility and takes no `AbortSignal`, and neither
+	// caller holds one when it asks (the queue entry and the workspace-edit
+	// preflight run inside the handler's `bounded()`, below this seam), so there
+	// is nothing for `bounded()` to take here: one filesystem syscall per walk
+	// step, and #2523 AC4's deps-type threading is what bounds it.
+	// 1 -> 4 (#4689 r2 F-CR1): the seam separates the identity from the fact a
+	// containment decision reads (`kernelPathIdentityAsync` awaits the walk), and
+	// a walk whose tail folded a `.`/`..` is resolved once more, because the fold
+	// can move a component the kernel refused into a position it then resolves.
+	// That is one await in the public wrapper, two in the identity entry (the
+	// walk and the settle walk) and the one syscall per step inside the driver.
+	// Still a pure path utility with no `AbortSignal`; both callers sit inside
+	// the handler's `bounded()`.
+	"clients/path-utils.ts": 4,
 	"clients/performance-report.ts": 8,
 	// #3506: 45 -> 61. `runPipeline` awaits its body inside the try whose
 	// finally releases pi's per-file mutation queue (1), `runFormatPhase`
