@@ -31,7 +31,6 @@ import {
 	normalizeFilePath,
 	normalizePathSpelling,
 	realpathOrResolve,
-	splitPathSegments,
 	toPosix,
 	toProjectRelativePath,
 } from "./path-utils.js";
@@ -1155,14 +1154,16 @@ function buildProjectIgnoreMatcher(
 	 * Does this caller spelling hold a `.` or `..` segment? Only such a spelling
 	 * has to be resolved by the KERNEL: `path.resolve` folds a dot segment
 	 * lexically, so a `..` after a directory link names a directory that never
-	 * existed (#4876 review r2 F2). `splitPathSegments` is the shared splitter,
-	 * so on POSIX a filename containing a backslash reads as several segments:
-	 * that makes such a name pay one directory read, never a wrong verdict.
+	 * existed (#4876 review r2 F2). The pattern reads the same separator set as
+	 * `splitPathSegments` on every platform (a `\` separates, so on POSIX a
+	 * filename containing one reads as several segments: such a name pays one
+	 * directory read, never a wrong verdict), and it is one regex rather than a
+	 * split + filter + some because this runs on EVERY `isIgnored` call: 46-49 ns
+	 * per call against the split's 230-240 ns (review r3 F3; the command and its
+	 * output are in the PR body under `## Blast radius`).
 	 */
 	const hasDotSegment = (spelling: string): boolean =>
-		splitPathSegments(spelling).some(
-			(segment) => segment === "." || segment === "..",
-		);
+		/(^|[\\/])\.\.?([\\/]|$)/.test(spelling);
 	/**
 	 * The file's project path key, from the caller's own spelling. A spelling
 	 * with no dot segment keeps the one `path.resolve` and the text compare, so a
@@ -1197,11 +1198,9 @@ function buildProjectIgnoreMatcher(
 		const absolute = path.resolve(subtree);
 		// #4876 review r2 F2: a dot-segment spelling resolves through the kernel,
 		// so this eviction reaches the directory the memo is really keyed under.
-		const dotSegmented = hasDotSegment(subtree);
-		const local =
-			!dotSegmented && isUnderRootText(absolute)
-				? absolute
-				: identityOfDir(dotSegmented ? subtree : absolute);
+		let local = absolute;
+		if (hasDotSegment(subtree)) local = identityOfDir(subtree);
+		else if (!isUnderRootText(absolute)) local = identityOfDir(absolute);
 		dropVerdictsUnder(local);
 		nestedCache.delete(local);
 	};
@@ -1528,6 +1527,12 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
  * Root changes discard the whole matcher because they change its base pattern
  * set. Nested changes evict only verdicts in that directory's subtree; the
  * matcher and compiled-glob memo remain reusable for unrelated trees.
+ *
+ * The subtree is the CALLER's spelling, never `path.resolve` of it: a bash
+ * redirect that names `src/linked/../shared/.gitignore` writes
+ * `<root>/shared/.gitignore`, and a lexical fold would evict `<root>/src/shared`,
+ * a directory that never existed (#4876 review r3 F1, CodeRabbit inline
+ * 4372287149).
  */
 export function invalidateProjectIgnoreMatcherForPath(filePath: string): void {
 	const resolvedPath = path.resolve(filePath);
@@ -1541,7 +1546,7 @@ export function invalidateProjectIgnoreMatcherForPath(filePath: string): void {
 			projectIgnoreMatcherCache.delete(cachedRoot);
 			continue;
 		}
-		cached.matcher.invalidateSubtree(path.dirname(resolvedPath));
+		cached.matcher.invalidateSubtree(path.dirname(filePath));
 	}
 }
 

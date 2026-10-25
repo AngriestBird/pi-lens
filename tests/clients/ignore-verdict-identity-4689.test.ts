@@ -323,21 +323,28 @@ describe("project ignore verdict by path identity (#4689)", () => {
 	});
 
 	it("evicts a subtree named through a `..` after a link", (ctx) => {
-		// RECURRENCE GUARDED (#4876 review r2 F2, the `invalidateSubtree` half):
-		// the write hook's spelling went through `path.resolve`, so the eviction
-		// named `<root>/src/shared` and left the memoized verdict the nested rules
-		// were rebuilt for.
+		// RECURRENCE GUARDED (#4876 review r2 F2, the `invalidateSubtree` half;
+		// review r3 F1, CodeRabbit inline 4372287149): the write hook folded the
+		// spelling with `path.resolve` before the matcher saw it, so the eviction
+		// named `<root>/src/shared` — a directory that never existed — and left the
+		// memoized verdict the nested rules were rebuilt for. The cell enters
+		// through `invalidateProjectIgnoreMatcherForPath`, which is what the write
+		// hook calls, and spells the write the way a bash redirect reports it.
 		const tree = plantTree("ignore-identity-dotdot-evict");
 		if (tree.skipReason !== undefined) return ctx.skip(tree.skipReason);
 		fs.writeFileSync(path.join(tree.repo, ".gitignore"), "root-only-rule\n");
 		const shared = path.join(tree.repo, "shared");
 		fs.writeFileSync(path.join(shared, ".gitignore"), "*.log\n");
 		const target = path.join(shared, "x.log");
-		const matcher = getProjectIgnoreMatcher(tree.repo);
-		expect(matcher.isIgnored(target)).toBe(true);
+		expect(isPathIgnoredByProject(target, tree.repo)).toBe(true);
 		fs.writeFileSync(path.join(shared, ".gitignore"), "!*.log\n");
-		matcher.invalidateSubtree(`${tree.repo}/src/linked/../shared`);
-		expect(matcher.isIgnored(target)).toBe(false);
+		// `src/linked` -> `../shared`, so the kernel reads this spelling as
+		// `<root>/shared/.gitignore` while `path.resolve` reads
+		// `<root>/src/shared/.gitignore`.
+		invalidateProjectIgnoreMatcherForPath(
+			`${tree.repo}/src/linked/../shared/.gitignore`,
+		);
+		expect(isPathIgnoredByProject(target, tree.repo)).toBe(false);
 	});
 
 	it("folds win32 case in the same form it folds win32 separators", () => {
