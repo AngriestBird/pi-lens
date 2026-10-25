@@ -64,8 +64,8 @@ import {
 } from "./test-utils.js";
 
 const spawned = vi.hoisted(() => ({ cwds: [] as string[] }));
-// Process boundary only: `cargo` is not on the CI image, so its `--version`
-// probe answers "installed" and `clippy --fix` records the cwd it would run in.
+// Process boundary only: `cargo` and `dart` are not on the CI image, so their
+// `--version` probes answer "installed" and the fix run records its cwd.
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../clients/safe-spawn.js")>();
@@ -76,10 +76,10 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => {
 			args: string[],
 			options: { cwd?: string } = {},
 		) => {
-			if (command !== "cargo")
+			if (command !== "cargo" && command !== "dart")
 				return actual.safeSpawnAsync(command, args, options);
-			if (args[0] === "clippy") spawned.cwds.push(options.cwd ?? "");
-			return { status: 0, stdout: "cargo 1.0", stderr: "" };
+			if (args[0] !== "--version") spawned.cwds.push(options.cwd ?? "");
+			return { status: 0, stdout: `${command} 1.0`, stderr: "" };
 		},
 	};
 });
@@ -331,38 +331,39 @@ describe("#4689 item 6: the shared walk climbs the path identity", () => {
 		expect(env?.source).toBe("uv-workspace");
 	});
 
-	it("a whole-package fixer for a linked file runs in the file's own crate", async (ctx) => {
-		// RECURRENCE GUARDED: `tryRustClippyFix` found `Cargo.toml` from the
-		// link's directory, so `cargo clippy --fix` rewrote `pkg-a`'s crate for
-		// a `pkg-b` source written through `pkg-a/src/f.rs`.
-		const t = tree("cargo");
-		if (t.skipReason) return ctx.skip(t.skipReason);
-		fs.writeFileSync(
-			path.join(t.pkgA, "Cargo.toml"),
-			'[package]\nname = "a"\n',
-		);
-		fs.writeFileSync(
-			path.join(t.pkgB, "Cargo.toml"),
-			'[package]\nname = "b"\n',
-		);
-		const link = linkIntoPkgB(t, "f.rs", "fn main() {}\n");
-		// The cwd `handleToolResult` hands the pipeline for this spelling.
-		await runAutofix(
-			link,
-			resolveLanguageRootForFile(link, t.repo),
-			() => false,
-			() => {},
-			{
-				biomeClient: {} as never,
-				ruffClient: {} as never,
-				fixedThisTurn: new Set<string>(),
-			},
-			undefined,
-			undefined,
-			t.repo,
-		);
-		expect(spawned.cwds).toEqual([real(t.pkgB)]);
-	});
+	const wholePackageFixers: Array<[string, string, string, string]> = [
+		["cargo clippy --fix", "Cargo.toml", '[package]\nname = "x"\n', "f.rs"],
+		["dart fix --apply", "pubspec.yaml", "name: x\n", "f.dart"],
+	];
+	it.for(wholePackageFixers)(
+		"%s for a linked file runs in the file's own package",
+		async ([, manifest, body, name], ctx) => {
+			// RECURRENCE GUARDED: `tryRustClippyFix` and `tryDartFix` found the
+			// manifest from the link's directory, so the whole-package fixer
+			// rewrote `pkg-a` for a `pkg-b` source written through `pkg-a/src`.
+			const t = tree(manifest.replace(/\W/g, ""));
+			if (t.skipReason) return ctx.skip(t.skipReason);
+			fs.writeFileSync(path.join(t.pkgA, manifest), body);
+			fs.writeFileSync(path.join(t.pkgB, manifest), body);
+			const link = linkIntoPkgB(t, name, "main() {}\n");
+			// The cwd `handleToolResult` hands the pipeline for this spelling.
+			await runAutofix(
+				link,
+				resolveLanguageRootForFile(link, t.repo),
+				() => false,
+				() => {},
+				{
+					biomeClient: {} as never,
+					ruffClient: {} as never,
+					fixedThisTurn: new Set<string>(),
+				},
+				undefined,
+				undefined,
+				t.repo,
+			);
+			expect(spawned.cwds).toEqual([real(t.pkgB)]);
+		},
+	);
 });
 
 describe("#4689 item 6: a home ceiling is compared on the axis the walk climbs", () => {
