@@ -1755,7 +1755,7 @@ export class RuntimeCoordinator {
 		// retirement of the same file — the agent is blocked on it again, so a
 		// carried "Resolved" entry would be a false claim.
 		this._resolvedBlockerFilesThisTurn.delete(filePath);
-		this._pendingInlineBlockers.set(path.resolve(filePath), {
+		this._pendingInlineBlockers.set(filePath, {
 			filePath,
 			summary,
 			writeIndex,
@@ -1858,7 +1858,7 @@ export class RuntimeCoordinator {
 	getInlineBlockerDiagnostics(
 		filePath: string,
 	): readonly Diagnostic[] | undefined {
-		return this._pendingInlineBlockers.get(path.resolve(filePath))?.diagnostics;
+		return this._pendingInlineBlockers.get(filePath)?.diagnostics;
 	}
 
 	/**
@@ -2035,7 +2035,7 @@ export class RuntimeCoordinator {
 			blocking?: number;
 		},
 	): boolean {
-		const existing = this._pendingInlineBlockers.get(path.resolve(filePath));
+		const existing = this._pendingInlineBlockers.get(filePath);
 		if (existing && (analysis?.blocking ?? 0) > 0) {
 			incrementDegradationCount({
 				kind: "blocker-clear-refused",
@@ -2077,7 +2077,7 @@ export class RuntimeCoordinator {
 				false,
 			);
 		}
-		this._pendingInlineBlockers.delete(path.resolve(filePath));
+		this._pendingInlineBlockers.delete(filePath);
 		return true;
 	}
 
@@ -2737,7 +2737,7 @@ export class RuntimeCoordinator {
 				batchId: string;
 		  }
 		| undefined {
-		const record = this._pendingDeferredMutations.get(path.resolve(filePath));
+		const record = this._pendingDeferredMutations.get(filePath);
 		if (!record || !record.kinds.has("format")) return undefined;
 		return {
 			ownerSessionId: record.ownerSessionId,
@@ -2850,7 +2850,7 @@ export class RuntimeCoordinator {
 	/** Return claimed records that were never started by an aborted drain. */
 	requeueDeferredFormatFiles(records: DeferredFormatRecord[]): void {
 		for (const record of records) {
-			const key = path.resolve(record.filePath);
+			const key = record.filePath;
 			const existing = this._pendingDeferredMutations.get(key);
 			if (existing) {
 				for (const kind of record.kinds) existing.kinds.add(kind);
