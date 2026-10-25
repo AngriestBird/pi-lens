@@ -1036,8 +1036,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 61 -> 68 (#4689 r4): the data-dir adoption joins its walk with the
 		// node `path` module (no `path` binding of its own). 68 -> 70 (r5): the
 		// done-marker's path and its parent. 70 -> 68 (#4530): machineStateDir
-		// moved to probe-home-state.ts, below the spawn seam.
-		"clients/file-utils.ts": 68,
+		// moved to probe-home-state.ts, below the spawn seam. 68 -> 72 (#4689
+		// batch 5): the ignore matcher's off-root namespace joins the identity of
+		// a directory with the node `path` module (`path.join`, `dirname`,
+		// `basename`, `sep`); no `path` binding of its own.
+		"clients/file-utils.ts": 72,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realpathOrResolve`,
