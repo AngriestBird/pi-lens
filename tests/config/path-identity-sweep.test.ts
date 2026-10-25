@@ -163,12 +163,12 @@ const PINS: Readonly<Record<string, Pin>> = {
 		sites: 1,
 		identities: "394522becca2b539",
 		reason: PRE_4689,
-	}, // :433 (r6: keyed by its function, renamed to dataDirCanonicalRoot)
+	}, // :436 (r6: keyed by its function, renamed to dataDirCanonicalRoot)
 	"clients/file-utils.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "7e723fe52bc1e91e",
 		reason: SPELLING_MEMO,
-	}, // :1518, :1529
+	}, // :1524, :1535 (#4689 batch 7 moved them; count and identity unchanged)
 	"clients/inline-blocker-dispositions.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "22f213e6ea043ad8",

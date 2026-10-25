@@ -971,7 +971,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/integration.ts": 1,
 		"clients/dispatch/rule-id-normalize.ts": 2,
 		"clients/dispatch/rule-ignores.ts": 3,
-		"clients/dispatch/runner-context.ts": 11,
+		// 11 -> 10 (#4689 batch 7): the absolute runner path is `realpathOrResolve`,
+		// not a `path.resolve` of the spelling the tool reported.
+		"clients/dispatch/runner-context.ts": 10,
 		"clients/dispatch/runners/actionlint.ts": 4,
 		"clients/dispatch/runners/ast-grep-napi.ts": 4,
 		"clients/dispatch/runners/biome-check.ts": 6,
@@ -1037,7 +1039,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/file-time.ts": 7,
 		// 18 -> 13 (#4689): the private nearest-existing realpath walk folded
 		// onto path-utils' `realpathOrResolve`.
-		"clients/ephemeral-root.ts": 13,
+		// 13 -> 11 (#4689 batch 7): the git-marker climb is `walkUpDirs`, so its
+		// two `path.dirname` steps are the seam's.
+		"clients/ephemeral-root.ts": 11,
 		// 61 -> 68 (#4689 r4): the data-dir adoption joins its walk with the
 		// node `path` module (no `path` binding of its own). 68 -> 70 (r5): the
 		// done-marker's path and its parent. 70 -> 68 (#4530): machineStateDir
@@ -1045,7 +1049,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// batch 5): the ignore matcher's off-root namespace joins the identity of
 		// a directory with the node `path` module (`path.join`, `dirname`,
 		// `basename`, `sep`); no `path` binding of its own.
-		"clients/file-utils.ts": 72,
+		// 72 -> 65 (#4689 batch 7): the ignore matcher's containment tests are the
+		// owner predicate on one path form, so four `path.relative` /
+		// `path.isAbsolute` folds and the `rootPrefix`'s `path.sep` are gone.
+		"clients/file-utils.ts": 65,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realpathOrResolve`,
@@ -1053,7 +1060,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the widget row kept the caller's spelling, a `path.resolve` again;
 		// 3 -> 2 (#4689 item 3): the row is written under the identity.
 		"clients/format-service.ts": 2,
-		"clients/formatters.ts": 15,
+		// 15 -> 14 (#4689 batch 7): `findUp` climbs `walkUpDirs`, so its own
+		// `path.dirname` step is the seam's.
+		"clients/formatters.ts": 14,
 		"clients/generated-artifacts.ts": 4,
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
@@ -1343,7 +1352,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 13 -> 12 (#4689 item 6): the file is resolved by `realpathOrResolve`.
 		"clients/tool-cwd.ts": 12,
 		"clients/tool-policy.ts": 64,
-		"clients/tree-sitter-client.ts": 19,
+		// 19 -> 18 (#4689 batch 7): the grammar write probe climbs `walkUpDirs`, so
+		// its own `path.dirname` step is the seam's.
+		"clients/tree-sitter-client.ts": 18,
 		"clients/tree-sitter-logger.ts": 2,
 		// 11 -> 18 (#3930 r2): the loader's complete rule fingerprint walks
 		// language rule directories and normalizes their paths.
