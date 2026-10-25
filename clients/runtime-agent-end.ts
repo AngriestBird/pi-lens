@@ -621,6 +621,7 @@ export async function handleAgentEnd({
 		// The original restore still owns its queued writes and reports loss
 		// once when it settles, even after the deadline or caller abort.
 		if (restoring) {
+			// #3915: the restore needs no `lateFormatCompletions`-style registration — every file it writes is an agent-edited one, which `wholePackageChangedFiles` excludes from `changedFiles`, so no `pilens:files:touched` event and no drain write names a restored file.
 			await bounded(
 				restoring.then((loss) => {
 					if (loss.lost.length > 0 || loss.possiblyLost.length > 0) {
