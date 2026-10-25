@@ -611,7 +611,11 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 		expect(staged).toContain("$RUNNER_TEMP/pr-inputs/idle-eviction-promote.md");
 	});
 
-	const plant = (staging: string[], uploadPath: string, extra: string[] = []) =>
+	const plant = (
+		staging: string[],
+		uploadPath: string | string[],
+		extra: string[] = [],
+	) =>
 		[
 			"jobs:",
 			"  smoke:",
@@ -622,7 +626,12 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 			"      - uses: actions/upload-artifact@v7",
 			"        with:",
 			"          name: pr-inputs",
-			`          path: ${uploadPath}`,
+			...(Array.isArray(uploadPath)
+				? [
+						"          path:",
+						...uploadPath.map((line) => `            - ${line}`),
+					]
+				: [`          path: ${uploadPath}`]),
 			...extra.map((line) => `          ${line}`),
 		].join("\n");
 	const findingsFor = (source: string) =>
@@ -707,6 +716,22 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 			staging: staged(
 				'for f in .changelog/x.md; do cp --parents "$f" "$stage/files/"; done',
 			),
+			expected: 1,
+		},
+		{
+			title: "a dot path under an upload path that holds a workflow expression",
+			staging: [
+				'stage="$RUNNER_TEMP/out-7"',
+				'mkdir -p "$stage"',
+				'cp --parents .changelog/y.md "$stage/"',
+			],
+			uploadPath: "${{ runner.temp }}/out-${{ matrix.part }}",
+			expected: 1,
+		},
+		{
+			title: "a dot path under one entry of a list-form upload path",
+			staging: staged('cp --parents .changelog/x.md "$stage/files/"'),
+			uploadPath: ["${{ runner.temp }}/elsewhere", ROOT_PATH],
 			expected: 1,
 		},
 		{
