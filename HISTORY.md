@@ -1,5 +1,14 @@
 # HISTORY
 
+## 2026-10-25 — `path.resolve` in front of an identity key (shape 1)
+
+Three members surfaced in one day during the #4689 census. #4853's review
+found F1, a key built through `path.resolve` before `normalizeMapKey`.
+#4860's review found `test-runner-client.ts:739`. The census then listed
+`clients/dispatch/runner-context.ts:12`. Each folds `/repo/link/../f.ts`
+lexically to `/repo/f.ts`, while the kernel resolves `link` first and opens a
+different file. The rule now sits in AGENTS.md shape 1 with its screen.
+
 ## 2026-10-25 — default-budget tree census (shape 85)
 
 Four `tests/config` censuses (`lsp-spawn-heavy-coverage`,
