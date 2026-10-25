@@ -1052,7 +1052,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 72 -> 65 (#4689 batch 7): the ignore matcher's containment tests are the
 		// owner predicate on one path form, so four `path.relative` /
 		// `path.isAbsolute` folds and the `rootPrefix`'s `path.sep` are gone.
-		"clients/file-utils.ts": 65,
+		// 65 -> 68 (#4876 r2): `projectPathKey` keys a dot-segment spelling by its
+		// DIRECTORY's identity (`path.dirname` + `path.basename` of the caller's
+		// own spelling), so the kernel — not `path.resolve` — folds the `..`.
+		"clients/file-utils.ts": 68,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realpathOrResolve`,
