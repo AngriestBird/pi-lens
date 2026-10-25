@@ -443,6 +443,20 @@ function writeSlots(
 	const destinations = parsed.operands.slice(-1);
 	if (sources.length === 0 || destinations.length === 0)
 		return { destinations: [], slots: [] };
+	// `.`, `..`, `./` and `dir/.` copy a directory's whole contents, hidden
+	// entries included, and the YAML cannot list them: `cp -a . "$stage/files"`
+	// lands `files/.changelog/x.md`. The scan cannot place that write, so it
+	// refuses it (verify r5 R5-1, CodeRabbit inline).
+	for (const source of sources)
+		for (const from of expandWord(source, aliases)) {
+			const base = from.replace(/\/+$/, "").split("/").pop() ?? "";
+			if (base === "." || base === "..")
+				return {
+					destinations: [],
+					slots: [],
+					unplaced: `${from} (a source whose contents the scan cannot list)`,
+				};
+		}
 	const slots: Slot[] = [];
 	const placed: string[] = [];
 	// `cp --parents` refuses a destination that is not a directory ("with
@@ -468,8 +482,7 @@ function writeSlots(
 				for (const source of sources)
 					for (const from of expandWord(source, aliases)) {
 						const base = from.replace(/\/+$/, "").split("/").pop() ?? "";
-						if (base.startsWith(".") && base !== "." && base !== "..")
-							slots.push({ file: `${target}/${base}` });
+						if (base.startsWith(".")) slots.push({ file: `${target}/${base}` });
 					}
 				continue;
 			}
@@ -1012,6 +1025,30 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 		expect(findings[0]).toContain("cannot place the write");
 		expect(findings[0]).toContain("an option the write grammar does not admit");
 	});
+
+	// The state table for a copy source's basename (verify r5): a hidden name
+	// lands a hidden slot, a plain file a plain one, and a plain directory's
+	// unlisted children are the accepted residual. `.` and `..` copy a whole
+	// directory, hidden entries included, so the write is refused.
+	it.each([
+		["the checkout root copied as a source", 'cp -a . "$stage/files"'],
+		[
+			"the checkout root spelled ./ onto a slashed destination",
+			'cp -r ./ "$stage/files/"',
+		],
+		["a directory's contents spelled dir/.", 'cp -a src/. "$stage/files/"'],
+		["a parent directory copied as a source", 'rsync -a .. "$stage/files/"'],
+	])(
+		"refuses a source whose contents it cannot list: %s",
+		(_title, command) => {
+			const findings = findingsFor(plant(staged(command), ROOT_PATH));
+
+			expect(findings).toHaveLength(1);
+			expect(findings[0]).toContain(
+				"a source whose contents the scan cannot list",
+			);
+		},
+	);
 
 	// The admitted words, each pinned through a spelling whose placement is
 	// visible: `--parents` keeps the dot path, so a flag that silently stopped
