@@ -3,4 +3,4 @@ section: Changed
 audience: internal
 ---
 
-- Drop six no-op `path.resolve` wrappers on the coordinator's `PathKeyedMap` keys (inline blockers and deferred format). Every caller already passes a resolved path, so behaviour is unchanged; the path-identity and glossary pins move down with the sites (#4689).
+- Key every inline-blocker and deferred-format accessor of the runtime coordinator by the raw spelling through `normalizeMapKey`, and absolutize a deferred mutation with `realpathOrResolve`. A spelling that goes through a directory link with `..` (`link/../file.ts`) now reaches the same record through every accessor; common spellings are unchanged (#4689).
