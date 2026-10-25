@@ -710,6 +710,13 @@ export interface WalkUpDirsOptions {
 	 * whose answer is compared with spelled paths by design, named at the call.
 	 */
 	spelling?: boolean;
+	/**
+	 * Yield at most this many directories, counted from the start, for a walk
+	 * with its own depth cap (the Cargo workspace climb, the ast-grep
+	 * `node_modules` search). Omitted, the climb ends only at the root or the
+	 * home ceiling.
+	 */
+	maxDepth?: number;
 }
 
 /**
@@ -738,7 +745,7 @@ export function* walkUpDirs(
 	let current = axis(startDir);
 	const home =
 		options.homeDir === undefined ? undefined : axis(options.homeDir);
-	while (true) {
+	for (let yielded = 0; yielded < (options.maxDepth ?? Infinity); yielded++) {
 		if (home !== undefined && isAtOrAboveHomeDir(current, home)) return;
 		yield current;
 		const parent = path.dirname(current);

@@ -862,6 +862,16 @@ file-scoped worklist and receives no project-wide scanner output.
     only by an enclosing `describe.each` or loop; `Unit tests Windows` is the
     backstop. Instances and dates: `HISTORY.md`.
 
+86. **Turn-count wait for real I/O:** a test waits for a file write, a child
+    exit or a drain by awaiting a fixed number of event-loop turns, then
+    asserts. The count holds on an idle host and runs out on a loaded CI runner,
+    so the red lands on an unrelated PR. Wait on `waitFor`
+    (`tests/clients/interleaving-kit.ts`), which reads a real-clock deadline
+    scaled by `PI_LENS_TEST_TIMEOUT_SCALE`, and give the test a timeout above
+    that deadline. Screen: does the wait end on the event it waits for or on a
+    real-clock deadline, never on a count? Enforcer: none yet; the detector is
+    tracked in #4865. Instances and dates: `HISTORY.md`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">

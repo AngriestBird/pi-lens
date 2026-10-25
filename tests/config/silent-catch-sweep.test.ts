@@ -1182,10 +1182,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :48, :73
 	"clients/test-runner-client.ts": {
-		silent: 16,
-		identities: "06aea9d4bef19d77",
+		silent: 14,
+		identities: "5966330aef56c708",
 		reason: PRE_RULE,
-	}, // :325, :734, :749, :1046, :1096, :1112, :1156, :1185, :1230, :1334, :1535, :1914, :1991, :2233, :3368, :3377
+	}, // :331, :1048, :1098, :1114, :1158, :1188, :1233, :1337, :1538, :1917, :1994, :2236, :3372, :3381
 	"clients/test-runner-delivery.ts": {
 		silent: 2,
 		identities: "f4ada83f93d3b6b9",

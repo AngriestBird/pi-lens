@@ -15,7 +15,7 @@ respawned server reports every finding it reported before eviction; the
 content-bound coverage check the auxiliary freeze depends on. A server that
 cannot demonstrate it is never proposed for eviction on perf grounds alone.
 
-_Last generated: 2026-10-24 on linux; 49 registry servers: 33 eligible, 0 vetoed, 2 inconclusive, 14 unavailable (0 not reached: budget)._
+_Last generated: 2026-10-25 on linux; 49 registry servers: 32 eligible, 1 vetoed, 2 inconclusive, 14 unavailable (0 not reached: budget)._
 
 ## Per-server rows
 
@@ -71,7 +71,7 @@ step log only, because it flaps.
 | python | primary | transparent | eligible | · | ok | preserved |
 | python-jedi | primary | transparent | eligible | · | ok | preserved |
 | ruby | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
-| rust | primary | unmeasured | eligible | · | ok | preserved |
+| rust | primary | unmeasured | vetoed | findings-narrowed | ok | narrowed |
 | shuck | primary | unmeasured | unavailable | server-not-started | n/a | n/a |
 | svelte | primary | unmeasured | eligible | · | ok | preserved |
 | swift | primary | unmeasured | unavailable | tool-unavailable | n/a | n/a |
@@ -99,7 +99,7 @@ nothing.
 - **kotlin** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **lua** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **powershell** [proposal] declared unmeasured but eviction and respawn preserved its findings
-- **rust** [proposal] declared unmeasured but eviction and respawn preserved its findings
+- **rust** [proposal] declared unmeasured and the measurement vetoes eviction (findings-narrowed); consider declaring resident
 - **svelte** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **terraform** [proposal] declared unmeasured but eviction and respawn preserved its findings
 - **tinymist** [proposal] declared unmeasured but eviction and respawn preserved its findings

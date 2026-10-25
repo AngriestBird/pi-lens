@@ -99,6 +99,9 @@ const HELM_CONTAINMENT =
 const BIN_CONTAINMENT =
 	"project-local bin containment (#2556): a PATH shim's kernel-real target is checked against the kernel-real roots and a realpath that throws refuses the binary, which realpathOrResolve's fallback would turn into a spelling compare";
 
+const INSTALL_SELF_CONTAINED =
+	"clients/install-diagnostics.ts is the paste-able report for an install whose runtime dependencies did not resolve (#285/#335) and imports nothing from clients/: clients/path-utils.ts imports minimatch, so routing its one realpath (the symlinked-install probe, which compares the kernel-real package dir with the spelled one on purpose) through realpathOrResolve would stop the report loading exactly when it is needed; the import census in tests/clients/install-diagnostics.test.ts refuses any relative or bare specifier there, so that swap reds it";
+
 interface Pin {
 	sites: number;
 	identities: string;
@@ -111,11 +114,6 @@ interface Pin {
  * rows. Re-pin only downward; a row that grows needs its reason restated.
  */
 const PINS: Readonly<Record<string, Pin>> = {
-	"clients/actionable-warnings.ts#raw-realpath": {
-		sites: 2,
-		identities: "18c69cbc7e77f887",
-		reason: PRE_4689,
-	}, // :2247, :2249
 	"clients/dead-code-client.ts#path-resolve-keyed": {
 		sites: 4,
 		identities: "a6ddbdf02c6f7761",
@@ -162,10 +160,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :433 (r6: keyed by its function, renamed to dataDirCanonicalRoot)
 	"clients/file-utils.ts#path-resolve-keyed": {
-		sites: 3,
-		identities: "28e866f9b5baf0dd",
+		sites: 2,
+		identities: "7e723fe52bc1e91e",
 		reason: SPELLING_MEMO,
-	}, // :894, :1268, :1279
+	}, // :1518, :1529
 	"clients/inline-blocker-dispositions.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "22f213e6ea043ad8",
@@ -174,7 +172,7 @@ const PINS: Readonly<Record<string, Pin>> = {
 	"clients/install-diagnostics.ts#raw-realpath": {
 		sites: 1,
 		identities: "1e68f8fa901aa8c4",
-		reason: PRE_4689,
+		reason: INSTALL_SELF_CONTAINED,
 	}, // :157
 	"clients/installer/index.ts#path-resolve-keyed": {
 		sites: 2,
@@ -247,10 +245,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :444
 	"clients/pipeline.ts#path-resolve-keyed": {
-		sites: 5,
-		identities: "a02a55f7f6e6fc48",
+		sites: 2,
+		identities: "f25de8a73a269e45",
 		reason: PRE_4689,
-	}, // :212, :1022, :2259, :2330, :2374
+	}, // :215, :1054
 	"clients/probe-home-state.ts#raw-realpath": {
 		sites: 1,
 		identities: "480c8b119f83ad12",
@@ -307,10 +305,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :60
 	"clients/test-runner-client.ts#raw-realpath": {
-		sites: 6,
-		identities: "18ded036a3d116e6",
+		sites: 4,
+		identities: "c1a06e8a6462ff6b",
 		reason: PRE_4689,
-	}, // :300, :321, :322, :337, :733, :746
+	}, // :306, :327, :328, :343
 	"clients/test-runner-client.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "3aedefc29eced70b",
@@ -327,10 +325,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: SPELLING_MEMO,
 	}, // :219, :267, :272
 	"tools/lens-diagnostics.ts#path-resolve-keyed": {
-		sites: 9,
-		identities: "88eb117a49e95f43",
+		sites: 2,
+		identities: "223a7ec2d1f4172c",
 		reason: PRE_4689,
-	}, // :855, :857, :2049, :2063, :2606, :2608, :2618, :2684, :2783
+	}, // :895, :897 (a per-call bucket; `getDeltaFileGroup` keys the group by identity)
 	"mcp/server.ts#path-resolve-keyed": {
 		sites: 1,
 		identities: "95f9ef6922e0457e",

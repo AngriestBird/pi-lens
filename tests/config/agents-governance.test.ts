@@ -42,10 +42,10 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 
 	it("keeps every numbered defect shape exactly once", () => {
 		const numbers = shapeNumbers(agentsText());
-		expect(numbers).toHaveLength(85);
-		expect(new Set(numbers).size).toBe(85);
+		expect(numbers).toHaveLength(86);
+		expect(new Set(numbers).size).toBe(86);
 		expect(numbers.sort((a, b) => a - b)).toEqual(
-			Array.from({ length: 85 }, (_, index) => index + 1),
+			Array.from({ length: 86 }, (_, index) => index + 1),
 		);
 	});
 
@@ -54,7 +54,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		const counterfeit = agentsText()
 			.replace(/^1\. \*\*.*$/m, "")
 			.concat("\n<!--\n1. **Counterfeit shape:** hidden comment\n-->\n");
-		expect(shapeNumbers(counterfeit)).toHaveLength(84);
+		expect(shapeNumbers(counterfeit)).toHaveLength(85);
 		expect(shapeNumbers(counterfeit)).not.toContain(1);
 	});
 
@@ -79,7 +79,9 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		// The 2026-10-24 maintainer decision on #4682 adds the fourth raise, 121 ->
 		// 124: shape 84 names its three instance issues (#4293, #4294, #4682), the
 		// wording the maintainer set for the lazy axis.
-		expect(issueRefs(agentsText())).toBeLessThanOrEqual(124);
+		// The 2026-10-25 maintainer decision adds the fifth raise, 124 -> 125:
+		// shape 86 names its unbuilt detector's tracker (#4865), as shape 79 did.
+		expect(issueRefs(agentsText())).toBeLessThanOrEqual(125);
 	});
 
 	it("counts a reference and not a heading anchor", () => {

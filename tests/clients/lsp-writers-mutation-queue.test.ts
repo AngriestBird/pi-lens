@@ -627,6 +627,47 @@ describe("#3541: the actionable fix writes only the warning's own file", () => {
 });
 
 /**
+ * #4689 batch 2: the multi-file guard (`clients/actionable-warnings.ts`, the
+ * `target` / `writesOtherFile` pair) answers a second file that is not on disk
+ * like one that is. The link-spelling cells of the same guard are the
+ * `it.each` of the stale_content describe above (report and edit through a
+ * linked directory); an edit that names F and a link to F is merged into one
+ * op by `planWorkspaceEdit` before the guard sees it, so it cannot reach it.
+ */
+describe("#4689: the actionable fix's one-file guard answers a missing second file", () => {
+	// A second file that is not on disk is still a second file: the fix is
+	// refused as multi_file_edit before any write, the same answer as for a
+	// second file that exists. Recurrence: the raw realpath threw on it, so the
+	// refusal read as apply_failed (a failed fix) and counted toward the batch's
+	// failure total.
+	it("a quick fix whose edit names a file that is not on disk is refused as multi_file_edit and writes nothing", async () => {
+		const missing = path.join(env.tmpDir, "missing.ts");
+		useActionableFix(async () => [
+			{
+				...fixIt(),
+				edit: {
+					changes: {
+						...valueEdit(filePath).changes,
+						...valueEdit(missing).changes,
+					},
+				},
+			},
+		]);
+		const summary = await applyConservativeActionableWarningFixes({
+			cwd: env.tmpDir,
+			report: actionableReport(),
+		});
+		expect(summary).toMatchObject({
+			applied: 0,
+			changedFiles: [],
+			skipped: [{ id: "eslint:fix", reason: "multi_file_edit" }],
+		});
+		expect(fs.readFileSync(filePath, "utf8")).toBe("value = 1;\n");
+		expect(fs.existsSync(missing)).toBe(false);
+	});
+});
+
+/**
  * #3541 review round 2 (F2): the queue wait is a new blocking point on every
  * LSP edit, so it leaves a latency row a live monitor can read.
  */
