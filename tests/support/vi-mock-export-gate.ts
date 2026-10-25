@@ -443,13 +443,13 @@ function resolveProduction(
 
 function isProductionModule(file: string): boolean {
 	const relative = path.relative(process.cwd(), file).replaceAll(path.sep, "/");
-	// Synthetic detector fixtures live outside the checkout and are allowed to
-	// model production modules without pretending their paths are repository roots.
+	// Synthetic detector fixtures live outside the checkout -- since #4867 under
+	// `os.tmpdir()`, so they never sit at the checkout root #4864 guards -- and
+	// are allowed to model production modules without pretending their paths are
+	// repository roots.
 	return relative.startsWith("../")
 		? true
-		: relative.startsWith(".probe-vi-mock-")
-			? true
-			: /^(?:clients|tools|mcp|scripts)(?:\/|$)/.test(relative);
+		: /^(?:clients|tools|mcp|scripts)(?:\/|$)/.test(relative);
 }
 
 function exportedValues(source: string): Set<string> {

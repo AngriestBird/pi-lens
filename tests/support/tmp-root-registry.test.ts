@@ -313,9 +313,11 @@ describe("tmp-root interposer (#2912)", () => {
 
 	// #4864: a directory NAMED directly at the repository root is recorded, so the
 	// serialized owner can fail the CREATION even when the cell removes it before
-	// the run ends (the leftover census cannot see a transient tree). A `mkdtemp`
-	// root is not recorded: its name is unique per call and its file removes it.
-	it("records a directory named directly at the watched repository root (#4864)", () => {
+	// the run ends (the leftover census cannot see a transient tree). #4867: a
+	// `mkdtemp` root at that root is the SAME shape to a repo-walking scan, so it
+	// is recorded too -- its unique name does not shorten the window in which the
+	// scan lists it and the cell removes it.
+	it("records a directory created directly at the watched repository root, whatever made it (#4864, #4867)", async () => {
 		const registry = createTmpRootRegistry();
 		const { target } = fakeTarget();
 		const repoRoot = fs.mkdtempSync(
@@ -332,17 +334,37 @@ describe("tmp-root interposer (#2912)", () => {
 			const mkdirSync = target.mkdirSync as (dir: string) => string;
 			mkdirSync(path.join(repoRoot, ".probe-language-roots"));
 			// Not the repository root: a child of that fixture, a tmp-root sibling,
-			// and a `mkdtemp` root all stay out of the ledger.
+			// and a `mkdtemp` root INSIDE the fixture all stay out of the ledger.
 			mkdirSync(path.join(repoRoot, ".probe-language-roots", "packages"));
 			mkdirSync("/var/tmp/capture");
-			(target.mkdtempSync as (p: string) => string)(
-				path.join(repoRoot, "pi-lens-unique-"),
+			const sync = target.mkdtempSync as (p: string) => string;
+			sync(path.join(repoRoot, "pi-lens-unique-"));
+			sync(path.join(repoRoot, ".probe-language-roots", "pi-lens-nested-"));
+			// All three `mkdtemp` shapes, because each is its own call site in the
+			// interposer and a fix at one of them leaves the other two open.
+			await new Promise<void>((resolve) =>
+				(target.mkdtemp as (p: string, cb: () => void) => void)(
+					path.join(repoRoot, "pi-lens-cb-"),
+					resolve,
+				),
+			);
+			await (target.promises.mkdtemp as (p: string) => Promise<string>)(
+				path.join(repoRoot, "pi-lens-promise-"),
 			);
 			expect(recordedRepoRootDirs(registry)).toEqual(
-				new Map([[".probe-language-roots", "named.test.ts"]]),
+				new Map([
+					[".probe-language-roots", "named.test.ts"],
+					["pi-lens-unique-AAAAAA", "named.test.ts"],
+					["pi-lens-cb-BBBBBB", "named.test.ts"],
+					["pi-lens-promise-CCCCCC", "named.test.ts"],
+				]),
 			);
 			expect(formatTmpRootCreators(registry)).toBe(
-				"capture\tnamed.test.ts\nrepo-root:.probe-language-roots\tnamed.test.ts\n",
+				"capture\tnamed.test.ts\n" +
+					"repo-root:.probe-language-roots\tnamed.test.ts\n" +
+					"repo-root:pi-lens-cb-BBBBBB\tnamed.test.ts\n" +
+					"repo-root:pi-lens-promise-CCCCCC\tnamed.test.ts\n" +
+					"repo-root:pi-lens-unique-AAAAAA\tnamed.test.ts\n",
 			);
 		} finally {
 			fs.rmSync(repoRoot, { recursive: true, force: true });

@@ -573,12 +573,12 @@ describe("tmp-fixture-hygiene", () => {
 		// removed before the run ended, and that is the shape that raced: PR
 		// #4859's shard 3 listed `.probe-language-roots/packages/css/vite.config.ts`
 		// and then ENOENTed when `tests/clients/tool-cwd.test.ts` removed the tree
-		// mid-walk. The interposer records NAMED creations at this root, so judge
-		// the creation, not the leftover. The rule is the OUTCOME (no directory
-		// named at the checkout root, whatever made it); the recorded writers are
-		// `mkdirSync`, `mkdir` and `promises.mkdir`, and the rest of the population
-		// (`mkdtemp` roots, #4867, plus `cpSync`, `renameSync` and a child
-		// process's `mkdir`) is the admitted remainder the PR body names.
+		// mid-walk. The interposer records creations at this root, so judge the
+		// creation, not the leftover. The rule is the OUTCOME (no directory created
+		// at the checkout root, whatever made it): the recorded writers are
+		// `mkdirSync`, `mkdir`, `promises.mkdir` and, since #4867, `mkdtempSync`,
+		// `mkdtemp` and `promises.mkdtemp`; `cpSync`, `renameSync` and a child
+		// process's `mkdir` are the admitted remainder the PR body names.
 		const repoRootCreated = [...tmpHygieneRepoRootCreates()].filter(
 			// This file's own cells plant a stray at the root to drive the census in
 			// `names the entries a run added`, so its plants are the subject, not a
@@ -638,7 +638,7 @@ describe("tmp-fixture-hygiene", () => {
 						.map(([name, creator]) => `${name} (created by tests/${creator})`)
 						.join(
 							"; ",
-						)}. A repo-walking scan on a sibling worker lists that tree and then ENOENTs when the cell removes it mid-walk (#4864, PR #4859 shard 3). Build the fixture under a per-test temp root (setupTestEnvironment) or name it with mkdtemp, and remove it in a finally.`,
+						)}. A repo-walking scan on a sibling worker lists that tree and then ENOENTs when the cell removes it mid-walk (#4864, PR #4859 shard 3). Build the fixture under a per-test temp root (setupTestEnvironment, or an mkdtemp root under os.tmpdir()), and remove it in a finally.`,
 				).toEqual([]);
 			}
 		} finally {

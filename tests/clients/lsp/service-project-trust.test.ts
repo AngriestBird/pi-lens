@@ -201,8 +201,13 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		const sessionRoot = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-session-"),
 		);
+		// #4867: the project must be ADOPTABLE, and a directory created directly at
+		// the tmp root is a pi-owned staging path (`isPiOwnedTempPath`) the
+		// classifier refuses. It lives inside the checkout under the git-ignored
+		// `.probe-home`, never at the checkout root itself (#4864).
+		fs.mkdirSync(path.join(process.cwd(), ".probe-home"), { recursive: true });
 		const project = fs.mkdtempSync(
-			path.join(process.cwd(), ".probe-adopted-lsp-"),
+			path.join(process.cwd(), ".probe-home", "adopted-lsp-"),
 		);
 		const binDir = path.join(project, "node_modules", ".bin");
 		fs.mkdirSync(binDir, { recursive: true });
