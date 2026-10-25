@@ -41,8 +41,11 @@ const STRATEGIES_TS = path.resolve(
 );
 
 /** One field of a strategy object, by name. */
-function valueOf(object: object, field: string): unknown {
-	return Object.entries(object).find(([key]) => key === field)?.[1];
+function valueOf(
+	strategy: Readonly<Record<string, unknown>>,
+	field: string,
+): unknown {
+	return Object.entries(strategy).find(([key]) => key === field)?.[1];
 }
 
 /** Member names of `interface <name>`, or a thrown refusal for any unread form. */
@@ -168,9 +171,9 @@ describe("#4833 — every LSPServerInfo trait has an override-copy decision", ()
 			for (const [field, decision] of Object.entries(
 				OVERRIDE_STRATEGY_FIELDS,
 			)) {
-				const catalogValue = valueOf(row, field);
-				const defaultValue = valueOf(fallback, field);
-				const got = valueOf(effective, field);
+				const catalogValue = valueOf({ ...row }, field);
+				const defaultValue = valueOf({ ...fallback }, field);
+				const got = valueOf({ ...effective }, field);
 				if (catalogValue !== undefined) seen[decision.keep] += 1;
 				if (decision.keep === "inherit") {
 					expect(got, `${id}.${field}`).toEqual(catalogValue ?? defaultValue);
