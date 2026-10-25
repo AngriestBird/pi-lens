@@ -13,6 +13,7 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,
+	realpathOrResolveAsync,
 	uriToDiskPath,
 	uriToPath,
 } from "./path-utils.js";
@@ -1317,28 +1318,10 @@ async function assertParentIsUsable(
 	}
 }
 
-async function resolveExistingAncestor(filePath: string): Promise<string> {
-	let current = path.resolve(filePath);
-	const tail: string[] = [];
-	while (true) {
-		try {
-			const resolved = await fs.realpath(current);
-			return path.join(resolved, ...tail.reverse());
-		} catch (err) {
-			const code = (err as { code?: string }).code;
-			if (code !== "ENOENT" && code !== "ENOTDIR") throw err;
-			const parent = path.dirname(current);
-			if (parent === current) throw err;
-			tail.push(path.basename(current));
-			current = parent;
-		}
-	}
-}
-
 async function createWorkspaceUriConfiner(
 	cwd: string,
 ): Promise<(uri: string) => Promise<string>> {
-	const root = await resolveExistingAncestor(cwd);
+	const root = await realpathOrResolveAsync(cwd);
 	return async (uri: string): Promise<string> => {
 		let filePath = "";
 		try {
@@ -1357,7 +1340,7 @@ async function createWorkspaceUriConfiner(
 		}
 		if (!path.isAbsolute(filePath))
 			throw new Error(`workspace edit path escapes workspace: ${uri}`);
-		const resolved = await resolveExistingAncestor(filePath);
+		const resolved = await realpathOrResolveAsync(filePath);
 		if (!isUnderDir(resolved, root))
 			throw new Error(`workspace edit path escapes workspace: ${uri}`);
 		return filePath;
@@ -1472,9 +1455,9 @@ async function preflightWorkspaceEdit(
 		if (!physicalPath)
 			throw new Error(`text edit target does not exist: ${filePath}`);
 		const content = await fs.readFile(physicalPath, "utf-8");
-		// `?.` skips the realpath when no caller passed expected content.
+		// `?.` skips the identity lookup when no caller passed expected content.
 		const expected = options.expectedContent?.get(
-			await fs.realpath(physicalPath),
+			await realpathOrResolveAsync(physicalPath),
 		);
 		if (expected !== undefined && expected !== content) {
 			refuseStaleWorkspaceEdit(

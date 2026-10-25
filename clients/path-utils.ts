@@ -21,6 +21,7 @@ import {
 	realpathSync,
 	statSync,
 } from "node:fs";
+import { realpath as realpathNativeAsync } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { win32 } from "node:path";
@@ -366,6 +367,46 @@ export function resetPathIdentityFallbacks(): void {
 }
 
 /**
+ * The identity walk's candidates, deepest first: the spelling itself, then each
+ * ancestor up to the filesystem root. `missing` grows with the climb and names
+ * the segments to re-attach to the first ancestor the kernel resolves; a
+ * driver reads it only on the step it returns on, and `kernelRealPath`
+ * reverses it in place there, so a driver never resumes the walk after that.
+ *
+ * One walk, two syscall drivers (#4689 batch 10): `kernelRealPath` (sync,
+ * `realpathSync.native`) and `realpathOrResolveAsync` (`fs/promises.realpath`,
+ * the same `uv_fs_realpath`). A second copy of this loop is what the async
+ * seam deleted in `clients/lsp/edits.ts`, so keep the climb here.
+ */
+function* identityCandidates(
+	spelled: string,
+	p: typeof path.posix,
+): Generator<{ candidate: string; missing: string[] }> {
+	let current = spelled;
+	const missing: string[] = [];
+	for (;;) {
+		yield { candidate: current, missing };
+		const parent = p.dirname(current);
+		if (parent === current) return;
+		missing.push(p.basename(current));
+		current = parent;
+	}
+}
+
+/**
+ * One refused identity candidate. A missing component is the expected answer
+ * for a file not yet written (a per-key hot path, #2016), not a failure; any
+ * other errno (an unreadable ancestor, a cyclic link) is tallied for the
+ * ledger's read-time fold. Either way the identity is decided by the nearest
+ * ancestor the kernel can resolve.
+ */
+function noteIdentityRefusal(refusal: unknown, candidate: string): void {
+	const code = (refusal as NodeJS.ErrnoException | undefined)?.code;
+	if (code !== "ENOENT" && code !== "ENOTDIR")
+		recordPathIdentityFallback(code ?? "unknown", candidate);
+}
+
+/**
  * The kernel-real path of an absolute `spelled` path, parsed with `p`: the
  * `realpath` of the path itself when it exists, otherwise the `realpath` of its
  * nearest existing ancestor joined with the missing tail. Only the tail is
@@ -379,27 +420,15 @@ function kernelRealPath(
 	spelled: string,
 	p: typeof path.posix,
 ): string | undefined {
-	let current = spelled;
-	const tail: string[] = [];
-	for (;;) {
+	for (const { candidate, missing } of identityCandidates(spelled, p)) {
 		try {
-			const real = realpathSync.native(current);
-			return tail.length === 0 ? real : p.join(real, ...tail.reverse());
+			const real = realpathSync.native(candidate);
+			return missing.length === 0 ? real : p.join(real, ...missing.reverse());
 		} catch (refusal) {
-			// none: a missing component is the expected answer for a file not
-			// yet written (a per-key hot path, #2016), not a failure. Any other
-			// errno (an unreadable ancestor, a cyclic link) is tallied for the
-			// ledger's read-time fold. Either way the identity is decided by
-			// the nearest ancestor the kernel can resolve.
-			const code = (refusal as NodeJS.ErrnoException | undefined)?.code;
-			if (code !== "ENOENT" && code !== "ENOTDIR")
-				recordPathIdentityFallback(code ?? "unknown", current);
-			const parent = p.dirname(current);
-			if (parent === current) return undefined;
-			tail.push(p.basename(current));
-			current = parent;
+			noteIdentityRefusal(refusal, candidate);
 		}
 	}
+	return undefined;
 }
 
 /** `normalizeFilePath`'s POSIX arm for an absolute, slash-folded spelling. */
@@ -419,6 +448,34 @@ function posixPathIdentity(spelled: string): string {
  */
 export function realpathOrResolve(filePath: string): string {
 	return kernelRealPath(filePath, path) ?? path.resolve(filePath);
+}
+
+/**
+ * `realpathOrResolve` for a caller that already awaits (#4689 batch 10): the
+ * same identity, climbed by the same walk, resolved through
+ * `fs/promises.realpath`. Both that call and `realpathSync.native` are
+ * `uv_fs_realpath`, so the sync and async forms answer one string on every
+ * platform — unlike `realpathSync` (measured, #4689 batch 10: a `link/../f.ts`
+ * spelling comes back as the lexically folded path from `realpathSync` and as
+ * the file the kernel opens from `realpathSync.native` and from the async
+ * call). The input reaches the kernel unfolded, and a missing path is the
+ * nearest existing ancestor's real path plus the missing tail, as the sync
+ * form documents.
+ */
+export async function realpathOrResolveAsync(
+	filePath: string,
+): Promise<string> {
+	for (const { candidate, missing } of identityCandidates(filePath, path)) {
+		try {
+			const real = await realpathNativeAsync(candidate);
+			return missing.length === 0
+				? real
+				: path.join(real, ...missing.reverse());
+		} catch (refusal) {
+			noteIdentityRefusal(refusal, candidate);
+		}
+	}
+	return path.resolve(filePath);
 }
 
 /**

@@ -90,14 +90,14 @@ const LOCAL_DEDUPE =
 const LSP_FREEZE =
 	"clients/lsp/ is frozen during the LSP split (freeze.json) and is a #4689 non-goal; its identity sites move with the LSP slice that owns them";
 
+const RENAME_EXPECTED_CONTENT =
+	"the rename flows' expected-content keys (`captureRenameExpectedContent`): a file link and its target must key one entry, and the two sites move with the rename/apply slice (#4689 batch 15), not with the async seam batch 10 that shrank this row from five sites to three";
+
 const HELM_CONTAINMENT =
 	"chart containment: a template's kernel-real path is checked against the chart's kernel-real root, and a realpath that throws refuses the template (catch -> null), which realpathOrResolve's fallback would turn into a spelling compare; `canonicalChartRoot` is the realpathOrResolve shape, named in the #4689 class sweep";
 
 const BIN_CONTAINMENT =
 	"project-local bin containment (#2556): a PATH shim's kernel-real target is checked against the kernel-real roots and a realpath that throws refuses the binary, which realpathOrResolve's fallback would turn into a spelling compare";
-
-const MUTATION_QUEUE =
-	"the per-file mutation queue keys by the async kernel realpath (fs/promises), which the seam has no async form for; a file not created yet under a directory link keys by its spelling here and by identity in normalizeMapKey, a later #4689 slice";
 
 interface Pin {
 	sites: number;
@@ -151,11 +151,6 @@ const PINS: Readonly<Record<string, Pin>> = {
 		identities: "f640b5350df01957",
 		reason: SPELLING_MEMO,
 	}, // :1182, :1193, :1290, :1447, :1449, :1452, :1617, :1691, :1693, :1696
-	"clients/file-mutation-queue.ts#raw-realpath": {
-		sites: 2,
-		identities: "4d19f5c76da2f6ec",
-		reason: MUTATION_QUEUE,
-	}, // :27, :141
 	"clients/file-time.ts#path-resolve-keyed": {
 		sites: 9,
 		identities: "62c789065f4e9d86",
@@ -197,10 +192,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: LSP_FREEZE,
 	}, // :254
 	"clients/lsp/edits.ts#raw-realpath": {
-		sites: 5,
-		identities: "720e2ad3409465fb",
-		reason: LSP_FREEZE,
-	}, // :6, :848, :860, :1263, :1415
+		sites: 3,
+		identities: "96237f55c50b2878",
+		reason: RENAME_EXPECTED_CONTENT,
+	}, // :6, :879, :891
 	"clients/lsp/index.ts#path-resolve-keyed": {
 		sites: 1,
 		identities: "3d0caf4f32bd7a68",

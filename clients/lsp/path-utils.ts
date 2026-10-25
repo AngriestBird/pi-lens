@@ -7,6 +7,7 @@ export {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,
+	realpathOrResolveAsync,
 	uriToDiskPath,
 	uriToPath,
 } from "../path-utils.js";
