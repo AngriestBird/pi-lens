@@ -1,5 +1,6 @@
 /** Registered-or-fail guard for long-lived container growth (#2981). */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -626,7 +627,7 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"scans and audits a container below a nested tools source root",
 		() => {
 			const root = fs.mkdtempSync(
-				path.join(process.cwd(), ".probe-bounded-root-"),
+				path.join(os.tmpdir(), "pi-lens-bounded-root-"),
 			);
 			try {
 				const toolsRoot = path.join(root, "tools");
@@ -670,7 +671,7 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 			// class declared only below `.probe-home/` must not enter the class
 			// index either: the walk never reads scratch.
 			const root = fs.mkdtempSync(
-				path.join(process.cwd(), ".probe-bounded-root-"),
+				path.join(os.tmpdir(), "pi-lens-bounded-root-"),
 			);
 			try {
 				const scratch = path.join(root, ".probe-home", "worker-home-a");
@@ -695,7 +696,7 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"retains arbitrary dynamic identifiers in the real AST population",
 		() => {
 			const root = fs.mkdtempSync(
-				path.join(process.cwd(), ".probe-bounded-dynamic-key-"),
+				path.join(os.tmpdir(), "pi-lens-bounded-dynamic-key-"),
 			);
 			try {
 				const toolsRoot = path.join(root, "tools");
@@ -725,7 +726,7 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"retains a raw module-scope dynamic write and classifies its key as unknown",
 		() => {
 			const root = fs.mkdtempSync(
-				path.join(process.cwd(), ".probe-bounded-raw-dynamic-key-"),
+				path.join(os.tmpdir(), "pi-lens-bounded-raw-dynamic-key-"),
 			);
 			try {
 				const toolsRoot = path.join(root, "tools");

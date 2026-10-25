@@ -57,6 +57,14 @@ export interface TmpRootRegistry {
 	 *  members, because the #2912 rule that a directory made by `mkdirSync` is
 	 *  never touched still holds. Bounded by the same cap as `roots`. */
 	siblings: Map<string, { createdBy?: string }>;
+	/** Directories a TEST PROCESS created BY NAME under the repository root
+	 *  (#4864), keyed by entry name. A `mkdtemp` root is not one: its name is
+	 *  unique per call and the file that made it removes it, which is the
+	 *  reason `tests/config/tmp-fixture-hygiene.test.ts` admits it. A named
+	 *  directory has neither property, and a repo-walking governance scan on
+	 *  another worker can list it and then `ENOENT` when the cell removes it.
+	 *  Bounded by the same cap as `roots`. */
+	repoRootDirs: Map<string, { createdBy?: string }>;
 	/** Roots not recorded because the registry was full. */
 	dropped: number;
 }
@@ -72,12 +80,18 @@ export function getTmpRootRegistry(): TmpRootRegistry {
 	return (holder[REGISTRY_KEY] ??= {
 		roots: new Map(),
 		siblings: new Map(),
+		repoRootDirs: new Map(),
 		dropped: 0,
 	});
 }
 
 export function createTmpRootRegistry(): TmpRootRegistry {
-	return { roots: new Map(), siblings: new Map(), dropped: 0 };
+	return {
+		roots: new Map(),
+		siblings: new Map(),
+		repoRootDirs: new Map(),
+		dropped: 0,
+	};
 }
 
 export function registerTmpRoot(
@@ -102,6 +116,54 @@ export function registerTmpRoot(
 		return;
 	}
 	registry.roots.set(dir, { kind, sawAbsent: false, createdBy });
+}
+
+/** Record a directory a TEST PROCESS created by name directly under the
+ *  repository root (#4864). Keyed by entry NAME, not path: two workers that
+ *  build the same fixture name are the collision this records. Creator
+ *  attribution only, like `siblings`.
+ *
+ *  The RULE this serves is the OUTCOME, not the syscall: no directory created
+ *  directly at the checkout root, whatever made it. The RECORDED writers are
+ *  `mkdirSync`, `mkdir` and `promises.mkdir` (the three `noteSibling` call
+ *  sites in `installTmpRootInterposer`). The rest of the population is
+ *  admitted silently today and is named under the PR's `## Accepted
+ *  residuals` (AGENTS.md shape 69): `cpSync`, `renameSync`, a child process's
+ *  `mkdir`, and the `mkdtemp` roots named at this root (#4867). */
+export function registerRepoRootDir(
+	registry: TmpRootRegistry,
+	dir: string,
+	createdBy?: string,
+): void {
+	const name = path.basename(path.resolve(dir));
+	const existing = registry.repoRootDirs.get(name);
+	if (existing) {
+		if (existing.createdBy === undefined && createdBy !== undefined)
+			existing.createdBy = createdBy;
+		return;
+	}
+	if (
+		registry.roots.size + registry.siblings.size + registry.repoRootDirs.size >=
+		MAX_TMP_ROOTS
+	) {
+		registry.dropped += 1;
+		return;
+	}
+	registry.repoRootDirs.set(name, { createdBy });
+}
+
+/** The line prefix that marks a repository-root creation in the creators
+ *  record, so a tmp-root entry and a repo-root entry stay distinguishable. */
+export const REPO_ROOT_CREATE_PREFIX = "repo-root:";
+
+/** The repo-root directories this worker recorded, keyed by entry name. */
+export function recordedRepoRootDirs(
+	registry: TmpRootRegistry,
+): Map<string, string | undefined> {
+	const dirs = new Map<string, string | undefined>();
+	for (const [name, entry] of registry.repoRootDirs)
+		dirs.set(name, entry.createdBy);
+	return dirs;
 }
 
 /** Record a directory a TEST PROCESS made at the tmp root with `mkdir`, for
@@ -142,6 +204,12 @@ export function formatTmpRootCreators(
 	for (const [dir, entry] of registry.siblings)
 		if (entry.createdBy !== undefined)
 			lines.add(`${path.basename(dir)}\t${entry.createdBy}`);
+	// #4864: a repo-root creation is always recorded, creator or not, because
+	// the judgment (git) runs in the owner's process, not this one.
+	for (const [name, entry] of registry.repoRootDirs)
+		lines.add(
+			`${REPO_ROOT_CREATE_PREFIX}${name}\t${entry.createdBy ?? "unknown"}`,
+		);
 	if (lines.size === 0) return undefined;
 	return `${[...lines].sort().join("\n")}\n`;
 }
@@ -259,6 +327,9 @@ export function installTmpRootInterposer(
 	 *  the process's own file, so an entry a test created is attributed to it
 	 *  rather than to whatever file declares the name's prefix. */
 	createdBy?: () => string,
+	/** The repository root, when the caller wants named creations there recorded
+	 *  (#4864). `undefined` keeps the tmp-root ledger only. */
+	repoRoot = undefined as string | undefined,
 ): void {
 	// #3703: shared setup runs before test mocks. Import only node builtins
 	// and tests/support modules here, never clients/ (which would cache real fs).
@@ -296,6 +367,19 @@ export function installTmpRootInterposer(
 			canonicalParent(pathApi.dirname(resolved)) === canonicalParent(tmpRoot)
 		);
 	};
+	// #4864: a directory NAMED directly at the repository root is the shape a
+	// repo-walking scan on another worker can list and then lose to a removal.
+	// The tmp-root comparison above is the same one; only the watched parent
+	// differs, so the caller passes the root it wants judged.
+	const repoRootName =
+		repoRoot === undefined
+			? undefined
+			: canonicalParent(pathApi.resolve(repoRoot));
+	const isDirectRepoRootChild = (dir: unknown): dir is string => {
+		if (repoRootName === undefined || typeof dir !== "string") return false;
+		const resolved = pathApi.resolve(dir);
+		return canonicalParent(pathApi.dirname(resolved)) === repoRootName;
+	};
 	const note = (dir: unknown): void => {
 		if (
 			isDirectTmpChild(dir) &&
@@ -321,8 +405,18 @@ export function installTmpRootInterposer(
 		recursive: boolean,
 	): void => {
 		const made = recursive ? created : requested;
-		if (isDirectTmpChild(made))
+		if (isDirectTmpChild(made)) {
 			registerTmpSibling(registry, made, createdBy?.());
+			return;
+		}
+		// The rule is the OUTCOME: a directory NAMED directly at the checkout root
+		// is the shape a repo-walking scan loses. This branch sees the `mkdir`
+		// writers only. A `mkdtemp` root never reaches here (it is recorded by
+		// `note` above for the tmp root, and not recorded at all at the checkout
+		// root), so it is the admitted remainder this rule still covers (#4867),
+		// beside `cpSync`, `renameSync` and a child process's `mkdir`.
+		if (isDirectRepoRootChild(made))
+			registerRepoRootDir(registry, made, createdBy?.());
 	};
 	const sync = target.mkdtempSync as (...args: unknown[]) => unknown;
 	target.mkdtempSync = function (this: unknown, ...args: unknown[]) {

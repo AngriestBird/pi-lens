@@ -193,7 +193,7 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		expect(code).toContain('describe("tmp-fixture-hygiene"');
 		expect(code).not.toContain("describe.skipIf(WINDOWS_QUARANTINE)");
 		expect(code).toContain("if (!WINDOWS_QUARANTINE) {");
-		// The three census assertions sit inside the guard, and the sweep sits in
+		// The four census assertions sit inside the guard, and the sweep sits in
 		// the `finally` that follows it, so the sweep reaps on win32 too.
 		const guard = code.indexOf("if (!WINDOWS_QUARANTINE) {");
 		const finallyIndex = code.indexOf("} finally {", guard);
@@ -202,17 +202,20 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		);
 		expect(swept).toBeGreaterThan(guard);
 		expect(code.slice(guard, swept)).toContain("} finally {");
-		// #4592 review F1: the three assertions must be LIVE inside the guard.
+		// #4592 review F1: the assertions must be LIVE inside the guard.
 		// Without this arm the block could be emptied and the quarantine would read
 		// as "declined on every lane" with no red (shape 33: the pin covered the
 		// bracket, not the property; measured -- the emptied guard passed 59/59).
-		// Each assertion's subject is named, and the count is pinned, so a fourth
-		// one is a reviewed change rather than a silent widening.
+		// Each assertion's subject is named, and the count is pinned, so a further
+		// one is a reviewed change rather than a silent widening. #4864 added the
+		// fourth: the repository-root creation ledger the interposer records, which
+		// is deferred on win32 with its three siblings.
 		const deferred = stringsBlanked.slice(guard, finallyIndex);
 		expect(deferred).toContain("attributable,");
 		expect(deferred).toContain("tmpRootWriteLeaks,");
 		expect(deferred).toContain("rootCensus.leaked,");
-		expect(deferred.match(/\.toEqual\(\[\]\)/g) ?? []).toHaveLength(3);
+		expect(deferred).toContain("repoRootCreateLeaks,");
+		expect(deferred.match(/\.toEqual\(\[\]\)/g) ?? []).toHaveLength(4);
 		// #4592 review F4: a declined verdict leaves its own record. The census
 		// line carries which verdict ran, derived from this same guard, so the
 		// win32 lane prints `verdict=declined` instead of a counting line
