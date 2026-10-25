@@ -123,6 +123,65 @@ function textEdit(filePath: string) {
 	};
 }
 
+/** A resource create keyed as a bare URI, the op kind a confiner sees whole. */
+function createEdit(filePath: string) {
+	return {
+		documentChanges: [
+			{
+				kind: "create",
+				uri: pathToFileURL(filePath).href,
+				options: { overwrite: true },
+			},
+		],
+	};
+}
+
+/**
+ * A path whose identity the kernel refuses: a link that loops on itself, and a
+ * link into a directory this process may not traverse. Both `lstat` as existing
+ * entries, so a preflight alone still sees something to write.
+ */
+function plantUnresolvable(t: Tree): {
+	paths: string[];
+	restore: () => void;
+	skipReason?: string;
+} {
+	const loop = path.join(t.repo, "self-loop");
+	const hidden = path.join(t.repo, "hidden");
+	const behind = path.join(t.repo, "behind-eacces");
+	try {
+		fs.symlinkSync("self-loop", loop, "file");
+		fs.mkdirSync(hidden, { recursive: true });
+		fs.writeFileSync(path.join(hidden, "y.ts"), "export {};\n");
+		fs.symlinkSync(path.join(hidden, "y.ts"), behind, "file");
+		fs.chmodSync(hidden, 0o000);
+	} catch (error) {
+		return {
+			paths: [],
+			restore: () => {},
+			skipReason: `cannot plant a refused link here: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	const restore = (): void => fs.chmodSync(hidden, 0o700);
+	// Before the fixture's own removal: a mode-000 directory cannot be walked.
+	cleanups.unshift(restore);
+	const codes = [loop, behind].map((spelled) => {
+		try {
+			fs.realpathSync.native(spelled);
+			return "answered";
+		} catch (error) {
+			return (error as NodeJS.ErrnoException).code ?? "unknown";
+		}
+	});
+	if (codes.some((code) => code !== "EACCES" && code !== "ELOOP"))
+		return {
+			paths: [],
+			restore,
+			skipReason: `this host does not refuse the traversal (measured ${codes.join(", ")})`,
+		};
+	return { paths: [loop, behind], restore };
+}
+
 /** Enter the real multi-path writer and return the queue keys it took. */
 async function queuedKeys(
 	filePaths: readonly string[],
@@ -282,5 +341,82 @@ describe("#4689 batch 10: the async identity seam", () => {
 		expect(fs.readFileSync(t.realFile, "utf8")).toBe(
 			"// touched\nexport const real = 1;\n",
 		);
+	});
+
+	it("the identity is its own re-resolution when the missing tail folds a `..`", async (ctx) => {
+		// RECURRENCE GUARDED (F-CR1): the missing tail was folded with `path.join`
+		// and the answer returned as it stood, so a fold could promote a directory
+		// link the kernel had refused to traverse into the answer
+		// (`<missing>/../<dir-link>/child`) and resolving that answer again crossed
+		// the link: one spelling, two keys, and a queue entry keyed by a path the
+		// seam never returns.
+		const t = tree("fixpoint");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		const spelled = `${t.repo}/src/missing/../linked/util.ts`;
+		const once = await realpathOrResolveAsync(spelled);
+		expect(realpathOrResolve(spelled)).toBe(once);
+		expect(realpathOrResolve(once)).toBe(once);
+		expect(await realpathOrResolveAsync(once)).toBe(once);
+		// The spelling's own file: the fold + settle answers the identity of the
+		// path the fold names, which is the file both spellings reach.
+		expect(once).toBe(real(t.dirLink));
+		expect(
+			await realpathOrResolveAsync(
+				path.join(t.repo, "src", "linked", "util.ts"),
+			),
+		).toBe(once);
+		// The queue enters the key the seam returns; it does not re-derive another.
+		const { keys } = await queuedKeys([
+			spelled,
+			path.join(t.repo, "src", "linked", "util.ts"),
+		]);
+		expect(keys).toEqual([once]);
+	});
+
+	it("a workspace edit refuses a target whose identity the kernel never named", async (ctx) => {
+		// RECURRENCE GUARDED (F-CR2): the confiner replaced its own
+		// `resolveExistingAncestor` — which rethrew every errno that is not
+		// `ENOENT`/`ENOTDIR` — with the seam's fallback, so it proved containment
+		// for a path whose real name the kernel never gave: a trust boundary
+		// accepting an edit it cannot place.
+		const t = tree("confine-unresolved");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		const planted = plantUnresolvable(t);
+		if (planted.skipReason) return ctx.skip(planted.skipReason);
+		for (const target of planted.paths) {
+			await expect(
+				validateWorkspaceEdit(createEdit(target), t.repo),
+			).rejects.toThrow(/identity is unresolvable/);
+		}
+		// The whole edit is refused before the write loop: nothing lands, not even
+		// the op that precedes the unresolvable one.
+		const before = fs.readFileSync(t.realFile, "utf8");
+		await expect(
+			applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{
+							kind: "edit",
+							textDocument: {
+								uri: pathToFileURL(t.realFile).href,
+								version: null,
+							},
+							edits: [
+								{
+									range: {
+										start: { line: 0, character: 0 },
+										end: { line: 0, character: 0 },
+									},
+									newText: "// written before the refusal\n",
+								},
+							],
+						},
+						...createEdit(planted.paths[0]).documentChanges,
+					],
+				},
+				t.repo,
+			),
+		).rejects.toThrow(/identity is unresolvable/);
+		expect(fs.readFileSync(t.realFile, "utf8")).toBe(before);
 	});
 });

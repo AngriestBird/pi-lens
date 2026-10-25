@@ -1210,7 +1210,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.join` and the `path.resolve` fallback). Three are the same
 		// senses the sync walk already carries; the fourth is the seam's own
 		// fallback.
-		"clients/path-utils.ts": 37,
+		// 37 -> 39 (#4689 r2 F-CR1): each driver's attempt now folds its tail
+		// through the shared `foldMissingTail` (one `path` argument for the
+		// `typeof path.posix` parser), and `kernelAttemptAsync` carries the same
+		// argument its sync twin does; the fold and fallback calls are the same
+		// senses counted above.
+		"clients/path-utils.ts": 39,
 		"clients/php-cs-fixer-config.ts": 4,
 		// 26 -> 24 (#4689 batch 3): the changed-file set is a PathKeyedMap, so two
 		// `path.resolve` calls are gone. 24 -> 22: the postMutation gate compares

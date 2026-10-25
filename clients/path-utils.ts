@@ -369,14 +369,14 @@ export function resetPathIdentityFallbacks(): void {
 /**
  * The identity walk's candidates, deepest first: the spelling itself, then each
  * ancestor up to the filesystem root. `missing` grows with the climb and names
- * the segments to re-attach to the first ancestor the kernel resolves; a
- * driver reads it only on the step it returns on, and `kernelRealPath`
- * reverses it in place there, so a driver never resumes the walk after that.
+ * the segments to fold onto the first ancestor the kernel resolves; a driver
+ * reads it only on the step it returns on, and `foldMissingTail` reverses it in
+ * place there, so a driver never resumes the walk after that.
  *
- * One walk, two syscall drivers (#4689 batch 10): `kernelRealPath` (sync,
- * `realpathSync.native`) and `realpathOrResolveAsync` (`fs/promises.realpath`,
- * the same `uv_fs_realpath`). A second copy of this loop is what the async
- * seam deleted in `clients/lsp/edits.ts`, so keep the climb here.
+ * One walk, two syscall drivers (#4689 batch 10): `kernelAttempt` (sync,
+ * `realpathSync.native`) and `kernelAttemptAsync` (`fs/promises.realpath`, the
+ * same `uv_fs_realpath`). A second copy of this loop is what the async seam
+ * deleted in `clients/lsp/edits.ts`, so keep the climb here.
  */
 function* identityCandidates(
 	spelled: string,
@@ -394,16 +394,103 @@ function* identityCandidates(
 }
 
 /**
- * One refused identity candidate. A missing component is the expected answer
- * for a file not yet written (a per-key hot path, #2016), not a failure; any
- * other errno (an unreadable ancestor, a cyclic link) is tallied for the
- * ledger's read-time fold. Either way the identity is decided by the nearest
- * ancestor the kernel can resolve.
+ * One refused identity candidate. A missing component is the expected answer for a file not yet written (a
+ * per-key hot path, #2016), not a failure; any other errno (an unreadable
+ * ancestor, a cyclic link) is tallied for the ledger's read-time fold and makes
+ * the identity UNCONFIRMED: the walk climbed over a name the kernel refused to
+ * give, so the answer is only an ancestor plus the spelling's tail.
  */
 function recordIdentityRefusal(refusal: unknown, candidate: string): void {
+	if (isAbsenceRefusal(refusal)) return;
+	recordPathIdentityFallback(
+		(refusal as NodeJS.ErrnoException | undefined)?.code ?? "unknown",
+		candidate,
+	);
+}
+
+/**
+ * True when the kernel's refusal is the not-written answer (`ENOENT`: no such
+ * file, `ENOTDIR`: a component names a file) rather than a refused resolution
+ * (`EACCES`, `ELOOP`, `ENAMETOOLONG`): a walk that skipped the former answered
+ * about an absence, one that skipped the latter climbed over an unnamed file.
+ */
+function isAbsenceRefusal(refusal: unknown): boolean {
 	const code = (refusal as NodeJS.ErrnoException | undefined)?.code;
-	if (code !== "ENOENT" && code !== "ENOTDIR")
-		recordPathIdentityFallback(code ?? "unknown", candidate);
+	return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/**
+ * What one walk answered. `answer` is the resolved prefix with the missing tail
+ * folded on; `foldedTail` says the fold removed a segment, so the answer names a
+ * path the kernel never saw and needs one more walk (see `foldMissingTail`).
+ */
+interface KernelAttempt {
+	answer: string;
+	foldedTail: boolean;
+}
+
+/**
+ * An attempt that also answers whether the kernel confirmed the name. Only the
+ * async driver reports it: its one consumer is a containment decision
+ * (`kernelPathIdentityAsync`), and no sync caller asks — `realpathOrResolve`
+ * takes the fallback either way.
+ */
+interface ConfirmedKernelAttempt extends KernelAttempt {
+	/** False when a skipped component refused for a reason other than absence. */
+	kernelConfirmed: boolean;
+}
+
+/** One walk's identity, and whether the kernel confirmed the name. */
+export interface KernelPathIdentity {
+	/** The kernel-real path, or the nearest resolvable ancestor plus the tail. */
+	identity: string;
+	/** False when a skipped component refused for a reason other than absence. */
+	kernelConfirmed: boolean;
+}
+
+/**
+ * `real` with the walk's missing tail folded onto it. The tail names nothing on
+ * disk, so only the tail is folded (`p.join`); the resolved prefix keeps the
+ * kernel's own answer, link for link.
+ *
+ * The fold can still move a segment the kernel refused into a position it now
+ * resolves: `<dir>/<missing>/../<dir-link>/child` folds to
+ * `<dir>/<dir-link>/child`, whose `dir-link` the walk never traversed, so
+ * resolving that answer again crosses the link and the key moves. A folded
+ * answer is therefore resolved once more, and that second answer is a fixpoint
+ * — a fold removes every dot segment, so the tail it hands back holds none
+ * (#4689 r2 F-CR1).
+ */
+function foldMissingTail(
+	real: string,
+	missing: string[],
+	p: typeof path.posix,
+): string {
+	return missing.length === 0 ? real : p.join(real, ...missing.reverse());
+}
+
+/** True when the fold removed a segment, so the folded answer needs one more walk. */
+function tailHasDotSegment(missing: readonly string[]): boolean {
+	return missing.some((segment) => segment === "." || segment === "..");
+}
+
+/** One walk with the sync driver; see `identityCandidates`. */
+function kernelAttempt(
+	spelled: string,
+	p: typeof path.posix,
+): KernelAttempt | undefined {
+	for (const { candidate, missing } of identityCandidates(spelled, p)) {
+		try {
+			const real = realpathSync.native(candidate);
+			return {
+				answer: foldMissingTail(real, missing, p),
+				foldedTail: tailHasDotSegment(missing),
+			};
+		} catch (refusal) {
+			recordIdentityRefusal(refusal, candidate);
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -411,24 +498,22 @@ function recordIdentityRefusal(refusal: unknown, candidate: string): void {
  * `realpath` of the path itself when it exists, otherwise the `realpath` of its
  * nearest existing ancestor joined with the missing tail. Only the tail is
  * folded (`p.join`): it names nothing on disk, so it holds no link for the
- * kernel to follow. `undefined` when no ancestor resolves.
+ * kernel to follow; and a fold that removed a dot segment is resolved once
+ * more, so the answer is its own re-resolution. `undefined` when no ancestor
+ * resolves.
  *
  * The first attempt is the only syscall for an existing path, which is the
- * per-edit case; a missing path pays one more `realpath` per missing segment.
+ * per-edit case; a missing path pays one more `realpath` per missing segment,
+ * and a dot segment in that tail one second walk.
  */
 function kernelRealPath(
 	spelled: string,
 	p: typeof path.posix,
 ): string | undefined {
-	for (const { candidate, missing } of identityCandidates(spelled, p)) {
-		try {
-			const real = realpathSync.native(candidate);
-			return missing.length === 0 ? real : p.join(real, ...missing.reverse());
-		} catch (refusal) {
-			recordIdentityRefusal(refusal, candidate);
-		}
-	}
-	return undefined;
+	const first = kernelAttempt(spelled, p);
+	if (!first) return undefined;
+	if (!first.foldedTail) return first.answer;
+	return kernelAttempt(first.answer, p)?.answer ?? first.answer;
 }
 
 /** `normalizeFilePath`'s POSIX arm for an absolute, slash-folded spelling. */
@@ -465,17 +550,57 @@ export function realpathOrResolve(filePath: string): string {
 export async function realpathOrResolveAsync(
 	filePath: string,
 ): Promise<string> {
-	for (const { candidate, missing } of identityCandidates(filePath, path)) {
+	return (
+		(await kernelPathIdentityAsync(filePath))?.identity ??
+		path.resolve(filePath)
+	);
+}
+
+/** One walk with the async driver; see `identityCandidates`. */
+async function kernelAttemptAsync(
+	spelled: string,
+): Promise<ConfirmedKernelAttempt | undefined> {
+	let kernelConfirmed = true;
+	for (const { candidate, missing } of identityCandidates(spelled, path)) {
 		try {
 			const real = await realpathNativeAsync(candidate);
-			return missing.length === 0
-				? real
-				: path.join(real, ...missing.reverse());
+			return {
+				answer: foldMissingTail(real, missing, path),
+				foldedTail: tailHasDotSegment(missing),
+				kernelConfirmed,
+			};
 		} catch (refusal) {
 			recordIdentityRefusal(refusal, candidate);
+			if (!isAbsenceRefusal(refusal)) kernelConfirmed = false;
 		}
 	}
-	return path.resolve(filePath);
+	return undefined;
+}
+
+/**
+ * The async identity, with the one fact a containment decision needs.
+ * `kernelConfirmed` is false when the walk climbed over a component the kernel
+ * refused for a reason other than absence — an unreadable ancestor (`EACCES`),
+ * a cyclic link (`ELOOP`) — so `identity` is only the nearest resolvable
+ * ancestor plus the spelling's tail, not a name the kernel ever gave. A queue
+ * key takes that answer anyway (`realpathOrResolveAsync`); a caller that decides
+ * whether a path is inside a workspace refuses it, as this file's `edits.ts`
+ * confiner did before it borrowed this seam (#4689 r2 F-CR2). `undefined` when
+ * no ancestor resolves.
+ */
+export async function kernelPathIdentityAsync(
+	filePath: string,
+): Promise<KernelPathIdentity | undefined> {
+	const first = await kernelAttemptAsync(filePath);
+	if (!first) return undefined;
+	const settled = first.foldedTail
+		? await kernelAttemptAsync(first.answer)
+		: undefined;
+	return {
+		identity: settled?.answer ?? first.answer,
+		kernelConfirmed:
+			first.kernelConfirmed && (settled?.kernelConfirmed ?? true),
+	};
 }
 
 /**

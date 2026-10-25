@@ -4,6 +4,7 @@
  */
 export {
 	isUnderDir,
+	kernelPathIdentityAsync,
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,

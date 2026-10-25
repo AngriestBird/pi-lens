@@ -10,6 +10,7 @@ import path from "node:path";
 import { URL } from "node:url";
 import {
 	isUnderDir,
+	kernelPathIdentityAsync,
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,
@@ -1318,10 +1319,29 @@ async function assertParentIsUsable(
 	}
 }
 
+/**
+ * The identity a workspace edit may act on: a name the kernel answered for.
+ * `realpathOrResolveAsync` falls back to the spelling when a component refuses
+ * for a reason other than absence (`EACCES`, `ELOOP`), which is the right key
+ * for a queue and the wrong answer at a trust boundary: the confiner would
+ * prove containment for a path whose real name it never learned, where this
+ * file's former `resolveExistingAncestor` rethrew every errno that is not
+ * `ENOENT`/`ENOTDIR` and refused the whole edit (#4689 r2 F-CR2).
+ */
+async function requireKernelIdentity(
+	filePath: string,
+	subject: string,
+): Promise<string> {
+	const identity = await kernelPathIdentityAsync(filePath);
+	if (identity === undefined || !identity.kernelConfirmed)
+		throw new Error(`workspace edit path identity is unresolvable: ${subject}`);
+	return identity.identity;
+}
+
 async function createWorkspaceUriConfiner(
 	cwd: string,
 ): Promise<(uri: string) => Promise<string>> {
-	const root = await realpathOrResolveAsync(cwd);
+	const root = await requireKernelIdentity(cwd, cwd);
 	return async (uri: string): Promise<string> => {
 		let filePath = "";
 		try {
@@ -1340,7 +1360,7 @@ async function createWorkspaceUriConfiner(
 		}
 		if (!path.isAbsolute(filePath))
 			throw new Error(`workspace edit path escapes workspace: ${uri}`);
-		const resolved = await realpathOrResolveAsync(filePath);
+		const resolved = await requireKernelIdentity(filePath, uri);
 		if (!isUnderDir(resolved, root))
 			throw new Error(`workspace edit path escapes workspace: ${uri}`);
 		return filePath;
