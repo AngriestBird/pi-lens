@@ -376,14 +376,17 @@ function splitRedirects(words: string[]): {
  * (`--target-dir=`), `rsync -R` — so the gate admits a short list and refuses
  * everything else (#4869 rounds 1-3; principles, "Gates fail closed").
  * `rsync -R` is `--relative` and DOES preserve the source path, so `rsync`
- * admits only the forms its census rows spell. A verb with no admitted set
- * refuses every option word.
+ * admits only the forms its census rows spell. Each set holds only words the
+ * verb really has that leave the destination alone (`mv -f`, `install -p`,
+ * `tee -a`); any other option word, `install -t`/`-D` included, refuses
+ * (verify r4 R4-2).
  */
 const ADMITTED_OPTIONS: Record<string, ReadonlySet<string>> = {
 	cp: new Set(["-a", "-f", "-p", "-r", "-R", "--parents"]),
-	install: new Set(["-a", "-f", "-p", "-r", "-R"]),
-	mv: new Set(["-a", "-f", "-p", "-r", "-R"]),
+	install: new Set(["-p"]),
+	mv: new Set(["-f"]),
 	rsync: new Set(["-a", "-r"]),
+	tee: new Set(["-a"]),
 };
 
 /**
@@ -422,19 +425,19 @@ function writeSlots(
 	operands: string[],
 	aliases: Aliases,
 ): { destinations: string[]; slots: Slot[]; unplaced?: string } {
-	if (command === "tee") {
-		const targets = operands.filter((word) => !word.startsWith("-"));
-		return {
-			destinations: targets.flatMap((target) => expandWord(target, aliases)),
-			slots: targets.flatMap((target) => filesOf(target, aliases)),
-		};
-	}
 	const parsed = parseWriteOperands(command, operands);
 	if ("unplaced" in parsed)
 		return {
 			destinations: [],
 			slots: [],
 			unplaced: parsed.unplaced,
+		};
+	if (command === "tee")
+		return {
+			destinations: parsed.operands.flatMap((target) =>
+				expandWord(target, aliases),
+			),
+			slots: parsed.operands.flatMap((target) => filesOf(target, aliases)),
 		};
 	const sources = parsed.operands.slice(0, -1);
 	const destinations = parsed.operands.slice(-1);
@@ -447,6 +450,11 @@ function writeSlots(
 	// a directory too: `cp --parents .changelog/x.md "$stage/files"` lands
 	// `files/.changelog/x.md`, and reading it as a file slot drops the dot path
 	// (CodeRabbit inline, round 3).
+	// Without `--parents` a slashless destination is a file OR an existing
+	// directory, and the scan cannot tell which: `mkdir -p "$stage/files"` then
+	// `cp -a .changelog "$stage/files"` lands `files/.changelog/x.md`, and two
+	// sources force a directory. So it is read both ways, and a hidden source
+	// basename reds either reading (verify r4 R4-1, CodeRabbit inline).
 	const directoryOnly = parsed.parents;
 	for (const word of destinations)
 		for (const expanded of expandWord(word, aliases)) {
@@ -455,6 +463,14 @@ function writeSlots(
 			placed.push(target);
 			if (!target.endsWith("/")) {
 				slots.push({ file: target });
+				// The directory reading only adds a slot the file reading lacks:
+				// a hidden source basename landing inside the destination.
+				for (const source of sources)
+					for (const from of expandWord(source, aliases)) {
+						const base = from.replace(/\/+$/, "").split("/").pop() ?? "";
+						if (base.startsWith(".") && base !== "." && base !== "..")
+							slots.push({ file: `${target}/${base}` });
+					}
 				continue;
 			}
 			for (const source of sources)
@@ -801,6 +817,36 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 			expected: 1,
 		},
 		{
+			// A slashless destination is read both as a file and as an existing
+			// directory: the live step's own `mkdir -p "$stage/files"` makes it
+			// one, and real cp lands `files/.changelog/x.md` (verify r4 R4-1).
+			title: "a hidden directory copied onto a slashless destination",
+			staging: staged('cp -a .changelog "$stage/files"'),
+			expected: 1,
+		},
+		{
+			title: "a hidden file copied onto a slashless destination",
+			staging: staged('cp .gitkeep "$stage/files"'),
+			expected: 1,
+		},
+		{
+			title: "a hidden directory staged by rsync onto a slashless destination",
+			staging: staged('rsync -a .changelog "$stage/files"'),
+			expected: 1,
+		},
+		{
+			// Two sources force a directory destination (CodeRabbit inline,
+			// round 3 head).
+			title: "two hidden sources copied onto a slashless destination",
+			staging: staged('cp .a .b "$stage/files"'),
+			expected: 2,
+		},
+		{
+			title: "a plain file copied onto a slashless destination reads clean",
+			staging: staged('cp README.md "$stage/files"'),
+			expected: 0,
+		},
+		{
 			title: "a dot path staged by install onto a hidden name",
 			staging: staged('install .changelog/x.md "$stage/files/.changelog/x.md"'),
 			expected: 1,
@@ -946,6 +992,18 @@ describe("staged dot paths survive the artifact hand-off (#3952)", () => {
 		[
 			"rsync's path-preserving -R inside a bundle",
 			'rsync -aR .changelog/x.md "$stage/files/"',
+		],
+		[
+			"a tee option outside its set",
+			'printf x | tee --bogus-flag "$stage/files/.changelog/x.md"',
+		],
+		[
+			"an option mv does not have",
+			'mv -a .changelog/x.md "$stage/files/.changelog/x.md"',
+		],
+		[
+			"install's destination-moving -t",
+			'install -t "$stage/files/" .changelog/x.md',
 		],
 	])("refuses the option word it does not admit: %s", (_title, command) => {
 		const findings = findingsFor(plant(staged(command), ROOT_PATH));
