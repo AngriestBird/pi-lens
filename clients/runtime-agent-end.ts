@@ -617,17 +617,27 @@ export async function handleAgentEnd({
 		} finally {
 			fixHold?.release();
 		}
-		// The restore of agent edits the fixer overwrote waits for pi's queue
-		// entries (#3830), so it is awaited here, after the hold is released,
-		// never inside it.
-		const loss = await restoring;
-		if (loss && (loss.lost.length > 0 || loss.possiblyLost.length > 0)) {
-			// The agent's turn is over, so a UI notify alone reaches nobody it
-			// could act through (and print/json modes drop it): queue the same
-			// text for the model's next `context` call as well.
-			const text = renderFixRunLoss(loss);
-			queueAgentAdvisory(text, session);
-			notify(`pi-lens: ${text}`, "warning");
+		// #3915: bound only the wait, after releasing the target's hold.
+		// The original restore still owns its queued writes and reports loss
+		// once when it settles, even after the deadline or caller abort.
+		if (restoring) {
+			await bounded(
+				restoring.then((loss) => {
+					if (loss.lost.length > 0 || loss.possiblyLost.length > 0) {
+						// Keep the captured session: a late advisory must not reach
+						// the session that replaced this drain.
+						const text = renderFixRunLoss(loss);
+						queueAgentAdvisory(text, session);
+						notify(`pi-lens: ${text}`, "warning");
+					}
+				}),
+				{
+					ms: HOOK_WALL_BUDGET_MS.agent_settled,
+					signal,
+					hook: "agent_settled",
+					label: "deferred-autofix-restore",
+				},
+			);
 		}
 	}
 	if (deferredAutofixFixes.length > 0) {
