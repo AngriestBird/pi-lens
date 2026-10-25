@@ -167,10 +167,10 @@ const PINS: Readonly<Record<string, Pin>> = {
 		reason: PRE_4689,
 	}, // :433 (r6: keyed by its function, renamed to dataDirCanonicalRoot)
 	"clients/file-utils.ts#path-resolve-keyed": {
-		sites: 3,
-		identities: "28e866f9b5baf0dd",
+		sites: 2,
+		identities: "7e723fe52bc1e91e",
 		reason: SPELLING_MEMO,
-	}, // :894, :1268, :1279
+	}, // :1518, :1529
 	"clients/inline-blocker-dispositions.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "22f213e6ea043ad8",
