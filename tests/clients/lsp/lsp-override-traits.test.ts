@@ -1,17 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
-
-// The override copy launches through `launchLSP`; nothing here starts a
-// process (a hand-shaped `{}` stands in for the launched child, as
-// lsp-registry-trust.test.ts does).
-const launchLSP = vi.fn(async () => ({}));
-vi.mock("../../../clients/lsp/launch.js", () => ({
-	launchLSP,
-	admitProjectSuppliedTsserver: (tsserverPath: string) => tsserverPath,
-}));
 
 const dirs: string[] = [];
 
@@ -24,8 +15,6 @@ function tempDir(): string {
 }
 
 afterEach(async () => {
-	launchLSP.mockReset();
-	launchLSP.mockResolvedValue({});
 	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 	const trust = await import("../../../clients/project-trust.js");
 	trust.resetProjectTrust();
@@ -152,34 +141,5 @@ describe("a command override keeps only the traits it is allowed to (#4833)", ()
 				server.settingsSection,
 			);
 		}
-	});
-
-	it("starts the override's client on the default wait strategy, not the catalog id's row", async () => {
-		const { LSP_SERVERS, project, copies } = await compileEveryOverride();
-		const { getStrategy, SERVER_DIAGNOSTIC_STRATEGIES } =
-			await import("../../../clients/lsp/wait-policy/strategies.js");
-		const defaultStrategy = getStrategy("an-id-with-no-strategy-row");
-		// Non-vacuous: the catalog carries the facts the issue names.
-		const rows = Object.values(SERVER_DIAGNOSTIC_STRATEGIES);
-		expect(rows.some((r) => r.silentOnClean === true)).toBe(true);
-		expect(rows.some((r) => r.emptyFirstPublish === "indexing")).toBe(true);
-		expect(rows.some((r) => r.diagnosticsFence === "reply-first")).toBe(true);
-		expect(rows.some((r) => r.workspaceIndexing === true)).toBe(true);
-
-		const withRow = LSP_SERVERS.filter(
-			(s) => SERVER_DIAGNOSTIC_STRATEGIES[s.id],
-		);
-		expect(withRow.length).toBeGreaterThanOrEqual(10);
-		for (const server of withRow) {
-			const spawned = await copies.get(server.id)!.spawn(project);
-			// What `ClientRegistry.spawnClient` hands `createLSPClient` and the
-			// wait policy: `getStrategy(serverId, launchVariant)`.
-			expect(
-				getStrategy(server.id, spawned?.launchVariant),
-				`${server.id} strategy`,
-			).toEqual(defaultStrategy);
-		}
-		// The catalog row itself keeps its measurement.
-		expect(getStrategy("typescript", "classic").silentOnClean).toBe(true);
 	});
 });

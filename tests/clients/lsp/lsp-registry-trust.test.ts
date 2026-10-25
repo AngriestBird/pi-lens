@@ -287,21 +287,40 @@ describe("compiled LSP registry trust boundary (#2372)", () => {
 		expect(byId.get("rust")?.settingsSection).toBe("rust-analyzer");
 	});
 
-	// #4829 review r1 F3: `resendRecheck: "rechecks"` was measured on the
-	// catalog's binaries. A command override runs another binary, and one that
-	// publishes nothing for unchanged bytes would lose every re-sent dependent's
-	// answer with none coming. The copy falls back to the fail-safe default; the
-	// catalog row keeps its measurement.
-	it("drops the measured re-send trait from a command override's copy", async () => {
+	// #4833 (folds #4829 review r1 F3): every measured trait of the catalog
+	// binary, `resendRecheck` included, is reset on a command override's copy
+	// (the field-level half is tests/clients/lsp/lsp-override-traits.test.ts).
+	// What only the spawn can show: a launch from the override reports
+	// `launchVariant: "override"`, and the wait policy keyed by the catalog
+	// server id (`getStrategy`: silentOnClean, emptyFirstPublish,
+	// diagnosticsFence, workspaceIndexing) answers it with the default row.
+	it("starts a command override on the default wait strategy, not the catalog id's row", async () => {
+		const { LSP_SERVERS } = await import("../../../clients/lsp/server.js");
+		const { getStrategy, SERVER_DIAGNOSTIC_STRATEGIES } =
+			await import("../../../clients/lsp/wait-policy/strategies.js");
+		const withRow = LSP_SERVERS.filter(
+			(server) => SERVER_DIAGNOSTIC_STRATEGIES[server.id],
+		);
+		expect(withRow.length).toBeGreaterThanOrEqual(10);
+		const rows = withRow.map(
+			(server) => SERVER_DIAGNOSTIC_STRATEGIES[server.id],
+		);
+		expect(rows.some((r) => r?.silentOnClean === true)).toBe(true);
+		expect(rows.some((r) => r?.emptyFirstPublish === "indexing")).toBe(true);
+		expect(rows.some((r) => r?.diagnosticsFence === "reply-first")).toBe(true);
+		expect(rows.some((r) => r?.workspaceIndexing === true)).toBe(true);
+
 		const project = tempDir();
 		fs.writeFileSync(
 			path.join(project, ".pi-lens.json"),
 			JSON.stringify({
 				lsp: {
-					serverOverrides: {
-						python: { command: "other-python-lsp" },
-						typescript: { command: ["other-ts-lsp", "--stdio"] },
-					},
+					serverOverrides: Object.fromEntries(
+						withRow.map((server) => [
+							server.id,
+							{ command: [`other-${server.id}-lsp`, "--stdio"] },
+						]),
+					),
 				},
 			}),
 		);
@@ -309,24 +328,23 @@ describe("compiled LSP registry trust boundary (#2372)", () => {
 		trust.setProjectTrustState("trusted");
 		const { loadLSPConfig, compileLspRegistry } =
 			await import("../../../clients/lsp/config.js");
-		const { getServerById } = await import("../../../clients/lsp/server.js");
-		const { serverTraits } =
-			await import("../../../clients/lsp/server-traits.js");
 		const config = await loadLSPConfig(project);
 		const compiled = compileLspRegistry(
 			config,
 			config.__provenance,
 		).registeredServers;
 		const byId = new Map(compiled.map((entry) => [entry.id, entry]));
-
-		for (const id of ["python", "typescript"]) {
-			const copy = byId.get(id);
-			expect(copy, id).toBeDefined();
-			expect(copy, id).not.toBe(getServerById(id));
-			expect(serverTraits(copy!).resendRecheck, id).toBe("unmeasured");
-			expect(serverTraits(getServerById(id)!).resendRecheck, id).toBe(
-				"rechecks",
-			);
+		const defaultStrategy = getStrategy("an-id-with-no-strategy-row");
+		for (const server of withRow) {
+			const spawned = await byId.get(server.id)!.spawn(project);
+			expect(spawned?.launchVariant, server.id).toBe("override");
+			// What `ClientRegistry.spawnClient` hands the client and wait policy.
+			expect(
+				getStrategy(server.id, spawned?.launchVariant),
+				`${server.id} strategy`,
+			).toEqual(defaultStrategy);
 		}
+		// The catalog row itself keeps its measurement.
+		expect(getStrategy("typescript", "classic").silentOnClean).toBe(true);
 	});
 });
