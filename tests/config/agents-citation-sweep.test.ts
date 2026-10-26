@@ -1,11 +1,17 @@
 /**
- * Check C8 of the agent-contract audit (#4361): every `AGENTS.md "<section>"`
- * or `AGENTS.md, "<section>"` citation in tests/, scripts/, .github/, docs/,
- * clients/, .changelog/ and the repo-root config files must name a live heading
- * in AGENTS.md. The repo-root files read are dotfiles and config-extension files
- * (.toml, .json, .yml, .yaml, .cjs, .mjs); root markdown (AGENTS, HISTORY,
- * CHANGELOG, README) is not read. Compiled `.js` and `.d.ts` next to a `.ts`
- * source are skipped, since `npm run build` writes them in place.
+ * Check C8 of the agent-contract audit (#4361): every `<contract>.md
+ * "<section>"` or `<contract>.md, "<section>"` citation in tests/, scripts/,
+ * .github/, docs/, clients/, .changelog/ and the repo-root config files must
+ * name a live heading in the file it names. The contract documents are
+ * `AGENTS.md`, `docs/defect-shapes.md`, `docs/pi-lens-orchestration.md`,
+ * `docs/pi-lens-release.md` and every `docs/invariants/*.md`. Before #4361 the
+ * sweep read AGENTS.md alone, which is what it checked while AGENTS.md held the
+ * moved text; the split repointed 15 citations at the new files and none of
+ * them was checked (review 4883 F3). The repo-root files read are dotfiles and
+ * config-extension files (.toml, .json, .yml, .yaml, .cjs, .mjs); root markdown
+ * (AGENTS, HISTORY, CHANGELOG, README) is not read. Compiled `.js` and `.d.ts`
+ * next to a `.ts` source are skipped, since `npm run build` writes them in
+ * place.
  *
  * Recurrence this prevents: PLAN_4361 (2026-10-18) measured five headings that
  * the agent docs still cited after AGENTS.md had moved them: "Probe hygiene",
@@ -24,10 +30,13 @@
  * the citation form in its own header. A string-literal line in code never
  * joins onto the next line, so `" + "` concatenation is not read as a name.
  * An unquoted mention such as
- * `AGENTS.md Probe hygiene` is outside the form and is not swept.
+ * `AGENTS.md Probe hygiene` is outside the form and is not swept. The path may
+ * be backticked, as the reviewer table spells it
+ * (`` `docs/invariants/paths-os.md` "Paths, data, and operating systems" ``).
  *
- * Fail closed: a citation whose section is not a heading reds, and so does an
- * empty sweep (a dead sweep passes everything).
+ * Fail closed: a citation whose section is not a heading reds, a citation to a
+ * document that is not in the tree reds, and so does an empty sweep (a dead
+ * sweep passes everything).
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -69,7 +78,12 @@ const EXTENSIONS = new Set([
 	".sh",
 	".txt",
 ]);
-const CITATION = /AGENTS\.md,?[ \t]+(["'])([^\n]+?)\1/g;
+// A citation to any contract document: group 1 is the document (without `.md`),
+// then an optional comma or closing backtick, then the quoted heading. Group 2
+// is the quote, group 3 the heading. This alternation is the population: no
+// second spelling of it exists elsewhere in the file.
+const CITATION =
+	/(AGENTS|docs\/(?:invariants\/[a-z0-9-]+|defect-shapes|pi-lens-orchestration|pi-lens-release))\.md[`,]{0,2}[ \t]+(["'])([^\n]+?)\2/g;
 const COMMENT_PREFIX = /^[ \t]*(?:\/\/+|\*|#)[ \t]?/;
 
 /** A compiled `.js` or `.d.ts` emitted next to its `.ts` source by the build. */
@@ -125,14 +139,47 @@ function rootConfigFiles(): string[] {
 		.map((entry) => path.join(REPO_ROOT, entry.name));
 }
 
-function liveHeadings(): Set<string> {
-	const text = fs.readFileSync(path.join(REPO_ROOT, "AGENTS.md"), "utf8");
+/**
+ * The live headings of one contract document. A citation to a document that is
+ * not in the tree resolves against an empty set, so it reds: a pointer to a
+ * file nobody can open is as dead as a pointer to a missing section.
+ */
+function liveHeadings(target: string): Set<string> {
+	const file = path.join(REPO_ROOT, target);
 	const headings = new Set<string>();
-	for (const line of text.split("\n")) {
+	if (!fs.existsSync(file)) return headings;
+	for (const line of fs.readFileSync(file, "utf8").split("\n")) {
 		const match = /^#{1,6}[ \t]+(.+?)[ \t]*$/.exec(line);
 		if (match) headings.add(match[1]);
 	}
 	return headings;
+}
+
+/**
+ * Every contract document a citation may name: AGENTS.md, the documents #4361
+ * moved run text to, and every `docs/invariants/*.md` (read from the directory,
+ * so a new seam file is swept without touching this list).
+ */
+function contractDocuments(): string[] {
+	const invariants = fs
+		.readdirSync(path.join(REPO_ROOT, "docs/invariants"))
+		.filter((name) => name.endsWith(".md"))
+		.sort()
+		.map((name) => `docs/invariants/${name}`);
+	return [
+		"AGENTS.md",
+		"docs/defect-shapes.md",
+		"docs/pi-lens-orchestration.md",
+		"docs/pi-lens-release.md",
+		...invariants,
+	];
+}
+
+/** The headings of every contract document, keyed by the path a citation uses. */
+function headingsByTarget(): Map<string, Set<string>> {
+	return new Map(
+		contractDocuments().map((target) => [target, liveHeadings(target)]),
+	);
 }
 
 /**
@@ -148,13 +195,18 @@ function continuation(next: string, markdown: boolean): string | undefined {
 	return markdown ? next.trim() : undefined;
 }
 
-/** Every quoted AGENTS.md section cited from a line, with its file and line. */
-function citationsIn(file: string): { line: number; name: string }[] {
-	const lines = fs.readFileSync(file, "utf8").split("\n");
+/** Every quoted contract section cited from a line, with its document and line. */
+function citationsIn(
+	file: string,
+): { line: number; target: string; name: string }[] {
+	const text = fs.readFileSync(file, "utf8");
+	const found: { line: number; target: string; name: string }[] = [];
+	// A file that names no markdown document at all cannot hold a citation.
+	if (!text.includes(".md")) return found;
+	const lines = text.split("\n");
 	const markdown = file.endsWith(".md");
-	const found: { line: number; name: string }[] = [];
 	lines.forEach((line, index) => {
-		if (!line.includes("AGENTS.md")) return;
+		if (!line.includes(".md")) return;
 		const tail: string[] = [];
 		for (const next of lines.slice(index + 1, index + 3)) {
 			const text = continuation(next, markdown);
@@ -166,7 +218,8 @@ function citationsIn(file: string): { line: number; name: string }[] {
 			if ((match.index ?? 0) < line.length) {
 				found.push({
 					line: index + 1,
-					name: match[2].replace(/\s+/g, " ").trim(),
+					target: `${match[1]}.md`,
+					name: match[3].replace(/\s+/g, " ").trim(),
 				});
 			}
 		}
@@ -175,24 +228,24 @@ function citationsIn(file: string): { line: number; name: string }[] {
 }
 
 /**
- * The resolver: the citations whose quoted name is not a live heading. The
- * real sweep and the planted case both call this, so a change to either the
- * matcher or the resolver is seen by the planted case.
+ * The resolver: the citations whose quoted name is not a live heading of the
+ * document it names. The real sweep and the planted case both call this, so a
+ * change to either the matcher or the resolver is seen by the planted case.
  */
 function danglingCitations(
-	citations: { file: string; line: number; name: string }[],
-	headings: Set<string>,
+	citations: { file: string; line: number; target: string; name: string }[],
+	headings: Map<string, Set<string>>,
 ): string[] {
 	return citations
-		.filter((hit) => !headings.has(hit.name))
-		.map((hit) => `${hit.file}:${hit.line} AGENTS.md "${hit.name}"`);
+		.filter((hit) => !headings.get(hit.target)?.has(hit.name))
+		.map((hit) => `${hit.file}:${hit.line} ${hit.target} "${hit.name}"`);
 }
 
-describe("AGENTS.md section citations resolve (#4361 C8)", () => {
+describe("contract document section citations resolve (#4361 C8)", () => {
 	it(
-		"every quoted AGENTS.md section cited under the swept roots is a live heading",
+		"every quoted contract section cited under the swept roots is a live heading",
 		() => {
-			const headings = liveHeadings();
+			const headings = headingsByTarget();
 			const sweptFiles = sweptSources();
 			const citations = sweptFiles.flatMap((file) =>
 				citationsIn(file).map((hit) => ({
@@ -204,13 +257,18 @@ describe("AGENTS.md section citations resolve (#4361 C8)", () => {
 			// A dead sweep passes everything: the headings, the files and the
 			// citations must all be read. The citation floor catches a matcher
 			// neutered to match nothing, which the other two floors cannot see.
-			assertNonEmptyScan("AGENTS.md headings read", headings.size, 20);
+			assertNonEmptyScan("contract document count", headings.size, 9);
+			assertNonEmptyScan(
+				"contract document headings read",
+				[...headings.values()].reduce((sum, set) => sum + set.size, 0),
+				20,
+			);
 			assertNonEmptyScan("citation sweep files", sweptFiles.length, 500);
-			assertNonEmptyScan("AGENTS.md citations read", citations.length, 15);
+			assertNonEmptyScan("contract citations read", citations.length, 15);
 
 			expect(
 				danglingCitations(citations, headings),
-				"dangling AGENTS.md section citations",
+				"dangling contract document citations",
 			).toEqual([]);
 		},
 		TREE_WALK_TIMEOUT_MS,
@@ -219,11 +277,12 @@ describe("AGENTS.md section citations resolve (#4361 C8)", () => {
 	// Recurrence (CodeRabbit, PR 4767 round 3): C8 derives its population from
 	// the tree. A matcher or resolver that silently reports nothing keeps the
 	// real sweep green, and the citation-count floor only catches zero matches.
-	// This planted file carries one dangling and one live citation in both quote
-	// spellings. The same matcher and resolver must report exactly the dangling
-	// two, or the guard is not proven to red on a real miss.
+	// This planted file carries a dangling and a live citation in both quote
+	// spellings and in both targets: AGENTS.md and the documents #4361 moved
+	// text to. The same matcher and resolver must report exactly the dangling
+	// three, or the guard is not proven to red on a real miss.
 	it("reports a planted dangling citation through the same matcher and resolver", () => {
-		const headings = liveHeadings();
+		const headings = headingsByTarget();
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-c8-planted-"));
 		try {
 			const planted = path.join(dir, "planted.ts");
@@ -233,6 +292,9 @@ describe("AGENTS.md section citations resolve (#4361 C8)", () => {
 					'// see AGENTS.md "No Such Planted Heading" for the rule',
 					"// and AGENTS.md 'Another Missing Heading' too",
 					'// live: AGENTS.md "Test requirements" still resolves',
+					'// and `docs/invariants/paths-os.md` "Paths, data, and operating systems"',
+					'// but docs/invariants/paths-os.md "No Such Planted Heading" does not',
+					'// and docs/defect-shapes.md "a runner or tool outcome" is live',
 					"",
 				].join("\n"),
 			);
@@ -240,14 +302,18 @@ describe("AGENTS.md section citations resolve (#4361 C8)", () => {
 				file: "planted.ts",
 				...hit,
 			}));
-			expect(hits.map((hit) => hit.name)).toEqual([
-				"No Such Planted Heading",
-				"Another Missing Heading",
-				"Test requirements",
+			expect(hits.map((hit) => `${hit.target} ${hit.name}`)).toEqual([
+				"AGENTS.md No Such Planted Heading",
+				"AGENTS.md Another Missing Heading",
+				"AGENTS.md Test requirements",
+				"docs/invariants/paths-os.md Paths, data, and operating systems",
+				"docs/invariants/paths-os.md No Such Planted Heading",
+				"docs/defect-shapes.md a runner or tool outcome",
 			]);
 			expect(danglingCitations(hits, headings)).toEqual([
 				'planted.ts:1 AGENTS.md "No Such Planted Heading"',
 				'planted.ts:2 AGENTS.md "Another Missing Heading"',
+				'planted.ts:5 docs/invariants/paths-os.md "No Such Planted Heading"',
 			]);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });

@@ -1,11 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { minimatch } from "minimatch";
 import { describe, expect, it } from "vitest";
+import yaml from "../../clients/deps/js-yaml.js";
 import {
 	blankMarkdown,
 	parseDefectShapes,
 } from "../../scripts/lib/defect-shapes.mjs";
-import { stripSource } from "../support/sweep-kit.js";
+import { assertNonEmptyScan, stripSource } from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 
@@ -72,8 +74,10 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 	// #4361: AGENTS.md's index is a hand-kept mirror of the catalog, so an entry
 	// added, renumbered or dropped on one side alone makes the loaded file and
 	// the entry disagree (shape 12, a mirror refreshed outside its guard). Each
-	// index line carries its entry's number and name, and the two populations
-	// must match: same numbers, same names.
+	// index line carries its entry's number, name AND screen: the two
+	// populations must match on all three. The screen is the rule a dispatch
+	// reads, so a hand edit that keeps the number and the name while rewording
+	// the rule must red too (review 4883 F2: it did not).
 	it("keeps the AGENTS.md index in step with the catalog", () => {
 		const catalog = [...parseDefectShapes(catalogText())];
 		const index = [...parseDefectShapes(agentsText())];
@@ -84,8 +88,29 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 					/^\d+\. \*\*(.+?):\*\*/.exec(entry.replace(/\s+/g, " "))?.[1],
 				])
 				.sort((a, b) => Number(a[0]) - Number(b[0]));
+		const screens = (entries: [number, string][]) =>
+			new Map(
+				entries.map(([number, entry]) => [
+					number,
+					entry
+						.replace(/^\d+\. \*\*[^*]+?\*\*/, "")
+						.replace(/\s+/g, " ")
+						.trim(),
+				]),
+			);
 		expect(index.length).toBe(catalog.length);
 		expect(names(index)).toEqual(names(catalog));
+		const catalogScreens = screens(catalog);
+		const drifted = [...screens(index)]
+			.filter(
+				([number, screen]) => !catalogScreens.get(number)?.includes(screen),
+			)
+			.map(([number, screen]) => `#${number}: ${screen}`);
+		// A dead comparison passes everything: the population must be read.
+		expect(catalogScreens.size).toBeGreaterThan(80);
+		expect(drifted, "index screens missing from their catalog entry").toEqual(
+			[],
+		);
 	});
 
 	it("keeps issue and PR references in AGENTS.md from growing", () => {
@@ -128,7 +153,107 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		);
 		expect(issueRefs("https://github.com/o/r/pull/4565")).toBe(1);
 	});
+
+	// #4361: the two reviewer bots are configured readers, not prose. Before the
+	// split both loaded AGENTS.md alone; after it AGENTS.md carries one screen
+	// line per shape and the entries, with their enforcers and censuses, live in
+	// `docs/defect-shapes.md` and `docs/invariants/*.md`. A bot still told to
+	// review "the section of AGENTS.md" enforces 86 screens and none of the 738
+	// lines behind them (review 4883 F1).
+	it("keeps every reviewer bot loading the catalog and every invariant file", () => {
+		const required = [
+			"AGENTS.md",
+			"docs/defect-shapes.md",
+			...fs
+				.readdirSync(path.join(REPO_ROOT, "docs/invariants"))
+				.filter((name) => name.endsWith(".md"))
+				.sort()
+				.map((name) => `docs/invariants/${name}`),
+		];
+		const bots = botCorpus();
+		const gaps: string[] = [];
+		for (const bot of bots) {
+			// Fail closed on a dead input: a pattern that matches no file loads
+			// nothing, and would still read as coverage of the paths it spells.
+			assertNonEmptyScan(`${bot.file} configured inputs`, bot.inputs.length, 1);
+			for (const pattern of bot.inputs)
+				if (fs.globSync(pattern, { cwd: REPO_ROOT }).length === 0)
+					gaps.push(`${bot.file}: "${pattern}" loads no file`);
+			for (const file of required)
+				if (!bot.inputs.some((pattern) => minimatch(file, pattern)))
+					gaps.push(`${bot.file}: does not load ${file}`);
+			if (
+				!bot.instructions.some((text) => text.includes("docs/defect-shapes.md"))
+			)
+				gaps.push(`${bot.file}: no instruction names docs/defect-shapes.md`);
+		}
+		// Two bots, nine contract documents: an empty table or a short one passes
+		// every loop above without reading anything.
+		assertNonEmptyScan("reviewer bots parsed", bots.length, 2);
+		assertNonEmptyScan("contract documents required", required.length, 9);
+		expect(gaps).toEqual([]);
+	});
 });
+
+/** One JSON/YAML object, or an empty one: the configs are parsed, not trusted. */
+function asRecord(value: unknown): Record<string, unknown> {
+	return typeof value === "object" && value !== null
+		? (value as Record<string, unknown>)
+		: {};
+}
+
+function asList(value: unknown): unknown[] {
+	return Array.isArray(value) ? value : [];
+}
+
+function asStrings(value: unknown): string[] {
+	return asList(value).filter(
+		(item): item is string => typeof item === "string",
+	);
+}
+
+/**
+ * The files each reviewer bot is configured to read. CodeRabbit spells them as
+ * glob patterns (`knowledge_base.code_guidelines.filePatterns`); Greptile
+ * spells one path per `customContext.files` entry, and its documented syntax
+ * has no glob for those (only its PR filters take globs).
+ */
+function botCorpus(): {
+	bot: string;
+	file: string;
+	inputs: string[];
+	instructions: string[];
+}[] {
+	const codeRabbit = asRecord(
+		yaml.load(
+			fs.readFileSync(path.join(REPO_ROOT, ".coderabbit.yaml"), "utf8"),
+		),
+	);
+	const greptile = asRecord(
+		yaml.load(fs.readFileSync(path.join(REPO_ROOT, "greptile.json"), "utf8")),
+	);
+	const guidelines = asRecord(
+		asRecord(codeRabbit.knowledge_base).code_guidelines,
+	);
+	return [
+		{
+			bot: "CodeRabbit",
+			file: ".coderabbit.yaml",
+			inputs: asStrings(guidelines.filePatterns),
+			instructions: asList(asRecord(codeRabbit.reviews).path_instructions).map(
+				(row) => String(asRecord(row).instructions ?? ""),
+			),
+		},
+		{
+			bot: "Greptile",
+			file: "greptile.json",
+			inputs: asList(asRecord(greptile.customContext).files).map((row) =>
+				String(asRecord(row).path ?? ""),
+			),
+			instructions: [String(greptile.instructions ?? "")],
+		},
+	];
+}
 
 function issueRefs(text: string): number {
 	// `#N` of any length, and issue/PR URLs, which carry no `#` (review F-4272-1).

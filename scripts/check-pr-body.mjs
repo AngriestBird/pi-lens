@@ -3214,8 +3214,11 @@ function validDetectionGap(value) {
 // shapes") or `new: <name>`; `Enforcer:` is a test path on the base, an issue to
 // build one, or `none: judgment-only, <reason>`. With `Shape: #N`, a path
 // enforcer must be one the catalog entry for #N names.
+// The unresolved-catalog message names the remedy for the transition window: a
+// branch cut before the catalog landed has no catalog at its merge base, and
+// the honest fix is to merge master in, not to weaken a truthful `Enforcer:`.
 export const DETECTION_SHAPE_CATALOG_UNRESOLVED_MESSAGE =
-	'PR body "## Detection" says "Shape: #N" with a path "Enforcer:", but the defect-shape catalog could not be read from the base commit of the PR (git show <merge-base>:docs/defect-shapes.md), so the catalog entry cannot be checked. Give an issue ref (#NNN) or "none: judgment-only, <reason>" as the enforcer instead.';
+	'PR body "## Detection" says "Shape: #N" with a path "Enforcer:", but the defect-shape catalog could not be read from the base commit of the PR (git show <merge-base>:docs/defect-shapes.md), so the catalog entry cannot be checked. A branch cut before docs/defect-shapes.md landed has no catalog at its merge base: merge master into the branch, so the base commit holds the catalog. Otherwise give an issue ref (#NNN) or "none: judgment-only, <reason>" as the enforcer instead.';
 
 export const detectionUnknownShapeMessage = (number) =>
 	`PR body "## Detection" says "Shape: #${number}", but the defect-shape catalog (docs/defect-shapes.md) has no shape ${number}. Use a catalog number, or "Shape: new: <name>" for a shape the catalog lacks.`;

@@ -6645,15 +6645,23 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 			expect(run.status).toBe(1);
 		});
 
-		posix("reds a catalog path enforcer when AGENTS.md is unreadable", () => {
-			const run = runLint(
-				shaped("#4", OLD_TEST),
-				"bug",
-				existsBaseFixtures.baseHas(),
-			);
-			expect(run.output).toContain("could not be read from the base commit");
-			expect(run.status).toBe(1);
-		});
+		posix(
+			"reds a catalog path enforcer when the base catalog is unreadable",
+			() => {
+				const run = runLint(
+					shaped("#4", OLD_TEST),
+					"bug",
+					existsBaseFixtures.baseHas(),
+				);
+				expect(run.output).toContain("could not be read from the base commit");
+				// #4883 F7: a branch cut before the catalog landed has no catalog at its
+				// merge base, and the message must name the remedy that keeps the body's
+				// truthful `Enforcer:` (merge the base in) rather than the one that
+				// weakens it.
+				expect(run.output).toContain("merge master into the branch");
+				expect(run.status).toBe(1);
+			},
+		);
 
 		posix("validates the same lines for a non-bug issue", () => {
 			const run = runLint(

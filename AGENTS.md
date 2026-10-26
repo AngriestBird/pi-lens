@@ -47,8 +47,9 @@ Task routing:
 - Any code change: read **Issue and PR design contract**, **Recurring defect
   shapes**, and **Test requirements**.
 - LSP, dispatch, runner, formatter, installer, cache, session, telemetry,
-  review-graph, Git-guard, or rule work: read the matching **Standing
-  invariants** subsection and the relevant source tests.
+  review-graph, Git-guard, or rule work: read the matching row of the
+  **Standing invariants** table and the file it names, plus the relevant
+  source tests.
 - Delegated work: read `docs/pi-lens-subagent.md` and exactly one role contract
   from `docs/pi-lens-{fixer,reviewer,investigator,monitor,warden,retro}.md`.
 - Pi documentation work: read the installed pi documentation named by the
@@ -380,7 +381,7 @@ it governs. Read the file for the seam a brief or a diff names.
 | Language and configuration | [docs/invariants/language-config.md](docs/invariants/language-config.md) | `clients/language-registry.ts`, `clients/config-core/`, `clients/tool-config.ts`, `rules/`, `tools/` |
 | Paths, data, and operating systems | [docs/invariants/paths-os.md](docs/invariants/paths-os.md) | `clients/path-utils.ts`, `clients/file-utils.ts`, `clients/installer/index.ts`, `tests/support/` |
 | LSP, trust, and process execution | [docs/invariants/lsp-trust-exec.md](docs/invariants/lsp-trust-exec.md) | `clients/lsp/`, `clients/safe-spawn.ts`, `clients/session-repository.ts`, `scripts/`, `formal/` |
-| Dispatch, runners, formatters, and installers | [docs/invariants/dispatch-runners.md](docs/invariants/dispatch-runners.md) | `clients/dispatch/`, `clients/formatters`, `clients/installer/`, `clients/test-runner-client.ts`, `tests/fixtures/runner-output/` |
+| Dispatch, runners, formatters, and installers | [docs/invariants/dispatch-runners.md](docs/invariants/dispatch-runners.md) | `clients/dispatch/`, `clients/formatters.ts`, `clients/installer/`, `clients/test-runner-client.ts`, `tests/fixtures/runner-output/` |
 | Caches, stores, and project intelligence | [docs/invariants/caches-stores.md](docs/invariants/caches-stores.md) | `clients/durable-store.ts`, `clients/content-stamp.ts`, `clients/review-graph/`, `clients/word-index.ts`, `tools/` |
 | Session, telemetry, and delivery | [docs/invariants/session-telemetry.md](docs/invariants/session-telemetry.md) | `clients/runtime-*.ts`, `clients/session-lifecycle.ts`, `clients/degradation-ledger.ts`, `clients/finding-delivery-gate.ts` |
 | Git guard and host adapters | [docs/invariants/git-guard-host.md](docs/invariants/git-guard-host.md) | `clients/git-guard.ts`, `clients/inline-blocker-fields.ts`, `clients/deferred-runner-blockers.ts`, `clients/lens-engine.ts`, `index.ts`, `mcp/` |
