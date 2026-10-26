@@ -164,43 +164,14 @@ The principles' delegation contract applies. pi-lens adds:
   (Haiku) takes a fix lane only when its brief prescribes the change; a lane
   that must find its own failure space or make a design call goes to Sonnet or
   Opus.
-- A brief never asks a worker to wait for an answer ("report the size first"):
-  a worker cannot wait for a reply. It either authorizes the conditional
-  branch with its bound, or tells the worker to stop and hand back there.
-- A brief names every file by its repo path (`clients/lsp/index.ts`, never
-  `index.ts`): a bare basename resolves to another file in a read-only pass.
-- After every completion, push, verdict, merge, or status request, trigger the
-  next named owner in the same pass, and keep the handoff (exact head, verdict,
-  dispositions, next owner) on the PR or the ledger.
-- Review intake generalizes before it routes. For every HIGH, MEDIUM or
-  CRITICAL finding, name the defect shape, grep the tree for other members, and
-  record a verdict before the fix round dispatches: contained in this PR (with
-  the sweep), sibling issue filed with the member list, or none (with the
-  grep). The fix brief carries it as a `Shape:` line. History: `HISTORY.md`,
-  2026-10-10.
-- Plegma reads are token-budgeted (#417): settlements via `watch --next --mine`,
-  `result` only when the transcript or handoff artifact is needed.
 - Human decision, never an agent verdict alone: workflow permission grants,
   release/version changes, dependency majors or lockfile regeneration, deletion
   of user data or durable records, external-contributor PRs, and changes to
   these rules.
-- Every regroup, merged bug fix, second round on one shape, and incident runs
-  the retrospective in `docs/pi-lens-retro.md`.
-- Three open issues on one mechanism, in any seam groups, open a consolidation
-  audit across every consumer of that mechanism before the next one is filed
-  (history: `HISTORY.md`, 2026-10-16).
-- Run the **fold check** as soon as a lane's mechanism is known, which is when
-  the brief is written: read every open issue against that mechanism and decide
-  each candidate as folded into this PR (one `Closes #…` per folded issue) or
-  not folded, with the reason (two hazards in one review, a maintainer decision,
-  a blocked dependency, a different seam). The brief carries the candidate list
-  and its decisions, and the PR body records them under `## Fold check`.
-  Planning precedes filing: a new issue is the answer for p2+ work no lane can
-  carry, never for a p3 the lane could fold (history: `HISTORY.md`, 2026-10-20).
-- The per-PR loop (review, verify, auto-merge on green), round routing, the
-  merge gate and the Common mistakes table live in `docs/pi-lens-merge-policy.md`.
-- Read CI with `node scripts/ci-verdict.mjs <pr|sha>` (exact head, all pages).
-  Never merge on absent, stale, or advisory-only checks.
+
+The orchestrator-only procedure (brief authoring, review intake, the fold
+check, the per-PR loop, and the CI read) lives in
+[docs/pi-lens-orchestration.md](docs/pi-lens-orchestration.md).
 
 </important>
 ## Glossary
@@ -651,26 +622,11 @@ pi closes stdin or exits. Relevant logs are `latency.log`, `sessionstart.log`, `
 `extension.log`, `tree-sitter.log`, and `dispositions.log`.
 
 </important>
-<important if="building, packaging, or releasing">
-
 ## Build, packaging, and release
 
-`main` and `pi.extensions` point to `dist/index.js`; `dist/` is generated and
-not committed. `prepare` builds it for git and package installs. `build:dist`
-bundles pure-JS dependencies while keeping host-provided and lazy native
-packages external. Package-root resource resolution is depth-robust; pi
-resolves `pi.skills` entries relative to the package root, so manifests use
-`"./skills"` and never an escaping path.
+The build, packaging, and release rules live in
+[docs/pi-lens-release.md](docs/pi-lens-release.md).
 
-Runtime imports must be production dependencies. The pi SDK is an optional
-peer/dev dependency and must be imported type-only. Lockfiles use the pinned
-npm version. Release notes use one `.changelog/<slug>.md` fragment per PR
-(`audience: user` or `internal`; the release body lists only `user`); never
-edit `CHANGELOG.md` for ordinary PR notes.
-New user-facing fragments begin with a bold lead of at most 100 characters
-(issue references are excluded from the count); internal fragments are exempt.
-
-</important>
 ## Test requirements
 
 - `setupTestEnvironment` plants the shared `.git` project-root marker on every
