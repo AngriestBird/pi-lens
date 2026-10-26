@@ -199,6 +199,10 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// #4689: walks clients/ for raw realpath calls and raw path.resolve keys
 	// outside the path identity seam.
 	"tests/config/path-identity-sweep.test.ts",
+	// #2556: walks clients/, tools/, mcp/, index.ts AND tests/support/ for a
+	// hand-rolled `..` containment test over a `path.relative` result, so it is
+	// a both-tree scanner and is registered in TEST_TREE_GOVERNANCE_TESTS too.
+	"tests/config/path-containment-sweep.test.ts",
 	// #4590: the one scanner that walks BOTH trees (clients/, scripts/ AND
 	// tests/), so it is registered in both lists: a production change arms it
 	// here, a tests/ change through TEST_TREE_GOVERNANCE_TESTS below.
@@ -241,6 +245,10 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/config/pi-mock-importer-sweep.test.ts",
 	// #4381: walks tests/ for log-sink reads with no drain of that sink first.
 	"tests/config/sink-read-drain-sweep.test.ts",
+	// #2556: the tests/support half of the containment ratchet; its production
+	// half is the same file, registered in TREE_SCANNING_GOVERNANCE_TESTS above
+	// (a both-tree scanner, #4590).
+	"tests/config/path-containment-sweep.test.ts",
 	// #4590: the tests/ half of the env PATH-key composition sweep; its
 	// production half is the same file, registered in
 	// TREE_SCANNING_GOVERNANCE_TESTS above (a both-tree scanner).

@@ -785,6 +785,9 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/pr-smoke-paths.test.ts",
 			"tests/tools/diagnostics-route-switch-matrix.test.ts",
 			"tests/config/path-identity-sweep.test.ts",
+			// #2556: walks the production trees and tests/support, so both change kinds
+			// arm it.
+			"tests/config/path-containment-sweep.test.ts",
 			// #4590: walks both trees, so both change kinds must arm it.
 			"tests/config/env-path-key-composition-sweep.test.ts",
 			"tests/config/git-fixture-governance.test.ts",
@@ -807,6 +810,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/handler-verdict-sweep.test.ts",
 			"tests/config/pi-mock-importer-sweep.test.ts",
 			"tests/config/sink-read-drain-sweep.test.ts",
+			"tests/config/path-containment-sweep.test.ts",
 			"tests/config/env-path-key-composition-sweep.test.ts",
 			"tests/config/git-fixture-governance.test.ts",
 			"tests/config/real-home-reader-registry.test.ts",
