@@ -23,6 +23,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+	mayHoldContainment,
 	type PathContainmentSite,
 	scanPathContainmentSites,
 } from "./path-containment-scan.js";
@@ -159,6 +160,15 @@ describe("path containment detector (#2556)", () => {
 				'const UP = ".." + path.sep;\nconst rel = path.relative(a, b);\nreturn rel.startsWith(UP);',
 			],
 			[
+				"named constant inside a template substitution",
+				'const UP = "..";\nconst rel = path.relative(a, b);\nreturn rel.startsWith(`${UP}${path.sep}`);',
+			],
+			[
+				"named constant interpolated into a second named constant",
+				'const MARK = "..";\nconst UP = `${MARK}${path.sep}`;\n' +
+					"const rel = path.relative(a, b);\nreturn rel.startsWith(UP);",
+			],
+			[
 				"borrowed String method",
 				'const rel = path.relative(a, b);\nreturn String.prototype.startsWith.call(rel, "..");',
 			],
@@ -215,6 +225,39 @@ describe("path containment detector (#2556)", () => {
 		const [site] = rows(THE_4878_F1_SPELLING);
 		expect(site?.anchor).toBe("isInside");
 		expect(THE_4878_F1_SPELLING).toContain('rel.startsWith("..")');
+	});
+
+	/**
+	 * #4882 verify r3 N1: the census's prefilter has ONE condition, so it can
+	 * only skip work. A second condition on the marker's spelling
+	 * (`source.includes("..")`) hid every admitted form written with escapes:
+	 * `/^\.\./` and `"\u002e\u002e"` both reach the detector below and
+	 * neither spells `..`, so the census called their file green.
+	 */
+	it("never skips a file whose parent-segment marker is written with escapes", () => {
+		const cases: Array<[string, string]> = [
+			[
+				"an escaped RegExp literal",
+				"function isInside(target: string): boolean {\n" +
+					"\tconst UP = /^\\.\\./;\n" +
+					'\tconst rel = path.relative("/a", target);\n' +
+					"\treturn UP.test(rel);\n" +
+					"}\n",
+			],
+			[
+				"an escaped string literal",
+				"function isInside(target: string): boolean {\n" +
+					'\tconst UP = "\\u002e\\u002e";\n' +
+					'\tconst rel = path.relative("/a", target);\n' +
+					"\treturn UP.test(rel);\n" +
+					"}\n",
+			],
+		];
+		for (const [name, source] of cases) {
+			expect(source.includes(".."), name).toBe(false);
+			expect(scanPathContainmentSites(source).length, name).toBe(1);
+			expect(mayHoldContainment(source), name).toBe(true);
+		}
 	});
 
 	it("never reads a spread prefix, an unrelated value, or prose as a site", () => {

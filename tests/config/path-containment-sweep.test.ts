@@ -46,6 +46,19 @@
  *   literals and `indexOf`/`includes`/`match`/`test` readings are NOT in this
  *   list: #4882 review F1 proved the enumerated-predicate cut blind to them,
  *   and the derived reading now reports each.
+ * - a SAME-FILE helper that returns a `path.relative` result, tested at its
+ *   call site (`const rel = inside(path, root); rel.startsWith("..")`). The
+ *   value reading is per file and follows declarators, so a name bound inside
+ *   a helper is caught (#4882 verify r3 measured a late-bound `lateRel`), but
+ *   the call/return edge is not walked. Live population 0: no helper of that
+ *   shape has its result meet a `..` test in the scanned trees (#4882 verify
+ *   r3 N2 measured the population, and it is empty), so this is a declaration,
+ *   not a gap with members.
+ * - a character-index read with no `..` literal
+ *   (`rel[0] === "." && rel[1] === "."`). The arm needs a parent-segment
+ *   LITERAL and this spelling never writes one, so neither the literal walk
+ *   nor a comparison sees it. Live population 0 (0 sites, #4882 verify r3 N3);
+ *   `rel[0] + rel[1] === ".."` IS reported, because it spells the literal.
  * - a relative result read through a member chain whose method returns
  *   something unrelated (`rel.split("/").length`), which the fail-closed
  *   reading reports rather than drops.
@@ -74,6 +87,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+	mayHoldContainment,
 	scanPathContainmentSites,
 	type PathContainmentSite,
 } from "../support/path-containment-scan.js";
@@ -148,6 +162,20 @@ const DOTDOT_NAME =
 	"`..`-name arm (#4835): it tests the `..` PREFIX, so a directory named `..foo` — inside the root it belongs to — reads as outside. Unreproduced on a production call path and already paired with isAbsolute, so it stays baselined; pairing it with isWithinForm/isUnderDir is #2556's remainder.";
 
 /**
+ * A hand-rolled copy that answers the seam's question CORRECTLY today: a `..`
+ * SEGMENT (`..` + separator, or `../`), the exact parent (`rel === ".."`), and
+ * the cross-drive absolute form (`isAbsolute(rel)`) are all rejected, so a
+ * directory named `..foo` reads as inside and no shipping defect is claimed
+ * (#4882 verify r3 N4: 12 rows carried the `..`-name arm while their source
+ * spelled `..${sep}`/`../`, which does not misread `..foo`). It stays
+ * baselined because it re-derives a rule `clients/path-utils.ts` owns (shape
+ * 83), and the copies that DID drift are #4878 F1 and #4835; folding it onto
+ * `isUnderDir` is #2556's remainder.
+ */
+const SEAM_COPY =
+	'seam copy (shape 83), correct on every axis it is asked about: it matches a `..` SEGMENT rather than a bare prefix, and it pairs both `rel === ".."` and `isAbsolute(rel)`, so `..foo` reads as inside and a cross-drive absolute `rel` reads as outside. No shipping defect is claimed; it stays baselined because it re-derives a rule `clients/path-utils.ts` owns (shape 83), and the copies that drifted are #4878 F1 and #4835. Folding it onto `isUnderDir` is #2556\'s remainder.';
+
+/**
  * The seam's own predicate. Containment is admitted ONLY through
  * `clients/path-utils.ts`, so this file's site is an admission with a reason,
  * not a baseline row: a second containment test inside it still reds as
@@ -181,29 +209,29 @@ const BASELINE: Readonly<Record<string, string>> = {
 	"clients/actionable-warnings.ts#legacyActionableWarningId": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree file, so a legacy finding id keeps a relative component for a path outside the project; it fails toward a duplicate id, never toward a dropped finding.`,
 	"clients/cache-manager.ts#CacheManager.toTurnStateKey": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree key, so the turn-state key for a file outside cwd stays relative instead of falling back to the absolute form.`,
 	"clients/dependency-checker.ts#isWithin": `${DOTDOT_NAME} A directory named \`..foo\` reads as outside \`target\`'s tree, so a check target under it is treated as out-of-tree. This is the \`isWithin\` duplicate that #2556's own acceptance deletes in favour of \`isUnderDir\`.`,
-	"clients/dispatch/rule-ignores.ts#isRuleIgnoredForPath": `${DOTDOT_NAME} A directory named \`..foo\` reads as outside the root, so a file under it loses its root-relative display path and is matched as if it were absolute. Template-literal spelling the hand census did not see.`,
+	"clients/dispatch/rule-ignores.ts#isRuleIgnoredForPath": `${SEAM_COPY} Here \`outsideRoot\` decides whether the display path is the absolute spelling, which is the question \`toProjectRelativePath\` owns; the template-literal spelling is what the hand census did not see.`,
 	"clients/dispatch/runner-context.ts#toRunnerDisplayPath": `${CROSS_DRIVE} A cross-drive relative reads as a display path, so a runner diagnostic for a file on another drive keeps an absolute form in a relative slot.`,
 	"clients/dispatch/runners/go-vet.ts#run": `${CROSS_DRIVE} A cross-drive \`fileRel\` reads as under the module root, so \`./\` is prefixed to an absolute path and go vet's package argument names no package. The callee is a named \`relative\` import, which the hand census's \`path.relative\` grep did not reach.`,
-	"clients/dispatch/runners/helm-lint.ts#isWithin": `${DOTDOT_NAME} A chart path under a directory named \`..foo\` reads as outside the chart root, so helm-lint skips a template it should lint. Spelled \`..\${path.sep}\`, which a \`startsWith("..")\` grep does not match.`,
-	"clients/dispatch/runners/helm-render.ts#isWithin": `${DOTDOT_NAME} A chart path under a directory named \`..foo\` reads as outside the chart root, so helm-render skips a template it should render. The second member in this file, and a template-literal spelling the hand census missed.`,
+	"clients/dispatch/runners/helm-lint.ts#isWithin": `${SEAM_COPY} Here it decides whether a helm diagnostic's file is mapped onto a chart-relative path, and it gates the file at \`diagnosticLocation\`.`,
+	"clients/dispatch/runners/helm-render.ts#isWithin": `${SEAM_COPY} Here it gates the rendered-to-source mapping, and it is the second member of the shape inside this file.`,
 	"clients/dispatch/runners/helm-render.ts#mapRenderedToSource": `${CROSS_DRIVE} A cross-drive relative reads as inside \`outputDir\`, so a rendered file outside it is mapped onto a chart path that does not exist instead of falling back to source mapping.`,
 	"clients/finding-identity.ts#relativeFile": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree file, so a finding id carries an absolute path where a relative component is expected: two ids for one file rather than a lost one.`,
-	"clients/gitleaks-client.ts#isInsideNestedGitRepository": `${DOTDOT_NAME} A file under a directory named \`..foo\` reads as outside the root, so the nested-checkout verdict for it is wrong in the fail-open direction this helper deliberately keeps.`,
+	"clients/gitleaks-client.ts#isInsideNestedGitRepository": `${SEAM_COPY} Here it decides whether a finding is classified \`nested-repository\`, and the walk above it runs only when the answer is inside.`,
 	"clients/knip-client.ts#classifyKnipBinary": `${DOTDOT_NAME} A binary under a directory named \`..foo\` reads as outside the project, so a project-local shim is classified \`global\` instead of \`project\`.`,
 	"clients/lsp/client-registry.ts#ClientRegistry.resolveServerRoot": `${DOTDOT_NAME} A root under a directory named \`..foo\` reads as outside its ancestor key, so the root chain stops one level early. Paired with \`pathApi.isAbsolute\` in the same expression.`,
 	"clients/lsp/server.ts#cargoWorkspaceDeclaresMember": `${CROSS_DRIVE} A cross-drive relative reads as inside the manifest dir, so a cargo workspace member outside it is accepted and its crates are swept into the wrong root.`,
 	"clients/lsp/server.ts#isSameOrWithin": `${DOTDOT_NAME} A candidate under a directory named \`..foo\` reads as outside the root, so an in-root workspace member is not grouped with its workspace. Paired with \`pathApi.isAbsolute\` in the same expression.`,
-	"clients/lsp/workspace-diagnostics-cache.ts#clearWorkspaceDiagnosticsCacheAtAndAbove": `${DOTDOT_NAME} A root under a directory named \`..foo\` reads as outside the ceiling, so the cache prune stops at an ancestor the root is not under.`,
-	"clients/path-utils.ts#inside": `${DOTDOT_NAME} A third containment predicate inside the seam's own module (\`toProjectRelativePath\`): a file under a directory named \`..foo\` reads as outside the root, so no project-relative path is derived for it. Baselined rather than folded because this lane changes no production site; moving it onto \`isWithinForm\` is #2556's remainder.`,
+	"clients/lsp/workspace-diagnostics-cache.ts#clearWorkspaceDiagnosticsCacheAtAndAbove": `${SEAM_COPY} Here it stops the ancestor prune at the workspace ceiling, so a wrong answer would prune above the ceiling rather than at it.`,
+	"clients/path-utils.ts#inside": `${SEAM_COPY} A third containment predicate inside the seam's own module (\`toProjectRelativePath\`), baselined rather than folded because this lane changes no production site; moving it onto \`isWithinForm\` is #2556's remainder.`,
 	"clients/project-lens-config.ts#findNestedProjectMutationValue": `${DOTDOT_NAME} A directory whose name starts with \`..\` reads as outside the project root, so a nested config section under it is not read.`,
-	"clients/python-environment.ts#isUvWorkspaceMember": `${DOTDOT_NAME} A member under a directory named \`..foo\` reads as outside the workspace root, so its uv settings are not inherited: the over-inheritance #4847 guarded against, in the other direction.`,
-	"clients/python-environment.ts#isWithinProjectRoot": `${DOTDOT_NAME} An ambient environment root under a directory named \`..foo\` reads as outside the project, so it is not borrowed. Template-literal spelling, missed by the hand census.`,
-	"clients/test-runner-client.ts#isExcludedTestTarget": `${DOTDOT_NAME} A target under a directory named \`..foo\` reads as outside the project, so the fail-closed exclusion path runs for an in-tree file.`,
+	"clients/python-environment.ts#isUvWorkspaceMember": `${SEAM_COPY} Here it decides whether a project inherits the uv workspace's settings, and the \`toPosix\` fold above it makes the separator match on both arms.`,
+	"clients/python-environment.ts#isWithinProjectRoot": `${SEAM_COPY} Here it decides whether an ambient environment root is borrowed for the project, and the template-literal separator spelling is what the hand census missed.`,
+	"clients/test-runner-client.ts#isExcludedTestTarget": `${SEAM_COPY} Here a lexical inside answer is the fast path and an outside answer falls through to the canonical \`isUnderDir\` check, so the copy already defers to the seam for the hard cases.`,
 	"clients/test-runner-client.ts#TestRunnerClient.relativeSourceDir": `${DOTDOT_NAME} A source directory whose name starts with \`..\` reads as outside cwd, so the mirrored test-tree candidate is not computed for it.`,
 	"mcp/server.ts#isWithinServerWorkspace": `${DOTDOT_NAME} A cwd under a directory named \`..foo\` reads as outside the server's workspace, so an in-workspace route is rejected. Outside the roots the issue's hand census grepped.`,
-	"scripts/hooks/guard-bash.mjs#hasNodeModulesSymlinkOutside": `${DOTDOT_NAME} Both arms are present — \`rel === ".."\` and \`rel.startsWith(".." + SEP)\` — plus \`isAbsolute(rel)\`, so this copy answers the seam's own question; it cannot fold because the hook is a bare-Node \`.mjs\` that Claude Code runs before any build, so it may not import a TypeScript seam. Baselined as the record that the copy was read.`,
-	"scripts/hooks/guard-bash.mjs#isUnderTmpRoot": `${DOTDOT_NAME} Both arms are present and paired with \`isAbsolute(rel)\`, so the answer matches the seam's; the same bare-Node boundary (no build step, so no TypeScript seam import) is why it stays a copy.`,
-	"scripts/lib/pr-worktree.mjs#nestedDestinationError": `${DOTDOT_NAME} Both arms plus \`pathApi.isAbsolute\`, on the same bare-Node boundary as the git guard: \`.mjs\` run by a script that cannot import the TypeScript seam.`,
+	"scripts/hooks/guard-bash.mjs#hasNodeModulesSymlinkOutside": `${SEAM_COPY} It cannot fold because the hook is a bare-Node \`.mjs\` that Claude Code runs before any build, so it may not import a TypeScript seam. Baselined as the record that the copy was read.`,
+	"scripts/hooks/guard-bash.mjs#isUnderTmpRoot": `${SEAM_COPY} The same bare-Node boundary (no build step, so no TypeScript seam import) is why it stays a copy.`,
+	"scripts/lib/pr-worktree.mjs#nestedDestinationError": `${SEAM_COPY} It runs on the same bare-Node boundary as the git guard: a \`.mjs\` script that cannot import the TypeScript seam.`,
 	"scripts/lib/pr-worktree.mjs#deriveClosePlan": `${CROSS_DRIVE} It pairs no \`isAbsolute\` arm: on Windows a worktree path on another drive makes \`pathApi.relative\` return an absolute path, which is neither \`""\` nor \`".."\` nor a \`..\`-plus-separator prefix, so the close plan treats a path outside the worktrees root as inside. Unreproduced on a production call path this round, so it stays baselined; folding it is #2556's remainder.`,
 	"tests/support/v8-coverage.ts#fileFromScriptUrl": `${CROSS_DRIVE} A cross-drive relative reads as inside the coverage root, so a script outside \`include\` is reported as a covered file. The only member in \`tests/support/\`, the tree the #4878 F1 site shipped in.`,
 	"tests/clients/actionable-warnings-lsp-cache.test.ts#legacyActionableWarningIdForTest": `${CROSS_DRIVE} A test-local copy of \`clients/actionable-warnings.ts\`'s legacy-id helper, used as the INDEPENDENT expectation the production helper is compared against. Folding it onto the seam would make the cell restate the code it checks (principles §2, tautological test), so the copy is the point.`,
@@ -254,11 +282,11 @@ async function runCensus(): Promise<Census> {
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		if (source === undefined) continue;
 		scanned.set(tree, (scanned.get(tree) ?? 0) + 1);
-		// Cheap prefilter, and it can only skip WORK: every admitted form needs the
-		// callee's name somewhere in the file (`relative`, or a name bound to it)
-		// and a `..` literal, so a file holding neither holds no site. The walked
-		// file still counts toward the tree's floor above.
-		if (!source.includes("relative") || !source.includes("..")) continue;
+		// The prefilter can only skip WORK (see `mayHoldContainment`): every
+		// admitted form needs the callee's name somewhere in the file, so a file
+		// that never spells `relative` holds no site. The walked file still
+		// counts toward the tree's floor above.
+		if (!mayHoldContainment(source)) continue;
 		for (const site of scanPathContainmentSites(source))
 			occurrences.push({
 				row: rowOf(rel, site),

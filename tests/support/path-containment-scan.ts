@@ -49,12 +49,13 @@
  *
  * **What a parent-segment literal is.** A string whose TEXT holds a `..`
  * segment at a segment boundary (`".."`, `"../"`, `"..\\"`, `".." + path.sep`,
- * the first fragment of a template), the same value reached through a binding
- * (`const UP = ".."`), or a RegExp literal whose source escapes both dots
- * (`/^\.\./`). `"..."` fails the boundary test, so the rest-element prefix
- * (`clients/config-warn.ts`, `clients/middle-man-analysis.ts`,
- * `tests/support/sweep-kit.ts` all spell it) is never read as a parent segment,
- * and `"..foo"` is not a segment either.
+ * the first fragment of a template), a marker a template SUBSTITUTION carries
+ * (`` `${UP}${path.sep}` `` with `const UP = ".."`, #4882 verify r3 N5), the
+ * same value reached through a binding (`const UP = ".."`), or a RegExp
+ * literal whose source escapes both dots (`/^\.\./`). `"..."` fails the
+ * boundary test, so the rest-element prefix (`clients/config-warn.ts`,
+ * `clients/middle-man-analysis.ts`, `tests/support/sweep-kit.ts` all spell it)
+ * is never read as a parent segment, and `"..foo"` is not a segment either.
  *
  * One boolean chain is one predicate: `relative && relative !== ".." &&
  * !relative.startsWith(…)` answers containment once, so it is one site. A
@@ -307,11 +308,12 @@ function derivesFromRelative(
 
 /**
  * Does this expression hold a parent-segment literal? Reads the cooked value of
- * a string, every static fragment of a template, either side of a `+` (the
- * `".." + path.sep` spelling), a RegExp literal whose source escapes both dots,
- * and a name bound to one of those. `"..."` and `"..foo"` fail the boundary
- * test, so a rest-element prefix and a `..`-leading NAME are never read as a
- * parent segment.
+ * a string, every static fragment of a template AND what its substitutions
+ * bind (`${UP}${path.sep}`), either side of a `+` (the `".." + path.sep`
+ * spelling), a RegExp literal whose source escapes both dots, and a name bound
+ * to one of those. `"..."` and `"..foo"` fail the boundary test, so a
+ * rest-element prefix and a `..`-leading NAME are never read as a parent
+ * segment.
  */
 function mentionsParentSegment(
 	node: SgNode,
@@ -324,16 +326,26 @@ function mentionsParentSegment(
 			return cooked !== undefined && holdsParentSegment(cooked);
 		}
 		case "template_string": {
-			const substitutions = named(value).filter(
+			const children = named(value);
+			const substitutions = children.filter(
 				(child) => child.kind() === "template_substitution",
 			);
 			if (substitutions.length === 0) {
 				const cooked = cookedString(value.text());
 				return cooked !== undefined && holdsParentSegment(cooked);
 			}
-			return named(value)
-				.filter((child) => child.kind() === "string_fragment")
-				.some((child) => holdsParentSegment(child.text()));
+			// A template that INTERPOLATES the marker keeps it: `${UP}${path.sep}`
+			// holds `..` plus a separator when `UP` is bound to `..` (#4882 verify
+			// r3 N5), so each substitution is read through the same binding set as
+			// a bare name rather than ignored.
+			return (
+				children
+					.filter((child) => child.kind() === "string_fragment")
+					.some((child) => holdsParentSegment(child.text())) ||
+				substitutions
+					.flatMap((child) => named(child))
+					.some((child) => mentionsParentSegment(child, literals))
+			);
 		}
 		case "regex":
 			return PARENT_SEGMENT_REGEX_SOURCE.test(value.text());
@@ -508,6 +520,17 @@ const CALLABLE_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The census's prefilter. It can only skip WORK: an admitted site always needs
+ * a `relative` callee (or a name the file binds to one), so a file that never
+ * spells `relative` holds no site. It is ONE condition on purpose (#4882
+ * verify r3 N1): a second one on the marker's spelling (`source.includes("..")`)
+ * skipped every form written with escapes, which the detector below reports.
+ */
+export function mayHoldContainment(source: string): boolean {
+	return source.includes("relative");
+}
+
+/**
  * Every containment predicate over a `path.relative` result in one source.
  * One entry per (symbol, boolean chain): a chain that spells the parent-segment
  * test twice answers the question once.
@@ -643,6 +666,10 @@ function predicatePositionOf(literalNode: SgNode): SgNode | undefined {
 			TRANSPARENT.has(kind) ||
 			kind === "unary_expression" ||
 			kind === "template_substitution" ||
+			// A template's value carries its substitutions, so a literal read
+			// inside one (`${UP}`) still reaches the predicate above it (#4882 r3
+			// N5).
+			kind === "template_string" ||
 			kind === "arguments"
 		) {
 			current = parent;
