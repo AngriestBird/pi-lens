@@ -507,7 +507,8 @@ const ALLOW_CASES: string[] = [
 	"cat <<EOF\n$(echo x\n$(git stash)\nEOF",
 	// #3026: the COMPLIANT shapes of the tmpdirCollision rule. TMPDIR aimed
 	// at its own directory, with PI_LENS_HOME still pinned at .probe-home
-	// exactly as AGENTS.md "Paths, data, and operating systems" prescribes.
+	// exactly as docs/invariants/paths-os.md "Paths, data, and operating systems"
+	// prescribes.
 	"PI_LENS_HOME=$PWD/.probe-home TMPDIR=$PWD/.tmp-disk npx vitest run tests/config",
 	"export TMPDIR=/home/dev/.cache/lane-tmp\nnpx vitest run tests/config",
 	// TMPDIR untouched -- the harness keeps the real one on purpose.

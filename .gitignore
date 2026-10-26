@@ -223,7 +223,8 @@ tests/native-ts7-live-*/
 # prepack backup of package.json (scripts/strip-dev-deps-for-pack.mjs)
 .pack-backup/
 
-# Probe hygiene home for tests and scripts (AGENTS.md "Paths, data, and operating systems"); never tracked.
+# Probe hygiene home for tests and scripts (docs/invariants/paths-os.md
+# "Paths, data, and operating systems"); never tracked.
 .probe-home/
 
 # TLA+ tools jar fetched by scripts/check-tla-models.mjs (#3447)

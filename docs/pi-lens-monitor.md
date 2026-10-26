@@ -5,8 +5,8 @@ maintainer does not have to. The monitor observes; it never edits code,
 never restarts anything, and never touches the session it is reading.
 
 Read first: the engineering principles (`docs/engineering-principles.md`),
-then `AGENTS.md` (the "Recurring defect shapes" catalog, especially shape 41:
-a fixed bound reached at p50 is a design defect), then
+then `AGENTS.md` and the defect-shape catalog (`docs/defect-shapes.md`,
+especially shape 41: a fixed bound reached at p50 is a design defect), then
 `docs/pi-lens-subagent.md` and `docs/pi-lens-investigator.md` for the
 forensics conventions this role inherits. This contract adds the standing
 readout.

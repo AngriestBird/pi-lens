@@ -161,7 +161,8 @@ function packYaml(): string {
  * Resolve the binary once, then pin HOME for every case: the real `opengrep`
  * child writes its own settings and caches under `$HOME/.config/.opengrep` and
  * `$HOME/.config/.semgrep`, so a case that pins only `PI_LENS_HOME` still writes
- * into the developer's home (AGENTS.md "Paths, data, and operating systems";
+ * into the developer's home (docs/invariants/paths-os.md "Paths, data, and
+ * operating systems";
  * #4780 review). A probe over the strace of this file records zero writes to the
  * real `~/.config/.opengrep` and `~/.config/.semgrep`.
  */

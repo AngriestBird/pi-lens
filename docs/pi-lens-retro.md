@@ -61,7 +61,7 @@ job logs on the exact head, `latency.log` under the resolved log root (`docs/pi-
    exactly as a regression test would; a check without a red is a proposal and
    is filed as an issue naming the incident as its recurrence, not merged.
 4. **Judgement candidates become one line in the right place.** A defect shape
-   goes into the `AGENTS.md` catalog as a lean screen, and its issues, PRs and
+   goes into the catalog (`docs/defect-shapes.md`) as a lean screen, and its issues, PRs and
    examples go to `HISTORY.md`, under a heading that names the shape, such as
    `## 2026-10-14 - title (shape N)`: a lean entry cites no issue, and
    `tests/config/shape-history-governance.test.ts` finds the record by that

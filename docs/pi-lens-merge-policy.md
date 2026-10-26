@@ -261,15 +261,15 @@ These are the habits the train depends on. They live here, not in any one
 operator's private notes, so a different orchestrator can run the same train.
 
 - **Contracts move in the same session.** When a review or a dogfood finding
-  reveals a defect CLASS (not an instance), add a numbered shape to AGENTS.md's
-  catalog with the issue ref and a one-line screen, extend the fixer's screen
+  reveals a defect CLASS (not an instance), add a numbered shape to the defect-shape
+  catalog (`docs/defect-shapes.md`) with the issue ref and a one-line screen, extend the fixer's screen
   list, and cite the number in the next brief — before the next dispatch. "To
   err twice is not the mark of a wise man." (2026-09-03: shapes 28–36 came out
   of one day's reviews this way.)
 - **Second instance of a catalogued shape opens the consolidation lane, not a
   third instance fix (2026-09-09).** The trigger is the shape recurring at all,
   not only twice in one session: when a review, an issue or a dogfood finding
-  is the second member of a shape already in AGENTS.md's catalog, the
+  is the second member of a shape already in the defect-shape catalog, the
   orchestrator files the consolidation lane BEFORE the second instance merges,
   with three fixed deliverables: one seam every consumer calls, one log line
   per resolution (which value was chosen and why, throttled once per key per
@@ -435,7 +435,8 @@ operator's private notes, so a different orchestrator can run the same train.
   `final-review`; NOT borrowed from it: auto-fixing null checks, error
   handling or cleanup hooks, which change meaning.
 - **Allocate the catalog number at MERGE, not at dispatch (2026-09-15).**
-  AGENTS.md's defect-shape catalog is a markdownlint MD029 ordered list: the
+  The defect-shape catalog (`docs/defect-shapes.md`) is a markdownlint MD029
+  ordered list: the
   number is the list position, so dispatch-time reservations create a gap on
   branches whose holder has not merged. The orchestrator owns allocation; a
   lane may draft a shape but must not claim a number. At merge, insert or
@@ -562,7 +563,8 @@ operator's private notes, so a different orchestrator can run the same train.
   If that layer does not exist, file it as an issue with the bug as
   its named recurrence — the same standard shapes are held to. The lesson
   names the defect SHAPE and its tree-wide enforcer, not only a test for the
-  instance: the Gap names the `AGENTS.md` catalog shape (or a new shape) and
+  instance: the Gap names the `docs/defect-shapes.md` catalog shape (or a new
+  shape) and
   either a test that scans the whole population, an issue to build one, or
   `judgment-only` with the reason. A one-bug test is the fix's regression
   test, not the closed gap (lint half: #4439). The ledger

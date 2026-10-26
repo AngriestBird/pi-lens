@@ -89,7 +89,11 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		// wording the maintainer set for the lazy axis.
 		// The 2026-10-25 maintainer decision adds the fifth raise, 124 -> 125:
 		// shape 86 names its unbuilt detector's tracker (#4865), as shape 79 did.
-		expect(issueRefs(agentsText())).toBeLessThanOrEqual(125);
+		// #4361 moves it 125 -> 55: the numbered entries, with their instance
+		// numbers, now live in `docs/defect-shapes.md`, and AGENTS.md keeps an
+		// index of screen sentences. The guard still ratchets what a rule line
+		// adds to the loaded file.
+		expect(issueRefs(agentsText())).toBeLessThanOrEqual(55);
 	});
 
 	it("counts a reference and not a heading anchor", () => {

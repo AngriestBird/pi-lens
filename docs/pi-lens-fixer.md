@@ -293,7 +293,8 @@ rigor (#2599).
   (#4439).
 - A `Shape: new: <name>` is a proposal, not a catalog entry: write the
   proposed shape text in the PR body under "Proposed contract change
-  (maintainer decision)" and never edit `AGENTS.md`. Catalog shapes and rule
+  (maintainer decision)" and never edit `docs/defect-shapes.md`. Catalog shapes
+  and rule
   changes are the maintainer's decision; the orchestrator lands an approved
   one in its own change (#4577's fixer added shape 74 unasked, and the
   governance suites redded).
