@@ -540,4 +540,34 @@ describe("#4689 batch 10: the async identity seam", () => {
 		);
 		expect(fs.existsSync(target)).toBe(false);
 	});
+
+	it("a workspace edit refuses a rename onto a dangling symlink (#4877)", async (ctx) => {
+		// The acceptance names the rename destination too: a `newUri` through a
+		// dangling link would move the file to the link's target outside the root.
+		const t = tree("dangling-rename");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		const target = path.join(t.base, "outside", "moved.ts");
+		const link = path.join(t.repo, "escape.ts");
+		const source = path.join(t.repo, "source.ts");
+		fs.writeFileSync(source, "export {};\n");
+		fs.symlinkSync(target, link, "file");
+		const edit = {
+			documentChanges: [
+				{
+					kind: "rename",
+					oldUri: pathToFileURL(source).href,
+					newUri: pathToFileURL(link).href,
+					options: { overwrite: true },
+				},
+			],
+		};
+		await expect(validateWorkspaceEdit(edit, t.repo)).rejects.toThrow(
+			/identity is unresolvable/,
+		);
+		await expect(applyWorkspaceEdit(edit, t.repo)).rejects.toThrow(
+			/identity is unresolvable/,
+		);
+		expect(fs.existsSync(target)).toBe(false);
+		expect(fs.existsSync(source)).toBe(true);
+	});
 });

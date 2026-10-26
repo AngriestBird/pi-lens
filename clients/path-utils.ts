@@ -578,7 +578,14 @@ async function kernelAttemptAsync(
 			// A dangling link also answers `ENOENT`, but its entry exists and a write
 			// through it lands at the link's target, not under this spelling (#4877).
 			else if (
-				!(await lstatAsync(candidate).then(() => false, isAbsenceRefusal))
+				!(await lstatAsync(candidate).then(
+					() => false,
+					(lstatRefusal) => {
+						// none: absence is the ordinary missing tail, and any other `lstat`
+						// refusal already leaves the walk unconfirmed, so it fails closed.
+						return isAbsenceRefusal(lstatRefusal);
+					},
+				))
 			)
 				kernelConfirmed = false;
 		}
