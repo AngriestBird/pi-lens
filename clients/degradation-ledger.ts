@@ -288,6 +288,8 @@ export type DegradationKind =
 	 * repeats it every turn.
 	 */
 	| "dead-code-late-scan-dropped"
+	/** A deferred autofix scope was already attempted; once per tool/scope per session. */
+	| "deferred-autofix-duplicate-scope"
 	/**
 	 * #3814: the commit gate's pre-check of settled collect-later runner answers
 	 * (`absorbSettledRunnerBlockers`) threw. The gate falls back to the blocker
@@ -2583,6 +2585,8 @@ function isRenderableSummary(value: unknown): value is DegradationGroup[] {
  */
 const INFORMATIONAL_DEGRADATION_KINDS: ReadonlySet<string> = new Set([
 	"log-sink-rotated",
+	// Project-scoped autofix dedupe is intentional, not a failed fixer (#4862).
+	"deferred-autofix-duplicate-scope",
 	// #2504 review round 8 (S1): both fire on the ordinary re-edit cadence
 	// (a carry-forward window closing, or a session boundary) and are
 	// self-healing -- the next turn's analysis or deferral re-observes the
