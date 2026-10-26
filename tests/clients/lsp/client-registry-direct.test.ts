@@ -157,8 +157,15 @@ const internals = (registry: ClientRegistry) =>
 
 const dirs: string[] = [];
 function tempProject(prefix: string, withMarker = true): string {
+	// #4867: these are ADOPTABLE project roots. A directory created directly at
+	// the tmp root is a pi-owned staging path (`isPiOwnedTempPath`), which the
+	// classifier refuses, so they live inside the checkout under the git-ignored
+	// `.probe-home` -- never at the checkout root itself (#4864).
+	fs.mkdirSync(path.join(process.cwd(), ".probe-home"), { recursive: true });
 	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(process.cwd(), `.probe-reg4449-${prefix}-`)),
+		fs.mkdtempSync(
+			path.join(process.cwd(), ".probe-home", `reg4449-${prefix}-`),
+		),
 	);
 	if (withMarker) fs.writeFileSync(path.join(dir, "package.json"), "{}\n");
 	dirs.push(dir);

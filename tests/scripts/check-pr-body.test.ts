@@ -240,7 +240,10 @@ function createOriginMasterFixture(
 	postImage?: RuntimePostImageFixture,
 	baseFile?: { path: string; rows: string[] },
 ) {
-	const directory = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-origin-"));
+	mkdirSync(join(repositoryRoot, ".probe-home"), { recursive: true });
+	const directory = mkdtempSync(
+		join(repositoryRoot, ".probe-home", "pr-body-origin-"),
+	);
 	// `baseFile` commits a file the fixture needs as pre-existing evidence (the
 	// #4597 read-back witness), so the diff under test does not name it: a test
 	// file the diff adds would owe row 1 a red-first transcript this fixture is
@@ -561,8 +564,9 @@ describe("test-reference shape and placement", () => {
 	});
 
 	it("accepts short ids in a test column when they resolve to test titles", () => {
+		mkdirSync(join(repositoryRoot, ".probe-home"), { recursive: true });
 		const fixtureCwd = mkdtempSync(
-			join(repositoryRoot, ".tmp-pr-body-short-id-"),
+			join(repositoryRoot, ".probe-home", "pr-body-short-id-"),
 		);
 		try {
 			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
@@ -662,7 +666,10 @@ describe("test-reference shape and placement", () => {
 			),
 			"utf8",
 		);
-		const fixtureRepo = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-git-"));
+		mkdirSync(join(repositoryRoot, ".probe-home"), { recursive: true });
+		const fixtureRepo = mkdtempSync(
+			join(repositoryRoot, ".probe-home", "pr-body-git-"),
+		);
 		try {
 			mkdirSync(join(fixtureRepo, "tests"));
 			writeFileSync(join(fixtureRepo, "tests", "fixture.test.ts"), "fixture\n");
@@ -717,7 +724,10 @@ describe("test-reference shape and placement", () => {
 	});
 
 	it("rejects a local citation of a git-ignored path CI can never resolve (#2904)", () => {
-		const fixtureRepo = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-git-"));
+		mkdirSync(join(repositoryRoot, ".probe-home"), { recursive: true });
+		const fixtureRepo = mkdtempSync(
+			join(repositoryRoot, ".probe-home", "pr-body-git-"),
+		);
 		try {
 			mkdirSync(join(fixtureRepo, "src"));
 			mkdirSync(join(fixtureRepo, "vendor"));

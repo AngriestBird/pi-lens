@@ -113,8 +113,15 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 		cleanup: () => void;
 	} {
 		const sessionEnv = setupTestEnvironment("pi-lens-format-identity-");
+		// #4867: the "other project" must be ADOPTABLE, and an adoptable root
+		// cannot sit under the tmp root (a direct tmp child is pi-owned staging,
+		// `isPiOwnedTempPath`). It stays inside the checkout under the git-ignored
+		// `.probe-home`, never at the checkout root itself (#4864).
+		fs.mkdirSync(path.join(process.cwd(), ".probe-home"), { recursive: true });
 		const outside = fs.realpathSync(
-			fs.mkdtempSync(path.join(process.cwd(), ".format-identity-project-")),
+			fs.mkdtempSync(
+				path.join(process.cwd(), ".probe-home", "format-identity-project-"),
+			),
 		);
 		registerTmpRoot(getTmpRootRegistry(), outside, "registered");
 		const session = fs.realpathSync(sessionEnv.tmpDir);

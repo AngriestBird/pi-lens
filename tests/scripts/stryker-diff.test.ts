@@ -123,6 +123,15 @@ const underStryker = isInstrumented(driver);
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const driverPath = join(repositoryRoot, "scripts", "stryker-diff.mjs");
 
+/** A throwaway fixture root for a real `git` repo (#4867). It lives inside the
+ *  checkout under the git-ignored `.probe-home`, never at the checkout root
+ *  (#4864): the plegma Bash guard refuses a git write outside the worker's
+ *  worktree, and a checkout fixture does not belong on tmpfs (AGENTS.md, #3526). */
+function strykerFixtureDir(prefix: string): string {
+	mkdirSync(join(repositoryRoot, ".probe-home"), { recursive: true });
+	return mkdtempSync(join(repositoryRoot, ".probe-home", prefix));
+}
+
 /** git in a throwaway fixture repo, with an identity so a commit works. */
 function fixtureGit(cwd: string, args: string[]) {
 	return gitExecFileSync(
@@ -413,7 +422,7 @@ function buildDriverFixture({
 	corruptCompiled = false,
 	whitespaceCovered = false,
 }: DriverFixtureOptions) {
-	const root = mkdtempSync(join(repositoryRoot, ".tmp-stryker-diff-fixture-"));
+	const root = strykerFixtureDir("stryker-diff-fixture-");
 	mkdirSync(join(root, "scripts"));
 	mkdirSync(join(root, "src"));
 	mkdirSync(join(root, "tests", "scripts"), { recursive: true });
@@ -604,9 +613,7 @@ describe("driver early-exit paths, spawned for real (#3592 round 2 F1)", () => {
 	// script against a real, throwaway git repo -- no relative import,
 	// mock, or source-text substitute reproduces a temporal-dead-zone crash.
 	it("exits 0 with a zero-mutant report when no changed line falls under a mutated glob, instead of crashing on costEstimate's TDZ", () => {
-		const fixtureRepo = mkdtempSync(
-			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
-		);
+		const fixtureRepo = strykerFixtureDir("stryker-diff-fixture-");
 		try {
 			// One commit, no files under scripts/**/*.mjs, clients/**/*.ts,
 			// tools/**/*.ts, mcp/**/*.ts, or index.ts -- `--base HEAD` then diffs
@@ -656,9 +663,7 @@ describe("driver early-exit paths, spawned for real (#3592 round 2 F1)", () => {
 // repo: the flag is read in the driver's own top-level flow.
 describe.skipIf(underStryker)("--runtime-only (#4005)", () => {
 	const reasonFor = (extraArgs: string[]) => {
-		const fixtureRepo = mkdtempSync(
-			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
-		);
+		const fixtureRepo = strykerFixtureDir("stryker-diff-fixture-");
 		try {
 			writeFileSync(join(fixtureRepo, "README.md"), "fixture\n");
 			fixtureGit(fixtureRepo, ["init", "-q"]);
@@ -693,9 +698,7 @@ describe.skipIf(underStryker)("--runtime-only (#4005)", () => {
 	// edit; the driver must take the valid existing runtime entries, in order,
 	// and nothing else, before the cap.
 	it("mutates queued files first and drops every invalid or vanished queue entry", () => {
-		const fixtureRepo = mkdtempSync(
-			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
-		);
+		const fixtureRepo = strykerFixtureDir("stryker-diff-fixture-");
 		try {
 			mkdirSync(join(fixtureRepo, "clients"));
 			mkdirSync(join(fixtureRepo, "scripts"));
@@ -741,9 +744,7 @@ describe.skipIf(underStryker)("--runtime-only (#4005)", () => {
 	// its own entry carries (the sha reaches git), take a well-formed entry
 	// whose base git knows, and refuse a malformed base suffix outright.
 	it("reads each queued file against its own entry's base", () => {
-		const fixtureRepo = mkdtempSync(
-			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
-		);
+		const fixtureRepo = strykerFixtureDir("stryker-diff-fixture-");
 		try {
 			mkdirSync(join(fixtureRepo, "clients"));
 			for (const file of ["clients/q1.ts", "clients/q2.ts"])
@@ -994,9 +995,7 @@ describe("driver selection stage, spawned for real (#3810)", () => {
 	// coverage probe (one process, v8, source-mapped), the real selector, and
 	// the file cap reading the real `git diff -w`.
 	it("probes real coverage, keeps no test when none executes a changed line, and reports a zero-mutant run instead of running the suite", () => {
-		const fixtureRepo = mkdtempSync(
-			join(repositoryRoot, ".tmp-stryker-diff-fixture-"),
-		);
+		const fixtureRepo = strykerFixtureDir("stryker-diff-fixture-");
 		try {
 			mkdirSync(join(fixtureRepo, "scripts"));
 			mkdirSync(join(fixtureRepo, "src"));
@@ -3607,9 +3606,7 @@ describe("shared test-suite slot (#3853)", () => {
 		// run. A full-suite (exclusive) holder must make it wait and then refuse,
 		// never run concurrently: a real in-process store plus the real spawned
 		// CLI, no mocked lock.
-		const fixtureRepo = mkdtempSync(
-			join(repositoryRoot, ".tmp-stryker-diff-lock-"),
-		);
+		const fixtureRepo = strykerFixtureDir("stryker-diff-lock-");
 		const home = join(fixtureRepo, "home");
 		mkdirSync(home, { recursive: true });
 		const previousHome = process.env.PI_LENS_HOME;

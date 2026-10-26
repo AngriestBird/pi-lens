@@ -70,8 +70,17 @@ function write(relPath: string, content: string) {
 	fs.writeFileSync(full, content, "utf8");
 }
 
+// #4867: a real git fixture lives inside the checkout under the git-ignored
+// `.probe-home`, never at the checkout root (#4864): the plegma Bash guard
+// refuses a git write outside the worker's worktree, and a checkout fixture
+// does not belong on tmpfs (AGENTS.md, #3526).
+function fixtureRoot(prefix: string): string {
+	fs.mkdirSync(path.join(repoRoot, ".probe-home"), { recursive: true });
+	return fs.mkdtempSync(path.join(repoRoot, ".probe-home", prefix));
+}
+
 function enterFixture() {
-	fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pre-push-test-"));
+	fixtureDir = fixtureRoot("pre-push-test-");
 	process.chdir(fixtureDir);
 }
 
@@ -199,7 +208,7 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 	// node_modules/, two source files with their tests, one base commit that
 	// origin/master points at, and the hook run through the symlinked scripts/.
 	function gitFixture() {
-		fixtureDir = fs.mkdtempSync(path.join(repoRoot, ".tmp-pre-push-test-"));
+		fixtureDir = fixtureRoot("pre-push-test-");
 		process.chdir(fixtureDir);
 		const scriptDir = path.join(fixtureDir, "scripts");
 		fs.symlinkSync(path.join(repoRoot, "scripts"), scriptDir, "dir");
@@ -2222,7 +2231,7 @@ if (process.argv[1] && process.argv[1].endsWith("pre-push-targeted-tests.mjs")) 
 
 describe("history pass through the real hook and real git (#3215 lane 3)", () => {
 	function repo() {
-		fixtureDir = fs.mkdtempSync(path.join(repoRoot, ".tmp-history-pass-test-"));
+		fixtureDir = fixtureRoot("history-pass-test-");
 		const cwd = fixtureDir as string;
 		const git = (args: string[]) =>
 			String(gitExecFileSync(args, { cwd, encoding: "utf8" }));

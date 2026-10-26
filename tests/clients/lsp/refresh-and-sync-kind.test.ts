@@ -1752,7 +1752,7 @@ describe("workspace/diagnostic/refresh reaches an unregistered cwd's on-disk cac
 describe("workspace/diagnostic/refresh reaches a never-swept monorepo cache (#1707)", () => {
 	it("clears the sweep-root cache when the client root is a nested member", async () => {
 		const workspaceRoot = fs.mkdtempSync(
-			path.join(process.cwd(), "pi-lens-refresh-1707-"),
+			path.join(os.tmpdir(), "pi-lens-refresh-1707-"),
 		);
 		const memberRoot = path.join(workspaceRoot, "packages", "member");
 		fs.mkdirSync(memberRoot, { recursive: true });

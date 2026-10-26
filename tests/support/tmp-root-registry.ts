@@ -57,12 +57,12 @@ export interface TmpRootRegistry {
 	 *  members, because the #2912 rule that a directory made by `mkdirSync` is
 	 *  never touched still holds. Bounded by the same cap as `roots`. */
 	siblings: Map<string, { createdBy?: string }>;
-	/** Directories a TEST PROCESS created BY NAME under the repository root
-	 *  (#4864), keyed by entry name. A `mkdtemp` root is not one: its name is
-	 *  unique per call and the file that made it removes it, which is the
-	 *  reason `tests/config/tmp-fixture-hygiene.test.ts` admits it. A named
-	 *  directory has neither property, and a repo-walking governance scan on
-	 *  another worker can list it and then `ENOENT` when the cell removes it.
+	/** Directories a TEST PROCESS created directly at the repository root
+	 *  (#4864, #4867), keyed by entry name. Whatever syscall made it: a named
+	 *  directory and a `mkdtemp` root are the same shape to a repo-walking
+	 *  governance scan on another worker, which lists the tree and then
+	 *  `ENOENT`s when the cell removes it mid-walk. The `mkdtemp` name's
+	 *  uniqueness does not remove the directory from that window (#4867).
 	 *  Bounded by the same cap as `roots`. */
 	repoRootDirs: Map<string, { createdBy?: string }>;
 	/** Roots not recorded because the registry was full. */
@@ -126,10 +126,11 @@ export function registerTmpRoot(
  *  The RULE this serves is the OUTCOME, not the syscall: no directory created
  *  directly at the checkout root, whatever made it. The RECORDED writers are
  *  `mkdirSync`, `mkdir` and `promises.mkdir` (the three `noteSibling` call
- *  sites in `installTmpRootInterposer`). The rest of the population is
- *  admitted silently today and is named under the PR's `## Accepted
- *  residuals` (AGENTS.md shape 69): `cpSync`, `renameSync`, a child process's
- *  `mkdir`, and the `mkdtemp` roots named at this root (#4867). */
+ *  sites in `installTmpRootInterposer`) and `mkdtempSync`, `mkdtemp` and
+ *  `promises.mkdtemp` (its three `noteRepoRoot` call sites, #4867). The rest
+ *  of the population is admitted silently today and is named under the PR's
+ *  `## Accepted residuals` (AGENTS.md shape 69): `cpSync`, `renameSync` and a
+ *  child process's `mkdir`. */
 export function registerRepoRootDir(
 	registry: TmpRootRegistry,
 	dir: string,
@@ -307,7 +308,10 @@ export interface TmpRootFsTarget {
  * `mkdtemp` records only the `pi-lens-` namespace, because that is the family
  * the census observes and sweeps (#2912). `mkdir` records ANY name: a fixture
  * sibling written at the tmp root — `path.join(<fixture>, "..")` — is the
- * pattern-class leak of #4560, and its name is not namespaced. A directory a
+ * pattern-class leak of #4560, and its name is not namespaced. Both record ANY
+ * name when the caller passes a `repoRoot` and the call created its directory
+ * directly there, because that population is a repo-walking scan's hazard and
+ * not a tmp-namespace one (#4864, #4867). A directory a
  * CHILD process creates is not observed here: that is the case with no creator
  * on record, and the reason a child's tmp cache is counted and never asserted.
  * It is NOT the case for a loader's cache created IN THIS PROCESS -- pi's
@@ -411,17 +415,25 @@ export function installTmpRootInterposer(
 		}
 		// The rule is the OUTCOME: a directory NAMED directly at the checkout root
 		// is the shape a repo-walking scan loses. This branch sees the `mkdir`
-		// writers only. A `mkdtemp` root never reaches here (it is recorded by
-		// `note` above for the tmp root, and not recorded at all at the checkout
-		// root), so it is the admitted remainder this rule still covers (#4867),
-		// beside `cpSync`, `renameSync` and a child process's `mkdir`.
+		// writers only; `mkdtemp` reaches the same rule through `noteRepoRoot`.
+		// The admitted remainder is `cpSync`, `renameSync` and a child process's
+		// `mkdir`.
 		if (isDirectRepoRootChild(made))
 			registerRepoRootDir(registry, made, createdBy?.());
+	};
+	// #4867: the same OUTCOME rule for `mkdtemp`, which `note` above only judges
+	// at the tmp root. A root named directly at the checkout root is on disk for
+	// the life of the cell, and its unique name does not keep a repo-walking scan
+	// from listing it and losing it to the cell's own removal.
+	const noteRepoRoot = (dir: unknown): void => {
+		if (isDirectRepoRootChild(dir))
+			registerRepoRootDir(registry, dir, createdBy?.());
 	};
 	const sync = target.mkdtempSync as (...args: unknown[]) => unknown;
 	target.mkdtempSync = function (this: unknown, ...args: unknown[]) {
 		const dir = sync.apply(this, args);
 		note(dir);
+		noteRepoRoot(dir);
 		return dir;
 	} as TmpRootFsTarget["mkdtempSync"];
 	const callback = target.mkdtemp as (...args: unknown[]) => unknown;
@@ -430,7 +442,10 @@ export function installTmpRootInterposer(
 		const done = args[last];
 		if (typeof done === "function")
 			args[last] = (error: unknown, dir: unknown) => {
-				if (!error) note(dir);
+				if (!error) {
+					note(dir);
+					noteRepoRoot(dir);
+				}
 				(done as (...cbArgs: unknown[]) => void)(error, dir);
 			};
 		return callback.apply(this, args);
@@ -441,6 +456,7 @@ export function installTmpRootInterposer(
 	target.promises.mkdtemp = async function (this: unknown, ...args: unknown[]) {
 		const dir = await promised.apply(this, args);
 		note(dir);
+		noteRepoRoot(dir);
 		return dir;
 	} as TmpRootFsTarget["promises"]["mkdtemp"];
 	const mkdirSync = target.mkdirSync as (...args: unknown[]) => unknown;
