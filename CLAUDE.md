@@ -2,8 +2,10 @@
 
 Read the engineering principles (in your global instructions; vendored at
 `docs/engineering-principles.md`), then the contract, [AGENTS.md](AGENTS.md),
-starting with its "Recurring defect shapes". Claude Code does not load
-AGENTS.md automatically; this file carries only what precedes that read.
+starting with its "Recurring defect shapes" index and the entries it points at
+(`docs/defect-shapes.md`); the standing invariants live under `docs/invariants/`.
+Claude Code does not load AGENTS.md automatically; this file carries only what
+precedes that read.
 
 - `npm run build` before any test run; tests execute the compiled twins
   (`npm run build:dist` too for the census files that read `dist/`).

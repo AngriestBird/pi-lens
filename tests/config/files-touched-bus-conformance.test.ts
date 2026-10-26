@@ -18,7 +18,8 @@ type BusSurfaceEntry = {
 };
 
 // This is the reviewable contract. If a new module publishes or subscribes,
-// the source scan below fails until this list and AGENTS.md are updated with
+// the source scan below fails until this list and the invariant file are
+// updated with
 // the reason that the bus applies there.
 const PUBLISHERS: BusSurfaceEntry[] = [
 	{
@@ -146,7 +147,10 @@ describe("pilens:files:touched bus surface (#1966)", () => {
 			const actual = busPublisherFiles(files, sources).sort((a, b) =>
 				a < b ? -1 : a > b ? 1 : 0,
 			);
-			expect(actual, "new publisher: update PUBLISHERS and AGENTS.md").toEqual(
+			expect(
+				actual,
+				"new publisher: update PUBLISHERS and docs/invariants/session-telemetry.md",
+			).toEqual(
 				PUBLISHERS.map((entry) => entry.file).sort((a, b) =>
 					a < b ? -1 : a > b ? 1 : 0,
 				),
@@ -165,7 +169,7 @@ describe("pilens:files:touched bus surface (#1966)", () => {
 			);
 			expect(
 				actual,
-				"new subscriber: update SUBSCRIBERS and AGENTS.md",
+				"new subscriber: update SUBSCRIBERS and docs/invariants/session-telemetry.md",
 			).toEqual(
 				SUBSCRIBERS.map((entry) => entry.file).sort((a, b) =>
 					a < b ? -1 : a > b ? 1 : 0,
@@ -205,14 +209,18 @@ describe("pilens:files:touched bus surface (#1966)", () => {
 	});
 
 	it("requires every declaration to explain why the bus applies", () => {
-		const docs = read("AGENTS.md");
+		// #4361: the bus contract is an invariant, and its text lives in
+		// docs/invariants/session-telemetry.md, so that is the document a new
+		// publisher or subscriber updates.
+		const docs = read("docs/invariants/session-telemetry.md");
 		for (const entry of [...PUBLISHERS, ...SUBSCRIBERS]) {
 			expect(entry.why.length, `${entry.file} needs a reason`).toBeGreaterThan(
 				20,
 			);
-			expect(docs, `${entry.file} is missing from AGENTS.md`).toContain(
-				entry.file,
-			);
+			expect(
+				docs,
+				`${entry.file} is missing from docs/invariants/session-telemetry.md`,
+			).toContain(entry.file);
 		}
 	});
 });
