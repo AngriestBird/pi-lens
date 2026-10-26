@@ -535,7 +535,21 @@ export async function handleAgentEnd({
 			policy?.scope && policy.scope !== "file"
 				? `${policy.defaultTool ?? "unknown"}:${path.resolve(record.cwd)}`
 				: `${policy?.defaultTool ?? "unknown"}:${filePath}`;
-		if (executedAutofixScopes.has(scopeKey)) continue;
+		if (executedAutofixScopes.has(scopeKey)) {
+			// Once per tool/scope per session, not per skipped file or drain.
+			recordDegradationOnce({
+				kind: "deferred-autofix-duplicate-scope",
+				subject: scopeKey,
+				reason: "deferred autofix scope already attempted in this drain",
+				metadata: {
+					reason: "duplicate-scope",
+					tool: policy?.defaultTool ?? "unknown",
+					scope: policy?.scope ?? "file",
+					filePath,
+				},
+			});
+			continue;
+		}
 		executedAutofixScopes.add(scopeKey);
 		// #4131: the fixer's recordWritten below credits authorship without
 		// bytes the agent saw, so it may only advance one whose bytes still hold.

@@ -1741,7 +1741,6 @@ export function getAutofixPolicyForFile(
 			defaultWhenUnconfigured: true,
 			gate: "smart-default",
 			safe: true,
-			scope: "cargo-project",
 		};
 	}
 
