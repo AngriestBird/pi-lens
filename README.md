@@ -209,6 +209,10 @@ In the verified environment, `/lens-health` reported zero pipeline crashes and
 listed the `ast-grep` and `bash` LSP servers as available. This confirms startup
 and server discovery only; `ast_grep_search` was not tested end to end.
 
+pi-lens only looks for an `ast-grep` on `PATH` (such as Cargo's
+`~/.cargo/bin/ast-grep`) when pi trusts the project, so in an untrusted
+project this fallback leaves `ast_grep_search` unavailable.
+
 ## Documentation
 
 - [Agent guide](docs/agent-guide.md) — how an AI agent should consume and respond to pi-lens
