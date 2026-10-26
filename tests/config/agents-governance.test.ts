@@ -1,7 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { blankMarkdown } from "../../scripts/lib/defect-shapes.mjs";
+import {
+	blankMarkdown,
+	parseDefectShapes,
+} from "../../scripts/lib/defect-shapes.mjs";
 import { stripSource } from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
@@ -64,6 +67,25 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 			.concat("\n<!--\n1. **Counterfeit shape:** hidden comment\n-->\n");
 		expect(shapeNumbers(counterfeit)).toHaveLength(85);
 		expect(shapeNumbers(counterfeit)).not.toContain(1);
+	});
+
+	// #4361: AGENTS.md's index is a hand-kept mirror of the catalog, so an entry
+	// added, renumbered or dropped on one side alone makes the loaded file and
+	// the entry disagree (shape 12, a mirror refreshed outside its guard). Each
+	// index line carries its entry's number and name, and the two populations
+	// must match: same numbers, same names.
+	it("keeps the AGENTS.md index in step with the catalog", () => {
+		const catalog = [...parseDefectShapes(catalogText())];
+		const index = [...parseDefectShapes(agentsText())];
+		const names = (entries: [number, string][]) =>
+			entries
+				.map(([number, entry]) => [
+					number,
+					/^\d+\. \*\*(.+?):\*\*/.exec(entry.replace(/\s+/g, " "))?.[1],
+				])
+				.sort((a, b) => Number(a[0]) - Number(b[0]));
+		expect(index.length).toBe(catalog.length);
+		expect(names(index)).toEqual(names(catalog));
 	});
 
 	it("keeps issue and PR references in AGENTS.md from growing", () => {
