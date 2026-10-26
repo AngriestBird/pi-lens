@@ -54,7 +54,7 @@
  *   scanned trees, so the live population is 0.
  *
  * SCOPE (defect shape 80, one verdict per root a containment test can be
- * written in — AGENTS.md "Evidence and reporting" names them): `clients/`,
+ * written in — the fixer contract's `Evidence` section names them): `clients/`,
  * `tools/`, `mcp/`, `index.ts`, `scripts/` (with `scripts/lib/` and
  * `scripts/hooks/`, `.ts` and `.mjs`), `tests/support/`, and `tests/` outside
  * `support/`. `tests/config/` is inside `tests/` and therefore scanned. The
@@ -92,8 +92,9 @@ const REPO_ROOT = path.resolve(
 );
 
 /**
- * The trees this lane scans. AGENTS.md "Evidence and reporting" names the
- * class-sweep roots: the shipped runtime (`clients/`, `tools/`, `mcp/`,
+ * The trees this lane scans. The fixer contract (`docs/pi-lens-fixer.md`,
+ * its `Evidence` section) names the class-sweep roots: the shipped runtime
+ * (`clients/`, `tools/`, `mcp/`,
  * `index.ts`), the repository's own scripts (`scripts/`, `scripts/lib/`,
  * `scripts/hooks/`), and the test trees (`tests/support/` plus `tests/`
  * outside it). Defect shape 80: a census that reads one root while its subject
