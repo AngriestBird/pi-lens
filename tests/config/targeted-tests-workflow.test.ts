@@ -676,6 +676,7 @@ describe("targeted advisory workflow contract (#3215)", () => {
 			).toEqual([
 				"tests/config/env-path-key-composition-sweep.test.ts",
 				"tests/config/git-fixture-governance.test.ts",
+				"tests/config/path-containment-sweep.test.ts",
 			]);
 			expect(expectedRegistry).toEqual([...new Set(registered)].sort());
 			expect(new Set(registered).size).toBe(
