@@ -131,10 +131,6 @@ describe("path containment detector (#2556)", () => {
 				"const rel = path.relative(a, b);\nreturn /^\\.\\./.test(rel);",
 			],
 			[
-				"RegExp literal as the receiver",
-				"const rel = path.relative(a, b);\nreturn /^\\.\\./.test(rel);",
-			],
-			[
 				"`toMatch` with a `..` regex",
 				"const rel = path.relative(a, b);\nexpect(rel).toMatch(/^\\.\\./);",
 			],
