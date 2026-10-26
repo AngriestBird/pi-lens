@@ -23,6 +23,9 @@ function catalogText(): string {
 	return fs.readFileSync(path.join(REPO_ROOT, "docs/defect-shapes.md"), "utf8");
 }
 
+/** A screen states a rule: it ends a sentence, so it cannot be empty or cut. */
+const SENTENCE_END = /[.!?]$/;
+
 function shapeNumbers(text: string): number[] {
 	const source = stripSource(blankMarkdown(text), { strings: "blank" });
 	return [...source.matchAll(/^(\d+)\. \*\*/gm)].map((match) =>
@@ -106,11 +109,21 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 				([number, screen]) => !catalogScreens.get(number)?.includes(screen),
 			)
 			.map(([number, screen]) => `#${number}: ${screen}`);
+		// Containment is true of a whole sentence and of nothing at all, because
+		// every string contains "", so the containment filter above cannot see a
+		// deleted or truncated screen (review 4883 F9; the CodeRabbit thread on
+		// this line). The screen is the rule a dispatch reads, so it must end a
+		// sentence: an index line kept for its number and name but emptied of
+		// its rule reds here.
+		const silent = [...screens(index)]
+			.filter(([, screen]) => !SENTENCE_END.test(screen))
+			.map(([number, screen]) => `#${number}: ${JSON.stringify(screen)}`);
 		// A dead comparison passes everything: the population must be read.
 		expect(catalogScreens.size).toBeGreaterThan(80);
 		expect(drifted, "index screens missing from their catalog entry").toEqual(
 			[],
 		);
+		expect(silent, "index screens that state no rule").toEqual([]);
 	});
 
 	it("keeps issue and PR references in AGENTS.md from growing", () => {

@@ -34,6 +34,16 @@
  * be backticked, as the reviewer table spells it
  * (`` `docs/invariants/paths-os.md` "Paths, data, and operating systems" ``).
  *
+ * Two known misses, declared rather than fixed. A citation that names a shape
+ * by its number (`docs/defect-shapes.md "shape 3"`) or by the shape's own
+ * name (`docs/defect-shapes.md "Wrong argv transform"`) is outside the form:
+ * the catalog's headings are its ten trigger groups, and a numbered entry is
+ * not a heading, so such a citation reds as dangling. Live population 0 on
+ * 2026-10-26 (this sweep is green at that head): resolving it needs a second
+ * identity form for the catalog, which is a maintainer decision, so it is an
+ * accepted residual (p3, review 4883 F11). Second, the form reads a quoted
+ * name only; a bare link into a heading anchor is not read at all.
+ *
  * Fail closed: a citation whose section is not a heading reds, a citation to a
  * document that is not in the tree reds, and so does an empty sweep (a dead
  * sweep passes everything).
@@ -280,7 +290,10 @@ describe("contract document section citations resolve (#4361 C8)", () => {
 	// This planted file carries a dangling and a live citation in both quote
 	// spellings and in both targets: AGENTS.md and the documents #4361 moved
 	// text to. The same matcher and resolver must report exactly the dangling
-	// three, or the guard is not proven to red on a real miss.
+	// four, or the guard is not proven to red on a real miss. The fourth is
+	// cross-document (review 4883 F10): `Test requirements` is a heading of
+	// AGENTS.md and of no other contract document, so resolving it against any
+	// document's headings rather than the one the citation names reds this case.
 	it("reports a planted dangling citation through the same matcher and resolver", () => {
 		const headings = headingsByTarget();
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-c8-planted-"));
@@ -295,6 +308,7 @@ describe("contract document section citations resolve (#4361 C8)", () => {
 					'// and `docs/invariants/paths-os.md` "Paths, data, and operating systems"',
 					'// but docs/invariants/paths-os.md "No Such Planted Heading" does not',
 					'// and docs/defect-shapes.md "a runner or tool outcome" is live',
+					'// and docs/invariants/paths-os.md "Test requirements" holds only in AGENTS.md',
 					"",
 				].join("\n"),
 			);
@@ -309,11 +323,13 @@ describe("contract document section citations resolve (#4361 C8)", () => {
 				"docs/invariants/paths-os.md Paths, data, and operating systems",
 				"docs/invariants/paths-os.md No Such Planted Heading",
 				"docs/defect-shapes.md a runner or tool outcome",
+				"docs/invariants/paths-os.md Test requirements",
 			]);
 			expect(danglingCitations(hits, headings)).toEqual([
 				'planted.ts:1 AGENTS.md "No Such Planted Heading"',
 				'planted.ts:2 AGENTS.md "Another Missing Heading"',
 				'planted.ts:5 docs/invariants/paths-os.md "No Such Planted Heading"',
+				'planted.ts:7 docs/invariants/paths-os.md "Test requirements"',
 			]);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
