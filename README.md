@@ -187,6 +187,28 @@ expects to be operated.
 > git:...` / `pi update --extension git:...`) may similarly prompt for
 > git-dependency approval; accept it to let the `prepare` build step run.
 
+### Android/Termux fallback
+
+Try the normal install first. If it fails in `@ast-grep/cli`'s
+`postinstall.js` with `Failed to locate @ast-grep/cli native binary`, this
+fallback was verified on one Termux environment:
+
+```bash
+pkg install rust clang
+cargo install ast-grep --locked
+ast-grep --version
+npm_config_ignore_scripts=true pi install npm:pi-lens
+```
+
+`npm_config_ignore_scripts=true` skips every dependency lifecycle script for
+that `pi install` command, not only the failing `@ast-grep/cli` script. Use it
+only for this fallback after installing and checking the Rust-built `ast-grep`
+binary separately.
+
+In the verified environment, `/lens-health` reported zero pipeline crashes and
+listed the `ast-grep` and `bash` LSP servers as available. This confirms startup
+and server discovery only; `ast_grep_search` was not tested end to end.
+
 ## Documentation
 
 - [Agent guide](docs/agent-guide.md) — how an AI agent should consume and respond to pi-lens
