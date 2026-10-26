@@ -93,6 +93,11 @@ migrate-*.js
 !docs/pi-lens-investigator.md
 !docs/pi-lens-merge-policy.md
 !docs/pi-lens-warden.md
+# #4361: the agent contract's moved text lives in these files.
+!docs/defect-shapes.md
+!docs/invariants/*.md
+!docs/pi-lens-orchestration.md
+!docs/pi-lens-release.md
 !docs/merge-queue-rollout.md
 !docs/pi-lens-monitor.md
 !docs/real-harness.md
@@ -218,7 +223,8 @@ tests/native-ts7-live-*/
 # prepack backup of package.json (scripts/strip-dev-deps-for-pack.mjs)
 .pack-backup/
 
-# Probe hygiene home for tests and scripts (AGENTS.md "Paths, data, and operating systems"); never tracked.
+# Probe hygiene home for tests and scripts (docs/invariants/paths-os.md
+# "Paths, data, and operating systems"); never tracked.
 .probe-home/
 
 # TLA+ tools jar fetched by scripts/check-tla-models.mjs (#3447)

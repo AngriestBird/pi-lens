@@ -237,7 +237,7 @@ reviewer. File only different-seam, blocked, decision-dependent, untouched
 pre-existing, or risk-class-changing items, as one consolidated issue per PR.
 
 Folds also decide the issue list itself, one step earlier than a review
-finding: `AGENTS.md`, "Orchestration and delegated work" states that check.
+finding: `docs/pi-lens-orchestration.md` states that check.
 
 A brief carries the lane's facts and the task, and points at the role
 contract for everything else. Lane facts are the worktree, branch, base,
@@ -261,15 +261,15 @@ These are the habits the train depends on. They live here, not in any one
 operator's private notes, so a different orchestrator can run the same train.
 
 - **Contracts move in the same session.** When a review or a dogfood finding
-  reveals a defect CLASS (not an instance), add a numbered shape to AGENTS.md's
-  catalog with the issue ref and a one-line screen, extend the fixer's screen
+  reveals a defect CLASS (not an instance), add a numbered shape to the defect-shape
+  catalog (`docs/defect-shapes.md`) with the issue ref and a one-line screen, extend the fixer's screen
   list, and cite the number in the next brief — before the next dispatch. "To
   err twice is not the mark of a wise man." (2026-09-03: shapes 28–36 came out
   of one day's reviews this way.)
 - **Second instance of a catalogued shape opens the consolidation lane, not a
   third instance fix (2026-09-09).** The trigger is the shape recurring at all,
   not only twice in one session: when a review, an issue or a dogfood finding
-  is the second member of a shape already in AGENTS.md's catalog, the
+  is the second member of a shape already in the defect-shape catalog, the
   orchestrator files the consolidation lane BEFORE the second instance merges,
   with three fixed deliverables: one seam every consumer calls, one log line
   per resolution (which value was chosen and why, throttled once per key per
@@ -435,7 +435,8 @@ operator's private notes, so a different orchestrator can run the same train.
   `final-review`; NOT borrowed from it: auto-fixing null checks, error
   handling or cleanup hooks, which change meaning.
 - **Allocate the catalog number at MERGE, not at dispatch (2026-09-15).**
-  AGENTS.md's defect-shape catalog is a markdownlint MD029 ordered list: the
+  The defect-shape catalog (`docs/defect-shapes.md`) is a markdownlint MD029
+  ordered list: the
   number is the list position, so dispatch-time reservations create a gap on
   branches whose holder has not merged. The orchestrator owns allocation; a
   lane may draft a shape but must not claim a number. At merge, insert or
@@ -562,7 +563,8 @@ operator's private notes, so a different orchestrator can run the same train.
   If that layer does not exist, file it as an issue with the bug as
   its named recurrence — the same standard shapes are held to. The lesson
   names the defect SHAPE and its tree-wide enforcer, not only a test for the
-  instance: the Gap names the `AGENTS.md` catalog shape (or a new shape) and
+  instance: the Gap names the `docs/defect-shapes.md` catalog shape (or a new
+  shape) and
   either a test that scans the whole population, an issue to build one, or
   `judgment-only` with the reason. A one-bug test is the fix's regression
   test, not the closed gap (lint half: #4439). The ledger
@@ -821,7 +823,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | Routing on the word "governance" instead of the risk | #4350 (a CodeQL pin-equality test) went to Opus as "governance authoring"; the Opus rule is for source-scanning detectors only. |
 | Leaving the `dist/` precondition undeclared | At least 5 lanes (#4417, #4418, the #4422 verify, the #4410 r1 review, the #4423 review F5) each ruled out the same 3 census reds that need `npm run build:dist` (2026-10-14). Mechanical: fail fast when a selected test needs `dist/` and it is missing or stale (#4436); `CLAUDE.md` names `npm run build:dist` for those files meanwhile |
 | A wait helper with a fixed wall-clock budget | `interleaving-kit` `waitFor` ran out at 3000 ms under CI load (run 38618401454, `tests/clients/fix-run-restore.test.ts:378`); the file passed alone and under 3 shuffle seeds, so the red read as a flake. Mechanical, filed as #4437 |
-| Briefing a worker to "report the size first" before a large migration | A worker cannot wait for a reply, so the #4432 fixer did the migration anyway (2026-10-14). A brief authorizes the conditional branch with its bound, or tells the worker to stop and hand back; `AGENTS.md` "Orchestration and delegated work" |
+| Briefing a worker to "report the size first" before a large migration | A worker cannot wait for a reply, so the #4432 fixer did the migration anyway (2026-10-14). A brief authorizes the conditional branch with its bound, or tells the worker to stop and hand back; `docs/pi-lens-orchestration.md` |
 | Naming a file by basename in a brief | "index.ts" meant `clients/lsp/index.ts`; a Haiku measurement pass searched the root `index.ts` and reported the #2052 comment missing (2026-10-14). Name every file by its repo path |
 | Sending a lane that must find its own failure space to Haiku | #4342 rounds 1 and 2 left three review findings (a wall-clock bound, a wrong offline premise, a 13-vs-20 population); a fresh Opus round with a state table passed verify first time (#4410 round 3). Haiku folds with a prescribed remedy (#4340, #4341, #4345, #4356, #4368, #4372, #4374, #4417) landed first try. Haiku takes only a prescribed change; `AGENTS.md` "Orchestration and delegated work" |
 | Listing a blast radius without the changed result's callers | #4411 round 3 changed `touchFile`'s result and the body omitted the cascade neighbour caller (`clients/dispatch/integration.ts:2139`), which then printed an uncaused "inconclusive" line every turn (review N2). `AGENTS.md` already requires `module_report` with `blastRadius: true` before and after; run it for the changed result and quote every caller, then read each one |
@@ -830,7 +832,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | Concluding "no existing seam does this" from a search of your own call names | #4528 searched `notifyExternalFileChange\(` and missed six freshness modules in `clients/`; five detectors ended up wiring their own consumers (#4535). Search by primitive (`docs/pi-lens-fixer.md` "Before code"); the reviewer widens the query (`docs/pi-lens-reviewer.md`, #4536) |
 | Importing `dist/` from a script a workflow runs before any build | #4525's `scripts/assert-evaluated.mjs` reached `dist/` through `lib/clean-signal.mjs`, so `tool-smoke-prs` would fail on every refresh PR. #4531 pins the import graph with a test and plants |
 | Pinning workflow step shell as text instead of running it | #4531 r1: four mutations of the Swift, APFS and handshake shell survived, including deleting `set +e`. Run the extracted step shell against stubs in a test |
-| Filing gap after gap on one mechanism without an audit | Eleven freshness gaps went into #4532 before anyone asked why there were eleven; the cause was one missing fan-out (#4535). Three issues on one mechanism open a consolidation audit (`AGENTS.md` "Orchestration and delegated work") |
+| Filing gap after gap on one mechanism without an audit | Eleven freshness gaps went into #4532 before anyone asked why there were eleven; the cause was one missing fan-out (#4535). Three issues on one mechanism open a consolidation audit (`docs/pi-lens-orchestration.md`) |
 | Landing with an unresolved bot review thread | #4548 and #4558 merged with open Greptile threads (2026-10-17); each one's disposition arrived or never did, and nothing held the land. Every bot thread gets a disposition reply and is resolved before the merge (step 1 and step 4 of "The loop, per PR") |
 | Pushing a worker tree on a stale "failed" settlement | The #4575 r5 settlement read as failed while its resumed turn was live and about to push (plegma #752). The orchestrator's push-verify now refuses a tree with a live agent process, and its wait loop takes a `turnId`. |
 | Settling a fix round with unpushed commits | #4582 r1 settled with the commits still local and nobody noticed (plegma #753). The settlement hook now prints `UNPUSHED` or `DIRTY` for the tree it just settled. |

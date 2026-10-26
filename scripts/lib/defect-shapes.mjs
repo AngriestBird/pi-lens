@@ -1,4 +1,5 @@
-// The AGENTS.md "Recurring defect shapes" catalog, parsed once (#4439). The PR
+// The `docs/defect-shapes.md` "Recurring defect shapes" catalog, parsed once
+// (#4439). The PR
 // body Detection lint (`Shape:` / `Enforcer:`) and the catalog-to-HISTORY.md
 // governance test both read it here, so neither carries a private parser.
 import { blankMarkdownRegions } from "./markdown-lexer.mjs";
@@ -63,8 +64,8 @@ const CATALOG_HEADING = /^## Recurring defect shapes[ \t]*$/m;
  * not blank and not indented: the next shape, a `###` heading or a block tag.
  * Empty when the catalog heading is absent.
  */
-export function parseDefectShapes(agentsMarkdown) {
-	const blanked = blankMarkdown(agentsMarkdown);
+export function parseDefectShapes(catalogMarkdown) {
+	const blanked = blankMarkdown(catalogMarkdown);
 	const start = blanked.search(CATALOG_HEADING);
 	if (start < 0) return new Map();
 	const rest = blanked.slice(start + 1);

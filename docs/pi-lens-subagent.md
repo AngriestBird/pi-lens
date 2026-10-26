@@ -221,8 +221,8 @@ foreground, push with the targeted and governance suites green and say that
 the full suite was delegated to CI.
 
 Pin `PI_LENS_HOME` and `PILENS_DATA_DIR` to `<worktree>/.probe-home` for
-probes, smoke scripts, and `npm install`/`npm ci` (`AGENTS.md` "Paths, data,
-and operating systems"); a test that inspects the install record also pins
+probes, smoke scripts, and `npm install`/`npm ci` (`docs/invariants/paths-os.md`
+"Paths, data, and operating systems"); a test that inspects the install record also pins
 `PI_LENS_INSTALL_LOG`. Never export them for a Vitest run: the setup keeps
 the real home on purpose (#3178). Kill every language server a probe spawns
 before moving on; the plegma daemon's cgroup holds every worker's children

@@ -1,0 +1,31 @@
+<important if="touching language and configuration rules">
+
+### Language and configuration
+
+- `clients/language-registry.ts` is the identity source for language ids,
+  extensions, filenames, file kinds, LSP ids, and grammars. Consumers project
+  from it; they do not maintain parallel language tables.
+- Agent-facing advisory text resolves names through `resolveLensToolName` with
+  the delivery host: pi uses `piName`, and MCP uses `mcpName` from
+  `TOOL_REGISTRY`. Known tools without a host mapping resolve to `undefined`,
+  so callers omit or rephrase them; pi-only rows require
+  `PI_ONLY_TOOL_REASONS`. Do not add a second name map or hard-code a pi tool
+  name in advisory output (#2535).
+- `clients/config-core/` owns schema validation, normalization, merging,
+  provenance, deny precedence, merge strategies, trust-gated process specs,
+  and bounded migration records. Existing LSP, global, and project loaders
+  adopt it without adding another merge implementation.
+- Canonical config is `.pi-lens.json` plus `~/.pi-lens/config.json`; locations,
+  legacy migrations, and namespaces live in the config-location/schema modules.
+  A new config key or environment flag needs a forcing function, stability tier,
+  diagnostic code, tests, and docs.
+- `rules.<id>.ignorePaths` is an experimental, project-relative path denial
+  resolved by config-core with array-union semantics: global entries cannot be
+  cleared by project config. Ast-grep and tree-sitter apply it before scanning;
+  other runner output uses the shared rule-policy filter.
+- `lens_diagnostics` has one model-facing diagnostic surface. `source` is
+  `session` or `lsp`; `scope` is `paths` or `workspace`; explicit paths always
+  win. Severity is a threshold. Retired compatibility names must not widen a
+  request into a workspace sweep.
+
+</important>

@@ -91,7 +91,7 @@ candidates you do not delete here go to the corpus value ledger issue.
 
 ## Detection
 
-Optional unless this PR closes a bug-labelled issue: name `Caught by:` (one layer word from `DETECTION_LAYERS` in `scripts/check-pr-body.mjs`, among them `TLA+`, `mutation`, `pre-push` and `lint/type check`; `nightly:<workflow>` names the workflow; a bug-closing PR may not answer `unknown`, `n/a`, `tbd` or `?` in any free-text line), `Should have been caught by:` (a layer or `this layer`), and `Gap:` (`#NNN`, `exists: <path of a test already on master>`, or `none: <reason>`; a test this PR adds does not count); a bug-closing PR also names `Shape:` (`#N`, an AGENTS.md "Recurring defect shapes" number, or `new: <name>`) and `Enforcer:` (the tree-wide test path on master that scans the shape's whole population, `#N` for an issue to build one, or `none: judgment-only, <reason>`; with `Shape: #N` the path must be one catalog entry N names).
+Optional unless this PR closes a bug-labelled issue: name `Caught by:` (one layer word from `DETECTION_LAYERS` in `scripts/check-pr-body.mjs`, among them `TLA+`, `mutation`, `pre-push` and `lint/type check`; `nightly:<workflow>` names the workflow; a bug-closing PR may not answer `unknown`, `n/a`, `tbd` or `?` in any free-text line), `Should have been caught by:` (a layer or `this layer`), and `Gap:` (`#NNN`, `exists: <path of a test already on master>`, or `none: <reason>`; a test this PR adds does not count); a bug-closing PR also names `Shape:` (`#N`, a `docs/defect-shapes.md` number, or `new: <name>`) and `Enforcer:` (the tree-wide test path on master that scans the shape's whole population, `#N` for an issue to build one, or `none: judgment-only, <reason>`; with `Shape: #N` the path must be one catalog entry N names).
 
 ## Accepted residuals
 
@@ -143,7 +143,8 @@ The `PR body` check requires one of two forms here:
    per-member line (an arrow, a coverage note, or a markdown table row) or a
    fold/stay statement (`folds onto ...`, `stays distributed because ...`).
    The sweep covers the WHOLE tree — `clients/`, `tools/`, `mcp/`, `scripts/`,
-   `index.ts`, never `clients/` alone. Cite AGENTS.md's defect-shape catalog.
+   `index.ts`, never `clients/` alone. Cite the defect-shape catalog
+   (`docs/defect-shapes.md`).
    "Class of size 1" requires the grep that proves it. End a population sweep
    with a consolidation verdict: fold the family onto one seam (issue ref) or
    state why it stays distributed.
@@ -157,9 +158,9 @@ change list, not a tree-wide sweep (#4248, #4273).
 
 ## Fold check
 
-The fold check ran before this lane was written (AGENTS.md, "Orchestration and
-delegated work"): every open issue and pull request against this change's
-mechanism got a decision. One line per candidate, `#N` first:
+The fold check ran before this lane was written (`docs/pi-lens-orchestration.md`):
+every open issue and pull request against this change's mechanism got a
+decision. One line per candidate, `#N` first:
 `#N folded: <reason>`, `#N not folded: <reason>`, or `#N sequenced: <reason>`;
 a `folded` line also carries its `Closes #N`. When the search found no
 candidate, write `none: <reason>`. `scripts/check-pr-body.mjs` refuses a section
