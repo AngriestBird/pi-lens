@@ -13,6 +13,11 @@ function agentsText(): string {
 	);
 }
 
+/** The numbered catalog (#4361): AGENTS.md keeps only the trigger-grouped index. */
+function catalogText(): string {
+	return fs.readFileSync(path.join(REPO_ROOT, "docs/defect-shapes.md"), "utf8");
+}
+
 function shapeNumbers(text: string): number[] {
 	const source = stripSource(blankMarkdown(text), { strings: "blank" });
 	return [...source.matchAll(/^(\d+)\. \*\*/gm)].map((match) =>
@@ -21,6 +26,9 @@ function shapeNumbers(text: string): number[] {
 }
 
 describe("AGENTS.md trigger-block governance (#3259)", () => {
+	// The trigger wrappers are the loaded file's, so these two cases read
+	// AGENTS.md even though docs/defect-shapes.md keeps the same wrappers around
+	// the entries it owns.
 	it("keeps every trigger marker standalone and paired (#3265)", () => {
 		const text = agentsText();
 		const literalOpenings = [...text.matchAll(/<important if=/g)].length;
@@ -41,7 +49,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 	});
 
 	it("keeps every numbered defect shape exactly once", () => {
-		const numbers = shapeNumbers(agentsText());
+		const numbers = shapeNumbers(catalogText());
 		expect(numbers).toHaveLength(86);
 		expect(new Set(numbers).size).toBe(86);
 		expect(numbers.sort((a, b) => a - b)).toEqual(
@@ -51,7 +59,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 
 	it("does not count a counterfeit shape hidden in an HTML comment (#3265)", () => {
 		// Prevents a comment counterfeit from replacing a real catalog member.
-		const counterfeit = agentsText()
+		const counterfeit = catalogText()
 			.replace(/^1\. \*\*.*$/m, "")
 			.concat("\n<!--\n1. **Counterfeit shape:** hidden comment\n-->\n");
 		expect(shapeNumbers(counterfeit)).toHaveLength(85);

@@ -35,6 +35,10 @@ import {
 import { checkProse, proseSections } from "./check-prose.mjs";
 
 const TEMPLATE_PATH = ".github/PULL_REQUEST_TEMPLATE.md";
+
+// #4361: the numbered defect-shape entries live here; AGENTS.md keeps the
+// trigger-grouped index. Read from the PR's base commit, never the checkout.
+const SHAPE_CATALOG_PATH = "docs/defect-shapes.md";
 const TEMPLATE_FILE = resolve(
 	dirname(fileURLToPath(import.meta.url)),
 	"..",
@@ -2991,7 +2995,7 @@ export const DETECTION_MESSAGE =
 	'PR body "## Detection" must state the bug-detection lesson in five lines: ' +
 	'"Caught by: <layer>", "Should have been caught by: <layer|this layer>", ' +
 	'"Gap: <issue ref> | exists: <path of a test already on master> | none: <reason>", ' +
-	'"Shape: #N (an AGENTS.md Recurring defect shapes number) | new: <name>", ' +
+	'"Shape: #N (a docs/defect-shapes.md number) | new: <name>", ' +
 	'and "Enforcer: <tree-wide test path on master> | #N (an issue to build one) | none: judgment-only, <reason>". ' +
 	DETECTION_LAYER_HINT;
 
@@ -3206,20 +3210,21 @@ function validDetectionGap(value) {
 
 // #4439: a bug fix names the defect SHAPE and the tree-wide enforcer of that
 // shape, not only a test for the instance. `Shape:` is a catalog number from
-// AGENTS.md "Recurring defect shapes" or `new: <name>`; `Enforcer:` is a test
-// path on the base, an issue to build one, or `none: judgment-only, <reason>`.
-// With `Shape: #N`, a path enforcer must be one the catalog entry for #N names.
+// docs/defect-shapes.md (whose index sits in AGENTS.md "Recurring defect
+// shapes") or `new: <name>`; `Enforcer:` is a test path on the base, an issue to
+// build one, or `none: judgment-only, <reason>`. With `Shape: #N`, a path
+// enforcer must be one the catalog entry for #N names.
 export const DETECTION_SHAPE_CATALOG_UNRESOLVED_MESSAGE =
-	'PR body "## Detection" says "Shape: #N" with a path "Enforcer:", but AGENTS.md "Recurring defect shapes" could not be read from the base commit of the PR (git show <merge-base>:AGENTS.md), so the catalog entry cannot be checked. Give an issue ref (#NNN) or "none: judgment-only, <reason>" as the enforcer instead.';
+	'PR body "## Detection" says "Shape: #N" with a path "Enforcer:", but the defect-shape catalog could not be read from the base commit of the PR (git show <merge-base>:docs/defect-shapes.md), so the catalog entry cannot be checked. Give an issue ref (#NNN) or "none: judgment-only, <reason>" as the enforcer instead.';
 
 export const detectionUnknownShapeMessage = (number) =>
-	`PR body "## Detection" says "Shape: #${number}", but AGENTS.md "Recurring defect shapes" has no shape ${number}. Use a catalog number, or "Shape: new: <name>" for a shape the catalog lacks.`;
+	`PR body "## Detection" says "Shape: #${number}", but the defect-shape catalog (docs/defect-shapes.md) has no shape ${number}. Use a catalog number, or "Shape: new: <name>" for a shape the catalog lacks.`;
 
 export const detectionEnforcerNotOnBaseMessage = (path) =>
 	`PR body "## Detection" says "Enforcer: ${path}", but that file is not on the PR's base commit (git merge-base origin/master HEAD). A test this PR adds is the regression test, not the enforcer of the shape. Name a tree-wide test already on the base, an issue (#NNN) to build one, or "none: judgment-only, <reason>".`;
 
 export const detectionEnforcerNotInCatalogMessage = (path, number) =>
-	`PR body "## Detection" says "Shape: #${number}" and "Enforcer: ${path}", but AGENTS.md shape ${number} does not name that path. Name a test the catalog entry lists, or give an issue (#NNN) to add it, or "none: judgment-only, <reason>".`;
+	`PR body "## Detection" says "Shape: #${number}" and "Enforcer: ${path}", but docs/defect-shapes.md shape ${number} does not name that path. Name a test the catalog entry lists, or give an issue (#NNN) to add it, or "none: judgment-only, <reason>".`;
 
 const stripEmphasis = (value) =>
 	String(value ?? "")
@@ -3289,11 +3294,12 @@ function lintShapeAndEnforcer(content, options) {
 }
 
 /**
- * The `shapeCatalog` reader for `lintDetectionSection`: AGENTS.md as the PR's
- * base commit has it (the base `baseFileReader` reads the enforcer path from),
- * parsed once on first use. `null` when the base or its AGENTS.md cannot be
- * read. The base, never the checkout: a PR that edits entry N to name its own
- * enforcer must not approve itself (#4439).
+ * The `shapeCatalog` reader for `lintDetectionSection`: docs/defect-shapes.md
+ * as the PR's base commit has it (the base `baseFileReader` reads the enforcer
+ * path from), parsed once on first use. `null` when the base or that file
+ * cannot be read; there is no fallback to AGENTS.md, whose index carries only
+ * the screen lines. The base, never the checkout: a PR that edits entry N to
+ * name its own enforcer must not approve itself (#4439).
  */
 export function shapeCatalogReader(cwd = process.cwd(), git = gitExecFileSync) {
 	let catalog;
@@ -3304,7 +3310,7 @@ export function shapeCatalogReader(cwd = process.cwd(), git = gitExecFileSync) {
 		try {
 			catalog = parseDefectShapes(
 				String(
-					git(["show", `${base}:AGENTS.md`], {
+					git(["show", `${base}:${SHAPE_CATALOG_PATH}`], {
 						cwd,
 						encoding: "utf8",
 						maxBuffer: 16 * 1024 * 1024,

@@ -6020,11 +6020,12 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 // regression test for one instance while the defect shape stayed unenforced
 // across the tree, and #4409 wrote "Gap: none: this change is the layer"
 // before install-smoke run 38610594076 failed on master (#4439). A bug-closing
-// body now names the AGENTS.md shape and its tree-wide enforcer, and a path
-// enforcer must be one the shape's catalog entry names.
+// body now names the defect shape and its tree-wide enforcer, and a path
+// enforcer must be one the shape's catalog entry names. The catalog lives in
+// docs/defect-shapes.md (#4361); AGENTS.md keeps the trigger-grouped index.
 describe("Detection names the defect shape and its enforcer (#4439)", () => {
 	const catalog = parseDefectShapes(
-		readFileSync(resolve(repositoryRoot, "AGENTS.md"), "utf8"),
+		readFileSync(resolve(repositoryRoot, "docs/defect-shapes.md"), "utf8"),
 	);
 	const head =
 		"## Detection\nCaught by: smoke\nShould have been caught by: CI unit\nGap: #4439\n";
@@ -6087,7 +6088,9 @@ describe("Detection names the defect shape and its enforcer (#4439)", () => {
 	it("refuses a path enforcer that the shape's catalog entry does not name", () => {
 		// Shape 68's enforcer is not shape 67's.
 		expect(lint(lines("#67", "tests/config/tla-switch-pins.test.ts"))).toEqual([
-			expect.stringContaining("AGENTS.md shape 67 does not name that path"),
+			expect.stringContaining(
+				"docs/defect-shapes.md shape 67 does not name that path",
+			),
 		]);
 	});
 
@@ -6202,9 +6205,10 @@ describe("Detection names the defect shape and its enforcer (#4439)", () => {
 // Recurrence (#4448 review F4): the catalog was read from the PR's own
 // checkout while the enforcer path was read from its base, so a PR could add
 // its test to catalog entry N and approve its own enforcer. The reader takes
-// AGENTS.md from the base commit. `git` is stubbed at the process boundary (a
-// stub, not a spawn): the checkout holds the head's AGENTS.md on disk, and the
-// stub answers `merge-base` and `show <base>:AGENTS.md` like a two-commit repo.
+// docs/defect-shapes.md from the base commit. `git` is stubbed at the process
+// boundary (a stub, not a spawn): the checkout holds the head's catalog on
+// disk, and the stub answers `merge-base` and `show <base>:docs/defect-shapes.md`
+// like a two-commit repo.
 describe("the shape catalog is read from the PR's base (#4439)", () => {
 	const ENFORCER = "tests/config/claimed-enforcer.test.ts";
 	const entry = (extra: string) =>
@@ -6219,17 +6223,19 @@ describe("the shape catalog is read from the PR's base (#4439)", () => {
 	function lintAgainst(base: string | null, head: string) {
 		const checkout = mkdtempSync(join(tmpdir(), "pi-lens-shape-catalog-"));
 		checkouts.push(checkout);
-		writeFileSync(join(checkout, "AGENTS.md"), head);
+		mkdirSync(join(checkout, "docs"), { recursive: true });
+		writeFileSync(join(checkout, "docs/defect-shapes.md"), head);
 		const git = (args: string[]): string => {
 			if (args[0] === "merge-base" && base !== null) return "base0000\n";
 			if (
 				args[0] === "show" &&
-				args[1] === "base0000:AGENTS.md" &&
+				args[1] === "base0000:docs/defect-shapes.md" &&
 				base !== null
 			)
 				return base;
 			// A repository answers a show of HEAD with the head's file.
-			if (args[0] === "show" && args[1] === "HEAD:AGENTS.md") return head;
+			if (args[0] === "show" && args[1] === "HEAD:docs/defect-shapes.md")
+				return head;
 			throw new Error(`git ${args.join(" ")} failed`);
 		};
 		return {
@@ -6246,13 +6252,15 @@ describe("the shape catalog is read from the PR's base (#4439)", () => {
 		};
 	}
 
-	it("refuses an enforcer that only the head's AGENTS.md names", () => {
+	it("refuses an enforcer that only the head's catalog names", () => {
 		expect(lintAgainst(entry(""), entry(naming)).errors).toEqual([
-			expect.stringContaining("AGENTS.md shape 4 does not name that path"),
+			expect.stringContaining(
+				"docs/defect-shapes.md shape 4 does not name that path",
+			),
 		]);
 	});
 
-	it("accepts an enforcer that the base's AGENTS.md names", () => {
+	it("accepts an enforcer that the base's catalog names", () => {
 		expect(lintAgainst(entry(naming), entry(naming)).errors).toEqual([]);
 	});
 

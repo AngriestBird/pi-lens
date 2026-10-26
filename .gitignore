@@ -93,6 +93,11 @@ migrate-*.js
 !docs/pi-lens-investigator.md
 !docs/pi-lens-merge-policy.md
 !docs/pi-lens-warden.md
+# #4361: the agent contract's moved text lives in these files.
+!docs/defect-shapes.md
+!docs/invariants/*.md
+!docs/pi-lens-orchestration.md
+!docs/pi-lens-release.md
 !docs/merge-queue-rollout.md
 !docs/pi-lens-monitor.md
 !docs/real-harness.md

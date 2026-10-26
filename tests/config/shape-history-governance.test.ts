@@ -7,13 +7,17 @@ import {
 	parseDefectShapes,
 } from "../../scripts/lib/defect-shapes.mjs";
 
-// Recurrence (#4439): shapes 67 and 68 entered the AGENTS.md catalog on
+// Recurrence (#4439): shapes 67 and 68 entered the defect-shape catalog on
 // 2026-10-14 with no HISTORY.md entry, and nothing checked it. The retro
 // contract (`docs/pi-lens-retro.md` step 4) puts each shape's issues and PRs in
-// HISTORY.md, because AGENTS.md stays lean (agents-governance.test.ts keeps its
-// reference count from growing). A shape has history when HISTORY.md, read as
-// comment-blanked markdown, carries one of the shape's own issue or PR numbers
-// from its catalog entry, or a heading naming `shape N`.
+// HISTORY.md, because the catalog stays lean (agents-governance.test.ts keeps
+// its reference count from growing). A shape has history when HISTORY.md, read
+// as comment-blanked markdown, carries one of the shape's own issue or PR
+// numbers from its catalog entry, or a heading naming `shape N`.
+//
+// #4361: the numbered entries moved out of AGENTS.md into
+// docs/defect-shapes.md, which keeps AGENTS.md's index from carrying them. The
+// scan reads the file that holds the entries.
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 
@@ -24,7 +28,7 @@ const read = (file: string, env?: string): string =>
 	);
 
 /** Catalog shape numbers with no entry in `history`, ascending. */
-function shapesWithoutHistory(agents: string, history: string): number[] {
+function shapesWithoutHistory(catalog: string, history: string): number[] {
 	const blanked = blankMarkdown(history);
 	const referenced = issueNumbers(blanked);
 	const headed = new Set(
@@ -35,7 +39,7 @@ function shapesWithoutHistory(agents: string, history: string): number[] {
 			(match) => Number(match[1]),
 		),
 	);
-	return [...parseDefectShapes(agents)]
+	return [...parseDefectShapes(catalog)]
 		.filter(
 			([number, entry]) =>
 				!headed.has(number) &&
@@ -70,16 +74,16 @@ const NO_HISTORY_BASELINE: readonly number[] = [
 ];
 
 describe("catalog shapes have a HISTORY.md entry (#4439)", () => {
-	const agents = read("AGENTS.md", "PI_LENS_AGENTS_PATH");
+	const catalog = read("docs/defect-shapes.md");
 	const history = read("HISTORY.md", "PI_LENS_HISTORY_PATH");
-	const uncovered = shapesWithoutHistory(agents, history);
+	const uncovered = shapesWithoutHistory(catalog, history);
 
 	const { added, stale } = baselineViolations(uncovered, NO_HISTORY_BASELINE);
 
 	it("lets no shape outside the baseline lack a HISTORY.md entry", () => {
 		expect(
 			added,
-			`shape(s) ${added.join(", ")} in AGENTS.md have no HISTORY.md entry: give each a HISTORY.md section whose heading names it, such as "## 2026-10-14 - model switch drift (shape 68)" (retro step 4), or cite one of its own issues there; never add to the baseline`,
+			`shape(s) ${added.join(", ")} in docs/defect-shapes.md have no HISTORY.md entry: give each a HISTORY.md section whose heading names it, such as "## 2026-10-14 - model switch drift (shape 68)" (retro step 4), or cite one of its own issues there; never add to the baseline`,
 		).toEqual([]);
 	});
 
@@ -91,15 +95,15 @@ describe("catalog shapes have a HISTORY.md entry (#4439)", () => {
 	});
 
 	it("lists only catalog shapes, once each, ascending", () => {
-		const catalog = parseDefectShapes(agents);
-		expect(NO_HISTORY_BASELINE.filter((n) => !catalog.has(n))).toEqual([]);
+		const parsed = parseDefectShapes(catalog);
+		expect(NO_HISTORY_BASELINE.filter((n) => !parsed.has(n))).toEqual([]);
 		expect([...NO_HISTORY_BASELINE]).toEqual(
 			[...new Set(NO_HISTORY_BASELINE)].sort((a, b) => a - b),
 		);
 	});
 
 	it("parses the whole catalog, so the scan is not vacuous", () => {
-		expect(parseDefectShapes(agents).size).toBeGreaterThanOrEqual(68);
+		expect(parseDefectShapes(catalog).size).toBeGreaterThanOrEqual(68);
 	});
 });
 
