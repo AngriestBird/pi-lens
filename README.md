@@ -190,8 +190,8 @@ expects to be operated.
 ### Android/Termux fallback
 
 Try the normal install first. If it fails in `@ast-grep/cli`'s
-`postinstall.js` with `Failed to locate @ast-grep/cli native binary`, this
-fallback was verified on one Termux environment:
+`postinstall.js` with `Failed to locate @ast-grep/cli native binary`, the
+fallback below has worked in one Termux environment:
 
 ```bash
 pkg install rust clang
