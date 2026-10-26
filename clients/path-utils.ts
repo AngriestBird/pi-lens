@@ -21,7 +21,10 @@ import {
 	realpathSync,
 	statSync,
 } from "node:fs";
-import { realpath as realpathNativeAsync } from "node:fs/promises";
+import {
+	lstat as lstatAsync,
+	realpath as realpathNativeAsync,
+} from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { win32 } from "node:path";
@@ -572,6 +575,12 @@ async function kernelAttemptAsync(
 		} catch (refusal) {
 			recordIdentityRefusal(refusal, candidate);
 			if (!isAbsenceRefusal(refusal)) kernelConfirmed = false;
+			// A dangling link also answers `ENOENT`, but its entry exists and a write
+			// through it lands at the link's target, not under this spelling (#4877).
+			else if (
+				!(await lstatAsync(candidate).then(() => false, isAbsenceRefusal))
+			)
+				kernelConfirmed = false;
 		}
 	}
 	return undefined;

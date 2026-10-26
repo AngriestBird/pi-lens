@@ -2648,7 +2648,9 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// walk and the settle walk) and the one syscall per step inside the driver.
 	// Still a pure path utility with no `AbortSignal`; both callers sit inside
 	// the handler's `bounded()`.
-	"clients/path-utils.ts": 4,
+	// 4 -> 5 (#4877): an `ENOENT` step also `lstat`s its candidate, because a
+	// dangling link answers `ENOENT` while a write through it leaves the root.
+	"clients/path-utils.ts": 5,
 	"clients/performance-report.ts": 8,
 	// #3506: 45 -> 61. `runPipeline` awaits its body inside the try whose
 	// finally releases pi's per-file mutation queue (1), `runFormatPhase`

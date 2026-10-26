@@ -525,4 +525,19 @@ describe("#4689 batch 10: the async identity seam", () => {
 		).rejects.toThrow(/identity is unresolvable/);
 		expect(fs.readFileSync(t.realFile, "utf8")).toBe(before);
 	});
+
+	it("a workspace edit refuses a create through a dangling symlink (#4877)", async (ctx) => {
+		const t = tree("dangling-link");
+		if (t.skipReason) return ctx.skip(t.skipReason);
+		const target = path.join(t.base, "outside", "written.ts");
+		const link = path.join(t.repo, "escape.ts");
+		fs.symlinkSync(target, link, "file");
+		await expect(
+			validateWorkspaceEdit(createEdit(link), t.repo),
+		).rejects.toThrow(/identity is unresolvable/);
+		await expect(applyWorkspaceEdit(createEdit(link), t.repo)).rejects.toThrow(
+			/identity is unresolvable/,
+		);
+		expect(fs.existsSync(target)).toBe(false);
+	});
 });
