@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import {
@@ -539,9 +540,10 @@ export async function handleAgentEnd({
 			// Once per tool/scope per session, not per skipped file or drain.
 			recordDegradationOnce({
 				kind: "deferred-autofix-duplicate-scope",
-				subject: scopeKey,
+				subject: createHash("sha256").update(scopeKey).digest("hex"),
 				reason: "deferred autofix scope already attempted in this drain",
 				metadata: {
+					scopeKey,
 					reason: "duplicate-scope",
 					tool: policy?.defaultTool ?? "unknown",
 					scope: policy?.scope ?? "file",

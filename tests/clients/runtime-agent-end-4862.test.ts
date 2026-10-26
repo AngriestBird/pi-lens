@@ -1,9 +1,15 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BiomeClient } from "../../clients/biome-client.js";
 import { CacheManager } from "../../clients/cache-manager.js";
-import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import {
+	LEDGER_FIELD_MAX,
+	renderDegradationLines,
+	resetDegradationLedger,
+	truncateForLedger,
+} from "../../clients/degradation-ledger.js";
 import {
 	flushLatencyLog,
 	getLatencyLogPath,
@@ -92,6 +98,24 @@ describe("deferred autofix scope (#4862)", () => {
 		});
 	}
 
+	it("renders duplicate-scope dedupe as informational", () => {
+		const lines = renderDegradationLines([
+			{
+				kind: "deferred-autofix-duplicate-scope",
+				count: 1,
+				droppedCount: 0,
+				latestReasons: [
+					{ subject: "sha256", reason: "duplicate project scope" },
+				],
+			},
+		]);
+		expect(lines).toEqual([
+			"Degradations:",
+			"  deferred-autofix-duplicate-scope: 1",
+		]);
+		expect(lines[1]).not.toContain("⚠");
+	});
+
 	// Recurrence: JS/TS's accidental cargo-project scope ran Biome only for
 	// the first file. Keep policy, queue, handler and runAutofix real; double
 	// only the Biome boundary, as runtime-agent-end.test.ts already does.
@@ -157,6 +181,7 @@ describe("deferred autofix scope (#4862)", () => {
 			}
 		});
 
+		const scopeKey = `dart-analyze:${path.resolve(env.tmpDir)}`;
 		for (let turn = 0; turn < 2; turn++) {
 			runtime.fixedThisTurn.clear();
 			for (const file of files) {
@@ -180,15 +205,118 @@ describe("deferred autofix scope (#4862)", () => {
 				return (
 					row.phase === "degradation_ledger" &&
 					metadata?.kind === "deferred-autofix-duplicate-scope" &&
-					metadata.subject === `dart-analyze:${path.resolve(env.tmpDir)}`
+					metadata.scopeKey === scopeKey
 				);
 			});
 			expect(skips).toHaveLength(1);
 			expect(skips[0]?.metadata).toMatchObject({
-				subject: `dart-analyze:${path.resolve(env.tmpDir)}`,
+				subject: createHash("sha256").update(scopeKey).digest("hex"),
+				scopeKey,
 				tool: "dart-analyze",
 				scope: "dart-project",
 				filePath: files[1],
+				reason: "duplicate-scope",
+				count: 1,
+			});
+		}
+	});
+
+	// Distinct roots can share the ledger's clipped prefix. Their skip entries
+	// must remain independently keyed by the full project scope.
+	it("keeps duplicate-scope skips separate for long Dart project keys", async () => {
+		const canonicalTmpRoot = fs.realpathSync(env.tmpDir);
+		const scopeRootPrefix = `dart-analyze:${canonicalTmpRoot}${path.sep}`;
+		const componentLength = Math.max(
+			1,
+			LEDGER_FIELD_MAX - scopeRootPrefix.length + 8,
+		);
+		const sharedPrefix = `dart-project-${"x".repeat(componentLength)}`;
+		expect(Buffer.byteLength(`${sharedPrefix}-one`)).toBeLessThan(255);
+		const projects = ["one", "two"].map((suffix) => {
+			const root = path.join(canonicalTmpRoot, `${sharedPrefix}-${suffix}`);
+			const files = ["a", "b"].map((name) =>
+				createTempFile(
+					root,
+					`lib/${name}.dart`,
+					"void main() { var x = 1; }\n",
+				),
+			);
+			createTempFile(
+				root,
+				"pubspec.yaml",
+				"name: fixture\nenvironment:\n  sdk: ^3.0.0\n",
+			);
+			return { root, files };
+		});
+		const firstScopeKey = `dart-analyze:${path.resolve(
+			path.join(canonicalTmpRoot, `${sharedPrefix}-one`),
+		)}`;
+		const secondScopeKey = `dart-analyze:${path.resolve(
+			path.join(canonicalTmpRoot, `${sharedPrefix}-two`),
+		)}`;
+		expect(firstScopeKey.length).toBeGreaterThan(LEDGER_FIELD_MAX);
+		expect(secondScopeKey.length).toBeGreaterThan(LEDGER_FIELD_MAX);
+		expect(firstScopeKey.slice(0, LEDGER_FIELD_MAX)).toBe(
+			secondScopeKey.slice(0, LEDGER_FIELD_MAX),
+		);
+		expect(firstScopeKey).not.toBe(secondScopeKey);
+		fake.dartFix.mockImplementation((cwd) => {
+			const project = projects.find(
+				(candidate) => fs.realpathSync(candidate.root) === fs.realpathSync(cwd),
+			);
+			expect(project).toBeDefined();
+			for (const file of project?.files ?? [])
+				fs.writeFileSync(file, "void main() { final x = 1; }\n");
+		});
+
+		for (const project of projects)
+			for (const file of project.files)
+				runtime.deferMutation(
+					file,
+					project.root,
+					"edit",
+					env.tmpDir,
+					"autofix",
+				);
+		const result = await drain({} as BiomeClient);
+		expect(result?.failed).toEqual([]);
+		expect(runtime.pendingDeferredFormatCount).toBe(0);
+		expect(fake.dartFix).toHaveBeenCalledTimes(2);
+
+		await flushLatencyLog();
+		const { rows, skipped } = readNdjsonRows(getLatencyLogPath());
+		expect(skipped).toBe(0);
+		const expectedSubjects = new Set(
+			projects.map(({ root }) =>
+				createHash("sha256")
+					.update(`dart-analyze:${path.resolve(root)}`)
+					.digest("hex"),
+			),
+		);
+		const skips = rows.filter((row) => {
+			const metadata = row.metadata as Record<string, unknown> | undefined;
+			return (
+				row.phase === "degradation_ledger" &&
+				metadata?.kind === "deferred-autofix-duplicate-scope" &&
+				typeof metadata.subject === "string" &&
+				expectedSubjects.has(metadata.subject)
+			);
+		});
+		expect(skips).toHaveLength(2);
+		for (const project of projects) {
+			const scopeKey = `dart-analyze:${path.resolve(project.root)}`;
+			const projectSkips = skips.filter((row) => {
+				const metadata = row.metadata as Record<string, unknown> | undefined;
+				return (
+					metadata?.subject ===
+					createHash("sha256").update(scopeKey).digest("hex")
+				);
+			});
+			expect(projectSkips).toHaveLength(1);
+			expect(projectSkips[0]?.metadata).toMatchObject({
+				scopeKey: truncateForLedger(scopeKey),
+				subject: createHash("sha256").update(scopeKey).digest("hex"),
+				scope: "dart-project",
 				reason: "duplicate-scope",
 				count: 1,
 			});
