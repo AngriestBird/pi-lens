@@ -18,24 +18,13 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const realpathState = vi.hoisted(() => ({ fail: false }));
-vi.mock("node:fs", async () => {
-	const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
-	// Only the slug's boundary probe (`fs.realpathSync`) fails on demand. The
-	// replacement keeps the real `.native`: `clients/path-utils.ts` keys by it,
-	// and a double without it made every key in this file fall back to the
-	// spelling, so the #4689 cell below could not see the identity arm.
-	const realpathSync = Object.assign(
-		(...args: Parameters<typeof actual.realpathSync>) => {
-			if (realpathState.fail) {
-				throw Object.assign(new Error("temporary failure"), { code: "EACCES" });
-			}
-			return actual.realpathSync(...args);
-		},
-		{ native: actual.realpathSync.native },
-	);
-	return { ...actual, realpathSync };
-});
+// A plain copy of the real module: the namespace itself is not writable, and
+// the rename cells below `vi.spyOn(fs, "renameSync")` it. No function is
+// replaced here (the slug's old `realpathSync` boundary probe is gone, #4689
+// batch 8), so every cell below runs the real filesystem.
+vi.mock("node:fs", async () => ({
+	...(await vi.importActual<typeof import("node:fs")>("node:fs")),
+}));
 import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import { getDisposition } from "../../clients/diagnostic-dispositions.js";
 import { CacheManager } from "../../clients/cache-manager.js";
@@ -247,23 +236,84 @@ describe("project data-dir slug (#2874)", () => {
 		).toBe(true);
 	});
 
-	it("realpath failure keeps the resolved directory stable and records fallback", () => {
+	it("a root not on disk yet records identity-fallback and keeps its name once created", () => {
+		// RECURRENCE GUARDED: #4689 batch 8. `fallback` used to come from a second
+		// `realpathSync` of the root whose result was thrown away; the existence
+		// check that replaced it must keep the same answer, or the notice
+		// (and the "root may not exist yet" name stability) moves with it.
 		isolateDataDir();
 		const scratch = makeScratch("pi-lens-realpath-");
 		const root = path.join(scratch, "proj");
+		const first = getProjectDataDir(root);
+		const notices = drainProjectDataDirMigrations();
+		expect(notices).toHaveLength(1);
+		expect(notices[0]?.outcome).toBe("identity-fallback");
+		expect(notices[0]?.to).toBe(first);
+
 		fs.mkdirSync(root, { recursive: true });
-		const healthy = getProjectDataDir(root);
 		_resetProjectDataDirMemoForTests();
-		realpathState.fail = true;
-		try {
-			expect(getProjectDataDir(root)).toBe(healthy);
-			const notices = drainProjectDataDirMigrations();
-			expect(notices).toHaveLength(1);
-			expect(notices[0]?.outcome).toBe("identity-fallback");
-			expect(notices[0]?.to).toBe(healthy);
-		} finally {
-			realpathState.fail = false;
+		expect(getProjectDataDir(root)).toBe(first);
+		expect(drainProjectDataDirMigrations()).toEqual([]);
+	});
+
+	it("fallback is true exactly when the root is not reachable on disk, for every way a path can fail to resolve (#4689 batch 8)", (ctx) => {
+		// RECURRENCE GUARDED: #4689 batch 8 replaced the discarded
+		// `realpathSync(resolved)` with `existsSync(resolved)`. The two agree on
+		// each row below; the column is what `realpathSync` threw, so a row that
+		// moves is a durable-data-dir selection change.
+		if (process.platform === "win32")
+			return ctx.skip("creating a directory link needs privileges on win32");
+		const scratch = makeScratch("pi-lens-fallback-rows-");
+		const dir = path.join(scratch, "dir");
+		fs.mkdirSync(path.join(dir, "child"), { recursive: true });
+		const file = path.join(scratch, "file.txt");
+		fs.writeFileSync(file, "x");
+		fs.symlinkSync("dir", path.join(scratch, "dirlink"), "dir");
+		fs.symlinkSync("file.txt", path.join(scratch, "filelink"), "file");
+		fs.symlinkSync("nowhere", path.join(scratch, "dangling"));
+		fs.symlinkSync("loop-b", path.join(scratch, "loop-a"));
+		fs.symlinkSync("loop-a", path.join(scratch, "loop-b"));
+		const rows: Array<[string, string, boolean]> = [
+			["a directory", dir, false],
+			["a file", file, false],
+			["a directory link", path.join(scratch, "dirlink"), false],
+			["a file link", path.join(scratch, "filelink"), false],
+			["below a directory link", path.join(scratch, "dirlink", "child"), false],
+			["missing (ENOENT)", path.join(scratch, "missing"), true],
+			[
+				"missing below a link (ENOENT)",
+				path.join(scratch, "dirlink", "m"),
+				true,
+			],
+			["a dangling link (ENOENT)", path.join(scratch, "dangling"), true],
+			["below a file (ENOTDIR)", path.join(file, "below"), true],
+			["a link loop (ELOOP)", path.join(scratch, "loop-a"), true],
+		];
+		for (const [name, root, fallback] of rows)
+			expect([name, dataDirCanonicalRoot(root, "linux").fallback]).toEqual([
+				name,
+				fallback,
+			]);
+		// EACCES: a root below a directory the process may not search. Root (uid 0)
+		// searches it anyway, so that row cannot run there.
+		if (typeof process.getuid === "function" && process.getuid() !== 0) {
+			const sealed = path.join(scratch, "sealed");
+			fs.mkdirSync(path.join(sealed, "proj"), { recursive: true });
+			fs.chmodSync(sealed, 0o000);
+			try {
+				expect(dataDirCanonicalRoot(path.join(sealed, "proj")).fallback).toBe(
+					true,
+				);
+			} finally {
+				fs.chmodSync(sealed, 0o755);
+			}
 		}
+		// win32 never changed: its name is the resolved spelling, and `fallback` is
+		// still existence.
+		expect(dataDirCanonicalRoot(dir, "win32").fallback).toBe(false);
+		expect(
+			dataDirCanonicalRoot(path.join(scratch, "missing"), "win32").fallback,
+		).toBe(true);
 	});
 
 	it("two processes converge on one migrated directory", async () => {

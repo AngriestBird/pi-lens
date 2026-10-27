@@ -585,10 +585,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :148, :202
 	"clients/file-utils.ts": {
-		silent: 11,
-		identities: "0cb7a41f4e5a5a7a",
+		silent: 10,
+		identities: "6ae9ab1bab948b4e",
 		reason: PRE_RULE,
-	}, // :265, :285, :303, :307, :310, :362, :437, :863, :1223, :1504, :1535 (#4689 r4: dataDirCanonicalRoot's realpath-probe arm now returns the identity root; the adoption's handlers declare their none)
+	}, // :339, :359, :377, :381, :384, :511, :939, :1399, :1686, :1717 (#4689 batch 8: dataDirCanonicalRoot's realpath-probe catch is gone with the probe; the adoption's handlers declare their none)
 	"clients/fix-run-restore.ts": {
 		silent: 10,
 		identities: "24b4689d533166d4",
@@ -822,10 +822,14 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :57, :79
 	"clients/lsp/server.ts": {
-		silent: 28,
-		identities: "8d1137f64482cd05",
+		silent: 30,
+		// 28 -> 30 (#4914): `findEffectTsgoLsp` answers `undefined` for an absent or
+		// unreadable `@effect/tsgo` manifest and skips a missing bin candidate, the
+		// same shape as `findNativeTypeScriptLsp`'s probe; either way the launch
+		// falls back to the native `tsc`, whose own session-start line names it.
+		identities: "badb29b973468d1c",
 		reason: PRE_RULE,
-	}, // :185, :335, :759, :790, :1019, :1219, :1352, :1484, :1673, :1754, :1776, :2086, :2165, :2180, :2194, :2211, :2229, :2261, :2288, :2301, :2379, :2391, :2412, :2433, :2625, :2633, :2663, :3201
+	}, // :223, :377, :890, :921, :1150, :1350, :1483, :1615, :1806, :1953, :1975, :2306, :2385, :2400, :2414, :2431, :2449, :2481, :2508, :2521, :2601, :2613, :2634, :2659, :2700, :2714, :2928, :2936, :2966, :3610
 	"clients/lsp/service-singleton.ts": {
 		silent: 1,
 		identities: "f88b642322d541aa",
@@ -1157,10 +1161,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :171, :579, :608, :904, :1108
 	"clients/sgconfig.ts": {
-		silent: 9,
-		identities: "e709eb6e68b73320",
+		silent: 8,
+		identities: "8fd40026fc0c11bb",
 		reason: PRE_RULE,
-	}, // :61, :144, :176, :212, :405, :424, :447, :476, :480
+	}, // :136, :168, :204, :397, :416, :439, :468, :472
 	"clients/single-flight.ts": {
 		silent: 1,
 		identities: "9b712a522f01e05f",

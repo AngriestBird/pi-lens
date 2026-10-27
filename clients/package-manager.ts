@@ -33,7 +33,12 @@ import {
 	createGenerationSource,
 	type GenerationHandle,
 } from "./generation-guard.js";
-import { isAtOrAboveHomeDir, isUnderDir, walkUpDirs } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	isUnderDir,
+	realpathOrResolve,
+	walkUpDirs,
+} from "./path-utils.js";
 import { getProjectTrustState } from "./project-trust.js";
 import {
 	NODE_MODULES_BIN_DIRS,
@@ -709,6 +714,13 @@ function* localBinMatches(
 		ceiling = true,
 	} = options;
 	const names = expandCandidateNames(tools, windowsExt, isWindows);
+	// The ceiling compares real paths (#4911): a HOME or an ancestor spelled
+	// through a link is still the home folder. A start whose spelling is its
+	// real path has no link in it, so neither has any ancestor the walk yields:
+	// each step is then compared as spelled, one realpath for the whole walk
+	// instead of one per step (measured 4x at depth 12 on Linux).
+	const home = ceiling ? realpathOrResolve(homeDir) : homeDir;
+	let startIsReal: boolean | undefined;
 	// Spelled by design (#4689 item 6): the resolver climbs the axis its trust
 	// classifier (`projectLocalBinDirs`) climbs; see there.
 	for (const dir of walkUpDirs(startDir, { spelling: true })) {
@@ -723,7 +735,13 @@ function* localBinMatches(
 		// because there is no legitimate case for this resolver to hand back a
 		// bin from outside the project tree. `ceiling: false` (own-install
 		// walk only, #2544 round 4 F1) skips this check entirely.
-		if (ceiling && isAtOrAboveHomeDir(dir, homeDir)) return;
+		// The first step is the start itself.
+		startIsReal ??= ceiling && realpathOrResolve(dir) === dir;
+		if (
+			ceiling &&
+			isAtOrAboveHomeDir(startIsReal ? dir : realpathOrResolve(dir), home)
+		)
+			return;
 		yield* matchesInDir(dir, names, binDirs);
 	}
 }

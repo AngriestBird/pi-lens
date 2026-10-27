@@ -27,7 +27,11 @@ import {
 	REVIEW_GRAPH_VERSION,
 } from "../../clients/review-graph/builder.js";
 import { clearModuleGraphCache } from "../../clients/review-graph/workspace-modules.js";
-import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+import {
+	createTempFile,
+	pinFixtureHome,
+	setupTestEnvironment,
+} from "./test-utils.js";
 
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
@@ -1141,6 +1145,44 @@ describe("review graph service", () => {
 			env.cleanup();
 		}
 	});
+
+	// RECURRENCE GUARDED: #4911. The ceiling compared spellings, so a cwd or a
+	// HOME spelled through a link walked the whole home tree. Both directions,
+	// each with a real directory link and the real `os.homedir()` read.
+	it.each([["home-link"], ["root-link"]] as const)(
+		"skips graph construction when the %s spelling names $HOME (#4911)",
+		async (kind) => {
+			const env = setupTestEnvironment("pi-lens-review-graph-home-link-");
+			const pin = pinFixtureHome("review-graph-4911");
+			try {
+				createTempFile(
+					pin.home,
+					"src/a.ts",
+					"export function alpha() { return 1; }\n",
+				);
+				const link = path.join(env.tmpDir, "link");
+				fs.symlinkSync(pin.home, link, "junction");
+				if (kind === "home-link") {
+					vi.stubEnv("HOME", link);
+					vi.stubEnv("USERPROFILE", link);
+				}
+				const graph = await buildOrUpdateGraph(
+					kind === "root-link" ? link : pin.home,
+					[],
+					new FactStore(),
+				);
+				expect(getLastGraphBuildInfo()).toMatchObject({
+					mode: "skipped",
+					skipReason: "unsafe_root",
+				});
+				expect(graph.fileNodes.size).toBe(0);
+			} finally {
+				vi.unstubAllEnvs();
+				pin.restore();
+				env.cleanup();
+			}
+		},
+	);
 
 	it("resolves a tree-sitter language import to a real file→file edge (#249)", async () => {
 		// ruby require_relative resolves to a sibling .rb — proves the resolver is

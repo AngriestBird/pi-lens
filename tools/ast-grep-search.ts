@@ -18,7 +18,11 @@ import {
 	synthesizeRule,
 } from "../clients/ast-grep-yaml-synth.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
-import { isAtOrAboveHomeDir } from "../clients/path-utils.js";
+import * as os from "node:os";
+import {
+	isAtOrAboveHomeDir,
+	realpathOrResolve,
+} from "../clients/path-utils.js";
 import {
 	type LensToolHost,
 	translateGuidanceToolNames,
@@ -693,8 +697,15 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 				// what the user asked to search — never second-guessed. But when no
 				// paths are given we fall back to `ctx.cwd`, and if that resolves at or
 				// above $HOME a full structural scan of the entire home tree would be
-				// spawned. Refuse and tell the caller how to scope it.
-				if (!paths?.length && isAtOrAboveHomeDir(ctx.cwd || ".")) {
+				// spawned. Refuse and tell the caller how to scope it. By real path
+				// on both sides (#4911), so a link on either side is refused too.
+				if (
+					!paths?.length &&
+					isAtOrAboveHomeDir(
+						realpathOrResolve(ctx.cwd || "."),
+						realpathOrResolve(os.homedir()),
+					)
+				) {
 					logOutcome("error", {
 						errorRaw: "defaulted cwd resolves at or above home directory",
 					});
