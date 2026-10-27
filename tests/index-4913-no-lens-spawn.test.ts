@@ -27,7 +27,11 @@ import {
 	writeTarget,
 } from "./support/pi-session-commit-gate.js";
 import { piSessionFixture, startPiSession } from "./support/pi-session.js";
-import { markerProject, spawnedWithin } from "./support/marker-lsp-project.js";
+import {
+	markerProject,
+	spawnedWithin,
+	until,
+} from "./support/marker-lsp-project.js";
 
 const fixture = piSessionFixture();
 
@@ -39,15 +43,6 @@ function warmResolvedCount(): number {
 		.readFileSync(log, "utf-8")
 		.split("\n")
 		.filter((line) => line.includes("LSP warm resolved")).length;
-}
-
-async function until(done: () => boolean, limitMs: number): Promise<boolean> {
-	const started = Date.now();
-	while (Date.now() - started < limitMs) {
-		if (done()) return true;
-		await new Promise((resolve) => setTimeout(resolve, 50));
-	}
-	return done();
 }
 
 it("spawns no server and warms nothing at session start under --no-lens, and a server on the next use after /lens-toggle", async () => {

@@ -1,3 +1,4 @@
+// flake-shape: raw-timer-wait — the marker server is a real child process the extension spawns on its own schedule, so a spawn (or its absence over a bounded window) is joinable only by polling the file it writes.
 /**
  * A project whose TypeScript server is a real child process that records its
  * own start (#4913 F1). `serverOverrides.typescript` runs a wrapper that
@@ -50,15 +51,26 @@ export function markerProject(
 	return { proj, marker };
 }
 
+/** Polls `done` until it holds or `limitMs` pass; true when it held. */
+export async function until(
+	done: () => boolean,
+	limitMs: number,
+): Promise<boolean> {
+	const started = Date.now();
+	while (Date.now() - started < limitMs) {
+		if (done()) return true;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	return done();
+}
+
 /** Milliseconds until the marker exists, or undefined after `limitMs`. */
 export async function spawnedWithin(
 	marker: string,
 	limitMs: number,
 ): Promise<number | undefined> {
 	const started = Date.now();
-	while (Date.now() - started < limitMs) {
-		if (fs.existsSync(marker)) return Date.now() - started;
-		await new Promise((resolve) => setTimeout(resolve, 50));
-	}
-	return undefined;
+	return (await until(() => fs.existsSync(marker), limitMs))
+		? Date.now() - started
+		: undefined;
 }

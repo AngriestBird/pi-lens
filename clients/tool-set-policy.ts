@@ -228,7 +228,8 @@ export function planToolSet(
 	const activeSet = new Set(active);
 	const removedCount = active.filter((name) => !desiredSet.has(name)).length;
 	const addedCount = desired.filter((name) => !activeSet.has(name)).length;
-	const cliDisabledCount = active.filter((name) => disabled.has(name)).length;
+	let cliDisabledCount = 0;
+	for (const name of active) if (disabled.has(name)) cliDisabledCount++;
 	return {
 		desired,
 		addedCount,
