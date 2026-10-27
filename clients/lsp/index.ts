@@ -45,6 +45,7 @@ import {
 	DocumentDriftTracker,
 	fingerprintDocumentContent,
 	type DriftDisposition,
+	type DriftSweepOptions,
 	type DriftSweepResult,
 } from "./document-drift.js";
 import {
@@ -3894,7 +3895,7 @@ export class LSPService {
 	 * no stale view to correct, so its record is dropped instead of resynced.
 	 */
 	async sweepDocumentDrift(
-		options: { force?: boolean } = {},
+		options: DriftSweepOptions = {},
 	): Promise<DriftSweepResult | undefined> {
 		if (this.checkDestroyed()) return undefined;
 		return this.documentDrift.sweep(

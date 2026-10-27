@@ -1313,7 +1313,7 @@ export function createLspNavigationTool(
 					);
 					// #4532 gap 13: the same forced drift sweep `lsp_diagnostics` runs, so
 					// a held file changed outside pi is re-pushed before this read.
-					await lspService.sweepDocumentDrift({ force: true });
+					await lspService.sweepDocumentDrift({ force: true, full: true });
 					// #1634: the content the diagnostics below answer for is the
 					// content the policy's inline and strict-anchor checks read.
 					const openedContent = await openFileBestEffort(

@@ -476,6 +476,10 @@ const lspSpawnHeavyInclude = [
 	// LSPService over a real stdio fake-server child (a project custom server);
 	// waits on a real handshake and pull rounds like #4320's.
 	"tests/tools/lsp-diagnostics-drift-sweep-4532.test.ts",
+	// #4532 gap 13 round 1b: the same handlers over a real stdio fake-server child
+	// with 200 and 500 held documents; each cell spawns its own service and waits
+	// on the handshake and pull rounds, so the real child is the thing under test.
+	"tests/tools/lsp-diagnostics-drift-sweep-caps-4532.test.ts",
 	// #3310: launches the fake server THROUGH the production `PHPServer` entry
 	// (an executable node_modules/.bin/intelephense shim) and waits on a real
 	// initialize handshake plus a two-publish diagnostics sequence per case —
