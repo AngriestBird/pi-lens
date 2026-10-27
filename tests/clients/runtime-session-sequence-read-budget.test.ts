@@ -784,4 +784,46 @@ describe("#1162 — bounded session_start sequence read", () => {
 			env.cleanup();
 		}
 	});
+
+	// RECURRENCE GUARDED: #4911. The snapshot root's home ceiling compared
+	// spellings, so with a HOME or a cwd spelled through a link the nearest
+	// marker at the home became the snapshot root: the session read (and
+	// later wrote) the whole home's project state. The read is the observable:
+	// its root argument is the snapshot root `session_start` chose. Both
+	// directions, each with a real directory link and the real `os.homedir()`.
+	it.each([["home-link"], ["root-link"]] as const)(
+		"keeps the snapshot root at the cwd when the %s spelling puts the nearest marker at the home (#4911)",
+		async (kind) => {
+			const env = setupTestEnvironment("pi-lens-seq-budget-home-link-");
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			const pin = pinFixtureHome("runtime-session-4911");
+			try {
+				fs.mkdirSync(path.join(pin.home, ".git"), { recursive: true });
+				fs.mkdirSync(path.join(pin.home, "proj"), { recursive: true });
+				const link = path.join(env.tmpDir, "link");
+				fs.symlinkSync(pin.home, link, "junction");
+				if (kind === "home-link") {
+					vi.stubEnv("HOME", link);
+					vi.stubEnv("USERPROFILE", link);
+				}
+				const cwd = path.join(kind === "root-link" ? link : pin.home, "proj");
+				readLatestProjectSequenceAsyncSpy.mockResolvedValue({
+					projectSeq: 0,
+					fileSeqByPath: new Map(),
+					logEntries: 0,
+				});
+
+				await handleSessionStart(makeDeps(cwd, new RuntimeCoordinator()));
+
+				const roots = new Set(
+					readLatestProjectSequenceAsyncSpy.mock.calls.map((call) => call[0]),
+				);
+				expect([...roots]).toEqual([cwd]);
+			} finally {
+				vi.unstubAllEnvs();
+				pin.restore();
+				env.cleanup();
+			}
+		},
+	);
 });

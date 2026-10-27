@@ -33,7 +33,12 @@ import {
 	createGenerationSource,
 	type GenerationHandle,
 } from "./generation-guard.js";
-import { isAtOrAboveHomeDir, isUnderDir, walkUpDirs } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	isUnderDir,
+	realpathOrResolve,
+	walkUpDirs,
+} from "./path-utils.js";
 import { getProjectTrustState } from "./project-trust.js";
 import {
 	NODE_MODULES_BIN_DIRS,
@@ -709,6 +714,10 @@ function* localBinMatches(
 		ceiling = true,
 	} = options;
 	const names = expandCandidateNames(tools, windowsExt, isWindows);
+	// The ceiling compares real paths (#4911): a HOME or an ancestor spelled
+	// through a link is still the home folder. Resolved once, and each step
+	// only while the ceiling is on.
+	const home = ceiling ? realpathOrResolve(homeDir) : homeDir;
 	// Spelled by design (#4689 item 6): the resolver climbs the axis its trust
 	// classifier (`projectLocalBinDirs`) climbs; see there.
 	for (const dir of walkUpDirs(startDir, { spelling: true })) {
@@ -723,7 +732,7 @@ function* localBinMatches(
 		// because there is no legitimate case for this resolver to hand back a
 		// bin from outside the project tree. `ceiling: false` (own-install
 		// walk only, #2544 round 4 F1) skips this check entirely.
-		if (ceiling && isAtOrAboveHomeDir(dir, homeDir)) return;
+		if (ceiling && isAtOrAboveHomeDir(realpathOrResolve(dir), home)) return;
 		yield* matchesInDir(dir, names, binDirs);
 	}
 }

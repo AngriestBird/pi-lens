@@ -688,6 +688,32 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		expect(cacheManager.writeCache).not.toHaveBeenCalled();
 	});
 
+	// RECURRENCE GUARDED: #4911. The root was a real path but HOME was compared
+	// as spelled, so a HOME spelled through a link let every analyzer walk the
+	// home tree. The root-link direction rides along: it must keep refusing.
+	it.each([["home-link"], ["root-link"]] as const)(
+		"refuses to run anything when the %s spelling names the home directory (#4911)",
+		async (kind) => {
+			const cacheManager = makeCacheManager();
+			const clients = makeClients();
+			const home = path.join(tmp, "home");
+			fs.mkdirSync(home, { recursive: true });
+			const link = path.join(tmp, "link");
+			fs.symlinkSync(home, link, "junction");
+
+			const result = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				kind === "root-link" ? link : home,
+				clients,
+				undefined,
+				{ homeDir: kind === "home-link" ? link : home },
+			);
+
+			expect(result.unsafeRoot).toBe(true);
+			expect(clients.knipClient.analyze).not.toHaveBeenCalled();
+		},
+	);
+
 	it("runs normally for a project directory UNDER the home directory (#747)", async () => {
 		const cacheManager = makeCacheManager();
 		const clients = makeClients();

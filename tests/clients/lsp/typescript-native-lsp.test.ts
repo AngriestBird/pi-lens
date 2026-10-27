@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { removeTempDirSync } from "../test-utils.js";
+import { pinFixtureHome, removeTempDirSync } from "../test-utils.js";
 
 const { ensureTool, getToolEnvironment, launchLSP } = vi.hoisted(() => ({
 	ensureTool: vi.fn(),
@@ -252,4 +252,54 @@ describe("TypeScript native LSP selection", () => {
 		expect(launchLSP).not.toHaveBeenCalled();
 		expect(result).toBeUndefined();
 	});
+});
+
+describe("TypeScript LSP ancestor walks stop at a linked home (#4911)", () => {
+	// RECURRENCE GUARDED: #4911. Both ancestor walks keep the caller's spelling
+	// (a returned binary is classified where it is spelled) and compared that
+	// spelling with the spelled HOME, so a HOME or a root spelled through a link
+	// climbed into the home and launched the home's TypeScript. Both directions,
+	// each with a real directory link and the real `os.homedir()` read.
+	beforeEach(() => {
+		ensureTool.mockReset();
+		ensureTool.mockResolvedValue(undefined);
+		launchLSP.mockReset();
+		launchLSP.mockResolvedValue(fakeProcess);
+	});
+
+	const cells = (["native", "classic"] as const).flatMap((walk) =>
+		(["home-link", "root-link"] as const).map((kind) => [walk, kind] as const),
+	);
+
+	it.each(cells)(
+		"the %s walk does not launch the home's server when the %s spelling names the home",
+		async (walk, kind) => {
+			const pin = pinFixtureHome("ts-native-4911");
+			const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4911-"));
+			dirs.push(scratch);
+			try {
+				if (walk === "native") {
+					addTypeScriptPackage(pin.home, "7.0.2");
+					addNativeTsc(pin.home);
+				} else {
+					addClassicServer(pin.home);
+				}
+				fs.mkdirSync(path.join(pin.home, "proj"), { recursive: true });
+				const link = path.join(scratch, "link");
+				fs.symlinkSync(pin.home, link, "junction");
+				if (kind === "home-link") {
+					vi.stubEnv("HOME", link);
+					vi.stubEnv("USERPROFILE", link);
+				}
+				const root = path.join(kind === "root-link" ? link : pin.home, "proj");
+
+				await TypeScriptServer.spawn(root, { allowInstall: false });
+
+				expect(launchLSP).not.toHaveBeenCalled();
+			} finally {
+				vi.unstubAllEnvs();
+				pin.restore();
+			}
+		},
+	);
 });
