@@ -395,5 +395,5 @@ date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
 counts (#3989). Regenerated every run; never a measurement.
 
 ```json
-{"idle-eviction":{"docker-official":{"nights":[{"day":"2026-10-23","rssMb":62,"coldMs":883},{"day":"2026-10-24","rssMb":62,"coldMs":957}]},"kotlin":{"nights":[{"day":"2026-10-25","rssMb":270,"coldMs":2522}]},"powershell":{"nights":[{"day":"2026-10-25","rssMb":167,"coldMs":2967}]},"rust":{"nights":[{"day":"2026-10-25","rssMb":596,"coldMs":2927}]},"svelte":{"nights":[{"day":"2026-10-25","rssMb":232,"coldMs":2674}]},"zizmor":{"nights":[{"day":"2026-10-23","rssMb":55,"coldMs":1661},{"day":"2026-10-24","rssMb":57,"coldMs":1683}]}}}
+{"idle-eviction":{"powershell":{"nights":[{"day":"2026-10-27","rssMb":155,"coldMs":2553}]}}}
 ```
