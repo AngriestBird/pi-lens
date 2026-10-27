@@ -282,6 +282,9 @@ describe("TypeScript LSP ancestor walks stop at a linked home (#4911)", () => {
 					addTypeScriptPackage(pin.home, "7.0.2");
 					addNativeTsc(pin.home);
 				} else {
+					// A TypeScript 6 package beside the wrapper: the native walk reads
+					// it and steps aside, so only the classic walk can reach the home.
+					addTypeScriptPackage(pin.home, "6.0.3");
 					addClassicServer(pin.home);
 				}
 				fs.mkdirSync(path.join(pin.home, "proj"), { recursive: true });
