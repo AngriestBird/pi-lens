@@ -83,6 +83,21 @@ function changedEventsFor(file: string, from: number): number {
 		.filter((entry) => entry === line).length;
 }
 
+/** The latency log's `lsp_unheld_dependency_changed` rows, in order. */
+function phaseRows(): Array<{
+	result?: string;
+	metadata?: { changed?: number; paths?: string[] };
+}> {
+	if (!fs.existsSync(getLatencyLogPath())) return [];
+	const { rows, skipped } = readNdjsonRows<{
+		phase?: string;
+		result?: string;
+		metadata?: { changed?: number; paths?: string[] };
+	}>(getLatencyLogPath());
+	expect(skipped).toBe(0);
+	return rows.filter((row) => row.phase === "lsp_unheld_dependency_changed");
+}
+
 /** A fixture pair: `<name>_user.ts` imports `NEW` from `<name>_dep.ts`. */
 function pair(name: string): { user: string; dep: string } {
 	const dep = path.join(workspace, `${name}_dep.ts`);
@@ -235,6 +250,24 @@ describe("a closed module changed outside pi (#4532 gap 13)", () => {
 		expect(changedEventsFor(dep, mark)).toBe(0);
 	}, 30_000);
 
+	// Recurrence: the record a sent event refreshes dropped the hash the check
+	// had just taken, so the next same-bytes stat move (a save of unchanged
+	// bytes) compared no bytes and sent the module again.
+	it("sends nothing when bytes it sent are rewritten unchanged", async () => {
+		const { user, dep } = pair("resaved");
+		age(dep);
+		expect((await diagnose({ path: user })).text).toContain(MISSING);
+		fs.writeFileSync(dep, "export const NEW = 1;\n");
+		expect((await diagnose({ path: user })).text).not.toContain(MISSING);
+
+		const mark = traceLines().length;
+		const later = Date.now() / 1000 + 5;
+		fs.utimesSync(dep, later, later);
+		expect((await diagnose({ path: user })).text).not.toContain(MISSING);
+
+		expect(changedEventsFor(dep, mark)).toBe(0);
+	}, 30_000);
+
 	// A held module is the open-document sync's to keep current (#4532 gap
 	// 13a); a watched-files event for an open document is noise.
 	it("sends nothing for a module a server holds open", async () => {
@@ -273,6 +306,30 @@ describe("a closed module changed outside pi (#4532 gap 13)", () => {
 		// The other sender's event, and none from the call.
 		expect(changedEventsFor(dep, mark)).toBe(1);
 	}, 30_000);
+
+	// Recurrence: a sent Deleted event left the module's record behind, so the
+	// module restored with the same bytes (a HEAD move away and back, #4742)
+	// compared equal and was never sent: the server kept its deleted view.
+	it("sends a module restored with its old bytes after a sent deletion", async () => {
+		const { user, dep } = pair("restored");
+		age(dep);
+		expect((await diagnose({ path: user })).text).toContain(MISSING);
+
+		const bytes = fs.readFileSync(dep);
+		fs.unlinkSync(dep);
+		const lsp = service as unknown as {
+			notifyOutOfBandFileChanges: (
+				changes: Array<{ filePath: string; type: number }>,
+			) => void;
+		};
+		lsp.notifyOutOfBandFileChanges([{ filePath: dep, type: 3 }]);
+		fs.writeFileSync(dep, bytes);
+		const mark = traceLines().length;
+		const after = await diagnose({ path: user });
+
+		expect(after.text).toContain(MISSING);
+		expect(changedEventsFor(dep, mark)).toBe(1);
+	}, 30_000);
 });
 
 describe("the record of a sent change (#4532 gap 13)", () => {
@@ -282,24 +339,19 @@ describe("the record of a sent change (#4532 gap 13)", () => {
 		try {
 			const { user, dep } = pair("row");
 			age(dep);
+			await flushLatencyLog();
+			const before = phaseRows().length;
 			await diagnose({ path: user });
 			fs.writeFileSync(dep, "export const NEW = 1;\n");
 			await diagnose({ path: user });
 			await diagnose({ path: user });
 
 			await flushLatencyLog();
-			const { rows, skipped } = readNdjsonRows<{
-				phase?: string;
-				result?: string;
-				metadata?: { changed?: number; paths?: string[] };
-			}>(getLatencyLogPath());
-			expect(skipped).toBe(0);
-			const sent = rows.filter(
-				(row) =>
-					row.phase === "lsp_unheld_dependency_changed" &&
-					row.metadata?.paths?.includes(dep),
-			);
+			// Three calls, one of which sent: one row, and none from the two
+			// calls that sent nothing.
+			const sent = phaseRows().slice(before);
 			expect(sent).toHaveLength(1);
+			expect(sent[0]?.metadata?.paths).toEqual([dep]);
 			expect(sent[0]?.result).toBe("changed:1");
 		} finally {
 			if (saved === undefined) delete process.env.PI_LENS_TEST_MODE;
