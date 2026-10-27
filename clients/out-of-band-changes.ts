@@ -133,9 +133,50 @@ const records = new BoundedFifoMap<string, RootRecord>(MAX_ROOTS);
  * One look per root at a time: a look that arrives mid-flight joins it and
  * gets one trailing look, which compares against the record the flight left,
  * so two sessions' looks after one install restart once. The trailing look
- * carries the first caller's trigger.
+ * runs the first caller's closure, so a joiner's walk demand rides
+ * {@link owedWalks}, not the closure.
  */
 const looks = createSingleFlight<void>({ coalesceTrailing: true });
+
+/**
+ * #4532 gap 6: roots owed a declaration walk by a caller whose trigger demands
+ * one (a bash result), by root key. The trailing pass of a joined flight runs
+ * the FIRST caller's closure, so a bash result that joined a `tool_call` look
+ * got no walk, and the file its command generated waited for some later walk.
+ *
+ * Each caller writes its demand here in the same synchronous step as its join
+ * ({@link oweDeclarationWalk}), and every pass takes its key's demand before
+ * its first await: the running pass has either not taken yet (it walks for
+ * the joiner) or has, and then the join earned the trailing pass that takes
+ * it. Process-wide like `records` (a session boundary keeps it: it is a demand
+ * on the disk, and costs at most one walk); bounded like `records`, and an
+ * evicted demand only defers the change to the next walk.
+ */
+const owedWalks = new BoundedFifoMap<string, true>(MAX_ROOTS);
+
+/**
+ * Owe `root`'s next look a declaration walk when this call demands one: a
+ * `tool_result` under the `"trigger"` rule. A `tool_call`, and every
+ * `"interval"` look, walk only when the interval has passed, which the pass
+ * reads from the record itself, so they owe nothing. The HEAD look calls this
+ * for its own caller before it joins (`resyncHeadMove`): a HEAD look that
+ * joins runs the first caller's closure too.
+ */
+export function oweDeclarationWalk(
+	root: string,
+	trigger: "tool_call" | "tool_result",
+	walk: OutOfBandLookOptions["walk"] = "trigger",
+): void {
+	if (demandsWalk(trigger, walk)) owedWalks.set(normalizeMapKey(root), true);
+}
+
+/** #4476's rule: a bash result always walks, unless the look is `"interval"`. */
+function demandsWalk(
+	trigger: "tool_call" | "tool_result",
+	walk: OutOfBandLookOptions["walk"],
+): boolean {
+	return trigger === "tool_result" && walk !== "interval";
+}
 
 const fingerprint = (stat: {
 	ino: number;
@@ -529,6 +570,7 @@ export function lookForOutOfBandChanges(
 				"a session root that is the home folder or above it is not walked for declaration files changed outside pi-lens; such a change under it is not looked for (a dependency install still is)",
 		});
 	const key = normalizeMapKey(root);
+	oweDeclarationWalk(root, trigger, options.walk);
 	return looks.run(key, () =>
 		lookOnce(root, key, trigger, runtime, options, homeRoot),
 	);
@@ -598,16 +640,18 @@ async function lookOnce(
 	/** The root is the home folder or above it: no declaration walk (#4905). */
 	skipWalk: boolean,
 ): Promise<void> {
+	// #4532 gap 6: this pass serves every walk demand written before it
+	// started, its own caller's and any joiner's, and takes them before its
+	// first await (`owedWalks`). A pass with none walks under the interval rule,
+	// as a lone `tool_call` or `"interval"` look does.
+	const walkOwed = owedWalks.delete(key);
 	const started = Date.now();
 	const prior = records.get(key);
 	const walkDue =
 		!skipWalk &&
-		(options.walk === "interval"
-			? prior === undefined ||
-				started - prior.walkedAt >= declarationLookIntervalMs()
-			: trigger === "tool_result" ||
-				prior === undefined ||
-				started - prior.walkedAt >= declarationLookIntervalMs());
+		(walkOwed ||
+			prior === undefined ||
+			started - prior.walkedAt >= declarationLookIntervalMs());
 	const [install, walked] = await Promise.all([
 		readInstallStamp(root),
 		walkDue ? walkDeclarations(root) : Promise.resolve(undefined),
@@ -725,6 +769,9 @@ async function lookOnce(
 			// session-cwd root and a live client's root write the same record,
 			// so this names the look, not the caller.
 			scope: prior === undefined ? "first-look" : "recorded",
+			// #4532 gap 6: the walk served a demand this row's own trigger did not
+			// make: a bash result that joined this flight (`owedWalks`).
+			joinedWalk: walkOwed && !demandsWalk(trigger, options.walk),
 			created: count(1),
 			changed: count(2),
 			deleted: count(3),
