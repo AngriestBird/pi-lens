@@ -7,7 +7,7 @@
  */
 
 import { getServersForFileWithConfig } from "../config.js";
-import { isAuxiliary } from "../server-traits.js";
+import { isAuxiliary, isTsgoLaunchVariant } from "../server-traits.js";
 import type { LSPService } from "../index.js";
 import { getStrategy } from "./strategies.js";
 import type { LSPCapabilitySnapshot } from "./capability-snapshot.js";
@@ -61,7 +61,7 @@ export function classifyServerWaitTier(
 	// ambiguous/fail-safe path an unmarked or non-push-only server already
 	// takes. `launchVariant === "classic"` or absent (older snapshots that
 	// predate the marker) keeps today's tier-3 behavior exactly.
-	if (snapshot.launchVariant === "native-ts7") return "waits";
+	if (isTsgoLaunchVariant(snapshot.launchVariant)) return "waits";
 
 	return "tier3-silent";
 }

@@ -2575,6 +2575,8 @@ async function findTsserverPath(
 interface NativeTypeScriptLsp {
 	command: string;
 	version: string;
+	/** The `node_modules` directory the nearest TypeScript 7+ package sits in. */
+	nodeModulesDir: string;
 }
 
 /**
@@ -2649,12 +2651,69 @@ async function findNativeTypeScriptLsp(
 		for (const command of candidates) {
 			try {
 				await access(command);
-				return { command, version };
+				return {
+					command,
+					version,
+					nodeModulesDir: path.join(currentDir, "node_modules"),
+				};
 			} catch {
 				/* not found */
 			}
 		}
 		return undefined;
+	}
+	return undefined;
+}
+
+interface EffectTsgoLsp {
+	command: string;
+	version: string;
+}
+
+/**
+ * #4914: a project that installed `@effect/tsgo` next to its TypeScript 7+
+ * gets the Effect language service through the project's own `effect-tsgo`
+ * wrapper (`effect-tsgo tsc --lsp --stdio`). Opting in is the install itself.
+ *
+ * `nodeModulesDir` is the level `findNativeTypeScriptLsp` found the nearest
+ * TypeScript 7+ at, and only that level is read: a TypeScript 7 package with
+ * no `@effect/tsgo` beside it, or a malformed one (no readable manifest
+ * version, no bin), answers `undefined` and the caller keeps the native
+ * launch. Never an ancestor's `@effect/tsgo`, which the nearer TypeScript does
+ * not resolve (the same shadowing rule as the compiler itself).
+ */
+async function findEffectTsgoLsp(
+	nodeModulesDir: string,
+): Promise<EffectTsgoLsp | undefined> {
+	let version: unknown;
+	try {
+		const manifest: unknown = JSON.parse(
+			await readFile(
+				path.join(nodeModulesDir, "@effect", "tsgo", "package.json"),
+				"utf8",
+			),
+		);
+		version =
+			typeof manifest === "object" && manifest !== null && "version" in manifest
+				? manifest.version
+				: undefined;
+	} catch {
+		return undefined;
+	}
+	if (typeof version !== "string" || !version) return undefined;
+
+	const localBin = path.join(nodeModulesDir, ".bin", "effect-tsgo");
+	const candidates =
+		process.platform === "win32"
+			? [`${localBin}.cmd`, `${localBin}.exe`, localBin]
+			: [localBin];
+	for (const command of candidates) {
+		try {
+			await access(command);
+			return { command, version };
+		} catch {
+			/* not found */
+		}
 	}
 	return undefined;
 }
@@ -2962,6 +3021,34 @@ export const TypeScriptServer: LSPServerInfo = {
 	rootMarkers: TypeScriptRoot.rootMarkers,
 	async spawn(root, options) {
 		const nativeLsp = await findNativeTypeScriptLsp(root);
+		// #4914: the project's `effect-tsgo` wrapper runs the same typescript-go
+		// server with the Effect language service. It is project-supplied code, so
+		// it takes the same trust gate as the compiler; a refusal falls through to
+		// the native launch, which that gate refuses the same way.
+		const effectLsp = nativeLsp
+			? await findEffectTsgoLsp(nativeLsp.nodeModulesDir)
+			: undefined;
+		if (
+			nativeLsp &&
+			effectLsp &&
+			admitProjectSuppliedTsserver(
+				effectLsp.command,
+				root,
+				true,
+				options?.projectCodeAllowed,
+			)
+		) {
+			const env = await getToolEnvironment();
+			logSessionStart(
+				`lsp typescript-effect-tsgo: version=${effectLsp.version} typescript=${nativeLsp.version} command=${effectLsp.command}`,
+			);
+			const proc = await launchLSP(
+				effectLsp.command,
+				["tsc", "--lsp", "--stdio"],
+				{ cwd: root, env },
+			);
+			return { process: proc, source: "direct", launchVariant: "effect-tsgo" };
+		}
 		if (
 			nativeLsp &&
 			admitProjectSuppliedTsserver(
