@@ -9,31 +9,55 @@
  * `pi --no-lens` still started language servers.
  *
  * Population: the body of every module-level function the default export
- * calls (today `activateExtension`), parsed from COMMENT-AND-STRING-BLANKED
- * text (`stripSource`, so a comment that quotes `getLensFlag(` is not a read),
- * through the census AST seam (`ast-census.ts`).
+ * calls (today `activateExtension`) AND, transitively, every module-level
+ * function or function-valued constant those bodies call while they run (a
+ * helper the factory calls synchronously is part of the factory). It is parsed
+ * from COMMENT-AND-STRING-BLANKED text (`stripSource`, so a comment that
+ * quotes `getLensFlag(` is not a read), through the census AST seam
+ * (`ast-census.ts`).
  *
  * The reader set R is the base names {@link BASE_READERS} plus, by fixpoint,
  * every function-valued binding or declaration in the population whose text
  * references a member of R. An indirect read (`const read = () =>
  * getLensFlag(..); read()`) is therefore a read at the call to `read`.
  *
- * A reference to a member of R is classified by where it sits. The detector
- * ADMITS a short list of forms and REFUSES every other:
+ * FAIL CLOSED (the round-2 redesign, #4917 F2). A function is factory-time
+ * code unless it is one of the short list of forms that only DEFERS it:
  *
- * - inside a nested function that is not a synchronous array callback: the
- *   host calls it later (a handler, a tool `execute`, a command), admitted;
+ * - a function declaration, or a function bound by `const f = () => ..`: it
+ *   runs when called, and a call at factory time is itself a reference to a
+ *   reader (the fixpoint above) or a transitively scanned helper;
+ * - a function (or an object literal holding functions) passed as an argument
+ *   of a call to a known deferring registrar, directly or through wrapper
+ *   calls whose result is the registrar's argument (`pi.on("x", wrap(fn))`): `pi.on`, `registerCommand`,
+ *   `registerTool`, the other `register*` hooks, event `on`/`once`, timers,
+ *   `queueMicrotask`, and the promise continuations `then`/`catch`/`finally`.
+ *
+ * Every other function is refused: an IIFE (arrow or `function`), an object
+ * method or property the factory invokes, a `new Promise` executor, a
+ * synchronous array callback, and anything nobody planned for. A reference to
+ * a member of R inside such a function is a factory-time read.
+ *
+ * A reference to a member of R at factory time is then classified by where it
+ * sits. The detector ADMITS a short list of forms and REFUSES every other:
+ *
  * - a declaration name, or an object-literal key: not a use, admitted;
  * - an argument of a call, or the value of a pair in an object literal that is
  *   itself a call argument: the reader is handed to a callee that stores it,
  *   admitted. RESIDUAL, named: a callee that invokes its argument
  *   synchronously reads at factory time, and this scan cannot see into it;
- * - anything else at factory time, which includes a call to a reader, a read
- *   inside a synchronous array callback (`.filter((t) => isToolEnabled(..))`),
- *   an alias binding, an assignment right-hand side, an array element,
- *   `.call`/`.apply`/`.bind` on a reader, and a destructuring: REFUSED, unless
- *   an {@link FactoryFlagAdmission} row keyed `<binding>:<reader>` carries its
+ * - anything else, which includes a call to a reader, an alias binding, an
+ *   assignment right-hand side, an array element, `.call`/`.apply`/`.bind` on
+ *   a reader, and a destructuring: REFUSED, unless an
+ *   {@link FactoryFlagAdmission} row keyed `<function>:<binding>:<reader>:<form>` carries its
  *   reason.
+ *
+ * RESIDUALS, named. The call graph follows direct calls by name only: a helper
+ * reached through a variable, a method, a dynamic `import()` or a callback the
+ * factory hands to a callee that runs it synchronously is invisible. A
+ * registrar name in the allowlist that a given object runs synchronously
+ * (an `on` of an emitter that fires at once) is trusted. A flag read in a
+ * module the factory imports is not scanned.
  */
 import type { SgNode } from "@ast-grep/napi";
 import { parseNodes } from "./ast-census.js";
@@ -55,7 +79,7 @@ export interface FactoryFlagRead {
 	readonly reader: string;
 	/** The enclosing declarator's name, or `<top>`. */
 	readonly binding: string;
-	/** `binding:reader`, the admission key. */
+	/** `function:binding:reader:form`, the admission key. */
 	readonly key: string;
 	/** How the reader appears: `call`, or the kind of the node holding it. */
 	readonly form: string;
@@ -82,18 +106,37 @@ const FUNCTION_KINDS = new Set([
 	"generator_function_declaration",
 ]);
 
-/** Array iteration methods whose callback runs before the call returns. */
-const SYNC_CALLBACK_METHODS = new Set([
-	"filter",
-	"map",
-	"flatMap",
-	"some",
-	"every",
-	"find",
-	"findIndex",
-	"forEach",
-	"reduce",
-	"sort",
+/** Callee identifiers that defer the function they are handed. */
+const DEFERRING_FUNCTIONS = new Set([
+	"setTimeout",
+	"setInterval",
+	"setImmediate",
+	"queueMicrotask",
+]);
+
+/** Member names that defer the function they are handed: host registrars. */
+const DEFERRING_METHODS = new Set([
+	"on",
+	"once",
+	"addListener",
+	"addEventListener",
+	"registerCommand",
+	"registerTool",
+	"registerFlag",
+	"registerShortcut",
+	"registerMessageRenderer",
+	"registerProvider",
+	"then",
+	"catch",
+	"finally",
+]);
+
+/** Expression wrappers that do not change what a function is passed to. */
+const WRAPPER_KINDS = new Set([
+	"parenthesized_expression",
+	"as_expression",
+	"satisfies_expression",
+	"non_null_expression",
 ]);
 
 const kindOf = (node: SgNode): string => String(node.kind());
@@ -160,7 +203,52 @@ function isFunctionValuedBinding(node: SgNode): boolean {
 	return value !== null && FUNCTION_KINDS.has(kindOf(value));
 }
 
-/** Module-level functions the default export calls by name. */
+/** The function a module-level declaration or constant defines, if any. */
+function moduleFunctionOf(node: SgNode): { name: string; fn: SgNode } | null {
+	const parent = node.parent();
+	if (!parent) return null;
+	const atModule = (n: SgNode | null): boolean => {
+		if (!n) return false;
+		const holder = kindOf(n) === "export_statement" ? n.parent() : n;
+		return holder !== null && kindOf(holder) === "program";
+	};
+	if (kindOf(node) === "function_declaration") {
+		if (!atModule(parent)) return null;
+		const name = boundName(node);
+		return name ? { name, fn: node } : null;
+	}
+	if (kindOf(node) === "variable_declarator") {
+		const declaration = parent;
+		if (
+			kindOf(declaration) !== "lexical_declaration" ||
+			!atModule(declaration.parent())
+		)
+			return null;
+		const value = node.field("value");
+		const name = boundName(node);
+		return value && name && FUNCTION_KINDS.has(kindOf(value))
+			? { name, fn: value }
+			: null;
+	}
+	return null;
+}
+
+/** A population function's reporting name. */
+function nameOf(fn: SgNode): string {
+	if (kindOf(fn) === "function_declaration")
+		return boundName(fn) ?? "<anonymous>";
+	const holder = fn.parent();
+	return holder && kindOf(holder) === "variable_declarator"
+		? (boundName(holder) ?? "<anonymous>")
+		: "<anonymous>";
+}
+
+/**
+ * Module-level functions that run while the factory runs: the ones the default
+ * export calls by name, then, transitively, the ones those bodies call by name
+ * at factory time (a call inside a function that only defers its body is not
+ * one).
+ */
 function populationFunctions(nodes: SgNode[]): SgNode[] {
 	const exported = nodes.find(
 		(node) =>
@@ -168,20 +256,32 @@ function populationFunctions(nodes: SgNode[]): SgNode[] {
 			node.text().startsWith("export default"),
 	);
 	if (!exported) throw new Error("factory-flag scan: no default export found");
-	const called = new Set(
-		within(nodes, exported)
-			.filter((node) => kindOf(node) === "call_expression")
+	const moduleFunctions = new Map<string, SgNode>();
+	for (const node of nodes) {
+		const found = moduleFunctionOf(node);
+		if (found && !moduleFunctions.has(found.name))
+			moduleFunctions.set(found.name, found.fn);
+	}
+	const calledBy = (root: SgNode, runs: (node: SgNode) => boolean): string[] =>
+		within(nodes, root)
+			.filter((node) => kindOf(node) === "call_expression" && runs(node))
 			.map((node) => node.field("function"))
 			.filter((callee): callee is SgNode => callee !== null)
 			.filter((callee) => kindOf(callee) === "identifier")
-			.map((callee) => callee.text()),
-	);
-	return nodes.filter(
-		(node) =>
-			kindOf(node) === "function_declaration" &&
-			kindOf(node.parent() as SgNode) === "program" &&
-			called.has(boundName(node) ?? ""),
-	);
+			.map((callee) => callee.text());
+	const population: SgNode[] = [];
+	const queue = calledBy(exported, () => true);
+	const seen = new Set<string>();
+	while (queue.length > 0) {
+		const name = queue.shift() as string;
+		if (seen.has(name)) continue;
+		seen.add(name);
+		const fn = moduleFunctions.get(name);
+		if (!fn) continue;
+		population.push(fn);
+		queue.push(...calledBy(fn, (node) => runsWithin(node, fn)));
+	}
+	return population;
 }
 
 /** The reader names: base plus every function whose text references one. */
@@ -213,18 +313,72 @@ function readerSet(population: SgNode[], nodes: SgNode[]): Set<string> {
 	return readers;
 }
 
-/** The synchronous-ness of one function ancestor between a site and its fn. */
-function runsBeforeFactoryReturns(fn: SgNode): boolean {
-	if (kindOf(fn) !== "arrow_function" && kindOf(fn) !== "function_expression")
+/** True when `callee` is a known deferring registrar. */
+function isDeferringCallee(callee: SgNode | null): boolean {
+	if (!callee) return false;
+	if (kindOf(callee) === "identifier")
+		return DEFERRING_FUNCTIONS.has(callee.text());
+	if (kindOf(callee) !== "member_expression") return false;
+	const property = callee.field("property")?.text() ?? "";
+	return DEFERRING_METHODS.has(property);
+}
+
+/**
+ * True when the function only DEFERS its body (see the header): a declaration,
+ * a function bound by a declarator, or one handed (directly or inside an
+ * object literal argument) to a known deferring registrar. An immediately
+ * invoked function is neither: its parent is the call that runs it. Every other
+ * function is code that can run while the factory runs.
+ */
+function defersTheFunction(fn: SgNode): boolean {
+	const fnKind = kindOf(fn);
+	if (fnKind === "function_declaration") return true;
+	if (fnKind === "generator_function_declaration") return true;
+	let current: SgNode = fn;
+	let viaObject = false;
+	for (let parent = current.parent(); parent; parent = current.parent()) {
+		const parentKind = kindOf(parent);
+		if (WRAPPER_KINDS.has(parentKind)) {
+			current = parent;
+			continue;
+		}
+		if (parentKind === "pair" && isField(parent, "value", current)) {
+			current = parent;
+			viaObject = true;
+			continue;
+		}
+		if (parentKind === "object") {
+			current = parent;
+			viaObject = true;
+			continue;
+		}
+		if (parentKind === "variable_declarator")
+			return !viaObject && isField(parent, "value", current);
+		if (parentKind === "arguments") {
+			const call = parent.parent();
+			if (!call || kindOf(call) !== "call_expression") return false;
+			if (isDeferringCallee(call.field("function"))) return true;
+			// `pi.on("x", wrap(async () => ..))`: a wrapper whose result is the
+			// registrar's argument returns the handler it was given; follow the
+			// wrapper call out to the registrar.
+			current = call;
+			viaObject = true;
+			continue;
+		}
 		return false;
-	const args = fn.parent();
-	if (!args || kindOf(args) !== "arguments") return false;
-	const call = args.parent();
-	if (!call || kindOf(call) !== "call_expression") return false;
-	const callee = call.field("function");
-	if (!callee || kindOf(callee) !== "member_expression") return false;
-	const method = callee.field("property")?.text() ?? "";
-	return SYNC_CALLBACK_METHODS.has(method);
+	}
+	return false;
+}
+
+/**
+ * True when `node`, inside the function `root`, runs while `root` runs: no
+ * function between them only defers its body.
+ */
+function runsWithin(node: SgNode, root: SgNode): boolean {
+	for (let p = node.parent(); p && !sameNode(p, root); p = p.parent()) {
+		if (FUNCTION_KINDS.has(kindOf(p)) && defersTheFunction(p)) return false;
+	}
+	return true;
 }
 
 /** The enclosing declarator's name, or `<top>`. */
@@ -250,12 +404,26 @@ function refusedForm(node: SgNode): string | undefined {
 		isField(holderParent, "function", holder)
 	)
 		return "call";
-	if (holderParentKind === "arguments") return undefined;
+	if (holderParentKind === "arguments") {
+		const call = holderParent.parent();
+		// The argument of `new Promise(..)` or any other construct is not a
+		// stored callback: only a call hands a reader to a callee.
+		return call && kindOf(call) === "call_expression"
+			? undefined
+			: "new-argument";
+	}
 	if (holderParentKind === "pair" && isField(holderParent, "value", holder)) {
 		const object = holderParent.parent();
 		if (object && kindOf(object) === "object") {
 			const around = object.parent();
-			if (around && kindOf(around) === "arguments") return undefined;
+			const call = around?.parent();
+			if (
+				around &&
+				kindOf(around) === "arguments" &&
+				call &&
+				kindOf(call) === "call_expression"
+			)
+				return undefined;
 		}
 		return "pair-value";
 	}
@@ -312,19 +480,10 @@ export function scanFactoryFlagReads(
 				parentKind === "required_parameter"
 			)
 				continue;
-			// Walk out to the population function: a nested function that the
-			// host calls later makes the read handler-time.
-			let atFactoryTime = true;
-			for (
-				let p: SgNode | null = parent;
-				p && !sameNode(p, fn);
-				p = p.parent()
-			) {
-				if (FUNCTION_KINDS.has(kindOf(p)) && !runsBeforeFactoryReturns(p)) {
-					atFactoryTime = false;
-					break;
-				}
-			}
+			// Walk out to the population function: a function that only defers
+			// its body (a handler the host calls later) makes the read
+			// handler-time; any other function runs while the factory runs.
+			const atFactoryTime = runsWithin(node, fn);
 			if (!atFactoryTime) continue;
 			const form = refusedForm(node);
 			if (form === undefined) continue;
@@ -333,14 +492,14 @@ export function scanFactoryFlagReads(
 				line: node.range().start.line + 1,
 				reader,
 				binding,
-				key: `${binding}:${reader}`,
+				key: `${nameOf(fn)}:${binding}:${reader}:${form}`,
 				form,
 			});
 		}
 	}
 	const used = new Set(sites.map((site) => site.key));
 	return {
-		population: population.map((fn) => boundName(fn) ?? "<anonymous>"),
+		population: population.map((fn) => nameOf(fn)),
 		sites,
 		unadmitted: sites.filter((site) => !(site.key in admissions)),
 		staleAdmissions: Object.keys(admissions).filter((key) => !used.has(key)),
