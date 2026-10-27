@@ -586,8 +586,12 @@ async function kernelAttemptAsync(
 						return isAbsenceRefusal(lstatRefusal);
 					},
 				))
-			)
+			) {
+				// Tallied like the other refused codes so the refusal reaches the
+				// ledger's read-time fold, not only the caller's error.
+				recordPathIdentityFallback("ENOENT-DANGLING", candidate);
 				kernelConfirmed = false;
+			}
 		}
 	}
 	return undefined;

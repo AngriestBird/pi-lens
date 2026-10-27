@@ -539,6 +539,17 @@ describe("#4689 batch 10: the async identity seam", () => {
 			/identity is unresolvable/,
 		);
 		expect(fs.existsSync(target)).toBe(false);
+		// The refusal is observable, as the ELOOP arm is (review R2-1): a
+		// server-initiated applyEdit gets only a failureReason, which no
+		// pi-lens monitor reads.
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({
+				kind: "path-identity-fallback",
+				latestReasons: [
+					expect.objectContaining({ subject: "ENOENT-DANGLING" }),
+				],
+			}),
+		]);
 	});
 
 	it("a workspace edit refuses a rename onto a dangling symlink (#4877)", async (ctx) => {
