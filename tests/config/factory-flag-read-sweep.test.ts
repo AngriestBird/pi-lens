@@ -41,8 +41,20 @@ const ADMITTED: FactoryFlagAdmission = {
 		"closures handed to the tool constructors (`createLensDiagnosticsTool`), which store them and call them per tool execution",
 	"activateExtension:lazyTools:getLensFlag:call":
 		"the closure handed to `createLspNavigationTool`, which stores it and calls it per tool execution",
-	"createHostPorts:<top>:getFlag:call":
+	"activateExtension:<top>:pi:initI18n()":
+		"`initI18n` (i18n.ts) only calls `pi.events?.emit?.(..)` to register the bundle; it reads no flag",
+	"activateExtension:activateToolsTool:pi:createActivateToolsTool()":
+		"`createActivateToolsTool` (tools/activate-tools.ts) stores `pi` and calls `getActiveTools`/`setActiveTools` per tool execution",
+	"activateExtension:<top>:pi:.events":
+		"`pi.events` is the event bus handed to `wireAgentNudgeSubscriber`; it carries no flag value",
+	"createHostPorts:activeTools:pi:variable_declarator":
+		"a type-asserted alias whose `getActiveTools`/`setActiveTools` run only inside the ports' `tools.getActive`/`setActive` closures, at event time",
+	"createHostPorts:<top>:emit:pair-value":
+		"the ports table's `emit.bus` closure reads `pi.events` when a consumer emits, never while `createHostPorts` builds the table",
+	"createHostPorts:<top>:pi:.getFlag":
 		"the ports table's `flags.get` closure: its consumers call it at event time, never while `createHostPorts` builds the table",
+	"createHostPorts:<top>:pi:.getTool":
+		"the ports table's `tools.has` closure: it calls `getTool` when a consumer asks, at event time",
 };
 
 /** A factory whose body is `body`, with the readers a real one has. */
@@ -121,7 +133,7 @@ describe("factory-time flag reads (#4913)", () => {
 			[
 				"the host member",
 				'const on = pi.getFlag("no-lens");',
-				"activateExtension:on:getFlag:call",
+				"activateExtension:on:pi:.getFlag",
 			],
 			[
 				"a synchronous array callback",
@@ -205,7 +217,7 @@ describe("factory-time flag reads (#4913)", () => {
 				"readNoLens",
 			]);
 			expect(scan.unadmitted.map((site) => site.key)).toContain(
-				"readNoLens:<top>:getFlag:call",
+				"readNoLens:<top>:pi:.getFlag",
 			);
 		});
 
@@ -225,7 +237,7 @@ describe("factory-time flag reads (#4913)", () => {
 				"inner",
 			]);
 			expect(scan.unadmitted.map((site) => site.key)).toContain(
-				"inner:<top>:getFlag:call",
+				"inner:<top>:pi:.getFlag",
 			);
 		});
 
@@ -238,37 +250,37 @@ describe("factory-time flag reads (#4913)", () => {
 			[
 				"a read in an inline default-export function declaration",
 				`export default function factory(pi: any) { ${read} return activateExtension(pi); }`,
-				"factory:on:getFlag:call",
+				"factory:on:pi:.getFlag",
 			],
 			[
 				"a read in a default-export function expression",
 				`export default function (pi: any) { ${read} return activateExtension(pi); }`,
-				"<default>:on:getFlag:call",
+				"<default>:on:pi:.getFlag",
 			],
 			[
 				"a read in a default-export arrow behind a type assertion",
 				`export default ((pi: any) => { ${read} return activateExtension(pi); }) as any;`,
-				"<default>:on:getFlag:call",
+				"<default>:on:pi:.getFlag",
 			],
 			[
 				"a read in the function `export default <name>` names",
 				`function factory(pi: any) { ${read} return activateExtension(pi); }\nexport default factory;`,
-				"factory:on:getFlag:call",
+				"factory:on:pi:.getFlag",
 			],
 			[
 				"a read in the function `export { x as default }` names",
 				`const factory = (pi: any) => { ${read} return activateExtension(pi); };\nexport { factory as default };`,
-				"factory:on:getFlag:call",
+				"factory:on:pi:.getFlag",
 			],
 			[
 				"a read in the default export after an export whose body has a `switch` default",
 				`export function pick(x: number) { switch (x) { default: return 1; } }\nexport default function (pi: any) { ${read} return activateExtension(pi); }`,
-				"<default>:on:getFlag:call",
+				"<default>:on:pi:.getFlag",
 			],
 			[
 				"a read in an arrow the default export passes to a call",
 				`export default function (pi: any) { return run(() => { ${read} return activateExtension(pi); }); }`,
-				"<default>:on:getFlag:call",
+				"<default>:on:pi:.getFlag",
 			],
 		];
 		it.each(defaultExports)("refuses %s", (_name, body, key) => {
@@ -328,6 +340,155 @@ describe("factory-time flag reads (#4913)", () => {
 			const scan = scanFactoryFlagReads(source);
 			expect(scan.population).toEqual(["<default>", "activateExtension"]);
 			expect(scan.unadmitted).toEqual([]);
+		});
+	});
+
+	describe("the allowlist of uses of `pi` (#4917 round 4)", () => {
+		// #4917 F9: a renamed destructuring of `pi.getFlag` scanned green while
+		// the scanner enumerated reader spellings. Every use of the factory's
+		// `pi` outside the allowlist is now refused, however it is spelled.
+		const refusedUses: Array<[string, string, string]> = [
+			[
+				"a member read not on the list",
+				'const on = pi.getFlag("no-lens");',
+				"activateExtension:on:pi:.getFlag",
+			],
+			[
+				"a renamed destructuring",
+				'const { getFlag: read } = pi; const on = read("no-lens");',
+				"activateExtension:{ getFlag: read }:pi:variable_declarator",
+			],
+			[
+				"a shorthand destructuring",
+				"const { getFlag } = pi;",
+				"activateExtension:{ getFlag }:pi:variable_declarator",
+			],
+			[
+				"a nested destructuring",
+				"const { events: { emit } } = pi;",
+				"activateExtension:{ events: { emit } }:pi:variable_declarator",
+			],
+			[
+				"an alias",
+				'const p = pi; const on = p.getFlag("no-lens");',
+				"activateExtension:p:pi:variable_declarator",
+			],
+			[
+				"a spread",
+				"const copy = { ...pi };",
+				"activateExtension:copy:pi:spread_element",
+			],
+			[
+				"a computed member",
+				'const on = pi["getFlag"]("no-lens");',
+				"activateExtension:on:pi:subscript_expression",
+			],
+			[
+				"a shorthand property",
+				"const holder = { pi };",
+				"activateExtension:holder:pi:shorthand",
+			],
+			[
+				"pi handed to a function outside the population",
+				"configure(pi);",
+				"activateExtension:<top>:pi:configure()",
+			],
+			[
+				"pi stored",
+				"stored = pi;",
+				"activateExtension:<top>:pi:assignment_expression",
+			],
+			[
+				"a closure that reads through a destructured pi, called at factory time",
+				'const read = () => { const { getFlag } = pi; return getFlag("no-lens"); }; const on = read();',
+				"activateExtension:on:read:call",
+			],
+		];
+		it.each(refusedUses)("refuses %s", (_name, body, key) => {
+			const scan = scanFactoryFlagReads(factory(body));
+			expect(scan.unadmitted.map((site) => site.key)).toContain(key);
+		});
+
+		it("refuses a destructured parameter that receives pi", () => {
+			const source = [
+				'function activateExtension({ getFlag: read }: any) { const on = read("no-lens"); }',
+				"export default function (pi: any) { return activateExtension(pi); }",
+				"",
+			].join("\n");
+			expect(
+				scanFactoryFlagReads(source).unadmitted.map((site) => site.key),
+			).toEqual(["activateExtension:<top>:pi:object_pattern"]);
+		});
+
+		it("refuses arguments[0] in a factory with no parameter", () => {
+			const source =
+				'export default function () { const on = arguments[0].getFlag("no-lens"); }\n';
+			expect(
+				scanFactoryFlagReads(source).unadmitted.map((site) => site.key),
+			).toEqual(["<default>:on:arguments:subscript_expression"]);
+		});
+
+		it("refuses a flag read through the withConsoleCaptureWindows wrapper", () => {
+			const source = [
+				"function activateExtension(hostPi: any) {",
+				"\tconst pi = withConsoleCaptureWindows(hostPi);",
+				'\tconst on = pi.getFlag("no-lens");',
+				"}",
+				"export default function (pi: any) { return activateExtension(pi); }",
+				"",
+			].join("\n");
+			expect(
+				scanFactoryFlagReads(source).unadmitted.map((site) => site.key),
+			).toEqual(["activateExtension:on:pi:.getFlag"]);
+		});
+
+		const admittedUses: Array<[string, string]> = [
+			["pi.on", 'pi.on("session_start", () => undefined);'],
+			["pi.registerTool", 'pi.registerTool({ name: "t" });'],
+			["pi.registerFlag", 'pi.registerFlag("f", { type: "boolean" });'],
+			[
+				"pi.registerCommand",
+				'pi.registerCommand("c", { handler: () => undefined });',
+			],
+			[
+				"pi.registerMessageRenderer",
+				'if (typeof pi.registerMessageRenderer === "function") pi.registerMessageRenderer("t", () => undefined);',
+			],
+			[
+				"a registrar reached through a type assertion and an optional call",
+				'(pi as any).on?.("context", () => undefined);',
+			],
+		];
+		it.each(admittedUses)("admits %s", (_name, body) => {
+			expect(scanFactoryFlagReads(factory(body)).unadmitted).toEqual([]);
+		});
+
+		it("admits pi handed to a module-level function that only registers", () => {
+			const source = [
+				"function registerAll(api: any) { api.registerTool({ name: 't' }); }",
+				"function activateExtension(pi: any) { registerAll(pi); }",
+				"export default function (pi: any) { return activateExtension(pi); }",
+				"",
+			].join("\n");
+			const scan = scanFactoryFlagReads(source);
+			expect(scan.population).toEqual([
+				"<default>",
+				"activateExtension",
+				"registerAll",
+			]);
+			expect(scan.unadmitted).toEqual([]);
+		});
+
+		it("admits a registrar on pi wrapped by withConsoleCaptureWindows", () => {
+			const source = [
+				"function activateExtension(hostPi: any) {",
+				"\tconst pi = withConsoleCaptureWindows(hostPi);",
+				'\tpi.on("session_start", () => pi.getFlag("no-lens"));',
+				"}",
+				"export default function (pi: any) { return activateExtension(pi); }",
+				"",
+			].join("\n");
+			expect(scanFactoryFlagReads(source).unadmitted).toEqual([]);
 		});
 	});
 

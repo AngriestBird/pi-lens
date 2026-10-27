@@ -21,60 +21,74 @@
  * quotes `getLensFlag(` is not a read), through the census AST seam
  * (`ast-census.ts`).
  *
- * The reader set R is the base names {@link BASE_READERS} plus, by fixpoint,
- * every function-valued binding or declaration in the population whose text
- * references a member of R. An indirect read (`const read = () =>
- * getLensFlag(..); read()`) is therefore a read at the call to `read`.
+ * ALLOWLIST (the round-4 redesign, #4917 F9: four rounds each found a new
+ * spelling of a read, so the scan no longer enumerates reader spellings).
+ * Inside the population, `pi` is the default export's first parameter, the
+ * parameter of a population function that receives `pi` as a call argument,
+ * and the result of a {@link PI_WRAPPERS} call. A use of `pi` that runs while
+ * the factory runs is ADMITTED only as:
  *
- * FAIL CLOSED (the round-2 redesign, #4917 F2). A function is factory-time
- * code unless it is one of the short list of forms that only DEFERS it:
+ * - A1: `pi.<m>` with `m` in {@link HOST_REGISTRARS}, called or read, through
+ *   type assertions and `?.`: each registers, and its handler runs later;
+ * - A2: a direct argument of a call to a module-level function, which joins
+ *   the population with that parameter as its `pi`;
+ * - A3: `const x = withConsoleCaptureWindows(pi)`, whose `x` is `pi`.
  *
- * - a function declaration, or a function bound by `const f = () => ..`: it
- *   runs when called, and a call at factory time is itself a reference to a
- *   reader (the fixpoint above) or a transitively scanned helper;
- * - a function (or an object literal holding functions) passed as an argument
- *   of a call to a known deferring registrar, directly or through wrapper
- *   calls whose result is the registrar's argument (`pi.on("x", wrap(fn))`): `pi.on`, `registerCommand`,
- *   `registerTool`, the other `register*` hooks, event `on`/`once`, timers,
- *   `queueMicrotask`, and the promise continuations `then`/`catch`/`finally`.
+ * Every other use is REFUSED, however it is spelled: another member, a
+ * destructuring (renamed, shorthand, nested, or a parameter), an alias, a
+ * spread, a computed member, a shorthand property, an assignment, `pi` handed
+ * to a function outside the population, and `arguments[0]`.
  *
- * Every other function is refused: an IIFE (arrow or `function`), an object
- * method or property the factory invokes, a `new Promise` executor, a
- * synchronous array callback, and anything nobody planned for. A reference to
- * a member of R inside such a function is a factory-time read.
+ * A local closure is a READER when running it would make a refused use (its
+ * own, a reader it calls, or a module function it hands `pi` to). A
+ * factory-time reference to a reader is admitted only when it is handed to a
+ * call that stores it (a call argument, or a pair value of an object-literal
+ * call argument); a call to it, an alias, an assignment and every other form
+ * is refused at the reference. That is how `getLensFlag("no-lens")`, the read
+ * #4913 shipped, is caught at the call site.
  *
- * A reference to a member of R at factory time is then classified by where it
- * sits. The detector ADMITS a short list of forms and REFUSES every other:
+ * WHEN code runs (round 2, #4917 F2): a function only DEFERS its body when it
+ * is a declaration, a function bound by `const f = () => ..`, or a function
+ * (or an object literal holding one) handed to a known deferring registrar,
+ * directly or through wrapper calls whose result is the registrar's argument
+ * (`pi.on("x", wrap(fn))`). Every other function (an IIFE, an object method
+ * the factory invokes, a `new Promise` executor, a synchronous array callback)
+ * runs while the factory runs.
  *
- * - a declaration name, or an object-literal key: not a use, admitted;
- * - an argument of a call, or the value of a pair in an object literal that is
- *   itself a call argument: the reader is handed to a callee that stores it,
- *   admitted. RESIDUAL, named: a callee that invokes its argument
- *   synchronously reads at factory time, and this scan cannot see into it;
- * - anything else, which includes a call to a reader, an alias binding, an
- *   assignment right-hand side, an array element, `.call`/`.apply`/`.bind` on
- *   a reader, and a destructuring: REFUSED, unless an
- *   {@link FactoryFlagAdmission} row keyed `<function>:<binding>:<reader>:<form>` carries its
- *   reason.
+ * A refused site is reported keyed `<function>:<binding>:<name>:<form>`; an
+ * {@link FactoryFlagAdmission} row with that key carries the reason the tree
+ * admits it.
  *
  * RESIDUALS, named. The call graph follows direct calls by name only: a helper
- * reached through a variable, a method, a dynamic `import()` or a callback the
- * factory hands to a callee that runs it synchronously is invisible. A
- * registrar name in the allowlist that a given object runs synchronously
- * (an `on` of an emitter that fires at once) is trusted. A flag read in a
- * module the factory imports is not scanned.
+ * reached through a variable, a method or a dynamic `import()` is invisible. A
+ * callee that runs a reader it was handed synchronously reads at factory time
+ * unseen. A registrar name that a given object runs synchronously is trusted.
+ * A flag read in a module the factory imports, or one reached through a value
+ * an admission row lets out, is not scanned.
  */
 import type { SgNode } from "@ast-grep/napi";
 import { parseNodes } from "./ast-census.js";
 import { stripSource } from "./sweep-kit.js";
 
-/** Names whose call reads a flag value: the closure and the host member. */
-export const BASE_READERS: readonly string[] = [
-	"getLensFlag",
-	"getLensFlagSource",
-	"noToolFlag",
-	"getFlag",
-];
+/**
+ * Members of the factory's `pi` whose use reads no flag value: each registers
+ * a definition or a handler, and a handler runs after pi applied the flags
+ * (allowlist form A1, #4917 round 4).
+ */
+const HOST_REGISTRARS = new Set([
+	"on",
+	"registerTool",
+	"registerFlag",
+	"registerCommand",
+	"registerMessageRenderer",
+]);
+
+/**
+ * Imported calls whose result is the factory's `pi`, wrapped (form A3):
+ * `withConsoleCaptureWindows` returns a `Proxy` and reads no member while it
+ * builds it (`clients/extension-log.ts`).
+ */
+const PI_WRAPPERS = new Set(["withConsoleCaptureWindows"]);
 
 /** A refused site the tree admits, with the reason it is not a defect. */
 export type FactoryFlagAdmission = Readonly<Record<string, string>>;
@@ -84,9 +98,9 @@ export interface FactoryFlagRead {
 	readonly reader: string;
 	/** The enclosing declarator's name, or `<top>`. */
 	readonly binding: string;
-	/** `function:binding:reader:form`, the admission key. */
+	/** `function:binding:name:form`, the admission key. */
 	readonly key: string;
-	/** How the reader appears: `call`, or the kind of the node holding it. */
+	/** How the name appears: `.member`, `callee()`, `call`, or the kind of the node holding it. */
 	readonly form: string;
 }
 
@@ -177,17 +191,6 @@ function within(nodes: readonly SgNode[], outer: SgNode): SgNode[] {
 	)
 		found.push(nodes[i] as SgNode);
 	return found;
-}
-
-const NAME_KINDS = new Set(["identifier", "property_identifier"]);
-
-/** The identifier names a node's subtree mentions. */
-function namesWithin(nodes: readonly SgNode[], outer: SgNode): Set<string> {
-	return new Set(
-		within(nodes, outer)
-			.filter((node) => NAME_KINDS.has(kindOf(node)))
-			.map((node) => node.text()),
-	);
 }
 
 /** The identifier a declaration or declarator binds, if it has one. */
@@ -314,68 +317,68 @@ function factoryFunction(
 	return named;
 }
 
-/**
- * The functions that run while the factory runs: the default export's own
- * function, then, transitively, every module-level function those bodies call
- * by name at factory time (a call inside a function that only defers its body
- * is not one).
- */
-function populationFunctions(nodes: SgNode[]): SgNode[] {
+/** Every module-level function, by name. */
+function moduleFunctionsOf(nodes: SgNode[]): Map<string, SgNode> {
 	const moduleFunctions = new Map<string, SgNode>();
 	for (const node of nodes) {
 		const found = moduleFunctionOf(node);
 		if (found && !moduleFunctions.has(found.name))
 			moduleFunctions.set(found.name, found.fn);
 	}
-	const population: SgNode[] = [];
-	const queue = [factoryFunction(nodes, moduleFunctions)];
-	const seen = new Set<number>();
-	while (queue.length > 0) {
-		const fn = queue.shift() as SgNode;
-		const start = fn.range().start.index;
-		if (seen.has(start)) continue;
-		seen.add(start);
-		population.push(fn);
-		for (const node of within(nodes, fn)) {
-			if (kindOf(node) !== "call_expression" || !runsWithin(node, fn)) continue;
-			const callee = node.field("function");
-			const helper =
-				callee && kindOf(callee) === "identifier"
-					? moduleFunctions.get(callee.text())
-					: undefined;
-			if (helper) queue.push(helper);
-		}
-	}
-	return population;
+	return moduleFunctions;
 }
 
-/** The reader names: base plus every function whose text references one. */
-function readerSet(population: SgNode[], nodes: SgNode[]): Set<string> {
-	const readers = new Set(BASE_READERS);
-	const candidates = population.flatMap((fn) =>
-		within(nodes, fn).filter(
-			(node) => isFunctionValuedBinding(node) && !sameNode(fn, node),
-		),
+/** The named nodes directly under `parent` (arguments, parameters), in order. */
+function argumentsOf(nodes: SgNode[], parent: SgNode): SgNode[] {
+	return within(nodes, parent).filter(
+		(node) => node.isNamed() && isChildOf(node, parent),
 	);
-	const mentions = candidates.map((candidate) => ({
-		name: boundName(candidate),
-		names: namesWithin(nodes, candidate),
-	}));
-	let grew = true;
-	while (grew) {
-		grew = false;
-		for (const { name, names } of mentions) {
-			if (!name || readers.has(name)) continue;
-			const references = [...names].some(
-				(mentioned) => mentioned !== name && readers.has(mentioned),
-			);
-			if (references) {
-				readers.add(name);
-				grew = true;
-			}
-		}
-	}
-	return readers;
+}
+
+/** `fn`'s parameter at `index`: its bound node (an identifier or a pattern). */
+function parameterAt(
+	nodes: SgNode[],
+	fn: SgNode,
+	index: number,
+): SgNode | undefined {
+	const single = fn.field("parameter");
+	if (single) return index === 0 ? single : undefined;
+	const list = fn.field("parameters");
+	const param = list ? argumentsOf(nodes, list)[index] : undefined;
+	return param && kindOf(param) !== "identifier"
+		? (param.field("pattern") ?? param)
+		: param;
+}
+
+/** The outermost expression wrapper around `node` (`(pi as any)`), or `node`. */
+function unwrapUp(node: SgNode): SgNode {
+	let holder = node;
+	for (
+		let parent = holder.parent();
+		parent && WRAPPER_KINDS.has(kindOf(parent));
+		parent = holder.parent()
+	)
+		holder = parent;
+	return holder;
+}
+
+/** True when `node` names a binding or a parameter rather than using one. */
+function isDeclarationName(node: SgNode): boolean {
+	const parent = node.parent() as SgNode;
+	const parentKind = kindOf(parent);
+	if (
+		(parentKind === "variable_declarator" ||
+			parentKind === "function_declaration") &&
+		isField(parent, "name", node)
+	)
+		return true;
+	if (parentKind === "arrow_function")
+		return isField(parent, "parameter", node);
+	return (
+		parentKind === "formal_parameters" ||
+		parentKind === "required_parameter" ||
+		parentKind === "optional_parameter"
+	);
 }
 
 /** True when `callee` is a known deferring registrar. */
@@ -457,46 +460,35 @@ function enclosingBinding(node: SgNode, root: SgNode): string {
 	return "<top>";
 }
 
-/** Classify one reference at factory time, or undefined when it is admitted. */
-function refusedForm(node: SgNode): string | undefined {
-	const parent = node.parent();
-	if (!parent) return "detached";
+/**
+ * Classify one factory-time reference to a reader closure, or undefined when
+ * it is admitted: handed to a call that stores it (a call argument, or a pair
+ * value of an object-literal call argument).
+ */
+function closureForm(node: SgNode): string | undefined {
+	if (kindOf(node) === "shorthand_property_identifier") return "shorthand";
+	const parent = node.parent() as SgNode;
 	const parentKind = kindOf(parent);
-	// `x.getFlag`: the reference is the member, and its holder is the parent.
-	const holder = kindOf(node) === "property_identifier" ? parent : node;
-	const holderParent = holder.parent();
-	if (!holderParent) return "detached";
-	const holderParentKind = kindOf(holderParent);
-	if (
-		holderParentKind === "call_expression" &&
-		isField(holderParent, "function", holder)
-	)
+	if (parentKind === "call_expression" && isField(parent, "function", node))
 		return "call";
-	if (holderParentKind === "arguments") {
-		const call = holderParent.parent();
+	if (parentKind === "arguments") {
 		// The argument of `new Promise(..)` or any other construct is not a
 		// stored callback: only a call hands a reader to a callee.
-		return call && kindOf(call) === "call_expression"
+		return kindOf(parent.parent() as SgNode) === "call_expression"
 			? undefined
 			: "new-argument";
 	}
-	if (holderParentKind === "pair" && isField(holderParent, "value", holder)) {
-		const object = holderParent.parent();
-		if (object && kindOf(object) === "object") {
-			const around = object.parent();
-			const call = around?.parent();
-			if (
-				around &&
-				kindOf(around) === "arguments" &&
-				call &&
-				kindOf(call) === "call_expression"
-			)
-				return undefined;
-		}
-		return "pair-value";
+	if (parentKind === "pair" && isField(parent, "value", node)) {
+		const around = parent.parent()?.parent();
+		const call = around?.parent();
+		return around &&
+			kindOf(around) === "arguments" &&
+			call &&
+			kindOf(call) === "call_expression"
+			? undefined
+			: "pair-value";
 	}
-	if (parentKind === "shorthand_property_identifier") return "shorthand";
-	return holderParentKind;
+	return parentKind;
 }
 
 /**
@@ -508,68 +500,176 @@ export function scanFactoryFlagReads(
 	admissions: FactoryFlagAdmission = {},
 ): FactoryFlagScan {
 	const nodes = parseNodes(stripSource(source));
-	const population = populationFunctions(nodes);
-	const readers = readerSet(population, nodes);
-	const sites: FactoryFlagRead[] = [];
-	for (const fn of population) {
-		for (const node of within(nodes, fn)) {
-			if (sameNode(fn, node)) continue;
-			const kind = kindOf(node);
-			if (
-				kind !== "identifier" &&
-				kind !== "property_identifier" &&
-				kind !== "shorthand_property_identifier"
-			)
-				continue;
-			const reader = node.text();
-			if (!readers.has(reader)) continue;
-			const parent = node.parent();
-			if (!parent) continue;
-			const parentKind = kindOf(parent);
-			// A property name counts only as the member of `x.getFlag`.
-			if (kind === "property_identifier") {
-				if (
-					parentKind !== "member_expression" ||
-					!isField(parent, "property", node)
-				)
-					continue;
-				if (reader !== "getFlag") continue;
-			}
-			// A declaration name or an object key is not a use.
-			if (
-				(parentKind === "variable_declarator" ||
-					parentKind === "function_declaration") &&
-				isField(parent, "name", node)
-			)
-				continue;
-			if (parentKind === "pair" && isField(parent, "key", node)) continue;
-			if (
-				parentKind === "formal_parameters" ||
-				parentKind === "required_parameter"
-			)
-				continue;
-			// Walk out to the population function: a function that only defers
-			// its body (a handler the host calls later) makes the read
-			// handler-time; any other function runs while the factory runs.
-			const atFactoryTime = runsWithin(node, fn);
-			if (!atFactoryTime) continue;
-			const form = refusedForm(node);
-			if (form === undefined) continue;
-			const binding = enclosingBinding(node, fn);
-			sites.push({
-				line: node.range().start.line + 1,
-				reader,
-				binding,
-				key: `${nameOf(fn)}:${binding}:${reader}:${form}`,
-				form,
-			});
+	const moduleFunctions = moduleFunctionsOf(nodes);
+	const seed = factoryFunction(nodes, moduleFunctions);
+	const site = (
+		fn: SgNode,
+		node: SgNode,
+		reader: string,
+		form: string,
+	): FactoryFlagRead => {
+		const binding = enclosingBinding(node, fn);
+		return {
+			line: node.range().start.line + 1,
+			reader,
+			binding,
+			key: `${nameOf(fn)}:${binding}:${reader}:${form}`,
+			form,
+		};
+	};
+
+	/** The names holding `pi` in `fn` entered with `pi` at `indexes`, plus the sites a destructured parameter makes. */
+	const enter = (fn: SgNode, indexes: Iterable<number>) => {
+		const pi = new Set<string>();
+		const sites: FactoryFlagRead[] = [];
+		for (const index of indexes) {
+			// `arguments[0]` is `pi` too, in any function that has its own.
+			if (kindOf(fn) !== "arrow_function") pi.add("arguments");
+			const param = parameterAt(nodes, fn, index);
+			if (param && kindOf(param) === "identifier") pi.add(param.text());
+			else if (param) sites.push(site(fn, param, "pi", kindOf(param)));
 		}
+		return { pi, sites };
+	};
+
+	const readsMemo = new Map<string, boolean>();
+	/** True when running `fn`, with `pi` the names holding pi, makes a refused use. */
+	const reads = (
+		fn: SgNode,
+		pi: ReadonlySet<string>,
+		closures: ReadonlyMap<string, SgNode>,
+	): boolean => {
+		const key = `${fn.range().start.index}|${[...pi].sort().join(",")}`;
+		const known = readsMemo.get(key);
+		if (known !== undefined) return known;
+		readsMemo.set(key, false);
+		const found =
+			usesIn(fn, new Set(pi), closures, (callee, index) =>
+				readsModule(callee, index) ? "call" : undefined,
+			).length > 0;
+		readsMemo.set(key, found);
+		return found;
+	};
+	const readsModule = (callee: SgNode, index: number): boolean => {
+		const entered = enter(callee, [index]);
+		return (
+			entered.sites.length > 0 ||
+			reads(callee, entered.pi, localClosures(callee))
+		);
+	};
+	const localClosures = (fn: SgNode): Map<string, SgNode> => {
+		const closures = new Map<string, SgNode>();
+		for (const node of within(nodes, fn)) {
+			const name = boundName(node);
+			if (sameNode(node, fn) || !name || !isFunctionValuedBinding(node))
+				continue;
+			closures.set(
+				name,
+				kindOf(node) === "variable_declarator"
+					? (node.field("value") as SgNode)
+					: node,
+			);
+		}
+		return closures;
+	};
+
+	/**
+	 * The refused uses a run of `fn` makes. `intoModule` answers a module-level
+	 * function handed `pi` (form A2): the population pass enqueues it, the
+	 * reader check asks whether it reads.
+	 */
+	const usesIn = (
+		fn: SgNode,
+		pi: Set<string>,
+		closures: ReadonlyMap<string, SgNode>,
+		intoModule: (callee: SgNode, index: number) => string | undefined,
+	): FactoryFlagRead[] => {
+		const sites: FactoryFlagRead[] = [];
+		for (const node of within(nodes, fn)) {
+			const kind = kindOf(node);
+			if (kind !== "identifier" && kind !== "shorthand_property_identifier")
+				continue;
+			const name = node.text();
+			const closure = pi.has(name) ? undefined : closures.get(name);
+			if (!pi.has(name) && !closure) continue;
+			if (isDeclarationName(node) || !runsWithin(node, fn)) continue;
+			const form = closure
+				? reads(closure, pi, closures)
+					? closureForm(node)
+					: undefined
+				: piForm(node, pi, intoModule);
+			if (form !== undefined) sites.push(site(fn, node, name, form));
+		}
+		return sites;
+	};
+
+	/** Classify one factory-time use of `pi`, or undefined when the allowlist admits it. */
+	const piForm = (
+		node: SgNode,
+		pi: Set<string>,
+		intoModule: (callee: SgNode, index: number) => string | undefined,
+	): string | undefined => {
+		if (kindOf(node) === "shorthand_property_identifier") return "shorthand";
+		const holder = unwrapUp(node);
+		const parent = holder.parent() as SgNode;
+		// A1: a registrar member, called or read.
+		if (kindOf(parent) === "member_expression") {
+			const member = (parent.field("property") as SgNode).text();
+			return HOST_REGISTRARS.has(member) ? undefined : `.${member}`;
+		}
+		if (kindOf(parent) !== "arguments") return kindOf(parent);
+		const call = parent.parent() as SgNode;
+		const callee = call.field("function");
+		const calleeName =
+			callee && kindOf(callee) === "identifier" ? callee.text() : "";
+		// A2: handed to a module-level function, which is scanned with it.
+		const helper = moduleFunctions.get(calleeName);
+		if (helper)
+			return intoModule(
+				helper,
+				argumentsOf(nodes, parent).findIndex((arg) => sameNode(arg, holder)),
+			);
+		// A3: `const x = withConsoleCaptureWindows(pi)`: `x` is `pi`.
+		const declarator = call.parent() as SgNode;
+		const alias = declarator.field("name") as SgNode;
+		if (
+			PI_WRAPPERS.has(calleeName) &&
+			kindOf(declarator) === "variable_declarator" &&
+			kindOf(alias) === "identifier"
+		) {
+			pi.add(alias.text());
+			return undefined;
+		}
+		return calleeName ? `${calleeName}()` : "arguments";
+	};
+
+	// The population pass: the default export entered with `pi` as its first
+	// parameter, then every module-level function a run hands `pi` to (A2). A
+	// function nobody hands `pi` holds no `pi` to use.
+	const indexesOf = new Map<SgNode, Set<number>>();
+	const sitesOf = new Map<SgNode, FactoryFlagRead[]>();
+	const queue: SgNode[] = [];
+	const enqueue = (fn: SgNode, index: number): undefined => {
+		const indexes = indexesOf.get(fn) ?? new Set<number>();
+		indexesOf.set(fn, indexes);
+		if (!indexes.has(index)) queue.push(fn);
+		indexes.add(index);
+		return undefined;
+	};
+	enqueue(seed, 0);
+	for (let fn = queue.shift(); fn; fn = queue.shift()) {
+		const entered = enter(fn, indexesOf.get(fn) as Set<number>);
+		sitesOf.set(fn, [
+			...entered.sites,
+			...usesIn(fn, entered.pi, localClosures(fn), enqueue),
+		]);
 	}
-	const used = new Set(sites.map((site) => site.key));
+	const sites = [...sitesOf.values()].flat();
+	const used = new Set(sites.map((read) => read.key));
 	return {
-		population: population.map((fn) => nameOf(fn)),
+		population: [...indexesOf.keys()].map(nameOf),
 		sites,
-		unadmitted: sites.filter((site) => !(site.key in admissions)),
+		unadmitted: sites.filter((read) => !(read.key in admissions)),
 		staleAdmissions: Object.keys(admissions).filter((key) => !used.has(key)),
 	};
 }
