@@ -133,13 +133,22 @@ describe("#4532 gap 6: a joined look gets the walk it demands", () => {
 		await joiner;
 		expect(publishedCreated(seen, generated)).toBe(true);
 		await starter;
-		const joinedRows = getRecentLoggedPhases()
+		// A bash result's own walk, alone, is not a joined one.
+		const own = path.join(root, "gen", "own.d.ts");
+		fs.writeFileSync(own, "export declare const own: 1;\n");
+		await lookForOutOfBandChanges(root, "tool_result");
+		expect(publishedCreated(seen, own)).toBe(true);
+		const rows = getRecentLoggedPhases()
 			.filter((entry) => entry.phase === "lsp_out_of_band_change")
 			.map((entry) => entry.metadata ?? {})
-			.filter((metadata) => metadata.joinedWalk === true);
-		expect(joinedRows).toEqual([
-			expect.objectContaining({ trigger: "tool_call", created: 1 }),
-		]);
+			.filter((metadata) => metadata.created === 1);
+		expect(rows).toHaveLength(2);
+		expect(rows).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ trigger: "tool_call", joinedWalk: true }),
+				expect.objectContaining({ trigger: "tool_result", joinedWalk: false }),
+			]),
+		);
 	});
 
 	it("walks for a bash result that joined a tool_call HEAD look", async () => {
