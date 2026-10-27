@@ -365,6 +365,24 @@ describe("#4913: --no-tool reaches the tool set pi holds", () => {
 		expect(offered).not.toContain(ALWAYS_ACTIVE);
 		// Only the named tool goes.
 		expect(offered).toContain("lens_diagnostics");
+		// #4917 F3: the removal has its own record, and the lazy posture's row
+		// does not count it (the control's row and this case's row agree).
+		const mutations = (await handle.latencyRows()).rows
+			.filter((row) => row.phase === "tool_set_mutation")
+			.map((row) => row.metadata as Record<string, unknown>);
+		expect(
+			mutations.filter((m) => m.reason === "cli_disabled_tool"),
+			"one row for the one tool the flag named",
+		).toEqual([expect.objectContaining({ removedCount: 1, addedCount: 0 })]);
+		const lazyRemoved = new Set(
+			mutations
+				.filter((m) => m.reason === "fresh_session_lazy_deactivation")
+				.map((m) => m.removedCount),
+		);
+		expect(
+			[...lazyRemoved],
+			"the lazy posture removes the same tools with and without the flag",
+		).toHaveLength(1);
 	});
 
 	it("does not let pi_lens_activate_tools bring back a situational tool the flag named", async () => {

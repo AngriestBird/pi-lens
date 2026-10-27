@@ -2399,17 +2399,28 @@ function activateExtension(hostPi: ExtensionAPI) {
 			);
 			if (!plan.changed) return;
 			piWithActiveTools.setActiveTools(plan.desired);
-			recordToolSetMutation({
-				addedCount: plan.addedCount,
-				removedCount: plan.removedCount,
-				reason:
-					trigger === "model_select"
-						? "model_switch"
-						: isFreshSessionStart(reason)
-							? "fresh_session_lazy_deactivation"
-							: "session_rebuild_restore",
-				deferralApplies: supportsDeferredTools(model),
-			});
+			// #4913: a `--no-tool` removal has its own row; the lazy posture's
+			// row counts only what the posture itself added or removed.
+			const lazyRemoved = plan.removedCount - plan.cliDisabledCount;
+			if (plan.cliDisabledCount > 0)
+				recordToolSetMutation({
+					addedCount: 0,
+					removedCount: plan.cliDisabledCount,
+					reason: "cli_disabled_tool",
+					deferralApplies: supportsDeferredTools(model),
+				});
+			if (plan.addedCount > 0 || lazyRemoved > 0)
+				recordToolSetMutation({
+					addedCount: plan.addedCount,
+					removedCount: lazyRemoved,
+					reason:
+						trigger === "model_select"
+							? "model_switch"
+							: isFreshSessionStart(reason)
+								? "fresh_session_lazy_deactivation"
+								: "session_rebuild_restore",
+					deferralApplies: supportsDeferredTools(model),
+				});
 		} catch (toolSetErr) {
 			dbg(
 				`dynamic tool set restore failed (older pi host lacking getActiveTools/setActiveTools, or a genuine host error): ${toolSetErr}`,

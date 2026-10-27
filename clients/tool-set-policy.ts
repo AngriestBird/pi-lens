@@ -11,7 +11,10 @@ type ToolSetMutationReason =
 	| "fresh_session_lazy_deactivation"
 	| "session_rebuild_restore"
 	| "model_switch"
-	| "lazy_activation";
+	| "lazy_activation"
+	// A tool the command line named (`--no-tool`) dropped from the active set
+	// (#4913): its own reason, so a monitor does not read it as lazy posture.
+	| "cli_disabled_tool";
 
 export interface ToolSetMutation {
 	addedCount: number;
@@ -175,6 +178,11 @@ export interface ToolSetPlan {
 	desired: string[];
 	addedCount: number;
 	removedCount: number;
+	/**
+	 * How many of `removedCount` are active tools named in `disabled`, which
+	 * are removed for that reason whatever the lazy posture would have done.
+	 */
+	cliDisabledCount: number;
 	/** False when `desired` already equals the host's active set. */
 	changed: boolean;
 }
@@ -220,10 +228,12 @@ export function planToolSet(
 	const activeSet = new Set(active);
 	const removedCount = active.filter((name) => !desiredSet.has(name)).length;
 	const addedCount = desired.filter((name) => !activeSet.has(name)).length;
+	const cliDisabledCount = active.filter((name) => disabled.has(name)).length;
 	return {
 		desired,
 		addedCount,
 		removedCount,
+		cliDisabledCount,
 		changed: addedCount > 0 || removedCount > 0,
 	};
 }
