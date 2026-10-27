@@ -24,6 +24,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
+import { setPlatform } from "../../support/platform-stub.js";
 
 const launchLSPMock = vi.hoisted(() => vi.fn());
 const ensureToolMock = vi.hoisted(() => vi.fn());
@@ -319,5 +320,96 @@ describe("effect-tsgo trust gate (#4914)", () => {
 
 		expect(launchLSPMock).not.toHaveBeenCalled();
 		expect(spawned).toBeUndefined();
+	});
+});
+
+// #4914 round 2 (F1): `findEffectTsgoLsp` tests existence only, so a shim
+// without the exec bit, or a directory at the bin path, passes the finder and
+// then fails in the REAL launcher with a SpawnFailureError. Recurrence: that
+// throw left `spawn` before the native branch, so the registry's spawn
+// cooldown could disable the `typescript` server for a project that worked on
+// the native launch before it installed `@effect/tsgo`. The effect-tsgo bin
+// goes through the real `launchLSP`; only the native launch is doubled.
+describe("effect-tsgo launch failure (#4914)", () => {
+	// Windows has no exec bit and its unit lane does not load this file.
+	const posixOnly = it.skipIf(process.platform === "win32");
+
+	async function useRealLauncherForEffectTsgo(): Promise<void> {
+		const actual = await vi.importActual<
+			typeof import("../../../clients/lsp/launch.js")
+		>("../../../clients/lsp/launch.js");
+		launchLSPMock.mockImplementation(async (command, ...rest) =>
+			path.basename(String(command)).startsWith("effect-tsgo")
+				? actual.launchLSP(String(command), ...(rest as [string[], never]))
+				: fakeProcess,
+		);
+	}
+
+	posixOnly.for([
+		["a shim without the exec bit", "noexec"],
+		["a directory at the bin path", "dir"],
+	] as const)(
+		"keeps the native launch for %s and records one row per root",
+		async ([, kind]) => {
+			const root = makeRoot(`launch-${kind}`);
+			const tsc = addTypeScript(root, "7.0.2");
+			const effect = addEffectTsgo(root, { bin: false });
+			if (kind === "dir") fs.mkdirSync(effect);
+			else {
+				fs.writeFileSync(effect, "#!/usr/bin/env node\n");
+				fs.chmodSync(effect, 0o644);
+			}
+			await useRealLauncherForEffectTsgo();
+			const ledger = await import("../../../clients/degradation-ledger.js");
+			ledger.resetDegradationLedger();
+
+			const first = await trustedSpawn(root);
+			const second = await trustedSpawn(root);
+
+			expect(first?.launchVariant).toBe("native-ts7");
+			expect(second?.launchVariant).toBe("native-ts7");
+			expect(launchLSPMock.mock.calls.map(([command]) => command)).toEqual([
+				effect,
+				tsc,
+				effect,
+				tsc,
+			]);
+			const rows = ledger
+				.getDegradationSummary()
+				.filter((group) => group.kind === "lsp-registry-decision")
+				.flatMap((group) => group.latestReasons)
+				.filter((row) => /^effect-tsgo-launch:g\d+:/.test(row.subject ?? ""));
+			expect(rows).toHaveLength(1);
+			expect(rows[0]?.subject).toContain(root);
+			expect(rows[0]?.reason).toMatch(/effect-tsgo launch failed/);
+		},
+	);
+});
+
+// #4914 round 2 (F2): the Windows candidate list (`.cmd` first, then `.exe`,
+// then the bare name) read `process.platform` live and ran in no lane. The
+// shared platform stub forces it from Linux. Recurrence: dropping or
+// reordering `.cmd` selects npm's POSIX-script shim, which cmd.exe cannot run.
+describe("effect-tsgo Windows bin candidates (#4914)", () => {
+	it("selects effect-tsgo.cmd ahead of the bare shim npm writes beside it", async () => {
+		const original = process.platform;
+		setPlatform("win32");
+		try {
+			const root = makeRoot("win32");
+			addTypeScript(root, "7.0.2");
+			const cmd = addEffectTsgo(root);
+			expect(cmd).toBe(
+				path.join(root, "node_modules", ".bin", "effect-tsgo.cmd"),
+			);
+			fs.writeFileSync(path.join(path.dirname(cmd), "effect-tsgo"), "");
+
+			const spawned = await trustedSpawn(root);
+
+			expect(launchLSPMock).toHaveBeenCalledTimes(1);
+			expect(launchLSPMock.mock.calls[0]?.[0]).toBe(cmd);
+			expect(spawned?.launchVariant).toBe("effect-tsgo");
+		} finally {
+			setPlatform(original);
+		}
 	});
 });

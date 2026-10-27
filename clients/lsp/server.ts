@@ -89,7 +89,10 @@ import {
 } from "./server-traits.js";
 import { FRESHNESS_CADENCE_MS } from "../freshness-cadence.js";
 import { HOOK_WALL_BUDGET_MS } from "../hook-budgets.js";
-import { recordDegradationOnce } from "../degradation-ledger.js";
+import {
+	getDegradationLedgerGeneration,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
 import {
 	hasCargoWorkspaceTable,
 	readCargoWorkspaceExclude,
@@ -3039,15 +3042,37 @@ export const TypeScriptServer: LSPServerInfo = {
 			)
 		) {
 			const env = await getToolEnvironment();
-			logSessionStart(
-				`lsp typescript-effect-tsgo: version=${effectLsp.releaseTag} typescript=${nativeLsp.version} command=${effectLsp.command}`,
-			);
-			const proc = await launchLSP(
-				effectLsp.command,
-				["tsc", "--lsp", "--stdio"],
-				{ cwd: root, env },
-			);
-			return { process: proc, source: "direct", launchVariant: "effect-tsgo" };
+			try {
+				const proc = await launchLSP(
+					effectLsp.command,
+					["tsc", "--lsp", "--stdio"],
+					{ cwd: root, env },
+				);
+				logSessionStart(
+					`lsp typescript-effect-tsgo: version=${effectLsp.releaseTag} typescript=${nativeLsp.version} command=${effectLsp.command}`,
+				);
+				return {
+					process: proc,
+					source: "direct",
+					launchVariant: "effect-tsgo",
+				};
+			} catch (error) {
+				// Existence is not launchability: a shim without the exec bit or a
+				// directory at the bin path passes the finder and fails here. The
+				// project worked on the native launch before it installed
+				// `@effect/tsgo`, so it keeps that launch instead of losing the
+				// TypeScript server to the registry's spawn cooldown. A process that
+				// starts and then fails `initialize` is not covered (client.ts).
+				recordDegradationOnce({
+					kind: "lsp-registry-decision",
+					subject: `effect-tsgo-launch:g${getDegradationLedgerGeneration()}:${root}`,
+					reason: `effect-tsgo launch failed, using the native launch: ${error instanceof Error ? error.message : String(error)}`,
+					metadata: {
+						field: "effect-tsgo-launch",
+						launchVariant: "effect-tsgo",
+					},
+				});
+			}
 		}
 		if (
 			nativeLsp &&
