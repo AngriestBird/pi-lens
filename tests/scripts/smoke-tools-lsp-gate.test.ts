@@ -471,11 +471,15 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 				adoptProjectTrustFromContext: vi.fn(),
 				getLSPService: () => makeLspServiceDouble(),
 				createdModulePoll: { deadlineMs: 30, intervalMs: 2 },
+				lookForOutOfBandChanges: vi.fn(async () => undefined),
 			},
 		});
 
 		expect(output.join("\n")).toContain("LSP created-module witness");
-		expect(failures).toBe(2);
+		// The two module rows and the two born-after-start config rows (#4532)
+		// all stay red: the scripted server reports every import missing.
+		expect(output.join("\n")).toContain("born after start (config file)");
+		expect(failures).toBe(4);
 	});
 
 	// Recurrence: the one-call witness red-flaked locally (2 of 5 pyright runs

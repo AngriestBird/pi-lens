@@ -323,13 +323,51 @@ const STALE_MODULE_LOOKUP = process.env.FAKE_LSP_STALE_MODULE_LOOKUP === "1";
 const STALE_MODULE_EXT = process.env.FAKE_LSP_STALE_MODULE_EXT ?? ".lua";
 const failedModuleLookups = new Set();
 
+// #4532: a server whose module search path comes from a config file at its
+// root, as pyright's `pyrightconfig.json` `extraPaths` does (measured, pyright
+// 1.1.414: a config created after the server answered is read only when a
+// `workspace/didChangeWatchedFiles` event names it; the registered watchers
+// are `**/pyrightconfig.json` and `**`). `FAKE_LSP_CONFIG_FILE=<name>` makes a
+// module that is not beside its importer resolve from `<root>/libs` when the
+// config read at initialize, or at the last watched-files event naming
+// `<root>/<name>`, holds `"extraPaths": ["libs"]`. Such an event drops every
+// remembered failed lookup and re-evaluates every open document. Off by
+// default.
+const CONFIG_FILE = process.env.FAKE_LSP_CONFIG_FILE ?? "";
+let configRoot;
+let configExtraDirs = [];
+
+function readServerConfig() {
+	configExtraDirs = [];
+	if (CONFIG_FILE === "" || configRoot === undefined) return;
+	try {
+		const parsed = JSON.parse(
+			fs.readFileSync(path.join(configRoot, CONFIG_FILE), "utf8"),
+		);
+		for (const extra of parsed.extraPaths ?? [])
+			configExtraDirs.push(path.join(configRoot, extra));
+	} catch {
+		// no config (or unreadable): the module search path stays the importer's dir
+	}
+}
+
+function resolvesFromConfig(target) {
+	return configExtraDirs.some((extra) =>
+		fs.existsSync(path.join(extra, path.basename(target))),
+	);
+}
+
 function publishModuleLookups(uri) {
 	const text = openDocuments.get(uri) ?? "";
 	const dir = path.dirname(fileURLToPath(uri));
 	const diagnostics = [];
 	for (const match of text.matchAll(/import\s+"(\.\.?\/[\w/-]+)"/g)) {
 		const target = path.join(dir, `${match[1]}${STALE_MODULE_EXT}`);
-		if (!failedModuleLookups.has(target) && !fs.existsSync(target)) {
+		if (
+			!failedModuleLookups.has(target) &&
+			!fs.existsSync(target) &&
+			!resolvesFromConfig(target)
+		) {
 			failedModuleLookups.add(target);
 		}
 		if (failedModuleLookups.has(target)) {
@@ -757,6 +795,10 @@ function handle(raw) {
 	// timeout kill + 2s SIGKILL-backstop path (#1114).
 	if (data.method === "initialize") {
 		if (process.env.FAKE_LSP_IGNORE_INITIALIZE === "1") return;
+		if (CONFIG_FILE !== "" && typeof data.params?.rootUri === "string") {
+			configRoot = fileURLToPath(data.params.rootUri);
+			readServerConfig();
+		}
 		if (CLOSED_FILE_CACHE && typeof data.params?.rootUri === "string") {
 			checkerRoot = fileURLToPath(data.params.rootUri);
 			walkAmbient(checkerRoot);
@@ -1198,6 +1240,14 @@ function handle(raw) {
 		if (STALE_MODULE_LOOKUP) {
 			let created = false;
 			for (const change of data.params?.changes ?? []) {
+				if (
+					CONFIG_FILE !== "" &&
+					path.basename(fileURLToPath(change.uri)) === CONFIG_FILE
+				) {
+					readServerConfig();
+					failedModuleLookups.clear();
+					created = true;
+				}
 				if (change.type !== 1) continue;
 				created = failedModuleLookups.delete(fileURLToPath(change.uri)) || created;
 			}

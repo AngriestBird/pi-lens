@@ -67,6 +67,9 @@ export interface LspFixture {
 	/** #4320/#4346: the created-module witness the clean gate runs on this
 	 *  fixture once its server is up (`runCreatedModuleWitness`). */
 	createdModuleWitness?: CreatedModuleWitness;
+	/** #4521/#4532: the config-file and root-marker phases the clean gate runs
+	 *  on this fixture once its server is up (`runBornAfterStartConfigWitness`). */
+	bornAfterStartConfig?: BornAfterStartConfigWitness;
 	lombokJar?: boolean;
 	expectNoMessageMatch?: string;
 	/** A diagnostic message that MUST arrive. The lane's default verdict passes
@@ -173,6 +176,23 @@ export interface CreatedModuleWitness {
 	moduleText: string;
 	reportsMissing: (text: string, name: string) => boolean;
 }
+/** What configures the server, created after it started (#4521, #4532). */
+export interface BornAfterStartConfigWitness extends CreatedModuleWitness {
+	/** Directory under the importer's root that holds the module. */
+	moduleDir: string;
+	/** The server's config file name and its text (puts `moduleDir` on the search path). */
+	configFile: string;
+	configText: string;
+	/** A marker the workspace itself holds, so a subdirectory shares its client. */
+	ancestorMarker: string;
+	/** A file whose presence makes a subdirectory a project root of its own. */
+	rootMarker: string;
+}
+/** Call `probe` until it returns true or `deadlineMs` passes (the phases' poll). */
+export function pollUntil(
+	probe: () => Promise<boolean>,
+	options: { deadlineMs: number; intervalMs: number },
+): Promise<{ ok: boolean; polls: number; elapsedMs: number }>;
 /** The born-after-start phase's deadline and poll interval (#4521). */
 export const BORN_AFTER_START_DEADLINE_MS: number;
 export const BORN_AFTER_START_POLL_MS: number;
@@ -187,6 +207,19 @@ export function runCreatedModuleWitness(
 		/** The LSP service whose `touchFile` syncs the pi-written module. */
 		getLSPService: () => unknown;
 		/** Poll deadline and interval; the defaults are the BORN_AFTER_START_* constants. */
+		deadlineMs?: number;
+		intervalMs?: number;
+	},
+): Promise<SmokeRow[]>;
+/** Create the server's config file, and a root marker, once the server
+ *  reports the importer's missing import; one row per case (#4521, #4532).
+ *  `look` is the out-of-band look pi runs at every `tool_call`. */
+export function runBornAfterStartConfigWitness(
+	fixture: LspFixture | undefined,
+	options: {
+		workspace: string;
+		execute: (...args: never[]) => Promise<unknown>;
+		look: (root: string) => Promise<unknown>;
 		deadlineMs?: number;
 		intervalMs?: number;
 	},
