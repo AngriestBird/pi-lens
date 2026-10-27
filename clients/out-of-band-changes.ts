@@ -24,11 +24,12 @@
  *
  * The same look compares the config files a server reads once and keeps
  * (`pyrightconfig.json`, `pyproject.toml`: the closed list in
- * `clients/lsp/server-config-files.ts`) at the root, and publishes a created,
- * edited or deleted one as a `config` change (#4532 gap 12). A config born
- * after the server answered never reached it before: pyright kept its
- * "could not be resolved" findings for the server's life until a watched-files
- * event named the file.
+ * `clients/lsp/server-config-files.ts`) at the root only (a config below it is
+ * a declared p3 residual: the look stats the root's names, it does not walk),
+ * and publishes a created, edited or deleted one as a `config` change (#4532
+ * gap 12). A config born after the server answered never reached it before:
+ * pyright kept its "could not be resolved" findings for the server's life until
+ * a watched-files event named the file.
  *
  * The records are process-wide per root, as the servers are (two sessions on
  * one root share them, so one install restarts once). They describe the disk,

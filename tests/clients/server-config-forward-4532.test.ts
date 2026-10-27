@@ -41,6 +41,7 @@ import { LSPService } from "../../clients/lsp/index.js";
 import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
+import { readNdjsonRows } from "../support/ndjson-rows.js";
 
 let tmp: string;
 let notified: Array<{ filePath: string; type: number }>;
@@ -163,7 +164,7 @@ describe("a file that is not on the closed config list", () => {
 		expect(notified).toEqual([]);
 	});
 
-	it("is not looked for below the root (the server hosts a root, not a tree)", async () => {
+	it("is not looked for below the root (the look stats the root only)", async () => {
 		fs.mkdirSync(path.join(tmp, "sub"));
 		const seen = await lookAfter(() =>
 			fs.writeFileSync(path.join(tmp, "sub", "pyrightconfig.json"), "{}\n"),
@@ -293,23 +294,16 @@ describe("the look's record", () => {
 				fs.writeFileSync(path.join(tmp, "pyproject.toml"), "\n");
 			});
 			await flushLatencyLog();
-			const rows = fs
-				.readFileSync(getLatencyLogPath(), "utf8")
-				.split("\n")
-				.filter(Boolean)
-				.map(
-					(line) =>
-						JSON.parse(line) as {
-							phase?: string;
-							filePath?: string;
-							result?: string;
-							metadata?: { configs?: string[] };
-						},
-				)
-				.filter(
-					(row) =>
-						row.phase === "lsp_out_of_band_change" && row.filePath === tmp,
-				);
+			const { rows: all, skipped } = readNdjsonRows<{
+				phase?: string;
+				filePath?: string;
+				result?: string;
+				metadata?: { configs?: string[] };
+			}>(getLatencyLogPath());
+			expect(skipped).toBe(0);
+			const rows = all.filter(
+				(row) => row.phase === "lsp_out_of_band_change" && row.filePath === tmp,
+			);
 			expect(rows).toHaveLength(1);
 			expect(rows[0].result).toBe("config");
 			expect(rows[0].metadata?.configs).toEqual([

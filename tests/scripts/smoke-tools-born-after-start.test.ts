@@ -39,6 +39,7 @@ import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
+import { readNdjsonRows } from "../support/ndjson-rows.js";
 
 const fakeServer = fileURLToPath(
 	new URL("../fixtures/fake-lsp-server.mjs", import.meta.url),
@@ -455,23 +456,16 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 			);
 			expect(await pollMissing(importer, "obsmod", false, look)).toBe(true);
 			await flushLatencyLog();
-			const rows = fs
-				.readFileSync(getLatencyLogPath(), "utf8")
-				.split("\n")
-				.filter(Boolean)
-				.map(
-					(line) =>
-						JSON.parse(line) as {
-							phase?: string;
-							filePath?: string;
-							result?: string;
-							metadata?: { configs?: string[] };
-						},
-				)
-				.filter(
-					(row) =>
-						row.phase === "lsp_out_of_band_change" && row.filePath === dir,
-				);
+			const { rows: all, skipped } = readNdjsonRows<{
+				phase?: string;
+				filePath?: string;
+				result?: string;
+				metadata?: { configs?: string[] };
+			}>(getLatencyLogPath());
+			expect(skipped).toBe(0);
+			const rows = all.filter(
+				(row) => row.phase === "lsp_out_of_band_change" && row.filePath === dir,
+			);
 			expect(rows).toHaveLength(1);
 			expect(rows[0].result).toBe("config");
 			expect(rows[0].metadata?.configs).toEqual(["created:pyrightconfig.json"]);
