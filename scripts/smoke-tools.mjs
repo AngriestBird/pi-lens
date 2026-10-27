@@ -688,6 +688,25 @@ const LSP_FIXTURES = [
 		expectLaunchVariant: "native-ts7",
 		clean: true,
 	},
+	// #4914: a project that installed `@effect/tsgo` on TypeScript 7+ gets its
+	// own `effect-tsgo tsc --lsp --stdio`. Both packages are pinned (the issue's
+	// measured pair) and installed into the COPIED workspace, as the typescript7
+	// row does. `expectLaunchVariant` fails the row if selection fell back to the
+	// native or classic launch; `expectMessageMatch` fails it on a handshake that
+	// publishes nothing, so a real `effect-tsgo` must publish the seeded error.
+	{
+		lang: "effect-tsgo",
+		lspGate: true,
+		lspGateMarker: '"not a number"',
+		dir: "tests/fixtures/tool-smoke/effect-tsgo",
+		file: "bad.ts",
+		serverHint: "effect-tsgo (@effect/tsgo on TypeScript 7+)",
+		tools: [],
+		setup:
+			"npm install typescript@7.0.2 @effect/tsgo@0.62.0 --no-save --no-audit --no-fund",
+		expectLaunchVariant: "effect-tsgo",
+		expectMessageMatch: "not assignable to type 'number'",
+	},
 	{
 		lang: "yaml",
 		lspGate: true,
