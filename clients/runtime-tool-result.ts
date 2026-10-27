@@ -153,7 +153,10 @@ import {
 	readHeldDocumentsAnswer,
 	SAME_HEAD_DISCARD_SOURCE,
 } from "./disk-change-subscribers.js";
-import { lookForOutOfBandChanges } from "./out-of-band-changes.js";
+import {
+	lookForOutOfBandChanges,
+	oweDeclarationWalk,
+} from "./out-of-band-changes.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import {
 	incrementDegradationCount,
@@ -307,6 +310,11 @@ export function resyncHeadMove(args: HeadLook): Promise<void> {
 	// `discarded`). Synchronous, so a joining caller's paths are in the
 	// accumulator before any drain that could owe them.
 	addHeadDiscards(args.key, args.discarded);
+	// #4532 gap 6: the same holds for this call's declaration walk. A bash
+	// result that joins a tool_call look runs the tool_call's closure, whose
+	// out-of-band look would not walk; the demand is owed to the root first, in
+	// the same synchronous step, and the out-of-band pass that runs next takes it.
+	oweDeclarationWalk(args.root, args.trigger);
 	return serializeHeadLook(args.key, async () => {
 		try {
 			await lookForOutOfBandChanges(args.root, args.trigger, args.runtime);
