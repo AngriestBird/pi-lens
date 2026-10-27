@@ -585,10 +585,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :148, :202
 	"clients/file-utils.ts": {
-		silent: 11,
-		identities: "0cb7a41f4e5a5a7a",
+		silent: 10,
+		identities: "6ae9ab1bab948b4e",
 		reason: PRE_RULE,
-	}, // :265, :285, :303, :307, :310, :362, :437, :863, :1223, :1504, :1535 (#4689 r4: dataDirCanonicalRoot's realpath-probe arm now returns the identity root; the adoption's handlers declare their none)
+	}, // :339, :359, :377, :381, :384, :511, :939, :1399, :1686, :1717 (#4689 batch 8: dataDirCanonicalRoot's realpath-probe catch is gone with the probe; the adoption's handlers declare their none)
 	"clients/fix-run-restore.ts": {
 		silent: 10,
 		identities: "24b4689d533166d4",
@@ -1161,10 +1161,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :171, :579, :608, :904, :1108
 	"clients/sgconfig.ts": {
-		silent: 9,
-		identities: "e709eb6e68b73320",
+		silent: 8,
+		identities: "8fd40026fc0c11bb",
 		reason: PRE_RULE,
-	}, // :61, :144, :176, :212, :405, :424, :447, :476, :480
+	}, // :136, :168, :204, :397, :416, :439, :468, :472
 	"clients/single-flight.ts": {
 		silent: 1,
 		identities: "9b712a522f01e05f",
