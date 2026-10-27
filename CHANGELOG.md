@@ -16,6 +16,43 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Security
 
+## [4.4.6] - 2026-10-27
+
+### Changed
+
+- **Termux install fallback** — documents the tested Rust-built ast-grep workaround for the `@ast-grep/cli` native-binary install failure. (#4902)
+
+### Fixed
+
+- **`lsp_navigation` results count as reads again (refs #1884)** — A navigation result whose path was relative and had no recorded resolution basis lost the `details.searchReads` lines it showed the agent, so the next edit to those lines was blocked by the read guard. Those lines are registered as reads before the refusal, which still keeps turn state and dispatch closed for the unresolved path. A navigation CALL also resolves the `path` it declares, so pi-lens initialises the file's LSP config and warms it before the request instead of treating the call as naming no file (#3650).
+
+- **Writes and LSP edits share one lock and one containment root per file.** A `<dir-link>/../file` spelling no longer locks a different file in pi's mutation queue, a workspace edit's root is the directory the kernel opens, and a path identity stays put when it is resolved again (#4689). A workspace edit whose target the kernel cannot name — an unreadable ancestor, a looping link — is refused instead of confined by its spelling.
+
+- **A file reached through a link spelling gets its own project's verdicts (refs #4689)** — the containment predicate, four upward walks (formatter configs, grammar write dirs, temporary-checkout markers), the project ignore verdict and a runner's dispatch path now climb and key the file's kernel-real path, so `repo/link/../f.ts` and a directory named `..foo` agree with the real spelling instead of reading as another project's file, as never ignored, or as outside the root.
+
+- **The bundled Biome config loads under Biome 2.6 again (refs #4886)** — In a project with no `biome.json`, pi-lens lints with its own fallback config. That config switched off the nursery rule `useSortedClasses`, which Biome 2.6 renamed, so the managed Biome (which tracks the latest release) rejected the whole file: every Biome lint run reported a config error instead of findings, and `lint --write` fixed nothing. The entry was redundant, since nursery rules are off unless named, so it is gone and the config loads on Biome 2.5 and 2.6 alike.
+
+- **Tool calls no longer wait on two walks of a non-git home folder (#4905)** — The opaque-mutation prescan refuses a session root that is the home folder or above it, and reads it as unknown, never as "no change". The declaration-file look skips its walk there but still looks for a dependency install, so language servers still restart after one. A root already found over the file cap is not walked again in the same session. Each is recorded once per session (`opaque-capture-refused` and `lsp-declaration-look-capped`, subject `home-root`).
+
+- **Deferred Biome fixes cover every edited JS/TS file (#4862)** — Fix all edited files in a project at agent end instead of only the first. Keep Dart project deduplication and record duplicate-scope skips once per tool/scope per session.
+
+### Security
+
+- **Workspace edits no longer write outside the workspace through a dangling symlink (closes #4877).** A `create` or `rename` whose path is a symlink to a missing file is refused instead of confined by its spelling.
+
+### Internal
+
+<details>
+<summary>3 internal changes: tests, CI, tooling, and refactors</summary>
+
+- **Path-containment ratchet: a hand-rolled `..` test over a `path.relative` result now reds (refs #2556)** — `tests/config/path-containment-sweep.test.ts` admits containment only through `clients/path-utils.ts` (`isUnderDir`, `isWithinForm`, the home-ceiling predicate) across the runtime trees, `scripts/` and `tests/`; the 42 remaining sites are baseline rows with reasons, every comparison and call spelling is read rather than a list of methods, and the detector's state table plants the #4878 F1 spelling that failed 26 `Unit tests Windows` cells.
+
+- **AGENTS.md split by seam (refs #4361)** — the defect-shape entries, the seven standing-invariant subsections, the orchestrator-only procedure and the release rules now live in `docs/`, each behind an index line or pointer in `AGENTS.md`; the moved text is verbatim apart from two rule lines, the task router naming the seam table row and the file it names, and one seam-table path corrected to `clients/formatters.ts`. Both reviewer bots load the catalog and the invariant files, and `scripts/check-pr-body.mjs` reads the shape catalog from `docs/defect-shapes.md` at the PR's merge base.
+
+- **Dev-only advisories cleared (refs #4874)** — the lockfile resolves `undici` 8.12.3 (through an override, since the pi peer pins 8.10.2), `zod` 4.6.7 and `fast-uri` 3.1.9; none ships in the package.
+
+</details>
+
 ## [4.4.5] - 2026-10-25
 
 ### Added
