@@ -3778,9 +3778,10 @@ export class LSPService {
 		servers: ReadonlyArray<{ id: string }>,
 	): boolean {
 		// #4926 review F3: held-ness is per client. Skip only when every live
-		// client of the path holds it; one that reads it closed needs the event.
+		// client of the path holds it (or none is live: nothing to tell); one
+		// that reads it closed needs the event.
 		const live = this.liveClientsOf(servers, filePath);
-		if (live.length > 0 && live.every((client) => client.holds)) return false;
+		if (live.every((client) => client.holds)) return false;
 		const key = normalizeMapKey(filePath);
 		const seen = this.unheldStamps.get(key);
 		if (seen?.size === stat.size && seen.mtimeMs === stat.mtimeMs) return false;
@@ -3799,11 +3800,10 @@ export class LSPService {
 			}
 		}
 		this.unheldStamps.set(key, stamp);
-		// With no live server of the path, nothing read older bytes: a baseline.
+		// A first sighting has nothing to compare: the client-start rule (#4320).
 		if (seen === undefined)
 			return live.some(
 				(client) =>
-					!client.holds &&
 					watchedTypeForOpen(stat.mtimeMs, client.launchedAt) === FILE_CREATED,
 			);
 		return seen.sha256 === undefined || seen.sha256 !== stamp.sha256;
