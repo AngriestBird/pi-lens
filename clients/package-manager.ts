@@ -720,8 +720,7 @@ function* localBinMatches(
 	// each step is then compared as spelled, one realpath for the whole walk
 	// instead of one per step (measured 4x at depth 12 on Linux).
 	const home = ceiling ? realpathOrResolve(homeDir) : homeDir;
-	const start = path.resolve(startDir);
-	const startIsReal = ceiling && realpathOrResolve(start) === start;
+	let startIsReal: boolean | undefined;
 	// Spelled by design (#4689 item 6): the resolver climbs the axis its trust
 	// classifier (`projectLocalBinDirs`) climbs; see there.
 	for (const dir of walkUpDirs(startDir, { spelling: true })) {
@@ -736,6 +735,8 @@ function* localBinMatches(
 		// because there is no legitimate case for this resolver to hand back a
 		// bin from outside the project tree. `ceiling: false` (own-install
 		// walk only, #2544 round 4 F1) skips this check entirely.
+		// The first step is the start itself.
+		startIsReal ??= ceiling && realpathOrResolve(dir) === dir;
 		if (
 			ceiling &&
 			isAtOrAboveHomeDir(startIsReal ? dir : realpathOrResolve(dir), home)
