@@ -70,7 +70,9 @@ names include `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`,
 `read_symbol`, `read_enclosing`, `effective_config`, `analyze`, `health`,
 `latency`, `project_scan`, and `rebuild`. The activation loader and MCP
 lifecycle tools `session_start`, `turn_end`, and `session_end` remain enabled
-because their host protocols require them.
+because their host protocols require them. A `tools.<name>` key that
+names no tool (`tools.lazy` aside), or names a required one, is dropped with
+`PILENS_CFG_0009`.
 
 To see the resolved tool surface, use `/lens-health`; the `effective_config`
 tool provides the full configuration provenance. Bundled skills are managed by
