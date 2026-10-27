@@ -181,8 +181,9 @@ and `[]` mean no arguments.
   toward a task hint without widening scope, and `view: "compact"` returns a
   line-oriented text rendering instead of JSON. Read-only: a cold cache returns
   `available: false` with a retry hint and starts a non-blocking background
-  build. A project over `maxProjectFiles` starts no build: the result names the
-  cap, so raise it in `.pi-lens.json` instead of retrying.
+  build. On a project over `maxProjectFiles` that first build records a
+  size-skip verdict; later calls name the cap and start no build, so raise it
+  in `.pi-lens.json` instead of retrying.
 - **`effective_config`** — Explains the resolved configuration and its
   provenance. Pass `file` to add that file's language and the per-server and
   per-runner selection decisions. The result holds no environment values and

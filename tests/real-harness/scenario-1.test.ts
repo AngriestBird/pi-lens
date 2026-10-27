@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 import { withRealPi } from "../support/real-pi-harness.js";
 
 function documentedToolBaselines(): { active: string[]; lazy: string[] } {
@@ -28,17 +29,33 @@ function documentedToolBaselines(): { active: string[]; lazy: string[] } {
 	const active = [...activeSection.matchAll(/`([a-z][a-z0-9_]*)`/g)].map(
 		(match) => match[1],
 	);
-	if (lazyStart < 0 || active.length === 0) {
+	const lazy = [...section.matchAll(/`([a-z][a-z0-9_]*)`/g)].map(
+		(match) => match[1],
+	);
+	if (lazyStart < 0 || active.length === 0 || lazy.length === 0) {
 		throw new Error(
 			"docs/agent-tools.md: the always-active or situational tool list was not found",
 		);
 	}
-	return {
-		active,
-		lazy: [...section.matchAll(/`([a-z][a-z0-9_]*)`/g)].map(
-			(match) => match[1],
-		),
-	};
+	// A tool the doc omits is also filtered out of the observed roster, so the
+	// roster check alone cannot see it missing: pin both lists to the registry.
+	// The loader tool is documented in its own sentence, outside both lists.
+	const piTools = TOOL_REGISTRY.filter(
+		(tool) => tool.piName && tool.piName !== "pi_lens_activate_tools",
+	);
+	expect([...active].sort()).toEqual(
+		piTools
+			.filter((tool) => !("situational" in tool))
+			.map((tool) => tool.piName)
+			.sort(),
+	);
+	expect([...lazy].sort()).toEqual(
+		piTools
+			.filter((tool) => "situational" in tool)
+			.map((tool) => tool.piName)
+			.sort(),
+	);
+	return { active, lazy };
 }
 
 // The provider observation's tools are wire objects ({ name, ...bytes }); the
