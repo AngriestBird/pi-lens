@@ -203,7 +203,9 @@ npm_config_ignore_scripts=true pi install npm:pi-lens
 `npm_config_ignore_scripts=true` skips every dependency lifecycle script for
 that `pi install` command, not only the failing `@ast-grep/cli` script. Use it
 only for this fallback after installing and checking the Rust-built `ast-grep`
-binary separately.
+binary separately. `pi update` runs the same postinstall, so set the variable
+for it too. `ast-grep --version` must succeed from a new shell, which means
+`~/.cargo/bin` is on your `PATH`.
 
 In the verified environment, `/lens-health` reported zero pipeline crashes and
 listed the `ast-grep` and `bash` LSP servers as available. This confirms startup
@@ -211,7 +213,9 @@ and server discovery only; `ast_grep_search` was not tested end to end.
 
 pi-lens only looks for an `ast-grep` on `PATH` (such as Cargo's
 `~/.cargo/bin/ast-grep`) when pi trusts the project, so in an untrusted
-project this fallback leaves `ast_grep_search` unavailable.
+project this fallback leaves `ast_grep_search` unavailable. The in-process
+ast-grep rules (`@ast-grep/napi`) and Biome have no Android build, so they stay
+unavailable either way.
 
 ## Documentation
 
