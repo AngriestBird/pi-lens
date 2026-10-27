@@ -233,6 +233,7 @@ describe("lens_diagnostics compact filename", () => {
 		fs.writeFileSync(file, "const app = 1;\n");
 		const service = {
 			announceCreatedFiles: vi.fn(),
+			sweepDocumentDrift: vi.fn(async () => undefined),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => []),
 			getCapabilitySnapshots: vi.fn(async () => []),
@@ -262,6 +263,7 @@ describe("lens_diagnostics compact filename", () => {
 		fs.writeFileSync(unrelated, "const unrelated = 1;\n");
 		const service = {
 			announceCreatedFiles: vi.fn(),
+			sweepDocumentDrift: vi.fn(async () => undefined),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => []),
 			getCapabilitySnapshots: vi.fn(async () => []),
@@ -366,6 +368,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		);
 		const service = {
 			announceCreatedFiles: vi.fn(),
+			sweepDocumentDrift: vi.fn(async () => undefined),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () =>
 				tiers.map(([_, message, severity]) => ({
@@ -446,6 +449,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		);
 		const service = {
 			announceCreatedFiles: vi.fn(),
+			sweepDocumentDrift: vi.fn(async () => undefined),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => [
 				{
@@ -492,6 +496,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		fs.writeFileSync(file, "const value: number = 'bad';\n");
 		const service = {
 			announceCreatedFiles: vi.fn(),
+			sweepDocumentDrift: vi.fn(async () => undefined),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => [
 				{
@@ -535,6 +540,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		const service = {
 			runWorkspaceDiagnostics: vi.fn(async () => []),
 			announceCreatedFiles: vi.fn(),
+			sweepDocumentDrift: vi.fn(async () => undefined),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => []),
 			getCapabilitySnapshots: vi.fn(async () => []),
@@ -566,6 +572,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		const touched: string[] = [];
 		const service = {
 			announceCreatedFiles: vi.fn(),
+			sweepDocumentDrift: vi.fn(async () => undefined),
 			touchFile: vi.fn(async (file: string) => {
 				touched.push(file);
 				return undefined;
@@ -600,6 +607,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		function makeService(key: string) {
 			return {
 				announceCreatedFiles: vi.fn(),
+				sweepDocumentDrift: vi.fn(async () => undefined),
 				touchFile: vi.fn(async (f: string) => {
 					touchedByScope.set(key, [...(touchedByScope.get(key) ?? []), f]);
 					return undefined;

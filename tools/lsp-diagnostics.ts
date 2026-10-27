@@ -583,6 +583,15 @@ export function createLspDiagnosticsTool(
 				};
 			}
 
+			// #4532 gap 13: a document the server already holds may have changed
+			// outside pi (a `cp`, a bash write) since pi last synced it. The touch
+			// below re-syncs only the files this call names, and its own drift
+			// sweep is rate-limited and not awaited, so a held file the named file
+			// depends on answered stale on the first call and clean on the second.
+			// The forced sweep re-pushes drifted held documents before any answer
+			// is read; it sends nothing for a held document whose bytes are unchanged.
+			await lspService.sweepDocumentDrift({ force: true });
+
 			if (Array.isArray(typedParams.paths) && typedParams.paths.length > 0) {
 				if (typedParams.paths.length > MAX_BATCH_FILES) {
 					return {
