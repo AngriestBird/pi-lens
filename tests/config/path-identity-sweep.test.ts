@@ -99,6 +99,9 @@ const HELM_CONTAINMENT =
 const BIN_CONTAINMENT =
 	"project-local bin containment (#2556): a PATH shim's kernel-real target is checked against the kernel-real roots and a realpath that throws refuses the binary, which realpathOrResolve's fallback would turn into a spelling compare";
 
+const FOREIGN_CHECKOUT_FAIL_CLOSED =
+	"foreignGitRoot's two realpaths fail closed by errno: ENOENT/ENOTDIR on either side is no proof of a foreign checkout (null, silent), and any other refusal (EACCES, ELOOP) records one `test-checkout-identity-unavailable` gap and also returns null. realpathOrResolve's sync fallback returns an ancestor-plus-tail guess instead, so a missing target would be walked for a foreign `.git` and the gap record would never fire; the sync seam has no `kernelConfirmed` (only the async one does). #4689 batch 8 tried the swap and the worktree-isolation cells went red";
+
 const INSTALL_SELF_CONTAINED =
 	"clients/install-diagnostics.ts is the paste-able report for an install whose runtime dependencies did not resolve (#285/#335) and imports nothing from clients/: clients/path-utils.ts imports minimatch, so routing its one realpath (the symlinked-install probe, which compares the kernel-real package dir with the spelled one on purpose) through realpathOrResolve would stop the report loading exactly when it is needed; the import census in tests/clients/install-diagnostics.test.ts refuses any relative or bare specifier there, so that swap reds it";
 
@@ -154,11 +157,6 @@ const PINS: Readonly<Record<string, Pin>> = {
 		identities: "62c789065f4e9d86",
 		reason: PRE_4689,
 	}, // :58, :68, :78, :112, :132, :133, :139, :147, :169
-	"clients/file-utils.ts#raw-realpath": {
-		sites: 1,
-		identities: "394522becca2b539",
-		reason: PRE_4689,
-	}, // :436 (r6: keyed by its function, renamed to dataDirCanonicalRoot)
 	"clients/file-utils.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "7e723fe52bc1e91e",
@@ -239,11 +237,6 @@ const PINS: Readonly<Record<string, Pin>> = {
 		identities: "1f35334f3e60fd48",
 		reason: LOCAL_DEDUPE,
 	}, // :435, :436
-	"clients/partial-edit-apply.ts#raw-realpath": {
-		sites: 1,
-		identities: "c80630266fdf1779",
-		reason: PRE_4689,
-	}, // :444
 	"clients/pipeline.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "f25de8a73a269e45",
@@ -299,16 +292,11 @@ const PINS: Readonly<Record<string, Pin>> = {
 		identities: "ff517a7d1b40a92e",
 		reason: PRE_4689,
 	}, // :3811
-	"clients/sgconfig.ts#raw-realpath": {
-		sites: 1,
-		identities: "63bbad78cd8d1284",
-		reason: PRE_4689,
-	}, // :60
 	"clients/test-runner-client.ts#raw-realpath": {
 		sites: 4,
 		identities: "c1a06e8a6462ff6b",
-		reason: PRE_4689,
-	}, // :306, :327, :328, :343
+		reason: FOREIGN_CHECKOUT_FAIL_CLOSED,
+	}, // :306, :327, :328, :343 (:327 and :328 are the calls; :306 and :343 are the gap record's `realpath` label)
 	"clients/test-runner-client.ts#path-resolve-keyed": {
 		sites: 2,
 		identities: "3aedefc29eced70b",
