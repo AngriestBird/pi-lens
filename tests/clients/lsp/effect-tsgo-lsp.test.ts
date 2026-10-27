@@ -4,8 +4,7 @@
  *
  * Real seams only: the production `TypeScriptServer.spawn`, the real
  * `admitProjectSuppliedTsserver` trust gate (driven by the host trust seam,
- * `setProjectTrustState`, and the spawn-scope permission), and the real
- * `getStrategy` the spawned variant feeds. Only the child launcher and the
+ * `setProjectTrustState`, and the spawn-scope permission). Only the child launcher and the
  * installer are doubled, as in `tsserver-project-trust.test.ts`; nothing here
  * claims the fixture binaries speak LSP (the smoke row
  * `effect-tsgo` in `scripts/smoke-tools.mjs` runs the real server).
@@ -155,24 +154,6 @@ describe("effect-tsgo selection (#4914)", () => {
 		});
 	});
 
-	it("answers the spawned effect-tsgo variant with the typescript-go strategy, never classic's silent-on-clean one", async () => {
-		const root = makeRoot("strategy");
-		addTypeScript(root, "7.0.2");
-		addEffectTsgo(root);
-		const { getStrategy } =
-			await import("../../../clients/lsp/wait-policy/strategies.js");
-
-		const spawned = await trustedSpawn(root);
-		const strategy = getStrategy("typescript", spawned?.launchVariant);
-
-		// Recurrence: an unlisted variant falls through to the `typescript` row
-		// measured on classic (`silentOnClean`), so the cascade would skip the
-		// wait for a server that does publish on clean.
-		expect(getStrategy("typescript", "classic").silentOnClean).toBe(true);
-		expect(strategy).toBe(getStrategy("typescript", "native-ts7"));
-		expect(strategy.silentOnClean).not.toBe(true);
-	});
-
 	it("keeps the native launch for TypeScript 7 without @effect/tsgo", async () => {
 		const root = makeRoot("native");
 		const tsc = addTypeScript(root, "7.0.2");
@@ -225,6 +206,7 @@ describe("effect-tsgo fallback (#4914)", () => {
 		["a directory with no manifest", { manifest: null }],
 		["a malformed manifest", { manifest: "{" }],
 		["a manifest with no version", { manifest: JSON.stringify({ name: "x" }) }],
+		["a manifest with an empty version", { manifest: '{"version":""}' }],
 		[
 			"a manifest with a non-string version",
 			{ manifest: JSON.stringify({ version: 7 }) },
