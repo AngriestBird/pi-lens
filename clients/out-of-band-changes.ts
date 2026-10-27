@@ -22,6 +22,14 @@
  * diagnostics-cache clock so the entries whose scope holds a changed path or
  * an install are refused. This module names no consumer.
  *
+ * The same look compares the config files a server reads once and keeps
+ * (`pyrightconfig.json`, `pyproject.toml`: the closed list in
+ * `clients/lsp/server-config-files.ts`) at the root, and publishes a created,
+ * edited or deleted one as a `config` change (#4532 gap 12). A config born
+ * after the server answered never reached it before: pyright kept its
+ * "could not be resolved" findings for the server's life until a watched-files
+ * event named the file.
+ *
  * The records are process-wide per root, as the servers are (two sessions on
  * one root share them, so one install restarts once). They describe the disk,
  * not a session, so a session boundary keeps them: an install made between
@@ -32,7 +40,7 @@
  */
 import { promises as fsp } from "node:fs";
 import * as os from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import {
 	incrementDegradationCount,
@@ -55,6 +63,7 @@ import {
 	normalizeMapKey,
 	realpathOrResolve,
 } from "./path-utils.js";
+import { SERVER_CONFIG_FILE_NAMES } from "./lsp/server-config-files.js";
 import { createSingleFlight } from "./single-flight.js";
 import { compareOrdinal } from "./string-utils.js";
 
@@ -94,7 +103,12 @@ const DECLARATION_WALK_MAX_DIRS = 4096;
 const DECLARATION_WALK_MAX_FILES = 2048;
 /** Directory reads in flight during one walk. */
 const DECLARATION_WALK_CONCURRENCY = 16;
-const DECLARATION_FILE = /\.d\.[cm]?ts$/i;
+/**
+ * Declaration files: TypeScript `.d.ts`/`.d.mts`/`.d.cts` and Python `.pyi`
+ * stubs (#4532 gap 3: a stub changed or added outside pi reached no server;
+ * pyright keeps the bytes of a closed stub it read for an importer).
+ */
+const DECLARATION_FILE = /(?:\.d\.[cm]?ts|\.pyi)$/i;
 /** Roots kept; the oldest is dropped (its next look is a first look). */
 const MAX_ROOTS = 64;
 
@@ -106,6 +120,8 @@ function declarationLookIntervalMs(): number {
 
 interface RootRecord {
 	stamp: string;
+	/** name -> `ino:size:mtimeMs` of each listed server config file (#4532). */
+	configs: Map<string, string> | undefined;
 	/** path -> `ino:size:mtimeMs`; undefined until a walk completes uncapped. */
 	declarations: Map<string, string> | undefined;
 	walkedAt: number;
@@ -127,6 +143,41 @@ const fingerprint = (stat: {
 }): string => `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
 
 /**
+ * The fingerprints of the root's server config files, from the listing the
+ * install stamp already read (#4532). A name that is listed but cannot be
+ * statted reads as absent, as a lockfile does in the stamp.
+ */
+async function readServerConfigs(
+	root: string,
+	listed: ReadonlySet<string>,
+): Promise<Map<string, string>> {
+	const found = await Promise.all(
+		SERVER_CONFIG_FILE_NAMES.filter((name) => listed.has(name)).map(
+			async (name): Promise<[string, string] | undefined> => {
+				try {
+					return [name, fingerprint(await fsp.stat(join(root, name)))];
+				} catch {
+					return undefined;
+				}
+			},
+		),
+	);
+	return new Map(found.filter((entry) => entry !== undefined));
+}
+
+/** Created, changed and deleted server config files between two looks. */
+function diffServerConfigs(
+	root: string,
+	before: ReadonlyMap<string, string>,
+	after: ReadonlyMap<string, string>,
+): Array<{ filePath: string; type: number }> {
+	return diffDeclarations(
+		new Map([...before].map(([name, print]) => [join(root, name), print])),
+		new Map([...after].map(([name, print]) => [join(root, name), print])),
+	);
+}
+
+/**
  * The root's install stamp and the freshest timestamp in it.
  *
  * `stamp` is opaque equality evidence: one listing of the root, then a stat of
@@ -144,15 +195,19 @@ const fingerprint = (stat: {
  * a cache directory under it would change the stamp and restart servers for
  * nothing (#4476's reason for listing markers instead of the directory).
  */
-async function readInstallStamp(
-	root: string,
-): Promise<{ stamp: string; newestChangeMs: number }> {
+async function readInstallStamp(root: string): Promise<{
+	stamp: string;
+	newestChangeMs: number;
+	/** The root's server config files; `undefined` when the root cannot be listed. */
+	configs: Map<string, string> | undefined;
+}> {
 	let listed: Set<string>;
 	try {
 		listed = new Set(await fsp.readdir(root));
 	} catch {
-		return { stamp: "-", newestChangeMs: 0 };
+		return { stamp: "-", newestChangeMs: 0, configs: undefined };
 	}
+	const configsPromise = readServerConfigs(root, listed);
 	const names: string[] = [];
 	for (const name of INSTALL_LOCKFILES) if (listed.has(name)) names.push(name);
 	let linkPrint: string | undefined;
@@ -189,6 +244,7 @@ async function readInstallStamp(
 	if (linkPrint !== undefined)
 		parts.push({ part: linkPrint, changedAt: linkChangedAt });
 	return {
+		configs: await configsPromise,
 		stamp: parts.map((entry) => entry.part).join("|"),
 		newestChangeMs: parts.reduce(
 			(newest, entry) => Math.max(newest, entry.changedAt),
@@ -487,6 +543,9 @@ export function lookForOutOfBandChanges(
 	);
 }
 
+/** The `DiskChange.sources` entry of a server config file change (#4532). */
+export const CONFIG_SOURCE = "config";
+
 /** `diffDeclarations`'s watched-files type codes, as the record names them. */
 const CHANGE_TYPE = {
 	1: "created",
@@ -504,13 +563,15 @@ function outOfBandChange(
 	root: string,
 	installed: boolean,
 	changes: ReadonlyArray<{ filePath: string; type: number }>,
+	configChanges: ReadonlyArray<{ filePath: string; type: number }>,
 	at: number,
 ): DiskChangeInput {
 	const sources = [
 		...(installed ? ["install"] : []),
 		...(changes.length > 0 ? ["declarations"] : []),
+		...(configChanges.length > 0 ? [CONFIG_SOURCE] : []),
 	];
-	const pathChanges = changes.map((change) => ({
+	const pathChanges = [...changes, ...configChanges].map((change) => ({
 		filePath: change.filePath,
 		type: CHANGE_TYPE[change.type as 1 | 2 | 3],
 	}));
@@ -521,12 +582,17 @@ function outOfBandChange(
 		// A stat fingerprint, not the bytes: an `inferred` change may never by
 		// itself confirm that a finding was not reproduced.
 		kind: "inferred",
+		// A config file changes the analysis of every file under its root, so it
+		// cannot be enumerated any more than an install can: the cache refuses
+		// everything scanned before it (`"unknown"`), never just the config path.
 		paths:
-			changes.length > 0
-				? changes.map((change) => normalizeMapKey(change.filePath))
-				: installed
-					? "unknown"
-					: [],
+			configChanges.length > 0
+				? "unknown"
+				: changes.length > 0
+					? changes.map((change) => normalizeMapKey(change.filePath))
+					: installed
+						? "unknown"
+						: [],
 		...(pathChanges.length > 0 ? { pathChanges } : {}),
 		at,
 	};
@@ -576,6 +642,9 @@ async function lookOnce(
 		: (observed?.declarations ?? prior?.declarations);
 	records.set(key, {
 		stamp: install.stamp,
+		// An unlistable root keeps the previous baseline: reading it as "no
+		// config files" would publish every one as created on the next look.
+		configs: install.configs ?? prior?.configs,
 		declarations,
 		walkedAt: walkDue && !incomplete ? started : (prior?.walkedAt ?? started),
 	});
@@ -621,12 +690,16 @@ async function lookOnce(
 		walkDue && !incomplete && declarations && prior?.declarations
 			? diffDeclarations(prior.declarations, declarations)
 			: [];
-	if (!installed && changes.length === 0) return;
+	const configChanges =
+		install.configs && prior?.configs
+			? diffServerConfigs(root, prior.configs, install.configs)
+			: [];
+	if (!installed && changes.length === 0 && configChanges.length === 0) return;
 	const at = Date.now();
 	// I1: the per-root record is committed above, before any consumer runs.
 	ensureDiskChangeSubscribers();
 	const { results, failedSubscribers } = await publishDiskChange(
-		outOfBandChange(root, installed, changes, at),
+		outOfBandChange(root, installed, changes, configChanges, at),
 		runtime,
 	);
 	// The restart count belongs to the LSP subscriber's own answer; the row
@@ -647,11 +720,11 @@ async function lookOnce(
 		phase: "lsp_out_of_band_change",
 		filePath: root,
 		durationMs: Date.now() - started,
-		result: installed
-			? changes.length > 0
-				? "install+declarations"
-				: "install"
-			: "declarations",
+		result: [
+			...(installed ? ["install"] : []),
+			...(changes.length > 0 ? ["declarations"] : []),
+			...(configChanges.length > 0 ? [CONFIG_SOURCE] : []),
+		].join("+"),
 		metadata: {
 			trigger,
 			restarted,
@@ -664,6 +737,11 @@ async function lookOnce(
 			created: count(1),
 			changed: count(2),
 			deleted: count(3),
+			// The server config files this look forwarded (#4532), by name.
+			configs: configChanges.map(
+				(change) =>
+					`${CHANGE_TYPE[change.type as 1 | 2 | 3]}:${basename(change.filePath)}`,
+			),
 		},
 	});
 }

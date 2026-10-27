@@ -646,6 +646,21 @@ const LSP_FIXTURES = [
 			reportsMissing: (text, name) =>
 				text.includes(`Import "${name}" could not be resolved`),
 		},
+		// #4521/#4532: `runBornAfterStartConfigWitness` (pyright reads its
+		// `pyrightconfig.json` once, at the root it is hosted at, measured on
+		// 1.1.414).
+		bornAfterStartConfig: {
+			ext: ".py",
+			importerText: (name) => `import ${name}\n\nprint(${name}.VALUE)\n`,
+			moduleText: "VALUE = 1\n",
+			reportsMissing: (text, name) =>
+				text.includes(`Import "${name}" could not be resolved`),
+			moduleDir: "libs",
+			configFile: "pyrightconfig.json",
+			configText: JSON.stringify({ extraPaths: ["libs"] }),
+			ancestorMarker: "requirements.txt",
+			rootMarker: "setup.py",
+		},
 	},
 	// Clean (no-diagnostic) counterpart — bench-only signal for the clean-file edit
 	// path (#240). Every other fixture is intentionally broken, which masks how long
@@ -2421,6 +2436,25 @@ export const BORN_AFTER_START_POLL_MS = 500;
 /** The marker the diagnostics tool prints when a check could not vouch for the file. */
 const INCONCLUSIVE_ANSWER = /NOT the same as 0 diagnostics/;
 
+/**
+ * One `lsp_diagnostics` call on `file`, as the born-after-start phases read it
+ * (the primary server's answer, as text). `before` runs first: the host's
+ * `tool_call` look, when the phase stands in for the pi hook (#4532).
+ */
+function diagnoseFile(execute, workspace, lang, file, before) {
+	return async () => {
+		if (before) await before();
+		const result = await execute(
+			`smoke-lsp-created-${lang}`,
+			{ path: file, waitMs: LSP_DIAGNOSTICS_WAIT_MS, serverScope: "primary" },
+			undefined,
+			null,
+			{ cwd: workspace },
+		);
+		return String(result?.content?.[0]?.text ?? "");
+	};
+}
+
 /** Call `probe` until it returns true or `deadlineMs` passes. */
 async function pollUntil(probe, { deadlineMs, intervalMs }) {
 	const startedAt = Date.now();
@@ -2461,16 +2495,7 @@ export async function runCreatedModuleWitness(
 ) {
 	const witness = fx.createdModuleWitness;
 	const tag = `${process.pid}_${Date.now().toString(36)}`;
-	const diagnose = async (file) => {
-		const result = await execute(
-			`smoke-lsp-created-${fx.lang}`,
-			{ path: file, waitMs: LSP_DIAGNOSTICS_WAIT_MS, serverScope: "primary" },
-			undefined,
-			null,
-			{ cwd: workspace },
-		);
-		return String(result?.content?.[0]?.text ?? "");
-	};
+	const diagnose = (file) => diagnoseFile(execute, workspace, fx.lang, file)();
 	const cases = [
 		{
 			label: "pi write",
@@ -2547,6 +2572,161 @@ export async function runCreatedModuleWitness(
 				detail: `witness error: ${err?.message ?? err}`,
 				diags: 0,
 			});
+		}
+	}
+	return rows;
+}
+
+/**
+ * Born-after-start phase for what configures the server rather than what the
+ * file imports (#4521; the gap is #4532 gap 12). Two cases, each polled to the
+ * deadline like the module phase, each only after the importer's finding is
+ * reported (the server is ready for the file, else the row proves nothing):
+ *
+ *  - config file: the module sits in `moduleDir` from the start and the
+ *    importer cannot see it; the server's config file, which puts the directory
+ *    on its search path, is created only then. pyright reads that file once:
+ *    before #4532 the finding stayed for the server's life. The phase stands in
+ *    for pi's hook: `look` is the out-of-band look pi runs at every `tool_call`
+ *    (`lookForOutOfBandChanges`), called before each poll, so its first call
+ *    records the baseline the later one is compared with;
+ *  - root marker: the workspace has a project marker of its own
+ *    (`ancestorMarker`), so a subdirectory without one shares the workspace's
+ *    client. The config sits in that subdirectory, which the server is not
+ *    hosted at, so the importer cannot see the module; a marker file created in
+ *    the subdirectory makes it a project root of its own, and a second client
+ *    hosted there reads the config. This needs no look: the root is resolved at
+ *    each call. (A workspace with NO marker of its own stays shared after the
+ *    subdirectory gets one: `projectBoundaryCache` keeps the "no boundary"
+ *    answer it gave before the marker existed; recorded on #4532, not covered
+ *    here.)
+ *
+ * One row per case, reported with the module phase's rows.
+ */
+export async function runBornAfterStartConfigWitness(
+	fx,
+	{
+		workspace,
+		execute,
+		look,
+		deadlineMs = BORN_AFTER_START_DEADLINE_MS,
+		intervalMs = BORN_AFTER_START_POLL_MS,
+	},
+) {
+	const witness = fx.bornAfterStartConfig;
+	const tag = `${process.pid}_${Date.now().toString(36)}`;
+	const runner = (label) => `${fx.serverHint} born after start (${label})`;
+	const seedModule = (dir, name) => {
+		fs.mkdirSync(path.join(dir, witness.moduleDir), { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, witness.moduleDir, `${name}${witness.ext}`),
+			witness.moduleText,
+		);
+	};
+	const cases = [
+		{
+			label: "config file",
+			root: workspace,
+			seed: (dir, name) => seedModule(dir, name),
+			before: () => look(workspace),
+			birth: (dir) =>
+				fs.writeFileSync(
+					path.join(dir, witness.configFile),
+					witness.configText,
+				),
+			cleanup: (dir) => {
+				fs.rmSync(path.join(dir, witness.configFile), { force: true });
+				return look(workspace);
+			},
+			what: witness.configFile,
+		},
+		{
+			label: "root marker",
+			root: path.join(workspace, `witness_root_${tag}`),
+			seed: (dir, name) => {
+				seedModule(dir, name);
+				fs.writeFileSync(
+					path.join(dir, witness.configFile),
+					witness.configText,
+				);
+				fs.writeFileSync(path.join(workspace, witness.ancestorMarker), "");
+			},
+			before: undefined,
+			birth: (dir) => fs.writeFileSync(path.join(dir, witness.rootMarker), ""),
+			cleanup: () =>
+				fs.rmSync(path.join(workspace, witness.ancestorMarker), {
+					force: true,
+				}),
+			what: witness.rootMarker,
+		},
+	];
+	const rows = [];
+	for (const [index, born] of cases.entries()) {
+		const name = `witness_cfg_${index}_${tag}`;
+		fs.mkdirSync(born.root, { recursive: true });
+		const importer = path.join(
+			born.root,
+			`witness_user_cfg_${index}${witness.ext}`,
+		);
+		const diagnose = diagnoseFile(
+			execute,
+			workspace,
+			fx.lang,
+			importer,
+			born.before,
+		);
+		try {
+			born.seed(born.root, name);
+			fs.writeFileSync(importer, witness.importerText(name));
+			const ready = await pollUntil(
+				async () => witness.reportsMissing(await diagnose(), name),
+				{ deadlineMs, intervalMs },
+			);
+			if (!ready.ok) {
+				rows.push({
+					lang: fx.lang,
+					runner: runner(born.label),
+					state: "fail",
+					detail: `precondition: the missing import of ${name} was not reported in ${ready.polls} calls over ${ready.elapsedMs} ms before ${born.what} was created`,
+					diags: 0,
+				});
+				continue;
+			}
+			born.birth(born.root);
+			const cleared = await pollUntil(
+				async () => {
+					const text = await diagnose();
+					return (
+						!INCONCLUSIVE_ANSWER.test(text) &&
+						!witness.reportsMissing(text, name)
+					);
+				},
+				{ deadlineMs, intervalMs },
+			);
+			rows.push({
+				lang: fx.lang,
+				runner: runner(born.label),
+				state: cleared.ok ? "pass" : "fail",
+				detail: cleared.ok
+					? `the importer's missing import cleared on call ${cleared.polls} (${cleared.elapsedMs} ms after ${born.what} was created)`
+					: `the importer still reports ${name} missing, or answers inconclusively, after ${cleared.polls} calls over ${cleared.elapsedMs} ms (${born.what} created after start; #4532)`,
+				diags: cleared.ok ? 0 : 1,
+			});
+		} catch (err) {
+			rows.push({
+				lang: fx.lang,
+				runner: runner(born.label),
+				state: "fail",
+				detail: `witness error: ${err?.message ?? err}`,
+				diags: 0,
+			});
+		} finally {
+			try {
+				await born.cleanup(born.root);
+			} catch {
+				// none: the workspace is removed with the run; a failed cleanup look
+				// only leaves the next case a baseline with this case's config in it.
+			}
 		}
 	}
 	return rows;
@@ -2741,6 +2921,31 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 						workspace,
 						execute: (...args) => createLspDiagnosticsTool().execute(...args),
 						getLSPService,
+						...deps?.createdModulePoll,
+					})),
+				);
+			}
+			if (fx.bornAfterStartConfig && verdict.state === "pass") {
+				// The look pi runs at every `tool_call` (#4532): this host has no hooks.
+				const lookForOutOfBandChanges =
+					deps?.lookForOutOfBandChanges ??
+					(
+						await import(
+							pathToFileURL(
+								path.join(
+									repoRoot,
+									"dist",
+									"clients",
+									"out-of-band-changes.js",
+								),
+							).href
+						)
+					).lookForOutOfBandChanges;
+				witnessRows.push(
+					...(await runBornAfterStartConfigWitness(fx, {
+						workspace,
+						execute: (...args) => createLspDiagnosticsTool().execute(...args),
+						look: (root) => lookForOutOfBandChanges(root, "tool_call"),
 						...deps?.createdModulePoll,
 					})),
 				);
