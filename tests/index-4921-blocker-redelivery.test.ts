@@ -232,7 +232,7 @@ describe("#4921: the commit gate does not depend on re-delivery (--lens-guard)",
 
 describe("#4921: a dedupe record the previous release wrote still parses", () => {
 	it(
-		"replaces a 4.4.6 `turn-end-findings-last` record with the content-keyed one",
+		"replaces a 4.4.6 dedupe record with the content-keyed one",
 		async () => {
 			// RECURRENCE GUARDED: the signature's shape changed (the file-set prefix
 			// is empty unless a count-driven hold is in the message). A record a
