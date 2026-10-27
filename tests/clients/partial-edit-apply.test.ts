@@ -356,6 +356,60 @@ describe("applyPartiallyApplicableEdits", () => {
 		},
 	);
 
+	it.skipIf(process.platform === "win32")(
+		"writes through the file link a `dir-link/../f.ts` spelling opens, not the one a lexical fold names (#4689 batch 8)",
+		async () => {
+			// RECURRENCE GUARDED: AGENTS.md shape 1, #4863's screen. The commit read
+			// the spelling through the kernel (`other/f.ts`, a link to
+			// `other/target.ts`) and then resolved it with `fs.realpathSync`, which
+			// folds `lnk/..` lexically first, so the bytes it built from `other/`
+			// were written to whatever `proj/f.ts` links to. The host's own
+			// `resolveToCwd` folds the spelling before `tool_call`, so this
+			// boundary cell is the function's contract, not a reachable defect.
+			const env = setupTestEnvironment("partial-apply-dotdot-");
+			try {
+				const proj = path.join(env.tmpDir, "proj");
+				const other = path.join(env.tmpDir, "other");
+				fs.mkdirSync(proj);
+				fs.mkdirSync(path.join(other, "deep"), { recursive: true });
+				const raw = "const other = 1;\n";
+				fs.writeFileSync(path.join(other, "target.ts"), raw);
+				fs.symlinkSync("target.ts", path.join(other, "f.ts"), "file");
+				fs.writeFileSync(path.join(proj, "real.ts"), "const proj = 1;\n");
+				fs.symlinkSync("real.ts", path.join(proj, "f.ts"), "file");
+				fs.symlinkSync(
+					path.join("..", "other", "deep"),
+					path.join(proj, "lnk"),
+					"dir",
+				);
+				const spelling = `${proj}${path.sep}lnk${path.sep}..${path.sep}f.ts`;
+
+				await applyPartiallyApplicableEdits({
+					filePath: spelling,
+					edits: [
+						spanEdit({
+							rawContent: raw,
+							oldText: "const other = 1;",
+							newText: "const other = 2;",
+						}),
+					],
+				});
+
+				expect(fs.readFileSync(path.join(other, "target.ts"), "utf8")).toBe(
+					"const other = 2;\n",
+				);
+				expect(fs.readFileSync(path.join(proj, "real.ts"), "utf8")).toBe(
+					"const proj = 1;\n",
+				);
+				expect(fs.lstatSync(path.join(other, "f.ts")).isSymbolicLink()).toBe(
+					true,
+				);
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
 	it("rejects a same-text invalid UTF-8 mutation as snapshot drift", async () => {
 		const env = setupTestEnvironment("partial-apply-invalid-utf8-");
 		try {
