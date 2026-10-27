@@ -715,9 +715,13 @@ function* localBinMatches(
 	} = options;
 	const names = expandCandidateNames(tools, windowsExt, isWindows);
 	// The ceiling compares real paths (#4911): a HOME or an ancestor spelled
-	// through a link is still the home folder. Resolved once, and each step
-	// only while the ceiling is on.
+	// through a link is still the home folder. A start whose spelling is its
+	// real path has no link in it, so neither has any ancestor the walk yields:
+	// each step is then compared as spelled, one realpath for the whole walk
+	// instead of one per step (measured 4x at depth 12 on Linux).
 	const home = ceiling ? realpathOrResolve(homeDir) : homeDir;
+	const start = path.resolve(startDir);
+	const startIsReal = ceiling && realpathOrResolve(start) === start;
 	// Spelled by design (#4689 item 6): the resolver climbs the axis its trust
 	// classifier (`projectLocalBinDirs`) climbs; see there.
 	for (const dir of walkUpDirs(startDir, { spelling: true })) {
@@ -732,7 +736,11 @@ function* localBinMatches(
 		// because there is no legitimate case for this resolver to hand back a
 		// bin from outside the project tree. `ceiling: false` (own-install
 		// walk only, #2544 round 4 F1) skips this check entirely.
-		if (ceiling && isAtOrAboveHomeDir(realpathOrResolve(dir), home)) return;
+		if (
+			ceiling &&
+			isAtOrAboveHomeDir(startIsReal ? dir : realpathOrResolve(dir), home)
+		)
+			return;
 		yield* matchesInDir(dir, names, binDirs);
 	}
 }
