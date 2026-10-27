@@ -1175,7 +1175,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"`captureGitDirtyPaths` 5s, the stat walk's own budget).",
 		owner: "#2050",
 	},
-	"clients/runtime-tool-call.ts#captureOpaqueBaseline:39656d5c~a8d2852f": {
+	"clients/runtime-tool-call.ts#captureOpaqueBaseline:39656d5c~6f0651b7": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
 		reason:
@@ -1183,7 +1183,10 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"for tool_call, so this await has no number to be measured against. It is " +
 			"the pre-command opaque baseline: the command has not run yet, so the read " +
 			"cannot be taken later, and each leaf bounds itself (`isGitWorktree` 3s, " +
-			"`captureGitDirtyPaths` 5s, the stat walk's own budget).",
+			"`captureGitDirtyPaths` 5s). The stat walk is bounded by its file cap and " +
+			"entry budget, not by `budgetMs` (that only paces its yields, #4905); a " +
+			"home root is refused and an over-cap root answers from a memo, so " +
+			"neither pays the walk again.",
 		owner: "#2050",
 	},
 	"clients/runtime-tool-call.ts#captureOpaqueBaseline:98e63c47~d6d00a8b": {

@@ -1,0 +1,313 @@
+/**
+ * #4905: the opaque prescan must not walk a non-git root that is the home
+ * folder (or above it), and must not walk a non-git root it already found over
+ * its file cap again on every tool call.
+ *
+ * Recurrence prevented: in a non-git home folder every opaque tool call
+ * (every `bash` call, and from #4732 every non-built-in tool call) awaited a
+ * stat walk that always stopped at `OPAQUE_SCAN_MAX_FILES + 1`, recorded
+ * `file-cap-exceeded` and gave no baseline. The reporter's `latency.log`: 681
+ * rows, median 2.1 s, maximum 26 s, total 1871 s. `captureFileStats`'s
+ * `budgetMs` is the walk's per-chunk yield cadence, not a wall bound
+ * (`walkTreeStackAsync` resets its deadline after every directory read), so a
+ * non-home root over the cap paid the same per-call cost.
+ *
+ * Real here: `handleToolCall` and `handleToolResult`, the runtime coordinator,
+ * the baseline store, the degradation ledger, the latency log, real trees on
+ * disk and the real `HOME` pin (`pinFixtureHome`, the value `os.homedir()`
+ * reads). "The walk did not run" is counted, not timed: every source walk
+ * writes one `source_walk_skip_summary` latency row per run (the fixtures plant
+ * a skippable file), and the tests count those rows.
+ */
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { CacheManager } from "../../clients/cache-manager.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../clients/latency-logger.js";
+import {
+	OPAQUE_SCAN_MAX_FILES,
+	isGitWorktree,
+	resetOpaqueMutationState,
+} from "../../clients/opaque-mutation-scan.js";
+import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { handleToolCall } from "../../clients/runtime-tool-call.js";
+import { handleToolResult } from "../../clients/runtime-tool-result.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
+import { readNdjsonRows } from "../support/ndjson-rows.js";
+import { pinFixtureHome, removeTempDirSync } from "./test-utils.js";
+
+/** Files written under a tree: enough to pass the cap, spread over 50 dirs. */
+const OVER_CAP = OPAQUE_SCAN_MAX_FILES + 100;
+
+function fillTree(root: string, count: number): void {
+	// A root-level generated file: the source walk visits a root's own files
+	// before it descends, so every walk of this tree, capped or not, counts one
+	// skip and writes the `source_walk_skip_summary` row `walksOf` reads.
+	fs.mkdirSync(root, { recursive: true });
+	fs.writeFileSync(path.join(root, "bundle.min.js"), "var a=1;\n");
+	for (let i = 0; i < count; i++) {
+		const dir = path.join(root, `dir${i % 50}`);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, `f${i}.ts`),
+			`export const v${i} = ${i};\n`,
+		);
+	}
+}
+
+describe("the opaque prescan at the home root (#4905)", () => {
+	let scratch = "";
+	let home = "";
+
+	beforeEach(() => {
+		scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-opaque-4905-"));
+		vi.stubEnv("PILENS_DATA_DIR", path.join(scratch, "data"));
+		// The phase rows this file reads are real only outside test mode.
+		vi.stubEnv("PI_LENS_TEST_MODE", "0");
+		home = pinFixtureHome("opaque-4905").home;
+		// The fixture home sits inside this checkout's scratch tree, so git would
+		// discover the checkout above it and the home would read as a worktree.
+		// The ceiling stops git's search above the home's parent, the directory
+		// the "above the home" case uses as its root: both are non-git folders,
+		// as in the report.
+		vi.stubEnv("GIT_CEILING_DIRECTORIES", path.dirname(path.dirname(home)));
+		// The same scratch tree sits under this checkout's `.gitignore`
+		// (`.probe-home/`), which the source walk would read as the project's own
+		// and skip every file. An empty `.git` directory is not a repository to
+		// git (the ceiling holds) but ends the walk's ignore-root search here, as
+		// a real home with no checkout above it does.
+		for (const dir of [home, path.dirname(home)])
+			fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+		resetOpaqueMutationState();
+		resetDegradationLedger();
+	});
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		resetOpaqueMutationState();
+		resetDegradationLedger();
+		removeTempDirSync(scratch);
+	});
+
+	function runtimeFor(root: string, sessionId: string): RuntimeCoordinator {
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = root;
+		runtime.setTelemetryIdentity({ sessionId });
+		return runtime;
+	}
+
+	async function call(
+		runtime: RuntimeCoordinator,
+		root: string,
+		toolName: string,
+		n: number,
+	): Promise<void> {
+		const event = {
+			toolName,
+			toolCallId: `4905-${toolName}-${n}`,
+			input: toolName === "bash" ? { command: "node -e ''" } : { query: "x" },
+		};
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall({
+				event,
+				ctx: { cwd: root },
+				lensEnabled: true,
+				getFlag: (flag: string) => flag === "no-lsp",
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as unknown as Parameters<typeof handleToolCall>[0]),
+		);
+		await handleToolResult({
+			event: { content: [{ type: "text", text: "ok" }], ...event },
+			getFlag: (flag: string) => flag === "no-lsp",
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			biomeClient: {},
+			ruffClient: {},
+			testRunnerClient: {},
+			metricsClient: {},
+			resetLSPService: () => {},
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as unknown as Parameters<typeof handleToolResult>[0]);
+	}
+
+	/** Every latency row of one phase since `offset`, in order. */
+	async function rows(
+		offset: number,
+		phase: string,
+	): Promise<Array<{ result?: string; durationMs?: number }>> {
+		await flushLatencyLog();
+		const logPath = getLatencyLogPath();
+		const text = fs.existsSync(logPath)
+			? fs.readFileSync(logPath, "utf8").slice(offset)
+			: "";
+		const tail = path.join(scratch, "latency-tail.ndjson");
+		fs.writeFileSync(tail, text);
+		const read = readNdjsonRows<{
+			phase?: string;
+			result?: string;
+			durationMs?: number;
+		}>(tail);
+		expect(read.skipped).toBe(0);
+		return read.rows.filter((row) => row.phase === phase);
+	}
+
+	async function latencyOffset(): Promise<number> {
+		await flushLatencyLog();
+		const logPath = getLatencyLogPath();
+		return fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
+	}
+
+	/** Source walks of `root` since `offset`: one summary row per walk. */
+	async function walksOf(offset: number, root: string): Promise<number> {
+		await flushLatencyLog();
+		const logPath = getLatencyLogPath();
+		const text = fs.existsSync(logPath)
+			? fs.readFileSync(logPath, "utf8").slice(offset)
+			: "";
+		const tail = path.join(scratch, "walks-tail.ndjson");
+		fs.writeFileSync(tail, text);
+		const read = readNdjsonRows<{ phase?: string; filePath?: string }>(tail);
+		expect(read.skipped).toBe(0);
+		return read.rows.filter(
+			(row) =>
+				row.phase === "source_walk_skip_summary" &&
+				row.filePath !== undefined &&
+				path.resolve(row.filePath) === path.resolve(root),
+		).length;
+	}
+
+	const refusedRecords = () =>
+		getDegradationSummary()
+			.filter((group) => group.kind === "opaque-capture-refused")
+			.map((group) => ({
+				count: group.count,
+				subjects: group.latestReasons.map((entry) => entry.subject),
+			}));
+
+	async function refusesAtHome(toolName: string): Promise<void> {
+		// RECURRENCE GUARDED: #4905. The home folder always passes the file cap, so
+		// every call waited for a walk that produced no baseline.
+		fillTree(home, OVER_CAP);
+		// Arm: the fixture really is a non-git folder (else the git branch ran).
+		expect(await isGitWorktree(home)).toBe(false);
+		resetOpaqueMutationState();
+		const runtime = runtimeFor(home, `4905-home-${toolName}`);
+		const offset = await latencyOffset();
+
+		for (const n of [1, 2, 3]) await call(runtime, home, toolName, n);
+
+		expect(
+			(await rows(offset, "opaque_mutation_prescan")).map((row) => row.result),
+		).toEqual(["home-root", "home-root", "home-root"]);
+		// The walk never ran: no directory of the home was listed.
+		expect(await walksOf(offset, home)).toBe(0);
+		// The verdict downstream is UNKNOWN, never "no change": bash names it in
+		// its coverage row, any other tool in the refusal record.
+		if (toolName === "bash")
+			expect(
+				(await rows(offset, "opaque_mutation_coverage_unknown")).map(
+					(row) => row.result,
+				),
+			).toEqual(["home-root", "home-root", "home-root"]);
+		// One record across three calls, under the `home-root` subject.
+		expect(refusedRecords()).toEqual([{ count: 1, subjects: ["home-root"] }]);
+	}
+
+	it(
+		"refuses bash's walk at a non-git home root, reads it as unknown, and records once",
+		{
+			timeout: 60_000,
+		},
+		async () => {
+			await refusesAtHome("bash");
+		},
+	);
+
+	it(
+		"refuses some_ext_tool's walk at a non-git home root, reads it as unknown, and records once",
+		{
+			timeout: 60_000,
+		},
+		async () => {
+			await refusesAtHome("some_ext_tool");
+		},
+	);
+
+	it("refuses a non-git root that is above the home folder", async () => {
+		// RECURRENCE GUARDED: #4905. `isAtOrAboveHomeDir` is the ancestor test too:
+		// a session started in `/Users` or `/` reaches the home through its walk.
+		const above = path.dirname(home);
+		fillTree(home, OVER_CAP);
+		const runtime = runtimeFor(above, "4905-above");
+		const offset = await latencyOffset();
+		await call(runtime, above, "some_ext_tool", 1);
+		expect(
+			(await rows(offset, "opaque_mutation_prescan")).map((row) => row.result),
+		).toEqual(["home-root"]);
+		expect(await walksOf(offset, above)).toBe(0);
+	});
+
+	it("still takes a baseline in a small non-git folder under the home", async () => {
+		// RECURRENCE GUARDED: #4905 (shape 54, both directions). The refusal is the
+		// home root and its ancestors only: a project folder under the home keeps
+		// its stat-diff baseline, and the refusal is not recorded for it.
+		const project = path.join(home, "project");
+		fillTree(project, 3);
+		const runtime = runtimeFor(project, "4905-project");
+		const offset = await latencyOffset();
+		await call(runtime, project, "some_ext_tool", 1);
+		// Two walks: the baseline, and the recovery's diff after the call.
+		expect(await walksOf(offset, project)).toBe(2);
+		expect(
+			(await rows(offset, "opaque_mutation_prescan")).map((row) => row.result),
+		).toEqual(["scanned:3"]);
+		expect(refusedRecords()).toEqual([]);
+	});
+
+	it("walks a non-home root over the cap once per session, not once per call", async () => {
+		// RECURRENCE GUARDED: #4905. `budgetMs` paces the walk's yields; it does
+		// not bound its wall time, so a non-git project over the cap paid its
+		// whole walk on every opaque call and never got a baseline from it.
+		const project = path.join(scratch, "big-project");
+		fillTree(project, OVER_CAP);
+		const runtime = runtimeFor(project, "4905-big");
+		const offset = await latencyOffset();
+
+		await call(runtime, project, "some_ext_tool", 1);
+		expect(await walksOf(offset, project)).toBe(1);
+		await call(runtime, project, "some_ext_tool", 2);
+		await call(runtime, project, "some_ext_tool", 3);
+		// Calls two and three walked nothing.
+		expect(await walksOf(offset, project)).toBe(1);
+		// The answer stays the one the walk gave: over the cap, unknown.
+		expect(
+			(await rows(offset, "opaque_mutation_prescan")).map((row) => row.result),
+		).toEqual(["file-cap-exceeded", "file-cap-exceeded", "file-cap-exceeded"]);
+		expect(refusedRecords()).toEqual([
+			{ count: 1, subjects: ["file-cap-exceeded"] },
+		]);
+
+		// A new session re-asks: the tree may have shrunk, and the memo is not a
+		// process latch (shape 17).
+		resetOpaqueMutationState();
+		await call(runtime, project, "some_ext_tool", 4);
+		expect(await walksOf(offset, project)).toBe(2);
+	});
+});
