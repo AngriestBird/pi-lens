@@ -45,6 +45,29 @@ anything). The native TS7 launch variant (`typescript7`/`typescript7-clean`,
 #524/#526) is deliberately excluded from comparison against classic's marker —
 they share a server id but not a verified clean-signal behavior.
 
+The `typescript` row has three launch variants, chosen in
+`TypeScriptServer.spawn` (`clients/lsp/server.ts`). The project's own
+TypeScript 7+ decides first: with `@effect/tsgo` installed beside it (the same
+`node_modules` level, with a readable manifest version and an existing
+`.bin/effect-tsgo` path) the launch is `effect-tsgo tsc --lsp --stdio`
+(`launchVariant: "effect-tsgo"`, #4914); otherwise the native `tsc --lsp --stdio`
+(`"native-ts7"`); with TypeScript 6 or older, or none, the classic
+`typescript-language-server` (`"classic"`). Installing `@effect/tsgo` is the
+only opt-in. pi-lens never installs it, adds no setting for it, and runs the
+binary only when pi trusts the project, like the project's compiler. A
+malformed `@effect/tsgo` install keeps the native launch and never takes an
+ancestor's. So does an install the finder admits but the launcher cannot start
+(no exec bit, a directory at the bin path): the failure records one
+`lsp-registry-decision` row per root per generation and the native launch
+follows. A process that starts and then fails `initialize` is not covered.
+`effect-tsgo` wraps the same typescript-go server, so it uses the
+native variant's wait strategy and cascade tier (`isTsgoLaunchVariant`,
+`clients/lsp/server-traits.ts`) and is excluded from classic's marker the same
+way; its own clean-signal behavior is not measured separately. The nightly
+`effect-tsgo` smoke row (`scripts/smoke-tools.mjs`, pinned
+`@effect/tsgo@0.62.0` on `typescript@7.0.2`) requires the `effect-tsgo` variant
+and a published type error.
+
 What IS gated is the pair of COMMITTED sources:
 `tests/config/lsp-clean-behavior-census.test.ts` (#3347) compares the
 `clean-behavior` column below against the `silentOnClean` markers in both

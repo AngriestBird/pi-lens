@@ -1,4 +1,5 @@
 import * as nodeFs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AstGrepClient } from "./ast-grep-client.js";
 import { resetBoundedTelemetry } from "./bounded-telemetry.js";
@@ -61,7 +62,7 @@ import { resetManagedToolRefreshSession } from "./installer/managed-tool-refresh
 import { resetResolvedPathCache } from "./installer/index.js";
 import { _resetPackageManagerCache } from "./package-manager.js";
 import { clearFormatterCache } from "./formatters.js";
-import { isAtOrAboveHomeDir } from "./path-utils.js";
+import { isAtOrAboveHomeDir, realpathOrResolve } from "./path-utils.js";
 import { isPrintMode } from "./print-mode.js";
 import {
 	type ProjectSequenceBase,
@@ -333,8 +334,16 @@ function resolveSnapshotRoot(cwd: string): string {
 	const resolvedCwd = path.resolve(cwd);
 	const nearest = findNearestProjectRoot(resolvedCwd);
 	// Reject a root at — or above — $HOME (the #250/#253 escape); fall back to
-	// the cwd so the snapshot stays scoped to the actual workspace.
-	if (!nearest || isAtOrAboveHomeDir(nearest)) {
+	// the cwd so the snapshot stays scoped to the actual workspace. By real path
+	// on both sides (#4911): a root or a HOME spelled through a link names the
+	// same folder.
+	if (
+		!nearest ||
+		isAtOrAboveHomeDir(
+			realpathOrResolve(nearest),
+			realpathOrResolve(os.homedir()),
+		)
+	) {
 		return resolvedCwd;
 	}
 	return nearest;

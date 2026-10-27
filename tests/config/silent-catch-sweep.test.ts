@@ -822,10 +822,14 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :57, :79
 	"clients/lsp/server.ts": {
-		silent: 28,
-		identities: "8d1137f64482cd05",
+		silent: 30,
+		// 28 -> 30 (#4914): `findEffectTsgoLsp` answers `undefined` for an absent or
+		// unreadable `@effect/tsgo` manifest and skips a missing bin candidate, the
+		// same shape as `findNativeTypeScriptLsp`'s probe; either way the launch
+		// falls back to the native `tsc`, whose own session-start line names it.
+		identities: "badb29b973468d1c",
 		reason: PRE_RULE,
-	}, // :185, :335, :759, :790, :1019, :1219, :1352, :1484, :1673, :1754, :1776, :2086, :2165, :2180, :2194, :2211, :2229, :2261, :2288, :2301, :2379, :2391, :2412, :2433, :2625, :2633, :2663, :3201
+	}, // :223, :377, :890, :921, :1150, :1350, :1483, :1615, :1806, :1953, :1975, :2306, :2385, :2400, :2414, :2431, :2449, :2481, :2508, :2521, :2601, :2613, :2634, :2659, :2700, :2714, :2928, :2936, :2966, :3610
 	"clients/lsp/service-singleton.ts": {
 		silent: 1,
 		identities: "f88b642322d541aa",
@@ -928,9 +932,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :291, :328, :387
 	"clients/out-of-band-changes.ts": {
 		silent: 3,
-		identities: "ec722a49db9a4818",
+		identities: "f6a8dcd9fdd0254e",
 		reason: SHARP_INSTALL_STAMP,
-	}, // :146, :177, :264
+	}, // :184, :220, :334
 	"clients/package-manager.ts": {
 		silent: 2,
 		identities: "56b6f18636fed761",

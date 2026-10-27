@@ -335,6 +335,21 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"tool installation and discovery are the host boundary; the stub hands the real typescript-language-server wrapper and a classic compiler to the real launcher, service, client and rename/watched-files paths",
 		},
+	// 2026-10-27 (#4914): the effect-tsgo selection cells drive the real
+	// TypeScriptServer.spawn and the real project-trust gate; the installer is
+	// the host boundary and the launcher the child-process boundary, so nothing
+	// here starts a language server.
+	"in-process-mock:clients/lsp/effect-tsgo-lsp.test.ts::clients/installer/index":
+		{
+			detector: "in-process-mock",
+			reason:
+				"tool installation and discovery are the host boundary; the stub answers no managed tool so the selection under test comes only from the fixture node_modules tree",
+		},
+	"in-process-mock:clients/lsp/effect-tsgo-lsp.test.ts::clients/lsp/launch": {
+		detector: "in-process-mock",
+		reason:
+			"launchLSP is the child-process boundary and records which command and arguments the production spawn chose; the trust gate beside it in the same module is the real one",
+	},
 	// 2026-10-14 (#4346): the ast-grep native addon's load is the host
 	// boundary, and `loadAstGrepNapiSync` is its only seam; no host lane
 	// lacks the addon, so the fail-closed record has no real driver.

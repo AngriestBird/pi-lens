@@ -182,6 +182,29 @@ describe("classifyCascadeWaitTier", () => {
 		);
 	});
 
+	// #4914: `effect-tsgo` runs the same typescript-go server as native-ts7.
+	// Recurrence it prevents: the variant read as "not native", so its snapshot
+	// took classic's tier3-silent path and the cascade skipped a wait the server
+	// needs.
+	it("classifies an effect-tsgo typescript snapshot like native-ts7 (#4914)", () => {
+		getServersForFileWithConfig.mockReturnValue([server("typescript")]);
+		const snapshot = {
+			serverId: "typescript",
+			root: "C:/repo",
+			operationSupport: {} as any,
+			workspaceDiagnosticsSupport: { mode: "push-only" as const },
+			advertisedCommands: [],
+			rawCapabilityKeys: [],
+			launchVariant: "effect-tsgo" as const,
+		};
+		expect(
+			mod.classifyCascadeWaitTier({} as any, FILE, [snapshot] as any),
+		).toBe("collect-later");
+		expect(mod.classifyServerWaitTier("typescript", snapshot as any)).toBe(
+			"waits",
+		);
+	});
+
 	it("keeps the shared native-ts7 server policy on waits outside cascade", () => {
 		const snapshot = {
 			serverId: "typescript",

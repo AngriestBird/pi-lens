@@ -1157,7 +1157,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 124 -> 121 (#4689 item 6): the root walks take their start, stop and
 		// refused home through `realpathOrResolve`, replacing three
 		// `path.resolve` calls; the extensions walk keeps its count.
-		"clients/lsp/server.ts": 121,
+		// 121 -> 124 (#4914): `findEffectTsgoLsp` joins the `@effect/tsgo` manifest
+		// path, the `.bin/effect-tsgo` path, and `findNativeTypeScriptLsp` hands
+		// back its `node_modules` directory: three `path.join` filesystem calls.
+		"clients/lsp/server.ts": 124,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
@@ -1264,7 +1267,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 33 -> 36 (#4346): the importer pass names a created file by its stem
 		// and directory; 36 -> 33 (#4346 final lane): that name test moved to
 		// import-resolvers.ts `fileAnswerNames`, shared with the LSP cache.
-		"clients/review-graph/builder.ts": 33,
+		"clients/review-graph/builder.ts": 32,
 		"clients/review-graph/format.ts": 4,
 		// 10 -> 11 (#4508): the walk joins the `.git` entry and its HEAD.
 		"clients/review-graph/git-identity.ts": 11,
@@ -1354,7 +1357,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the target with `path.basename`, the same call every walker path uses.
 		"clients/source-walker.ts": 4,
 		"clients/spawn-timeout-cooldown.ts": 3,
-		"clients/startup-scan.ts": 9,
+		"clients/startup-scan.ts": 7,
 		// 61 -> 66: filesystem ownership/discovery operations plus the alias
 		// exception's physical policy-relative path (R4). These remain filesystem
 		// operations, not delivery lanes; the census measures every use.
@@ -1731,7 +1734,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/lombok.ts": 6,
 		// #4299: 16 -> 18; two reads of the external TypeScript package
 		// manifest's literal version field, not a pi-lens generation identity.
-		"clients/lsp/server.ts": 18,
+		// 18 -> 20 (#4914): the same read of `@effect/tsgo`'s manifest field, and
+		// the session-start line that prints the TypeScript package version.
+		"clients/lsp/server.ts": 20,
 		"clients/lsp/workspace-diagnostics-cache.ts": 6,
 		"clients/mcp/ipc.ts": 15,
 		"clients/metrics-history.ts": 3,

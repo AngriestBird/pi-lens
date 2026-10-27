@@ -7,7 +7,7 @@ import {
 	_telemetryErrorForTest,
 	createAstGrepSearchTool,
 } from "../../tools/ast-grep-search.js";
-import { setupTestEnvironment } from "../clients/test-utils.js";
+import { pinFixtureHome, setupTestEnvironment } from "../clients/test-utils.js";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 
 function makeClient(
@@ -243,6 +243,42 @@ describe("ast_grep_search tool", () => {
 			expect(String(result.content[0].text)).toContain("paths");
 			expect(search).not.toHaveBeenCalled();
 		});
+
+		// RECURRENCE GUARDED: #4911. The ceiling compared spellings, so a cwd
+		// or a HOME spelled through a link spawned a structural scan of the
+		// whole home tree. Both directions, each with a real directory link and
+		// the real `os.homedir()` read.
+		it.each([["home-link"], ["root-link"]] as const)(
+			"refuses when no paths are given and the %s spelling names the home (#4911)",
+			async (kind) => {
+				const env = setupTestEnvironment("pi-lens-sg-search-home-link-");
+				const pin = pinFixtureHome("sg-search-4911");
+				try {
+					const link = path.join(env.tmpDir, "link");
+					fs.symlinkSync(pin.home, link, "junction");
+					if (kind === "home-link") {
+						vi.stubEnv("HOME", link);
+						vi.stubEnv("USERPROFILE", link);
+					}
+					const search = vi.fn().mockResolvedValue({ matches: [] });
+					const tool = createAstGrepSearchTool(makeClient({ search }));
+					const result = await tool.execute(
+						"h-link",
+						{ pattern: "console.log($MSG)", lang: "typescript" },
+						new AbortController().signal,
+						null,
+						{ cwd: kind === "root-link" ? link : pin.home },
+					);
+
+					expect(String(result.content[0].text)).toContain("Refused");
+					expect(search).not.toHaveBeenCalled();
+				} finally {
+					vi.unstubAllEnvs();
+					pin.restore();
+					env.cleanup();
+				}
+			},
+		);
 
 		it("does NOT refuse when explicit paths are given, even at home", async () => {
 			const search = vi.fn().mockResolvedValue({ matches: [] });

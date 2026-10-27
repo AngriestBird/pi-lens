@@ -16,7 +16,11 @@ import {
 	getProjectIgnoreMatcher,
 	type ProjectIgnoreMatcher,
 } from "./file-utils.js";
-import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	realpathOrResolve,
+	walkUpDirs,
+} from "./path-utils.js";
 import { getStartupScanMaxSourceFilesDerived } from "./project-scale.js";
 import {
 	shouldRecurseIntoDir,
@@ -372,7 +376,9 @@ function computeStartupScanContext(
 	options: StartupScanOptions = {},
 ): StartupScanContext {
 	const resolvedCwd = path.resolve(cwd);
-	const homeDir = path.resolve(options.homeDir ?? os.homedir());
+	// The ceiling compares real paths on both sides (#4911): the walk below is
+	// spelled, and a HOME or a cwd spelled through a link names the same folder.
+	const homeDir = realpathOrResolve(options.homeDir ?? os.homedir());
 	const maxSourceFiles =
 		options.maxSourceFiles ?? getStartupScanMaxSourceFilesDerived(resolvedCwd);
 	const maxScanEntries = options.maxScanEntries ?? getStartupScanMaxEntries();
@@ -384,7 +390,7 @@ function computeStartupScanContext(
 			scanRoot: resolvedCwd,
 			projectRoot: null,
 			canWarmCaches: false,
-			reason: isAtOrAboveHomeDir(resolvedCwd, homeDir)
+			reason: isAtOrAboveHomeDir(realpathOrResolve(resolvedCwd), homeDir)
 				? "home-dir"
 				: "no-project-root",
 		};
@@ -394,7 +400,7 @@ function computeStartupScanContext(
 	// C:\Users) — means the upward search escaped the workspace; warming caches
 	// would walk an unrelated tree (#250/#253). The old exact `=== homeDir`
 	// check missed the above-home case.
-	if (isAtOrAboveHomeDir(projectRoot, homeDir)) {
+	if (isAtOrAboveHomeDir(realpathOrResolve(projectRoot), homeDir)) {
 		return {
 			cwd: resolvedCwd,
 			scanRoot: projectRoot,
@@ -510,7 +516,9 @@ export async function resolveStartupScanContextAsync(
 	if (cached) return cached;
 
 	const resolvedCwd = path.resolve(cwd);
-	const homeDir = path.resolve(options.homeDir ?? os.homedir());
+	// The ceiling compares real paths on both sides (#4911): the walk below is
+	// spelled, and a HOME or a cwd spelled through a link names the same folder.
+	const homeDir = realpathOrResolve(options.homeDir ?? os.homedir());
 	const maxSourceFiles =
 		options.maxSourceFiles ?? getStartupScanMaxSourceFilesDerived(resolvedCwd);
 	const maxScanEntries = options.maxScanEntries ?? getStartupScanMaxEntries();
@@ -523,11 +531,11 @@ export async function resolveStartupScanContextAsync(
 			scanRoot: resolvedCwd,
 			projectRoot: null,
 			canWarmCaches: false,
-			reason: isAtOrAboveHomeDir(resolvedCwd, homeDir)
+			reason: isAtOrAboveHomeDir(realpathOrResolve(resolvedCwd), homeDir)
 				? "home-dir"
 				: "no-project-root",
 		};
-	} else if (isAtOrAboveHomeDir(projectRoot, homeDir)) {
+	} else if (isAtOrAboveHomeDir(realpathOrResolve(projectRoot), homeDir)) {
 		result = {
 			cwd: resolvedCwd,
 			scanRoot: projectRoot,

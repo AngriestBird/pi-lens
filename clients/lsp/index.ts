@@ -11,6 +11,7 @@
 import { CASCADE_DIAGNOSTICS_TTL_MS } from "../cascade-types.js";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL, URL } from "node:url";
 import { BoundedFifoMap } from "../bounded-cache.js";
@@ -54,6 +55,7 @@ import {
 import {
 	isAtOrAboveHomeDir,
 	normalizeMapKey,
+	realpathOrResolve,
 	uriToPath,
 } from "../path-utils.js";
 import type {
@@ -80,6 +82,7 @@ import {
 	type TouchFileResult,
 } from "./diagnostic-binding.js";
 import { getServersForFileWithConfig } from "./config.js";
+import { serverIdsForConfigFile } from "./server-config-files.js";
 // #2052: deliberately NOT taken from `config.js`. This module's import surface
 // from `config.js` is mirrored by explicit `vi.mock` factories in ~58 test
 // files, so every new symbol taken from there breaks all of them.
@@ -1148,8 +1151,14 @@ async function collectWorkspaceDiagnosticFiles(
 	// nothing is the honest result; the caller (runWorkspaceDiagnostics →
 	// tools/lens-diagnostics.ts) renders "unsafe root" so an empty sweep never
 	// reads as a clean project. Same ceiling as fresh-fetch.ts / the cheap-tier
-	// scanner.
-	if (isAtOrAboveHomeDir(root, homeDir)) return files;
+	// scanner. By real path on both sides (#4911).
+	if (
+		isAtOrAboveHomeDir(
+			realpathOrResolve(root),
+			realpathOrResolve(homeDir ?? os.homedir()),
+		)
+	)
+		return files;
 	const ignoreMatcher = getProjectIgnoreMatcher(root);
 	// #703: prime the tracked-files set once before the walk so a tracked file
 	// matching a `.gitignore`/global pattern still gets its workspace
@@ -3559,9 +3568,17 @@ export class LSPService {
 		changes: ReadonlyArray<{ filePath: string; type: number }>,
 	): void {
 		if (this.checkDestroyed() || changes.length === 0) return;
-		for (const { filePath, type } of changes)
-			for (const server of getServersForFileWithConfig(filePath))
-				this.notifyLiveClientsForServer(server.id, filePath, type, "", true);
+		for (const { filePath, type } of changes) {
+			// #4532 gap 12: a config file a server reads once is routed by name
+			// (its extension names a JSON or TOML server, never pyright), and still
+			// reaches the servers its extension names (format clients, auxiliaries).
+			const serverIds = new Set([
+				...(serverIdsForConfigFile(filePath) ?? []),
+				...getServersForFileWithConfig(filePath).map((server) => server.id),
+			]);
+			for (const serverId of serverIds)
+				this.notifyLiveClientsForServer(serverId, filePath, type, "", true);
+		}
 		for (const client of this.state.clients.values())
 			if (client.isAlive()) client.notify.flushWatched?.();
 	}

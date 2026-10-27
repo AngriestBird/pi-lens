@@ -722,6 +722,8 @@
 		"clients/lsp/docker-official-fallback.test.ts::clients/installer/index": 1,
 		"clients/lsp/docker-official-fallback.test.ts::clients/lsp/client": 1,
 		"clients/lsp/docker-official-fallback.test.ts::clients/lsp/launch": 1,
+		"clients/lsp/effect-tsgo-lsp.test.ts::clients/installer/index": 1,
+		"clients/lsp/effect-tsgo-lsp.test.ts::clients/lsp/launch": 1,
 		"clients/lsp/empty-first-publish-hold.test.ts::clients/latency-logger": 1,
 		"clients/lsp/idle-eviction-enabled-servers.test.ts::clients/lsp/client": 1,
 		"clients/lsp/idle-eviction-probe-driver.test.ts::clients/lsp/client": 1,

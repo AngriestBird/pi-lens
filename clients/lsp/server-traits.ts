@@ -76,7 +76,11 @@ export const DEFAULT_LSP_SERVER_ROLE: LspServerRole = "language";
  * Which concrete binary/protocol variant a launched server id is (#4833: the
  * ONE spelling; seven sites each repeated the two-member union).
  *
- * `"classic"` / `"native-ts7"` = the two launches of the `typescript` row.
+ * `"classic"` / `"native-ts7"` / `"effect-tsgo"` = the launches of the
+ * `typescript` row. `"effect-tsgo"` (#4914) is the project's
+ * `@effect/tsgo` wrapper around the same typescript-go language server the
+ * native TypeScript 7 launch runs, so it shares that launch's measured
+ * behaviour (`isTsgoLaunchVariant`).
  * `"override"` = the process came from a user's `serverOverrides.<id>.command`
  * (clients/lsp/config.ts). Per-server behavioural knowledge keyed by server id
  * (`wait-policy/strategies.ts`) was measured on the catalog binary, so
@@ -84,7 +88,23 @@ export const DEFAULT_LSP_SERVER_ROLE: LspServerRole = "language";
  * Undefined = single-variant server or not yet reported; consumers read it as
  * the classic/default behaviour.
  */
-export type LspLaunchVariant = "classic" | "native-ts7" | "override";
+export type LspLaunchVariant =
+	| "classic"
+	| "native-ts7"
+	| "effect-tsgo"
+	| "override";
+
+/**
+ * Whether a `typescript` launch runs the typescript-go language server
+ * (#4914): the native `tsc --lsp --stdio` entrypoint or the project's
+ * `effect-tsgo` wrapper over it. Both answer to the native strategy and the
+ * native cascade tier; neither inherits classic's `silentOnClean` verdict.
+ */
+export function isTsgoLaunchVariant(
+	variant: LspLaunchVariant | undefined,
+): boolean {
+	return variant === "native-ts7" || variant === "effect-tsgo";
+}
 
 /**
  * Anything carrying a declared role: a registry row, a `ResolvedLspServer`, a

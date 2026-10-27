@@ -3577,6 +3577,51 @@ describe("lens_diagnostics mode=full", () => {
 		).toContain("jscpd");
 	});
 
+	// RECURRENCE GUARDED: #4911. The project-walk note compared spellings, so a
+	// cwd or a HOME spelled through a link read as a project under the home:
+	// the two walks it describes refused (they compare real paths), and the
+	// empty result rendered as a clean sweep with no note. Both directions,
+	// each with a real directory link and the real `os.homedir()` read.
+	it.each([["home-link"], ["root-link"]] as const)(
+		"mode=full: says the project walk was skipped when the %s spelling names the home (#4911)",
+		async (kind) => {
+			mockSummaries.length = 0;
+			const scratch = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-diag-home-link-"),
+			);
+			const pin = pinFixtureHome("lens-diagnostics-4911");
+			try {
+				const link = path.join(scratch, "link");
+				fs.symlinkSync(pin.home, link, "junction");
+				if (kind === "home-link") {
+					vi.stubEnv("HOME", link);
+					vi.stubEnv("USERPROFILE", link);
+				}
+				const lspService = {
+					runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+				};
+
+				const result = await run(
+					makeTool({}, lspService),
+					{ mode: "full", refreshRunners: "cached" },
+					kind === "root-link" ? link : pin.home,
+				);
+
+				expect(
+					(result.details as { projectWalkUnsafeRoot?: boolean })
+						.projectWalkUnsafeRoot,
+				).toBe(true);
+				expect(String(result.content[0].text)).toContain(
+					"project file walk skipped",
+				);
+			} finally {
+				vi.unstubAllEnvs();
+				pin.restore();
+				removeTempDirSync(scratch);
+			}
+		},
+	);
+
 	// #613: fetchFreshProjectDiagnostics used to be `await`ed only AFTER the LSP
 	// sweep's own Promise.all had already resolved — sequentially eating into
 	// the SAME wall-clock ceiling the sweep already spent, instead of sharing it
