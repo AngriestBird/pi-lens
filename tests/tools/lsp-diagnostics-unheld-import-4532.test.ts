@@ -359,31 +359,29 @@ describe("the record of a sent change (#4532 gap 13)", () => {
 		}
 	}, 30_000);
 
-	// lane: dev-box-only and every POSIX lane; root reads any mode, and win32
+	// lane: every POSIX lane that is not root; root reads any mode, and win32
 	// has no mode bits for chmod 000 to remove.
-	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-		"records an unreadable module once and still sends its moved stat",
-		async () => {
-			resetDegradationLedger();
-			const { user, dep } = pair("unreadable");
-			age(dep);
+	it("records an unreadable module once and still sends its moved stat", async (ctx) => {
+		if (process.platform === "win32" || process.getuid?.() === 0)
+			ctx.skip("chmod 000 leaves the file readable here");
+		resetDegradationLedger();
+		const { user, dep } = pair("unreadable");
+		age(dep);
+		await diagnose({ path: user });
+		const mark = traceLines().length;
+		fs.writeFileSync(dep, "export const NEW = 1;\n");
+		fs.chmodSync(dep, 0o000);
+		try {
 			await diagnose({ path: user });
-			const mark = traceLines().length;
-			fs.writeFileSync(dep, "export const NEW = 1;\n");
-			fs.chmodSync(dep, 0o000);
-			try {
-				await diagnose({ path: user });
-			} finally {
-				fs.chmodSync(dep, 0o644);
-			}
+		} finally {
+			fs.chmodSync(dep, 0o644);
+		}
 
-			expect(changedEventsFor(dep, mark)).toBe(1);
-			expect(
-				getDegradationSummary()
-					.filter((entry) => entry.kind === "lsp-unheld-dependency-unreadable")
-					.map((entry) => entry.count),
-			).toEqual([1]);
-		},
-		30_000,
-	);
+		expect(changedEventsFor(dep, mark)).toBe(1);
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind === "lsp-unheld-dependency-unreadable")
+				.map((entry) => entry.count),
+		).toEqual([1]);
+	}, 30_000);
 });
