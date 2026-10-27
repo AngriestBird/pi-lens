@@ -378,10 +378,11 @@ describe("the record of a sent change (#4532 gap 13)", () => {
 			}
 
 			expect(changedEventsFor(dep, mark)).toBe(1);
-			const group = getDegradationSummary().find(
-				(entry) => entry.kind === "lsp-unheld-dependency-unreadable",
-			);
-			expect(group?.count).toBe(1);
+			expect(
+				getDegradationSummary()
+					.filter((entry) => entry.kind === "lsp-unheld-dependency-unreadable")
+					.map((entry) => entry.count),
+			).toEqual([1]);
 		},
 		30_000,
 	);
