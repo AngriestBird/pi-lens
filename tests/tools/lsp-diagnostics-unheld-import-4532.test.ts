@@ -31,6 +31,7 @@ import {
 	resetProjectTrust,
 	setProjectTrustState,
 } from "../../clients/project-trust.js";
+import { CREATED_IMPORT_SCAN_MAX_FILES } from "../../clients/lsp/created-import-targets.js";
 import { readNdjsonRows } from "../support/ndjson-rows.js";
 import { withEnv } from "../support/with-env.js";
 import {
@@ -491,4 +492,36 @@ describe("review round 2 on #4926 (#4532 gap 13)", () => {
 		// that the check sent; the clean answer above is B's own.
 		expect(changedEventsFor(dep, mark)).toBeGreaterThan(0);
 	}, 30_000);
+});
+
+describe("review round 3 on #4926 (#4532 gap 13)", () => {
+	// Recurrence: verify F5 on #4926. The batch resolves the files its clean
+	// entries answer in a call of their own, so they cannot use up the 32
+	// importers (the cap) a call resolves. In one call over the batch in order,
+	// a full cap of clean files ahead of a file with a finding left that file's
+	// import unchecked, and its changed import was never sent.
+	it("resolves a file with a finding after a full cap of clean entries", async () => {
+		const dir = path.join(workspace, "split-clean");
+		fs.mkdirSync(dir, { recursive: true });
+		const clean = Array.from(
+			{ length: CREATED_IMPORT_SCAN_MAX_FILES },
+			(_, index) => {
+				const file = path.join(dir, `clean${index}.ts`);
+				fs.writeFileSync(file, `export const c${index} = 1;\n`);
+				return file;
+			},
+		);
+		const { user, dep } = pair("split");
+		age(dep);
+		expect((await diagnose({ paths: [...clean, user] })).findings).toBe(1);
+
+		const mark = traceLines().length;
+		fs.writeFileSync(dep, "export const NEW = 1;\n");
+		const first = await diagnose({ paths: [...clean, user] });
+
+		expect(first.findings).toBe(0);
+		// Each live client gets one (the round 2 roots' clients too, on one
+		// shared trace), so the count says only that the check sent.
+		expect(changedEventsFor(dep, mark)).toBeGreaterThan(0);
+	}, 120_000);
 });
