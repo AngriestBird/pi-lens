@@ -1,6 +1,8 @@
 name: Hot-path latency
 
-# #4363: times session_start, dispatch and the diagnostics-cache replay on the
+# #4363: times session_start, dispatch and the diagnostics-cache replay, and
+# (#4905) three bash tool_calls at a non-git home over the opaque file cap
+# (row tool_call_bash_home_overcap), on the
 # checked-out commit and on its first parent, and fails only on a regression
 # that is both statistically significant and above a stated threshold. A pull
 # request checks out GitHub's merge of its head into master's tip, so the first
@@ -26,7 +28,7 @@ name: Hot-path latency
 #
 # COST. About 3 minutes of one ubuntu-latest runner (2m36s on the first run,
 # #4389): install, two tsc builds, 2 x 16 one-process samples of about 4 s on a
-# hosted runner. It runs only when a path the hot paths read changes (the
+# hosted runner; the #4905 row adds 0.35-1.1 s per sample. It runs only when a path the hot paths read changes (the
 # filters below). It uses no Actions cache (setup-node `cache:` is off on
 # purpose): the repository sits at its 10 GB cache cap (#4358) and a cache
 # write here would evict a CI entry.
