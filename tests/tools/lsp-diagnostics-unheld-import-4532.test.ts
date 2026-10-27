@@ -484,6 +484,17 @@ describe("review round 2 on #4926 (#4532 gap 13)", () => {
 			first = await diagnose({ path: userB });
 		} finally {
 			restore();
+			// Recurrence: CI run 40592427133 (shuffle seeds 202 and 424). The
+			// two roots' clients outlive this case in the shared service and
+			// every server writes the one trace, so each later cell that counts
+			// `Changed` events read 3 (one per live client) where it sent 1.
+			// Retire them, the workspace root's client included (it overlaps
+			// both), so the next cell starts its own single client.
+			await (
+				service as unknown as {
+					restartPrimaryClientsUnder: (root: string) => Promise<number>;
+				}
+			).restartPrimaryClientsUnder(workspace);
 		}
 
 		expect(first.text).not.toContain(MISSING);
@@ -520,8 +531,8 @@ describe("review round 3 on #4926 (#4532 gap 13)", () => {
 		const first = await diagnose({ paths: [...clean, user] });
 
 		expect(first.findings).toBe(0);
-		// Each live client gets one (the round 2 roots' clients too, on one
-		// shared trace), so the count says only that the check sent.
+		// Each live client gets one on the one shared trace, so the count says
+		// only that the check sent.
 		expect(changedEventsFor(dep, mark)).toBeGreaterThan(0);
 	}, 120_000);
 });
