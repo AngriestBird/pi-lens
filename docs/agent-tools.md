@@ -13,12 +13,14 @@ logging one `lsp-diagnostics-compatibility` degradation per session. Callers
 should move to `pilens_diagnostics`.
 
 
-**Dynamic tooling.** Seven tools stay always-active: `lens_diagnostics`,
+**Dynamic tooling.** Seven tools stay always-active on pi unless
+`tools.<name>.enabled: false` turns one off: `lens_diagnostics`,
 `module_report`, `project_report`, `read_symbol`, `read_enclosing`,
 `symbol_search`, `effective_config`. Five situational tools — `ast_grep_search`, `ast_grep_replace`,
 `ast_grep_outline`, `lsp_navigation`, `lens_diagnostic_mark` —
 are registered but
-inactive by default; the model activates the ones it needs via the always-active
+inactive by default under pi's lazy posture (`tools.lazy: false`, or a host
+without the dynamic-tool API, keeps them active); the model activates the ones it needs via the always-active
 loader tool `pi_lens_activate_tools`, per pi's dynamic-tool-loading API
 (`pi.setActiveTools`/`pi.getActiveTools`). The loader explicitly reports
 "Available starting next turn"; do not retry the tool in the same turn.
@@ -179,12 +181,14 @@ and `[]` mean no arguments.
   toward a task hint without widening scope, and `view: "compact"` returns a
   line-oriented text rendering instead of JSON. Read-only: a cold cache returns
   `available: false` with a retry hint and starts a non-blocking background
-  build.
+  build. A project over `maxProjectFiles` starts no build: the result names the
+  cap, so raise it in `.pi-lens.json` instead of retrying.
 - **`effective_config`** — Explains the resolved configuration and its
   provenance. Pass `file` to add that file's language and the per-server and
-  per-runner selection decisions. The result is redacted by construction: no
-  environment values, no command arguments beyond the binary, home-relative
-  paths. `file` must resolve inside `cwd`. See
+  per-runner selection decisions. The result holds no environment values and
+  no command arguments beyond the binary, and it shows paths under the home
+  folder home-relative (a path outside it stays absolute). `file` must resolve
+  inside `cwd`. See
   [configuration.md](configuration.md#asking-what-is-actually-in-effect).
 - **`module_report`** — Navigable outline of a file: every symbol's name/kind/
   startLine/endLine/signature, exported vs internal split, class/interface
