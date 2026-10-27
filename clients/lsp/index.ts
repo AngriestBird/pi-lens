@@ -3562,11 +3562,12 @@ export class LSPService {
 		if (this.checkDestroyed() || changes.length === 0) return;
 		for (const { filePath, type } of changes) {
 			// #4532 gap 12: a config file a server reads once is routed by name
-			// (its extension names a JSON or TOML server, never pyright).
-			const configServerIds = serverIdsForConfigFile(filePath);
-			const serverIds =
-				configServerIds ??
-				getServersForFileWithConfig(filePath).map((server) => server.id);
+			// (its extension names a JSON or TOML server, never pyright), and still
+			// reaches the servers its extension names (format clients, auxiliaries).
+			const serverIds = new Set([
+				...(serverIdsForConfigFile(filePath) ?? []),
+				...getServersForFileWithConfig(filePath).map((server) => server.id),
+			]);
 			for (const serverId of serverIds)
 				this.notifyLiveClientsForServer(serverId, filePath, type, "", true);
 		}

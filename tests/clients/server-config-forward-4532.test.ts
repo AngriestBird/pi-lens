@@ -37,6 +37,7 @@ import {
 	resetWorkspaceDiagnosticsCacheSession,
 	workspaceFileCreatedAtFor,
 } from "../../clients/lsp/workspace-diagnostics-session.js";
+import { LSPService } from "../../clients/lsp/index.js";
 import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
@@ -203,6 +204,60 @@ describe("a Python stub (.pyi) changed outside pi-lens (#4532 gap 3b)", () => {
 			fs.writeFileSync(path.join(tmp, "mod.py"), "X = 1\n"),
 		);
 		expect(seen).toEqual([]);
+	});
+});
+
+describe("a config name reaches the servers of its extension too (#4532 gap 12, F1)", () => {
+	// Recurrence: the config route REPLACED the extension route, so a
+	// `pyproject.toml` event reached pyright and no longer the TOML server, and
+	// a `pyrightconfig.json` event reached pyright and no longer the JSON server
+	// or the auxiliaries (format clients, opengrep, ast-grep, typos) that read
+	// the file by extension. Real `LSPService` routing; the clients are the host
+	// boundary (they record the events they are sent).
+	function deliveredTo(file: string): string[] {
+		const service = new LSPService();
+		const delivered: string[] = [];
+		const internal = service as unknown as {
+			state: { clients: Map<string, unknown> };
+		};
+		for (const id of [
+			"python",
+			"toml",
+			"json",
+			"opengrep",
+			"ast-grep",
+			"typos",
+			"typescript",
+		]) {
+			internal.state.clients.set(`${id}:${tmp}`, {
+				isAlive: () => true,
+				notify: {
+					watchedFileChange: (changed: string, type: number) => {
+						if (changed === file && type === 2) delivered.push(id);
+					},
+					flushWatched: () => undefined,
+				},
+			});
+		}
+		service.notifyOutOfBandFileChanges([{ filePath: file, type: 2 }]);
+		return delivered.sort();
+	}
+
+	it("pyproject.toml reaches python and toml", () => {
+		expect(deliveredTo(path.join(tmp, "pyproject.toml"))).toEqual([
+			"python",
+			"toml",
+		]);
+	});
+
+	it("pyrightconfig.json reaches python, json and the json auxiliaries once each", () => {
+		expect(deliveredTo(path.join(tmp, "pyrightconfig.json"))).toEqual([
+			"ast-grep",
+			"json",
+			"opengrep",
+			"python",
+			"typos",
+		]);
 	});
 });
 
