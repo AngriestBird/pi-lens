@@ -142,6 +142,45 @@ describe.each([
 	);
 
 	it(
+		"records each suppressed turn on its single turn_end row",
+		async () => {
+			// RECURRENCE GUARDED: #4921 review F3: a suppressed duplicate turn
+			// returned before the turn_end latency row, so the turns the fix
+			// silences left no record. The field rides the turn's one row; a
+			// second row per suppressed turn would be per-occurrence noise.
+			const { handle } = await openCell(`row-${tag}`, guard, (proj) => [
+				...write(proj, "bad.ts", BLOCKING_FILE),
+				...[1, 2, 3].flatMap((n) => write(proj, `f${n}.ts`)),
+				...listen(),
+			]);
+			await run(handle, 5);
+			const read = await handle.latencyRows();
+			expect(read.skipped).toBe(0);
+			const rows = read.rows.filter((row) => row.toolName === "turn_end");
+			const suppressed = rows.filter(
+				(row) =>
+					(row.metadata as Record<string, unknown> | undefined)
+						?.deliverySuppressed === "duplicate",
+			);
+			// The three clean-file write steps repeat the delivered blocker, and
+			// the first write step, which delivered it, carries no field.
+			expect(suppressed.length).toBeGreaterThanOrEqual(3);
+			expect(rows.length - suppressed.length).toBeGreaterThanOrEqual(1);
+			for (const row of suppressed) expect(row.result).toBe("blockers_found");
+			// The field lives on the turn_end row alone: no row of another kind
+			// (a new phase) carries it.
+			expect(
+				read.rows.filter((row) =>
+					JSON.stringify(row).includes("deliverySuppressed"),
+				).length,
+			).toBe(suppressed.length);
+			expect(sections(handle, "bad.ts")).toBe(1);
+			expect(handle.errors).toEqual([]);
+		},
+		LONG_SESSION_TIMEOUT_MS,
+	);
+
+	it(
 		"still delivers it once when the agent rewrites the same clean file each turn",
 		async () => {
 			// The s8 control: the shape that already worked without the gate must

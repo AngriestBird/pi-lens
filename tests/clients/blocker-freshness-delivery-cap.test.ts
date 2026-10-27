@@ -30,6 +30,7 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { DEPENDENCY_DRIFT_MAX_DELIVERIES } from "../../clients/blocker-freshness.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import {
 	cancelLSPIdleReset,
 	handleTurnEnd,
@@ -308,6 +309,93 @@ describe("dependency-drift delivery cap (#1950)", () => {
 				1,
 			);
 			expect(readTurnEndContent(cacheManager, env.tmpDir)).toBe(turn1Content);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #4921 review (CodeRabbit): the turn-end dedupe keys the turn's file set only
+ * while a count-driven hold (the #1950 drift advisory) is IN the delivered
+ * message. When the cap cuts that advisory away it stays pending and nothing
+ * advanced, so the message is the whole identity. Recurrence this prevents: a
+ * cut drift advisory kept the file set in the key, and an unchanged blocker
+ * was re-delivered on every turn that wrote a different file.
+ */
+describe("a cut drift advisory does not key the dedupe on the file set (#4921)", () => {
+	it("suppresses an identical capped message on a turn that writes a different file", async () => {
+		const env = setupTestEnvironment("pi-lens-4921-cut-hold-");
+		try {
+			const sessionId = "cut-hold-session";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+
+			const consumer = path.join(env.tmpDir, "consumer.ts");
+			const dep = path.join(env.tmpDir, "dep.ts");
+			const live = path.join(env.tmpDir, "live.ts");
+			fs.writeFileSync(dep, "export const other = 1;\n");
+			fs.writeFileSync(
+				consumer,
+				'import { other } from "./dep.js";\nexport const t = other;\n',
+			);
+			fs.writeFileSync(live, "export const l = 1;\n");
+			for (const file of [consumer, live]) {
+				runtime.bumpFileSeq(file);
+				cacheManager.addModifiedRange(
+					file,
+					{ start: 1, end: 2 },
+					false,
+					env.tmpDir,
+					sessionId,
+				);
+			}
+			// The live blocker alone overflows the 1000-char turn-end cap, so the
+			// drift advisory (rendered after it) is cut and stays pending.
+			runtime.recordInlineBlockers(
+				live,
+				`🔴 STOP — 1 issue(s) must be fixed:\n  L1: ${"x".repeat(1500)}`,
+				1,
+				["lsp"],
+			);
+			runtime.recordInlineBlockers(consumer, "🔴 L1 a drifted blocker", 1, [
+				"lsp",
+			]);
+			const future = new Date(Date.now() + 60_000);
+			fs.utimesSync(dep, future, future);
+
+			const delivered: Array<string | undefined> = [];
+			for (let turn = 1; turn <= 3; turn++) {
+				await driveTurn(
+					runtime,
+					cacheManager,
+					consumer,
+					env.tmpDir,
+					sessionId,
+					turn,
+				);
+				const result = consumeTurnEndFindings(
+					cacheManager,
+					env.tmpDir,
+					runtime,
+				);
+				delivered.push(result ? JSON.stringify(result.messages) : undefined);
+			}
+
+			// Turn 1 delivers the capped blocker; the drift advisory was cut, so
+			// its count never advanced.
+			expect(delivered[0]).toContain("must be fixed");
+			expect(runtime.getInlineBlockersSnapshot().length).toBe(2);
+			expect(
+				runtime
+					.getInlineBlockersSnapshot()
+					.every((entry) => (entry.staleDeliveryCount ?? 0) === 0),
+			).toBe(true);
+			// Turns 2 and 3 write other files but the message is the same.
+			expect(delivered[1]).toBeUndefined();
+			expect(delivered[2]).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}

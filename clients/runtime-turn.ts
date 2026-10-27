@@ -5965,6 +5965,51 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	];
 	const findingParts = composedParts.map((part) => part.text);
 	let heldSections = 0;
+	const logTurnEndRow = (deliverySuppressed?: "duplicate"): void => {
+		logLatency({
+			type: "tool_result",
+			toolName: "turn_end",
+			filePath: cwd,
+			durationMs: Date.now() - turnEndStart,
+			// #1622 review M2: a pending stale secret is NOT a clean turn. It gets its
+			// own result rather than being promoted to `blockers_found`, which would
+			// undo the demotion the freshness gate just made.
+			result:
+				blockerParts.length > 0
+					? "blockers_found"
+					: staleSecretParts.length > 0
+						? "stale_secrets_pending"
+						: "clean",
+			metadata: {
+				fileCount: files.length,
+				blockerSections: blockerParts.length,
+				staleSecretSections: staleSecretParts.length,
+				advisorySections: advisoryParts.length,
+				// #3218 criterion 2: how many files this turn LISTED as resolved
+				// (held-back entries are not counted), and how many retire events
+				// fell past the cap. The line itself is in the delivered content;
+				// these make the feature visible in latency.log even when the block
+				// is suppressed or the agent reads only telemetry.
+				resolvedBlockerFiles: resolvedBlockerFileList.length,
+				resolvedBlockerFilesDropped,
+				// #3813: one-shot parts the cap cut that stay pending for the next turn.
+				heldSections,
+				// #1944 AC3: an empty advisory section on its own cannot say whether
+				// the turn had nothing to report or dropped something. This counter
+				// answers that from latency.log even when the payload is empty, and
+				// the payload itself carries the retirement note when it is not.
+				demotedFindingsRetired,
+				// #2275: the widget-footer store's own dependency-drift retirements —
+				// a separate surface/counter from `demotedFindingsRetired` above,
+				// since a widget retirement never touches `advisoryParts` or the
+				// `turn-end-findings-last` suppression cache the block below clears.
+				widgetDemotedFindingsRetired,
+				// #4921: a turn whose content the agent already received is not
+				// re-sent; this row, the turn's only one, is where that is visible.
+				...(deliverySuppressed ? { deliverySuppressed } : {}),
+			},
+		});
+	};
 	if (findingParts.length > 0) {
 		dbg(
 			`turn_end: ${blockerParts.length} blocker section(s), ${advisoryParts.length} advisory section(s) found, persisting for next context`,
@@ -6018,9 +6063,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// unchanged blocker on every turn that wrote a different file. It stays
 		// in the key only while a count-driven hold (#1950's drift cap) is in the
 		// message, because that hold advances only on a delivery, and the cap that
-		// retires the record is never reached through suppression.
+		// retires the record is never reached through suppression. A hold the cap
+		// cut is not in the message (it stays pending, nothing advanced), so only
+		// a part that appears whole in the delivered content counts.
 		const countDrivenFileSet = deliveryHolds.some(
-			(hold) => hold.skipOnSuppressed === true,
+			(hold) => hold.skipOnSuppressed === true && content.includes(hold.part),
 		)
 			? files
 					.slice()
@@ -6102,6 +6149,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			settleHolds(true);
 			clearOwnedTurnState();
 			runtime.fixedThisTurn.clear();
+			logTurnEndRow("duplicate");
 			resetFormatService();
 			return;
 		}
@@ -6265,45 +6313,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// record it describes.
 		cacheManager.clearCache("turn-end-findings-last", cwd);
 	}
-	logLatency({
-		type: "tool_result",
-		toolName: "turn_end",
-		filePath: cwd,
-		durationMs: Date.now() - turnEndStart,
-		// #1622 review M2: a pending stale secret is NOT a clean turn. It gets its
-		// own result rather than being promoted to `blockers_found`, which would
-		// undo the demotion the freshness gate just made.
-		result:
-			blockerParts.length > 0
-				? "blockers_found"
-				: staleSecretParts.length > 0
-					? "stale_secrets_pending"
-					: "clean",
-		metadata: {
-			fileCount: files.length,
-			blockerSections: blockerParts.length,
-			staleSecretSections: staleSecretParts.length,
-			advisorySections: advisoryParts.length,
-			// #3218 criterion 2: how many files this turn LISTED as resolved
-			// (held-back entries are not counted), and how many retire events
-			// fell past the cap. The line itself is in the delivered content;
-			// these make the feature visible in latency.log even when the block
-			// is suppressed or the agent reads only telemetry.
-			resolvedBlockerFiles: resolvedBlockerFileList.length,
-			resolvedBlockerFilesDropped,
-			// #3813: one-shot parts the cap cut that stay pending for the next turn.
-			heldSections,
-			// #1944 AC3: an empty advisory section on its own cannot say whether
-			// the turn had nothing to report or dropped something. This counter
-			// answers that from latency.log even when the payload is empty, and
-			// the payload itself carries the retirement note when it is not.
-			demotedFindingsRetired,
-			// #2275: the widget-footer store's own dependency-drift retirements —
-			// a separate surface/counter from `demotedFindingsRetired` above,
-			// since a widget retirement never touches `advisoryParts` or the
-			// `turn-end-findings-last` suppression cache the block below clears.
-			widgetDemotedFindingsRetired,
-		},
-	});
+	logTurnEndRow();
 	resetFormatService();
 }
