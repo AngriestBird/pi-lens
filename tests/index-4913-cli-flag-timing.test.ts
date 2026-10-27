@@ -385,6 +385,30 @@ describe("#4913: --no-tool reaches the tool set pi holds", () => {
 		).toHaveLength(1);
 	});
 
+	it("writes no empty lazy-posture row when the flag is the only change", async () => {
+		// #4917 F3: with lazy tools off the posture changes nothing, so the only
+		// row this session writes is the flag's own. Rows accumulate across the
+		// file's sessions, so the session's rows are the newest ones.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: project("tool-off-not-lazy"),
+			flags: new Map<string, boolean | string>([
+				["no-tool", ALWAYS_ACTIVE],
+				["no-lazy-tools", true],
+			]),
+			responses: [endTurn("hello")],
+		});
+		await handle.prompt("hello");
+		const last = (await handle.latencyRows()).rows
+			.filter((row) => row.phase === "tool_set_mutation")
+			.at(-1)?.metadata as Record<string, unknown> | undefined;
+		expect(last).toMatchObject({
+			reason: "cli_disabled_tool",
+			removedCount: 1,
+			addedCount: 0,
+		});
+	});
+
 	it("does not let pi_lens_activate_tools bring back a situational tool the flag named", async () => {
 		const handle = await startPiSession({
 			root: fixture.root,
