@@ -29,6 +29,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { DEPENDENCY_DRIFT_MAX_DELIVERIES } from "../../clients/blocker-freshness.js";
+import { deferRunnerFindings } from "../../clients/dispatch/pending-runner-findings.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import {
@@ -559,6 +560,73 @@ describe("a leading oversized drift advisory still reaches the delivery cap (#49
 			// The live blocker never counts; the drift record is the max, and 0 once retired.
 			expect(counts.map((c) => Math.max(0, ...c))).toEqual([1, 2, 0]);
 			expect(delivered).toEqual([true, true, true]);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #4921 verify F7: only the #1950 drift hold counts on delivery, so only it may
+ * key the file set. A deferred runner's broken-runner note is a hold too, and
+ * its text names the runner and the failure kind, never the written file.
+ * Recurrence this prevents: dropping the `skipOnSuppressed` conjunct from the
+ * key restored #4921's defect through this second producer, an identical note
+ * re-delivered on every turn that wrote a different file, with the suite green.
+ */
+describe("a repeated broken-runner note does not key the dedupe on the file set (#4921)", () => {
+	it("delivers it once while each turn writes a different file", async () => {
+		const env = setupTestEnvironment("pi-lens-4921-runner-note-");
+		try {
+			const sessionId = "runner-note-session";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId });
+			const cacheManager = new CacheManager(false);
+			const runnerFile = path.join(env.tmpDir, "run-a.ts");
+			fs.writeFileSync(runnerFile, "export const r = 1;\n");
+			const past = new Date(Date.now() - 10_000);
+			fs.utimesSync(runnerFile, past, past);
+
+			const delivered: Array<string | undefined> = [];
+			for (let turn = 1; turn <= 3; turn++) {
+				runtime.beginTurn();
+				// A different written file every turn: only the file set differs.
+				const noise = path.join(env.tmpDir, `noise-${turn}.ts`);
+				fs.writeFileSync(noise, `export const noise${turn} = ${turn};\n`);
+				runtime.bumpFileSeq(noise);
+				cacheManager.addModifiedRange(
+					noise,
+					{ start: 1, end: 1 },
+					false,
+					env.tmpDir,
+					sessionId,
+				);
+				// The same note every turn: runner id and failure kind only.
+				deferRunnerFindings({
+					filePath: runnerFile,
+					cwd: env.tmpDir,
+					projectRoot: env.tmpDir,
+					runnerId: "slow-runner",
+					markedAtMs: Date.now(),
+					promise: Promise.resolve({
+						status: "failed",
+						semantic: "warning",
+						failureKind: "timeout",
+						failureMessage: "boom",
+						diagnostics: [],
+					}),
+				});
+				await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, env.tmpDir));
+				const result = consumeTurnEndFindings(
+					cacheManager,
+					env.tmpDir,
+					runtime,
+				);
+				delivered.push(result ? JSON.stringify(result.messages) : undefined);
+			}
+			expect(delivered[0]).toContain("Deferred runner slow-runner failed");
+			expect(delivered[1]).toBeUndefined();
+			expect(delivered[2]).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}
