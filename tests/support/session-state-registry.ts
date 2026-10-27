@@ -1016,11 +1016,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "opaque-mutation-scan:baselineStore+gitMemo",
 		module: "opaque-mutation-scan.ts",
 		state:
-			"OpaqueBaselineStore pending map, gitRepoMemo, gitToplevelMemo, headRecords, headLooks, pendingHeadDiscards",
+			"OpaqueBaselineStore pending map, gitRepoMemo, overCapRootMemo, gitToplevelMemo, headRecords, headLooks, pendingHeadDiscards",
 		policy: "session_start",
 		resetName: "resetOpaqueMutationState",
 		reason:
-			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation (plus the tool-call id, #4137) and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever. #4493: the per-session HEAD records (capped at 64) and the per-key HEAD-look flights clear at the same boundary, where the LSP service resets too, so no record outlives the documents it guards. #4612 r4: the discard paths a joined HEAD look still owes (keyed like the HEAD records, capped at 64 keys) clear at the same boundary.",
+			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation (plus the tool-call id, #4137) and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever. #4493: the per-session HEAD records (capped at 64) and the per-key HEAD-look flights clear at the same boundary, where the LSP service resets too, so no record outlives the documents it guards. #4612 r4: the discard paths a joined HEAD look still owes (keyed like the HEAD records, capped at 64 keys) clear at the same boundary. #4905: `overCapRootMemo` (capped at 16 roots) keeps a stat-walk verdict of file-cap-exceeded so the next opaque call of the session does not walk that root again; it clears at the same boundary, so a tree that shrank is walked again by the next session.",
 	},
 
 	// ── The rest of the session_start reset chain ────────────────────────────
@@ -1841,7 +1841,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #4732: 6 -> 7, `PI_BUILTIN_TOOL_WRITES`, the frozen table of what each of
 	// pi's built-in tools can write — an import-time constant with no session
 	// identity, so it needs no reset (SWEEP_HEURISTIC_LIMITS item 5).
-	"opaque-mutation-scan.ts": 7,
+	// #4905: 7 -> 8, `overCapRootMemo`, in the entry above and cleared by
+	// `resetOpaqueMutationState`.
+	"opaque-mutation-scan.ts": 8,
 	// #1602 added `globalBinDirCache` (1 → 2), cleared by the same
 	// `_resetPackageManagerCache` the registry entry above names.
 	"package-manager.ts": 2,

@@ -452,6 +452,7 @@ async function captureOpaqueBaseline(
 	root: string,
 	sessionRoot: boolean,
 	startedAt: number,
+	toolName: string,
 ): Promise<{ state: PendingOpaqueBaseline; note: string }> {
 	if (!sessionRoot)
 		return { state: { startedAt, strategy: "git" }, note: "git" };
@@ -476,6 +477,11 @@ async function captureOpaqueBaseline(
 		};
 	}
 	const outcome = await captureFileStats(root, { withHashes: true });
+	// #4905: bash names its unknown verdict through its coverage row at the
+	// result, so a refused home root would leave no ledger record for it. One
+	// record per session (the ledger's once-key is the subject).
+	if (outcome.unknownReason === "home-root")
+		recordOpaqueCaptureRefused("home-root", toolName);
 	return {
 		state: outcome.snapshot
 			? { startedAt, strategy: "stat-diff", stats: outcome.snapshot }
@@ -737,6 +743,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 					root,
 					index === 0,
 					started,
+					toolName,
 				);
 				if (index === 0) resultNote = baseline.note;
 				// Session-stamped slot: a concurrent-secondary session (#473)

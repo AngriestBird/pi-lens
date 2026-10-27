@@ -788,10 +788,18 @@ export type DegradationKind =
 	 */
 	| "lsp-created-import-scan-incomplete"
 	/**
-	 * #4476: the walk of a root's declaration files passed its directory or
-	 * file cap, so a declaration file created, edited or deleted outside
-	 * pi-lens under that root reaches no language server and refuses no
-	 * diagnostics-cache entry (clients/out-of-band-changes.ts). Once per root.
+	 * Two emitters, both in clients/out-of-band-changes.ts.
+	 *
+	 * #4476, the cap: the walk of a root's declaration files passed its
+	 * directory or file cap, so a declaration file created, edited or deleted
+	 * outside pi-lens under that root reaches no language server and refuses no
+	 * diagnostics-cache entry. Subject is the root. Once per root.
+	 *
+	 * #4905, the home ceiling: the root is the home folder or above it
+	 * (compared by real path), so the declaration walk is skipped and a
+	 * declaration file changed outside pi-lens under it is not looked for. The
+	 * install stamp is still read and compared, so an install still publishes.
+	 * Subject is `home-root`. Once per session.
 	 */
 	| "lsp-declaration-look-capped"
 	/**
