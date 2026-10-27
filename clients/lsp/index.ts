@@ -1555,7 +1555,7 @@ export class LSPService {
 		}
 		// #4320: a file new to a sibling's server must reach it as Created, as
 		// it does its owner; Pyrefly keeps a failed lookup through Changed.
-		this.announceCreatedTo([filePath]);
+		this.announceCreatedFiles([filePath]);
 		return Promise.all(
 			getServersForFileWithConfig(filePath).map((server) =>
 				this.clientRegistry.resolveServerRoot(server, filePath).then((root) => {
@@ -3666,30 +3666,24 @@ export class LSPService {
 	 * answered from cache, or by a server that has not heard of the module yet.
 	 * Each client decides which entries are new to it (`watchedTypeForExisting`).
 	 *
-	 * #4532 gap 13: first, a file no client holds whose bytes moved since its
-	 * servers last saw them goes out as Changed (`sendUnheldChanges`). The
-	 * diagnostics routes hand this the files their targets import directly
-	 * (`importTargetsToAnnounce`), so a module changed outside pi is re-read
-	 * before the importer's answer.
+	 * #4532 gap 13: `importTargets`, the files the caller's targets import
+	 * directly (`importTargetsToAnnounce`), are announced too, and first each
+	 * one whose bytes moved since its servers last saw them goes out as Changed
+	 * (`sendUnheldChanges`), so a module changed outside pi is re-read before
+	 * the importer's answer. Only import targets are checked: a sweep's own
+	 * file list (up to 5000) would churn the check's record (#4926 review F2).
 	 */
-	announceCreatedFiles(filePaths: readonly string[]): void {
+	announceCreatedFiles(
+		filePaths: readonly string[],
+		importTargets: readonly string[] = [],
+	): void {
 		if (this.checkDestroyed() || this.state.clients.size === 0) return;
-		this.sendUnheldChanges(filePaths);
-		this.announceCreatedTo(filePaths);
-	}
-
-	/**
-	 * #4320's per-client half of {@link announceCreatedFiles}, alone: a touch's
-	 * sibling announcement names the file it is about to open, whose bytes the
-	 * open itself sends.
-	 */
-	private announceCreatedTo(filePaths: readonly string[]): void {
-		if (this.checkDestroyed() || this.state.clients.size === 0) return;
+		this.sendUnheldChanges(importTargets);
 		const byServer = new Map<
 			string,
 			Array<{ filePath: string; stat: nodeFs.Stats }>
 		>();
-		for (const filePath of filePaths) {
+		for (const filePath of [...filePaths, ...importTargets]) {
 			let stat: nodeFs.Stats;
 			try {
 				stat = nodeFs.statSync(filePath);
@@ -3736,7 +3730,7 @@ export class LSPService {
 			const servers = getServersForFileWithConfig(filePath);
 			if (!this.unheldBytesMoved(filePath, stat, servers)) continue;
 			changed.push({ filePath, type: FILE_CHANGED });
-			for (const client of this.liveClientsOf(servers))
+			for (const client of this.liveClientsOf(servers, filePath))
 				noteWorkspaceFilesChangedOnDisk(
 					client.root,
 					[normalizeMapKey(filePath)],
@@ -3773,15 +3767,20 @@ export class LSPService {
 	 * has no record to compare, so its bytes take the client-start rule a
 	 * birth takes ({@link watchedTypeForOpen}, #4320): bytes written at or
 	 * after a live server of the path started (less the margin) may be newer
-	 * than the bytes that server read, and older ones are what it read. A held path is
-	 * skipped: the open-document sync keeps its view current.
+	 * than the bytes that server read, and older ones are what it read. A path every
+	 * live client holds is skipped: the open-document sync keeps those views
+	 * current. One that some client reads closed is compared and sent, and a
+	 * holder's copy of the event is redundant, since its open document wins.
 	 */
 	private unheldBytesMoved(
 		filePath: string,
 		stat: nodeFs.Stats,
 		servers: ReadonlyArray<{ id: string }>,
 	): boolean {
-		if (this.hasLiveClientHoldingDocument(filePath)) return false;
+		// #4926 review F3: held-ness is per client. Skip only when every live
+		// client of the path holds it; one that reads it closed needs the event.
+		const live = this.liveClientsOf(servers, filePath);
+		if (live.length > 0 && live.every((client) => client.holds)) return false;
 		const key = normalizeMapKey(filePath);
 		const seen = this.unheldStamps.get(key);
 		if (seen?.size === stat.size && seen.mtimeMs === stat.mtimeMs) return false;
@@ -3802,27 +3801,32 @@ export class LSPService {
 		this.unheldStamps.set(key, stamp);
 		// With no live server of the path, nothing read older bytes: a baseline.
 		if (seen === undefined)
-			return this.liveClientsOf(servers).some(
+			return live.some(
 				(client) =>
+					!client.holds &&
 					watchedTypeForOpen(stat.mtimeMs, client.launchedAt) === FILE_CREATED,
 			);
 		return seen.sha256 === undefined || seen.sha256 !== stamp.sha256;
 	}
 
 	/**
-	 * The live clients of `servers`, each with its root and the launch epoch
-	 * from which that server could read a project file.
+	 * The live clients of `servers`, each with its root, the launch epoch from
+	 * which that server could read a project file, and whether it holds
+	 * `filePath` open.
 	 */
 	private liveClientsOf(
 		servers: ReadonlyArray<{ id: string }>,
-	): Array<{ root: string; launchedAt: number }> {
-		const live: Array<{ root: string; launchedAt: number }> = [];
+		filePath: string,
+	): Array<{ root: string; launchedAt: number; holds: boolean }> {
+		const live: Array<{ root: string; launchedAt: number; holds: boolean }> =
+			[];
 		for (const [key, client] of this.state.clients) {
 			if (!client.isAlive()) continue;
 			if (!servers.some((server) => key.startsWith(`${server.id}:`))) continue;
 			live.push({
 				root: client.root,
 				launchedAt: this.clientRegistry.clientLaunchStartedAt.get(key) ?? 0,
+				holds: documentIsOpenOn(client, filePath),
 			});
 		}
 		return live;
@@ -9044,10 +9048,9 @@ export class LSPService {
 		// a file's imports name (created outside pi-lens), for every file a
 		// fresh clean entry will not answer (#4368 r1 F1), and a Go file's
 		// package files; each resolved file's imports go to the cache.
-		this.announceCreatedFiles([
-			...files,
-			...goPackageFilesToAnnounce(files),
-			...(await importTargetsToAnnounce(
+		this.announceCreatedFiles(
+			[...files, ...goPackageFilesToAnnounce(files)],
+			await importTargetsToAnnounce(
 				root,
 				files.filter(
 					(filePath) =>
@@ -9058,8 +9061,8 @@ export class LSPService {
 				),
 				(filePath, scope) =>
 					workspaceDiagnosticsCacheCtx.noteImportScope(filePath, scope),
-			)),
-		]);
+			),
+		);
 		const cachedResults: LSPWorkspaceDiagnosticResult[] = [];
 		const filesToTouch: string[] = [];
 		const writeIndexByPath = new Map<string, number | undefined>();
