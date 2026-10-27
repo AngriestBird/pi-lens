@@ -356,6 +356,7 @@ describe("applyPartiallyApplicableEdits", () => {
 		},
 	);
 
+	// lane: ubuntu Unit tests (creating a symlink needs a privilege on win32).
 	it.skipIf(process.platform === "win32")(
 		"writes through the file link a `dir-link/../f.ts` spelling opens, not the one a lexical fold names (#4689 batch 8)",
 		async () => {

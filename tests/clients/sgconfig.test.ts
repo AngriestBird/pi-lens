@@ -72,6 +72,7 @@ describe("ast-grep baseline sgconfig", () => {
 		}
 	});
 
+	// lane: ubuntu Unit tests (creating a symlink needs a privilege on win32).
 	it.skipIf(process.platform === "win32")(
 		"lists one source for a rule dir the project root and the user root reach through different spellings (#4689 batch 8)",
 		() => {
