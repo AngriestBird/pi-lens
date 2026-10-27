@@ -31,6 +31,7 @@
  * published instead of recorded as a baseline the server never read.
  */
 import { promises as fsp } from "node:fs";
+import * as os from "node:os";
 import { join } from "node:path";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import {
@@ -52,6 +53,7 @@ import {
 	isAtOrAboveHomeDir,
 	isUnderDir,
 	normalizeMapKey,
+	realpathOrResolve,
 } from "./path-utils.js";
 import { createSingleFlight } from "./single-flight.js";
 import { compareOrdinal } from "./string-utils.js";
@@ -464,7 +466,10 @@ export function lookForOutOfBandChanges(
 	// its time and end capped. Same ceiling as the opaque prescan, `analysis-root`
 	// and `jscpd-client` (#4760): refused, and said once per session, because a
 	// look that did not run is not a look that found nothing.
-	if (isAtOrAboveHomeDir(root)) {
+	// By real path on both sides, as `analysis-root` does (#4689).
+	if (
+		isAtOrAboveHomeDir(realpathOrResolve(root), realpathOrResolve(os.homedir()))
+	) {
 		recordDegradationOnce({
 			kind: "lsp-declaration-look-capped",
 			subject: "home-root",

@@ -41,6 +41,7 @@ import {
 } from "../../clients/latency-logger.js";
 import {
 	OPAQUE_SCAN_MAX_FILES,
+	captureFileStats,
 	isGitWorktree,
 	resetOpaqueMutationState,
 } from "../../clients/opaque-mutation-scan.js";
@@ -68,6 +69,13 @@ function fillTree(root: string, count: number): void {
 			`export const v${i} = ${i};\n`,
 		);
 	}
+}
+
+/** A directory link that needs no privilege on Windows (a junction). */
+function linkDir(target: string, link: string): string {
+	fs.mkdirSync(path.dirname(link), { recursive: true });
+	fs.symlinkSync(target, link, "junction");
+	return link;
 }
 
 describe("the opaque prescan at the home root (#4905)", () => {
@@ -205,12 +213,16 @@ describe("the opaque prescan at the home root (#4905)", () => {
 	});
 
 	/**
-	 * Count the listings of a fixture directory (`dirN`, see `fillTree`) under
+	 * Count the listings of a fixture directory (`dirN` by default, see
+	 * `fillTree`; or any directory whose name starts with `namePrefix`) under
 	 * `root` from here on, through a pass-through spy on the filesystem
 	 * boundary. The opaque walk is refused or memoized in the cases that use it,
 	 * so a listing here is the declaration walk's.
 	 */
-	function countFixtureListings(root: string): () => number {
+	function countFixtureListings(
+		root: string,
+		namePrefix = "dir",
+	): () => number {
 		const real = fs.promises.readdir.bind(fs.promises);
 		const spy = vi
 			.spyOn(fs.promises, "readdir")
@@ -221,7 +233,7 @@ describe("the opaque prescan at the home root (#4905)", () => {
 			spy.mock.calls.filter(([dir]) => {
 				const listed = String(dir);
 				return (
-					path.basename(listed).startsWith("dir") &&
+					path.basename(listed).startsWith(namePrefix) &&
 					listed.startsWith(root + path.sep)
 				);
 			}).length;
@@ -393,13 +405,149 @@ describe("the opaque prescan at the home root (#4905)", () => {
 	it("still walks declaration files in a project folder under the home", async () => {
 		// RECURRENCE GUARDED: #4905 (shape 54, both directions). The ceiling is the
 		// home and its ancestors: a project under the home keeps its look, and no
-		// refusal is recorded for it.
+		// refusal is recorded for it. The counted directory is gitignored, so the
+		// opaque walk (which honours the ignore rules) never lists it and only the
+		// declaration walk (which walks ignored directories, codegen writes there)
+		// does: a declaration look that stopped running reads 0 here.
+		fs.writeFileSync(path.join(home, ".gitignore"), "codegen/\n");
 		const project = path.join(home, "project");
 		fillTree(project, 3);
-		const listings = countFixtureListings(project);
+		fs.mkdirSync(path.join(project, "codegen"), { recursive: true });
+		fs.writeFileSync(
+			path.join(project, "codegen", "types.d.ts"),
+			"export type T = 1;\n",
+		);
+		const listings = countFixtureListings(project, "codegen");
 		const runtime = runtimeFor(project, "4905-oob-project");
 		await call(runtime, project, "bash", 1);
 		expect(listings()).toBeGreaterThan(0);
 		expect(declarationLookRecords()).toEqual([]);
+	});
+
+	describe("a home or a root spelled through a link (#4905 review)", () => {
+		// RECURRENCE GUARDED: #4905 review F1. `isAtOrAboveHomeDir` compares path
+		// spellings, so HOME=/link with root=/real, or HOME=/real with root=/link,
+		// read as a project under the home and the home tree was walked.
+		const spellings = [
+			["HOME is a link to the root", "home-link"],
+			["the root is a link to HOME", "root-link"],
+		] as const;
+
+		/** The root the session uses and the HOME it runs under, per spelling. */
+		function spelled(kind: (typeof spellings)[number][1]): string {
+			const link = linkDir(home, path.join(scratch, "links", kind));
+			if (kind === "root-link") return link;
+			vi.stubEnv("HOME", link);
+			vi.stubEnv("USERPROFILE", link);
+			return home;
+		}
+
+		async function refusesOpaqueWalk(
+			kind: (typeof spellings)[number][1],
+		): Promise<void> {
+			fillTree(home, OVER_CAP);
+			const root = spelled(kind);
+			const runtime = runtimeFor(root, `4905-link-opaque-${kind}`);
+			const offset = await latencyOffset();
+			await call(runtime, root, "some_ext_tool", 1);
+			expect(
+				(await rows(offset, "opaque_mutation_prescan")).map(
+					(row) => row.result,
+				),
+			).toEqual(["home-root"]);
+			expect(await walksOf(offset, root)).toBe(0);
+		}
+
+		async function refusesDeclarationLook(
+			kind: (typeof spellings)[number][1],
+		): Promise<void> {
+			fillTree(home, 3);
+			const root = spelled(kind);
+			const listings = countFixtureListings(root);
+			const runtime = runtimeFor(root, `4905-link-oob-${kind}`);
+			await call(runtime, root, "bash", 1);
+			expect(listings()).toBe(0);
+			expect(declarationLookRecords()).toEqual([
+				{ count: 1, subjects: ["home-root"] },
+			]);
+		}
+
+		it(
+			"refuses the opaque walk when HOME is a link to the root",
+			{
+				timeout: 60_000,
+			},
+			async () => {
+				await refusesOpaqueWalk("home-link");
+			},
+		);
+
+		it(
+			"refuses the opaque walk when the root is a link to HOME",
+			{
+				timeout: 60_000,
+			},
+			async () => {
+				await refusesOpaqueWalk("root-link");
+			},
+		);
+
+		it(
+			"refuses the declaration look when HOME is a link to the root",
+			{
+				timeout: 60_000,
+			},
+			async () => {
+				await refusesDeclarationLook("home-link");
+			},
+		);
+
+		it(
+			"refuses the declaration look when the root is a link to HOME",
+			{
+				timeout: 60_000,
+			},
+			async () => {
+				await refusesDeclarationLook("root-link");
+			},
+		);
+	});
+
+	it("keys the over-cap memo by the folder, not by how the root is spelled", async () => {
+		// RECURRENCE GUARDED: #4905 review M7. A memo keyed by the raw root string
+		// let a second spelling of the same folder (a link, then the real path) walk
+		// again. Mutating the key to the raw spelling survived every earlier case.
+		const project = path.join(scratch, "big-project");
+		fillTree(project, OVER_CAP);
+		const link = linkDir(project, path.join(scratch, "links", "big-link"));
+		const runtime = runtimeFor(project, "4905-memo-key");
+		const offset = await latencyOffset();
+		await call(runtime, link, "some_ext_tool", 1);
+		await call(runtime, project, "some_ext_tool", 2);
+		expect(
+			(await walksOf(offset, link)) + (await walksOf(offset, project)),
+		).toBe(1);
+	});
+
+	it("does not memoize a root over the entry budget: it answers entry-budget-exceeded and walks every call", async () => {
+		// RECURRENCE GUARDED: #4905 review F2. The memo records only
+		// `file-cap-exceeded`; mutating that predicate to `true` survived, and
+		// would have turned an entry-budget root's verdict into a file-cap one
+		// after its first walk. `maxScanEntries` is the seam standing in for 200,000
+		// directory entries: 3 root entries, then 100 data files in one folder,
+		// well under the 2000-file cap.
+		const root = path.join(scratch, "entry-budget");
+		fs.mkdirSync(path.join(root, "sub"), { recursive: true });
+		fs.writeFileSync(path.join(root, "bundle.min.js"), "var a=1;\n");
+		for (let i = 0; i < 100; i++)
+			fs.writeFileSync(path.join(root, "sub", `r${i}.dat`), "x");
+		const offset = await latencyOffset();
+		const first = await captureFileStats(root, { maxScanEntries: 20 });
+		const second = await captureFileStats(root, { maxScanEntries: 20 });
+		expect([first.unknownReason, second.unknownReason]).toEqual([
+			"entry-budget-exceeded",
+			"entry-budget-exceeded",
+		]);
+		expect(await walksOf(offset, root)).toBe(2);
 	});
 });

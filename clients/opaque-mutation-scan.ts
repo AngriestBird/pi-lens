@@ -35,6 +35,7 @@
  *   recognizes them.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
@@ -52,7 +53,11 @@ import {
 	incrementDegradationCount,
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
-import { isAtOrAboveHomeDir, normalizeMapKey } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	normalizeMapKey,
+	realpathOrResolve,
+} from "./path-utils.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { createSingleFlight } from "./single-flight.js";
@@ -207,6 +212,12 @@ export interface CaptureOptions {
 	 * simply carry no hash (comparison degrades to mtime+size for them).
 	 */
 	withHashes?: boolean;
+	/**
+	 * Internal test seam (#4905): the walk's entry budget, so the
+	 * `entry-budget-exceeded` verdict is reachable without planting 200,000
+	 * directory entries. Absent in production, which takes the walker's default.
+	 */
+	maxScanEntries?: number;
 }
 
 /** What a bounded capture returns: the snapshot, and whether it was cut. */
@@ -306,7 +317,11 @@ export async function captureFileStats(
 	// of files on any real machine, so the walk below would spend its time and
 	// end at `file-cap-exceeded`. Same rule as `analysis-root`, `jscpd-client`
 	// and `lsp/index` (#4760): refuse, and let the caller read it as UNKNOWN.
-	if (isAtOrAboveHomeDir(root))
+	// By real path on both sides, as `analysis-root` does (#4689): a root or a
+	// HOME spelled through a link names the same folder.
+	if (
+		isAtOrAboveHomeDir(realpathOrResolve(root), realpathOrResolve(os.homedir()))
+	)
 		return { unknownReason: "home-root", scannedCount: 0 };
 	const rootKey = normalizeMapKey(root);
 	// #4905: `budgetMs` below paces the walk's event-loop yields (the walker
@@ -321,6 +336,9 @@ export async function captureFileStats(
 		const walk = await collectSourceFilesWithBudgetAsync(root, {
 			maxFiles: OPAQUE_SCAN_MAX_FILES + 1,
 			budgetMs,
+			...(options.maxScanEntries === undefined
+				? {}
+				: { maxScanEntries: options.maxScanEntries }),
 		});
 		const files = walk.files;
 		if (walk.entryBudgetExceeded || files.length > OPAQUE_SCAN_MAX_FILES) {

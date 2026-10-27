@@ -1185,8 +1185,9 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"cannot be taken later, and each leaf bounds itself (`isGitWorktree` 3s, " +
 			"`captureGitDirtyPaths` 5s). The stat walk is bounded by its file cap and " +
 			"entry budget, not by `budgetMs` (that only paces its yields, #4905); a " +
-			"home root is refused and an over-cap root answers from a memo, so " +
-			"neither pays the walk again.",
+			"home root is refused, and an over-cap root answers from a memo after " +
+			"its first walk. A root over the entry budget is not memoized and " +
+			"still walks on every call.",
 		owner: "#2050",
 	},
 	"clients/runtime-tool-call.ts#captureOpaqueBaseline:98e63c47~d6d00a8b": {
