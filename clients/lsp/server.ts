@@ -3056,7 +3056,7 @@ export const TypeScriptServer: LSPServerInfo = {
 					source: "direct",
 					launchVariant: "effect-tsgo",
 				};
-			} catch (error) {
+			} catch (launchFailure) {
 				// Existence is not launchability: a shim without the exec bit or a
 				// directory at the bin path passes the finder and fails here. The
 				// project worked on the native launch before it installed
@@ -3066,7 +3066,7 @@ export const TypeScriptServer: LSPServerInfo = {
 				recordDegradationOnce({
 					kind: "lsp-registry-decision",
 					subject: `effect-tsgo-launch:g${getDegradationLedgerGeneration()}:${root}`,
-					reason: `effect-tsgo launch failed, using the native launch: ${error instanceof Error ? error.message : String(error)}`,
+					reason: `effect-tsgo launch failed, using the native launch: ${launchFailure instanceof Error ? launchFailure.message : String(launchFailure)}`,
 					metadata: {
 						field: "effect-tsgo-launch",
 						launchVariant: "effect-tsgo",

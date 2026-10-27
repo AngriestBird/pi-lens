@@ -158,6 +158,8 @@ const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"#3539: the one `launchLSP` call starts `/bin/sh -c sleep 30` to read the owner tag out of its /proc environ; no language server, no handshake and no diagnostics wait. The file is phased in the serialized wall-clock-budget lane, which the flake-shape admission gate requires, and a file cannot sit in both lanes.",
 	"tests/clients/session-repository-trust-4530.test.ts":
 		"#4530: each `launchLSP` call starts a planted `/bin/sh` stand-in that writes a marker file and exits, or is refused before any spawn; no language server, no handshake and no diagnostics wait. The file is phased in the serialized wall-clock-budget lane, which the flake-shape admission gate requires, and a file cannot sit in both lanes.",
+	"tests/clients/lsp/effect-tsgo-lsp.test.ts":
+		"#4914: the one real `launchLSP` call is handed a mode-644 shim or a directory at the bin path and fails before any process starts; every launch that would start is doubled, so no LSP child, handshake or diagnostics wait exists to starve",
 	"tests/clients/lsp/initialize-timeout-backstop.test.ts":
 		"POSIX-only real-child initialize-timeout backstop; waits on a 50ms timeout firing then sleeps past kill escalation — deterministic and short",
 	"tests/clients/lsp/lean-real-smoke.test.ts":
