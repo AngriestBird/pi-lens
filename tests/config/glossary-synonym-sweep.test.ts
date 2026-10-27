@@ -1345,7 +1345,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 25 -> 26 (#3930 r4): the cycle-memo key is derived with
 		// `path.resolve(projectRoot)`, the normalization every sibling map key
 		// in this file already uses (`cachedBaselines`, `rootArtifactKey`).
-		"clients/sgconfig.ts": 26,
+		"clients/sgconfig.ts": 25,
 		"clients/skills-resolver.ts": 3,
 		"clients/slow-fs.ts": 4,
 		"clients/smells-rollup.ts": 3,
