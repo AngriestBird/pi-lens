@@ -6062,12 +6062,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// turn's written-file set is not part of it: keying on it re-delivered an
 		// unchanged blocker on every turn that wrote a different file. It stays
 		// in the key only while a count-driven hold (#1950's drift cap) is in the
-		// message, because that hold advances only on a delivery, and the cap that
-		// retires the record is never reached through suppression. A hold the cap
+		// message, because that hold advances only on a delivery: suppressing its
+		// repeats would stop the count short of the cap, and the record that the
+		// cap retires would stay forever. A hold the cap
 		// cut is not in the message (it stays pending, nothing advanced), so only
-		// a part that appears whole in the delivered content counts.
+		// a part in the delivered content counts: one that appears whole, or the
+		// leading part, which the hold plan counts delivered even when the cap kept
+		// only a prefix of it (`leadsOversized`, delivery-holds.ts).
 		const countDrivenFileSet = deliveryHolds.some(
-			(hold) => hold.skipOnSuppressed === true && content.includes(hold.part),
+			(hold) =>
+				hold.skipOnSuppressed === true &&
+				(content.includes(hold.part) || composedParts[0]?.raw === hold.part),
 		)
 			? files
 					.slice()

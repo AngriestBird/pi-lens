@@ -403,6 +403,86 @@ describe("a cut drift advisory does not key the dedupe on the file set (#4921)",
 });
 
 /**
+ * #4921 verify F5: the opposite direction of the cut-hold case. A drift advisory
+ * that LEADS the message and alone overflows the cap is delivered (the plan
+ * counts it reached, so the #1950 count advances) although the capped content
+ * holds only a prefix of it. The file set must stay in the key, or every later
+ * turn is suppressed and the cap stalls at one delivery. Recurrence this
+ * prevents: counts [1] -> [1] -> [1] and the record never retiring.
+ */
+describe("a leading oversized drift advisory still reaches the delivery cap (#4921)", () => {
+	it("advances the count each delivered turn and retires the record", async () => {
+		const env = setupTestEnvironment("pi-lens-4921-leading-hold-");
+		try {
+			const sessionId = "leading-hold-session";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+
+			const consumer = path.join(env.tmpDir, "consumer.ts");
+			const dep = path.join(env.tmpDir, "dep.ts");
+			fs.writeFileSync(dep, "export const other = 1;\n");
+			fs.writeFileSync(
+				consumer,
+				'import { other } from "./dep.js";\nexport const t = other;\n',
+			);
+			runtime.bumpFileSeq(consumer);
+			cacheManager.addModifiedRange(
+				consumer,
+				{ start: 1, end: 2 },
+				false,
+				env.tmpDir,
+				sessionId,
+			);
+			// The advisory is the whole message and exceeds the 1000-char cap.
+			runtime.recordInlineBlockers(consumer, `🔴 L1 ${"x".repeat(1500)}`, 1, [
+				"lsp",
+			]);
+			const future = new Date(Date.now() + 60_000);
+			fs.utimesSync(dep, future, future);
+
+			const counts: number[][] = [];
+			const delivered: boolean[] = [];
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, env.tmpDir));
+			delivered.push(
+				consumeTurnEndFindings(cacheManager, env.tmpDir, runtime) !== undefined,
+			);
+			counts.push(
+				runtime
+					.getInlineBlockersSnapshot()
+					.map((entry) => entry.staleDeliveryCount ?? 0),
+			);
+			for (let turn = 2; turn <= 3; turn++) {
+				await driveTurn(
+					runtime,
+					cacheManager,
+					consumer,
+					env.tmpDir,
+					sessionId,
+					turn,
+				);
+				delivered.push(
+					consumeTurnEndFindings(cacheManager, env.tmpDir, runtime) !==
+						undefined,
+				);
+				counts.push(
+					runtime
+						.getInlineBlockersSnapshot()
+						.map((entry) => entry.staleDeliveryCount ?? 0),
+				);
+			}
+			// Each turn writes another file, so each is a new delivery; the third
+			// reaches the cap and retires the record (the round-1 behaviour).
+			expect(counts).toEqual([[1], [2], []]);
+			expect(delivered).toEqual([true, true, true]);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
  * #2982 review, the blocking finding. Self-drift demotion must not inherit the
  * dependency-drift delivery cap: that cap retires a record permanently after
  * DEPENDENCY_DRIFT_MAX_DELIVERIES stale deliveries, and it was designed for

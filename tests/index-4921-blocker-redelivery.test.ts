@@ -142,12 +142,13 @@ describe.each([
 	);
 
 	it(
-		"records each suppressed turn on its single turn_end row",
+		"marks the suppressed turns on turn_end rows and on no other row",
 		async () => {
 			// RECURRENCE GUARDED: #4921 review F3: a suppressed duplicate turn
 			// returned before the turn_end latency row, so the turns the fix
-			// silences left no record. The field rides the turn's one row; a
-			// second row per suppressed turn would be per-occurrence noise.
+			// silences left no record. The field rides the turn_end row; the case
+			// bounds the counts (at least three marked, the field on no other row
+			// kind). One row per turn is not pinned here (accepted residual).
 			const { handle } = await openCell(`row-${tag}`, guard, (proj) => [
 				...write(proj, "bad.ts", BLOCKING_FILE),
 				...[1, 2, 3].flatMap((n) => write(proj, `f${n}.ts`)),
