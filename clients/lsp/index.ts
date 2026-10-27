@@ -82,6 +82,7 @@ import {
 	type TouchFileResult,
 } from "./diagnostic-binding.js";
 import { getServersForFileWithConfig } from "./config.js";
+import { serverIdsForConfigFile } from "./server-config-files.js";
 // #2052: deliberately NOT taken from `config.js`. This module's import surface
 // from `config.js` is mirrored by explicit `vi.mock` factories in ~58 test
 // files, so every new symbol taken from there breaks all of them.
@@ -3567,9 +3568,17 @@ export class LSPService {
 		changes: ReadonlyArray<{ filePath: string; type: number }>,
 	): void {
 		if (this.checkDestroyed() || changes.length === 0) return;
-		for (const { filePath, type } of changes)
-			for (const server of getServersForFileWithConfig(filePath))
-				this.notifyLiveClientsForServer(server.id, filePath, type, "", true);
+		for (const { filePath, type } of changes) {
+			// #4532 gap 12: a config file a server reads once is routed by name
+			// (its extension names a JSON or TOML server, never pyright), and still
+			// reaches the servers its extension names (format clients, auxiliaries).
+			const serverIds = new Set([
+				...(serverIdsForConfigFile(filePath) ?? []),
+				...getServersForFileWithConfig(filePath).map((server) => server.id),
+			]);
+			for (const serverId of serverIds)
+				this.notifyLiveClientsForServer(serverId, filePath, type, "", true);
+		}
 		for (const client of this.state.clients.values())
 			if (client.isAlive()) client.notify.flushWatched?.();
 	}
