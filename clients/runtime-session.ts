@@ -2628,8 +2628,12 @@ export async function handleSessionStart(
 					// #473 guard in index.ts), so they never schedule this
 					// warmup in the first place.
 					const lspPrewarmStartedAt = Date.now();
+					// #4913: a session started with `--no-lens` starts no language
+					// server, so the pre-warm skips on `no-lens` as it does on `no-lsp`.
 					if (deps.getFlag("no-lsp")) {
 						warmupDbg("warmup: skipping LSP pre-warm (no-lsp)");
+					} else if (deps.getFlag("no-lens")) {
+						warmupDbg("warmup: skipping LSP pre-warm (no-lens)");
 					} else if (isSubagentSession()) {
 						warmupDbg("warmup: skipping LSP pre-warm (subagent session)");
 					} else if (isWarmAttached()) {
@@ -3430,6 +3434,10 @@ export async function handleSessionStart(
 	// lazily on first edit instead of eagerly at session start.
 	if (subagentSession) {
 		dbg("session_start lsp-warm: skipping pre-warm (subagent session)");
+	} else if (getFlag("no-lens")) {
+		// #4913: `--no-lens` starts no language server, even for a configured
+		// warm file; the first edit after a `/lens-toggle` spawns it lazily.
+		dbg("session_start lsp-warm: skipping pre-warm (no-lens)");
 	} else if (!getFlag("no-lsp") && allowBootstrapTasks) {
 		setImmediate(() => {
 			void loadLSPConfig(cwd).then((lspConfig) => {

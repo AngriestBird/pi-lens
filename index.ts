@@ -2490,40 +2490,45 @@ function activateExtension(hostPi: ExtensionAPI) {
 					return;
 				}
 				const sessionStartMonotonicAt = performance.now();
-				warmDispatchAtSessionStart();
-				void warmLspService()
-					.then(() =>
+				// #4913: the first point at which pi has applied the command-line
+				// flag values, and BEFORE any warm-up below, so a session started
+				// with `--no-lens` warms nothing. Once per activation (the duplicate
+				// start above returned), so a `/lens-toggle` or `/lens-context-toggle`
+				// after this line keeps winning for the rest of the session. The
+				// warm-ups load lazily on first use, so a toggle back on loses
+				// nothing but the head start.
+				lensEnabled = !getLensFlag("no-lens");
+				contextInjectionEnabled = !getLensFlag("no-lens-context");
+				if (lensEnabled) {
+					warmDispatchAtSessionStart();
+					void warmLspService()
+						.then(() =>
+							logExtension({
+								subsystem: "lsp",
+								level: "debug",
+								message: "LSP warm resolved",
+							}),
+						)
+						.catch((err) =>
+							logExtension({
+								subsystem: "lsp",
+								level: "warn",
+								message: `LSP warm failed: ${err}`,
+							}),
+						);
+					void warmFormatters().catch((err) =>
 						logExtension({
-							subsystem: "lsp",
-							level: "debug",
-							message: "LSP warm resolved",
-						}),
-					)
-					.catch((err) =>
-						logExtension({
-							subsystem: "lsp",
+							subsystem: "format",
 							level: "warn",
-							message: `LSP warm failed: ${err}`,
+							message: `formatter warm failed: ${err}`,
 						}),
 					);
-				void warmFormatters().catch((err) =>
-					logExtension({
-						subsystem: "format",
-						level: "warn",
-						message: `formatter warm failed: ${err}`,
-					}),
-				);
+				}
 				rememberOwnEventCtx(ctx);
 				refreshCtxDerivedPlumbing();
 				const sessionStartFiredAt = Date.now();
 				try {
 					dbg("session_start fired");
-					// #4913: the first point at which pi has applied the command-line
-					// flag values. Once per activation (the duplicate start above
-					// returned), so a `/lens-toggle` or `/lens-context-toggle` after
-					// this line keeps winning for the rest of the session.
-					lensEnabled = !getLensFlag("no-lens");
-					contextInjectionEnabled = !getLensFlag("no-lens-context");
 					// The wrapped tool definitions register here for the same reason
 					// (see `loadedLensTools`).
 					if (getLensFlag("lens-compact-tool-line") === true) {
