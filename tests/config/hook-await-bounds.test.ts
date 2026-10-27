@@ -2781,9 +2781,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// shared bounded pool, so one `await` on the pool replaces the per-file await in
 	// the loop; the walks themselves are unchanged.
 	// 35 -> 36 (#4532 gap 13): the file-path `workspaceDiagnostics` read awaits one
-	// forced `sweepDocumentDrift` before it opens the file. The pass is bounded by
-	// its own caps (64 stats, 4 serial resyncs through the per-server notify
-	// budget), not by a signal this tool path does not receive.
+	// full forced `sweepDocumentDrift` before it opens the file. The await is
+	// bounded by the pass's own work (one stat per tracked document and one serial
+	// resync per changed document through the per-server notify budget, with
+	// `diagnostics: "none"` so no publish wait), not by a hook signal; the cost is
+	// accepted by the maintainer (2026-10-27), see PR #4924 Accepted residuals.
 	"tools/lsp-navigation.ts": 36,
 	"tools/module-report.ts": 3,
 	"tools/project-report.ts": 1,

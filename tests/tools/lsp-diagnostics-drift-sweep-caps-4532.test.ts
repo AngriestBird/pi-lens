@@ -54,6 +54,8 @@ async function openWorkspace(): Promise<string> {
 		shim,
 		[
 			'process.env.FAKE_LSP_CLOSED_FILE_CACHE = "1";',
+			'process.env.FAKE_LSP_TRACE_TEXT = "1";',
+			`process.env.FAKE_LSP_TRACE_FILE = ${JSON.stringify(path.join(dir, "fake.trace"))};`,
 			`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
 			"",
 		].join("\n"),
@@ -133,6 +135,30 @@ function copyInOutsidePi(modules: readonly string[]): void {
 		fs.writeFileSync(module, "export const A = 1;\nexport const B = 2;\n");
 }
 
+/** The bytes each didOpen/didChange carried, by uri, as the server saw them. */
+function textLines(dir: string, name: string): string[] {
+	const trace = path.join(dir, "fake.trace");
+	if (!fs.existsSync(trace)) return [];
+	return fs
+		.readFileSync(trace, "utf8")
+		.split("\n")
+		.filter((line) => line.startsWith("text ") && line.includes(`/${name}`));
+}
+
+/** The `lsp_navigation workspaceDiagnostics` answer for a file path. */
+async function navigate(cwd: string, file: string): Promise<string> {
+	const { createLspNavigationTool } =
+		await import("../../tools/lsp-navigation.js");
+	const result = (await createLspNavigationTool(() => false).execute(
+		"probe-4532-g13-caps-nav",
+		{ operation: "workspaceDiagnostics", path: file },
+		undefined as unknown as AbortSignal,
+		null,
+		{ cwd },
+	)) as { content: Array<{ text?: string }> };
+	return String(result.content[0]?.text);
+}
+
 function missingCount(text: string): number {
 	return text.split(MISSING_B).length - 1;
 }
@@ -171,6 +197,49 @@ describe("the pre-answer sweep reaches every held document (#4532 gap 13)", () =
 
 		expect(missingCount(await diagnose(dir, importer))).toBe(0);
 	}, 120_000);
+
+	// Recurrence: round 1b changed `tools/lsp-navigation.ts` to
+	// `{ force: true, full: true }` and no cell pinned it; a later edit to
+	// `{ force: true }` would have reinstated the 64-document window on that route
+	// with every test green (review F6). 70 fillers put the modules out of reach.
+	it("lsp_navigation workspaceDiagnostics clears changed modules held past the 64-document window", async () => {
+		const { dir, importer, modules } = await heldProject(70, 2);
+		expect(await navigate(dir, importer)).toContain(MISSING_B);
+
+		copyInOutsidePi(modules);
+
+		expect(await navigate(dir, importer)).not.toContain(MISSING_B);
+	}, 60_000);
+
+	// Recurrence: CodeRabbit on #4924. The drift resync pushed whatever the file
+	// held through `touchFile`, so a held file that grew past the sync bound
+	// (2 MiB or 5000 lines, `exceedsLspSyncLimits`) was framed to the server in
+	// full, where every other writer skips such a file. The record must stay old so
+	// the next pass retries once the file is small again.
+	it("does not push a held file that grew past the sync limit, and heals it once it shrinks", async () => {
+		const dir = await openWorkspace();
+		const big = path.join(dir, "big.ts");
+		const other = path.join(dir, "other.ts");
+		fs.writeFileSync(big, "export const big = 1;\n");
+		fs.writeFileSync(other, "export const other = 1;\n");
+		await hold(big);
+		await hold(other);
+		const opened = textLines(dir, "big.ts").length;
+		expect(opened).toBe(1);
+
+		fs.writeFileSync(
+			big,
+			"// padding padding padding padding padding\n".repeat(60_000),
+		);
+		await diagnose(dir, other);
+
+		expect(textLines(dir, "big.ts")).toHaveLength(opened);
+
+		fs.writeFileSync(big, "export const big = 2;\n");
+		await diagnose(dir, other);
+
+		expect(textLines(dir, "big.ts")).toHaveLength(opened + 1);
+	}, 60_000);
 
 	it("clears a burst of 8 changed modules on call 1", async () => {
 		const { dir, importer, modules } = await heldProject(0, 8);

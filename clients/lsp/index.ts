@@ -48,6 +48,7 @@ import {
 	type DriftSweepOptions,
 	type DriftSweepResult,
 } from "./document-drift.js";
+import { exceedsLspSyncLimits } from "./content-limits.js";
 import {
 	captureAuxPublicationBacklog,
 	markPendingAuxiliaryCoverage,
@@ -3901,6 +3902,10 @@ export class LSPService {
 		return this.documentDrift.sweep(
 			{
 				resync: async (filePath, content, _driftAgeMs, readStamp, saved) => {
+					// A file past the sync bound is never framed to a server (every other
+					// writer skips it). Returning false keeps the old record, so the pass
+					// reports a failed resync and retries once the file is small again.
+					if (exceedsLspSyncLimits(content).tooLarge) return false;
 					// Reuse the normal touch path so the resync inherits the existing
 					// per-server notify-write budget, the #743 backpressure demotion and
 					// the client-lease machinery. diagnostics:"none" keeps it a pure

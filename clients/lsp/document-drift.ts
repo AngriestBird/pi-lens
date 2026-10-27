@@ -516,15 +516,15 @@ export class DocumentDriftTracker {
 		const tracked = keys.length;
 		if (this.cursor >= tracked) this.cursor = 0;
 		// A full pass checks every tracked document and re-pushes every change it
-		// finds, so the rotating cursor and the per-pass caps do not apply.
+		// finds, so the per-pass caps do not apply (its window is every tracked
+		// key, so the cursor lands where it started).
 		const checkBatch = full ? tracked : DRIFT_CHECK_BATCH;
 		const resyncBatch = full ? Number.POSITIVE_INFINITY : DRIFT_RESYNC_BATCH;
 		const window: string[] = [];
 		for (let i = 0; i < Math.min(checkBatch, tracked); i++) {
 			window.push(keys[(this.cursor + i) % tracked] as string);
 		}
-		if (!full)
-			this.cursor = tracked === 0 ? 0 : (this.cursor + window.length) % tracked;
+		this.cursor = tracked === 0 ? 0 : (this.cursor + window.length) % tracked;
 
 		// Drop records nobody holds BEFORE spending a stat on them.
 		let unheld = 0;
