@@ -142,29 +142,6 @@ const fingerprint = (stat: {
 	mtimeMs: number;
 }): string => `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
 
-/**
- * The fingerprints of the root's server config files, from the listing the
- * install stamp already read (#4532). A name that is listed but cannot be
- * statted reads as absent, as a lockfile does in the stamp.
- */
-async function readServerConfigs(
-	root: string,
-	listed: ReadonlySet<string>,
-): Promise<Map<string, string>> {
-	const found = await Promise.all(
-		SERVER_CONFIG_FILE_NAMES.filter((name) => listed.has(name)).map(
-			async (name): Promise<[string, string] | undefined> => {
-				try {
-					return [name, fingerprint(await fsp.stat(join(root, name)))];
-				} catch {
-					return undefined;
-				}
-			},
-		),
-	);
-	return new Map(found.filter((entry) => entry !== undefined));
-}
-
 /** Created, changed and deleted server config files between two looks. */
 function diffServerConfigs(
 	root: string,
@@ -207,7 +184,6 @@ async function readInstallStamp(root: string): Promise<{
 	} catch {
 		return { stamp: "-", newestChangeMs: 0, configs: undefined };
 	}
-	const configsPromise = readServerConfigs(root, listed);
 	const names: string[] = [];
 	for (const name of INSTALL_LOCKFILES) if (listed.has(name)) names.push(name);
 	let linkPrint: string | undefined;
@@ -228,8 +204,13 @@ async function readInstallStamp(root: string): Promise<{
 			linkChangedAt = link.mtimeMs;
 		}
 	}
-	const parts = await Promise.all(
-		names.map(async (name) => {
+	// #4532: the root's server config files are statted in the same round as
+	// the stamp's names, and kept out of the stamp (a config is no install).
+	const configNames: string[] = [];
+	for (const name of SERVER_CONFIG_FILE_NAMES)
+		if (listed.has(name)) configNames.push(name);
+	const statted = await Promise.all(
+		[...names, ...configNames].map(async (name) => {
 			try {
 				const stat = await fsp.stat(join(root, name));
 				return {
@@ -241,10 +222,19 @@ async function readInstallStamp(root: string): Promise<{
 			}
 		}),
 	);
+	const parts = statted.slice(0, names.length);
+	// A listed name that could not be statted reads as absent, as in the stamp.
+	const configs = new Map<string, string>();
+	for (const [index, name] of configNames.entries()) {
+		const print = (
+			statted[names.length + index] as { part: string }
+		).part.slice(name.length + 1);
+		if (print !== "-") configs.set(name, print);
+	}
 	if (linkPrint !== undefined)
 		parts.push({ part: linkPrint, changedAt: linkChangedAt });
 	return {
-		configs: await configsPromise,
+		configs,
 		stamp: parts.map((entry) => entry.part).join("|"),
 		newestChangeMs: parts.reduce(
 			(newest, entry) => Math.max(newest, entry.changedAt),

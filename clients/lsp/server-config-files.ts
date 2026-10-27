@@ -23,7 +23,7 @@
  * Imports nothing: `clients/out-of-band-changes.ts` (the detector) and the LSP
  * service (the delivery) both read it.
  */
-import path from "node:path";
+import { basename } from "node:path";
 
 /** Config file basename -> ids of the servers that read it once. */
 const CONFIG_FILE_SERVERS: ReadonlyMap<string, readonly string[]> = new Map([
@@ -44,5 +44,5 @@ export const SERVER_CONFIG_FILE_NAMES: readonly string[] = [
 export function serverIdsForConfigFile(
 	filePath: string,
 ): readonly string[] | undefined {
-	return CONFIG_FILE_SERVERS.get(path.basename(filePath));
+	return CONFIG_FILE_SERVERS.get(basename(filePath));
 }

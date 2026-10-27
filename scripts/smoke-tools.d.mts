@@ -188,6 +188,11 @@ export interface BornAfterStartConfigWitness extends CreatedModuleWitness {
 	/** A file whose presence makes a subdirectory a project root of its own. */
 	rootMarker: string;
 }
+/** Call `probe` until it returns true or `deadlineMs` passes (the phases' poll). */
+export function pollUntil(
+	probe: () => Promise<boolean>,
+	options: { deadlineMs: number; intervalMs: number },
+): Promise<{ ok: boolean; polls: number; elapsedMs: number }>;
 /** The born-after-start phase's deadline and poll interval (#4521). */
 export const BORN_AFTER_START_DEADLINE_MS: number;
 export const BORN_AFTER_START_POLL_MS: number;

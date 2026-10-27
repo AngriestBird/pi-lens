@@ -31,6 +31,7 @@ import {
 } from "../../clients/latency-logger.js";
 import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
 import {
+	pollUntil,
 	runBornAfterStartConfigWitness,
 	runCreatedModuleWitness,
 } from "../../scripts/smoke-tools.mjs";
@@ -383,19 +384,21 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 		return String(result.content[0]?.text);
 	}
 
+	/** Look, then diagnose, until the finding reads `want` (the witness's own poll). */
 	async function pollMissing(
 		file: string,
 		name: string,
 		want: boolean,
 		look: () => Promise<unknown>,
 	): Promise<boolean> {
-		const deadline = Date.now() + 10_000;
-		for (;;) {
-			await look();
-			if (reportsMissing(await diagnoseText(file), name) === want) return true;
-			if (Date.now() > deadline) return false;
-			await new Promise((resolve) => setTimeout(resolve, 100));
-		}
+		const polled = await pollUntil(
+			async () => {
+				await look();
+				return reportsMissing(await diagnoseText(file), name) === want;
+			},
+			{ deadlineMs: 10_000, intervalMs: 100 },
+		);
+		return polled.ok;
 	}
 
 	// Control: the config present when the server starts resolves on the first

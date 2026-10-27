@@ -2456,7 +2456,7 @@ function diagnoseFile(execute, workspace, lang, file, before) {
 }
 
 /** Call `probe` until it returns true or `deadlineMs` passes. */
-async function pollUntil(probe, { deadlineMs, intervalMs }) {
+export async function pollUntil(probe, { deadlineMs, intervalMs }) {
 	const startedAt = Date.now();
 	let polls = 0;
 	for (;;) {

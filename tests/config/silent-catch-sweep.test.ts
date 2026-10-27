@@ -928,9 +928,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :291, :328, :387
 	"clients/out-of-band-changes.ts": {
 		silent: 3,
-		identities: "ec722a49db9a4818",
+		identities: "f6a8dcd9fdd0254e",
 		reason: SHARP_INSTALL_STAMP,
-	}, // :146, :177, :264
+	}, // :184, :220, :334
 	"clients/package-manager.ts": {
 		silent: 2,
 		identities: "56b6f18636fed761",
