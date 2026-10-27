@@ -327,14 +327,25 @@ describe("turn-end unresolved inline blockers honor dispositions (#3246)", () =>
 
 			// The next turn touches only the unrelated file — the exact shape the
 			// report describes ("it came back on a turn I never touched it").
+			// #4921: the unmarked two are the same two, already delivered, so the
+			// turn does not hand them to the agent again (it used to, because the
+			// duplicate key held the touched-file set).
 			runtime.beginTurn();
 			registerEdit(cacheManager, cwd, unrelated);
 			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
-			const second = turnEndText(cacheManager, cwd, runtime);
-			expect(second).toContain("L2: finding 2");
-			expect(second).toContain("L4: finding 4");
-			expect(second).not.toContain("finding 1");
-			expect(second).not.toContain("finding 3");
+			expect(turnEndText(cacheManager, cwd, runtime)).toBe("");
+
+			// They are still held, not dropped: marking one more changes the set,
+			// and the next unrelated-file turn delivers the remaining one alone.
+			markFalsePositive(cwd, diagnostics[1]);
+			runtime.beginTurn();
+			registerEdit(cacheManager, cwd, unrelated);
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+			const third = turnEndText(cacheManager, cwd, runtime);
+			expect(third).toContain("L4: finding 4");
+			expect(third).not.toContain("finding 1");
+			expect(third).not.toContain("finding 2");
+			expect(third).not.toContain("finding 3");
 		} finally {
 			env.cleanup();
 		}

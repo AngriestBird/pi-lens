@@ -657,15 +657,25 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 	it("keeps the error pending when write 2 comes in the next turn (cell I, cross-turn)", async () => {
 		boundary.lsp.enabled = true;
 		const s = await openSession("i", "src/cell-i.ts", V_FIXED);
+		const blockerSection = "Unresolved from this turn — src/cell-i.ts";
 		await s.write(V1);
-		expect(await s.endTurn()).toContain("Unresolved from this turn");
+		expect(await s.endTurn()).toContain(blockerSection);
 		const w2 = await s.write(V2_OTHER_LINE);
 		expect(w2).not.toMatch(/clean/);
 		expect(w2).toMatch(STILL_UNFIXED);
 		expect(await s.commitBlocked()).toBe(true);
 		const turnEnd = await s.endTurn();
-		expect(turnEnd).toContain("Unresolved from this turn — src/cell-i.ts:");
-		expect(turnEnd).not.toMatch(/Resolved (this turn|since)/);
+		// #4921: the unchanged error was delivered at the first turn end and is
+		// not sent again; it is still held, which the gate and the session store
+		// say. The reply is not asserted empty: in some shuffle orders a cascade
+		// budget advisory (a scan count left by a sibling cell) joins this turn's
+		// message, the content is then new, and the whole of it is sent, blocker
+		// included. That is the content-keyed dedupe working as designed (an
+		// accepted residual in the PR), so the blocker is asserted absent only
+		// while the message gained nothing else.
+		if (!/cascade budget was exhausted/.test(turnEnd))
+			expect(turnEnd).not.toContain(blockerSection);
+		expect(await s.sessionDiagnostics()).toContain("src/cell-i.ts");
 		expect(await s.commitBlocked()).toBe(true);
 		await fixAndDrain(s);
 	}, 120_000);
