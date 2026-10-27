@@ -14,7 +14,10 @@
  */
 
 import { createRequire } from "node:module";
-import type { LspLaunchVariant } from "../server-traits.js";
+import {
+	isTsgoLaunchVariant,
+	type LspLaunchVariant,
+} from "../server-traits.js";
 
 const _require = createRequire(import.meta.url);
 
@@ -772,7 +775,7 @@ export function getStrategy(
 	serverId: string,
 	launchVariant?: LspLaunchVariant,
 ): DiagnosticStrategy {
-	if (serverId === "typescript" && launchVariant === "native-ts7") {
+	if (serverId === "typescript" && isTsgoLaunchVariant(launchVariant)) {
 		return NATIVE_TS7_DIAGNOSTIC_STRATEGY;
 	}
 	// #4833: a `serverOverrides.<id>.command` launch runs another binary, so the
