@@ -480,6 +480,89 @@ describe("a leading oversized drift advisory still reaches the delivery cap (#49
 			env.cleanup();
 		}
 	});
+
+	it("advances the count when a short live blocker leads and the drift advisory follows whole", async () => {
+		const env = setupTestEnvironment("pi-lens-4921-trailing-hold-");
+		try {
+			const sessionId = "trailing-hold-session";
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+
+			const consumer = path.join(env.tmpDir, "consumer.ts");
+			const dep = path.join(env.tmpDir, "dep.ts");
+			fs.writeFileSync(dep, "export const other = 1;\n");
+			fs.writeFileSync(
+				consumer,
+				'import { other } from "./dep.js";\nexport const t = other;\n',
+			);
+			runtime.bumpFileSeq(consumer);
+			cacheManager.addModifiedRange(
+				consumer,
+				{ start: 1, end: 2 },
+				false,
+				env.tmpDir,
+				sessionId,
+			);
+			// A short live blocker leads; the drift advisory follows it whole, so
+			// only the content check (not the leading-part arm) sees it delivered.
+			const live = path.join(env.tmpDir, "live.ts");
+			fs.writeFileSync(live, "export const l = 1;\n");
+			runtime.bumpFileSeq(live);
+			cacheManager.addModifiedRange(
+				live,
+				{ start: 1, end: 2 },
+				false,
+				env.tmpDir,
+				sessionId,
+			);
+			runtime.recordInlineBlockers(live, "🔴 L1 a live blocker", 1, ["lsp"]);
+			runtime.recordInlineBlockers(consumer, "🔴 L1 a drifted blocker", 1, [
+				"lsp",
+			]);
+			const future = new Date(Date.now() + 60_000);
+			fs.utimesSync(dep, future, future);
+
+			const counts: number[][] = [];
+			const delivered: boolean[] = [];
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, env.tmpDir));
+			delivered.push(
+				consumeTurnEndFindings(cacheManager, env.tmpDir, runtime) !== undefined,
+			);
+			counts.push(
+				runtime
+					.getInlineBlockersSnapshot()
+					.map((entry) => entry.staleDeliveryCount ?? 0),
+			);
+			for (let turn = 2; turn <= 3; turn++) {
+				await driveTurn(
+					runtime,
+					cacheManager,
+					consumer,
+					env.tmpDir,
+					sessionId,
+					turn,
+				);
+				delivered.push(
+					consumeTurnEndFindings(cacheManager, env.tmpDir, runtime) !==
+						undefined,
+				);
+				counts.push(
+					runtime
+						.getInlineBlockersSnapshot()
+						.map((entry) => entry.staleDeliveryCount ?? 0),
+				);
+			}
+			// Each turn writes another file, so each is a new delivery; the third
+			// reaches the cap and retires the record (the round-1 behaviour).
+			// The live blocker never counts; the drift record is the max, and 0 once retired.
+			expect(counts.map((c) => Math.max(0, ...c))).toEqual([1, 2, 0]);
+			expect(delivered).toEqual([true, true, true]);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
 
 /**
