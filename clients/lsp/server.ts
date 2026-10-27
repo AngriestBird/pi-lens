@@ -2667,7 +2667,7 @@ async function findNativeTypeScriptLsp(
 
 interface EffectTsgoLsp {
 	command: string;
-	version: string;
+	releaseTag: string;
 }
 
 /**
@@ -2685,7 +2685,7 @@ interface EffectTsgoLsp {
 async function findEffectTsgoLsp(
 	nodeModulesDir: string,
 ): Promise<EffectTsgoLsp | undefined> {
-	let version: unknown;
+	let release: unknown;
 	try {
 		const manifest: unknown = JSON.parse(
 			await readFile(
@@ -2693,14 +2693,14 @@ async function findEffectTsgoLsp(
 				"utf8",
 			),
 		);
-		version =
+		release =
 			typeof manifest === "object" && manifest !== null && "version" in manifest
 				? manifest.version
 				: undefined;
 	} catch {
 		return undefined;
 	}
-	if (typeof version !== "string" || !version) return undefined;
+	if (typeof release !== "string" || !release) return undefined;
 
 	const localBin = path.join(nodeModulesDir, ".bin", "effect-tsgo");
 	const candidates =
@@ -2710,7 +2710,7 @@ async function findEffectTsgoLsp(
 	for (const command of candidates) {
 		try {
 			await access(command);
-			return { command, version };
+			return { command, releaseTag: release };
 		} catch {
 			/* not found */
 		}
@@ -3040,7 +3040,7 @@ export const TypeScriptServer: LSPServerInfo = {
 		) {
 			const env = await getToolEnvironment();
 			logSessionStart(
-				`lsp typescript-effect-tsgo: version=${effectLsp.version} typescript=${nativeLsp.version} command=${effectLsp.command}`,
+				`lsp typescript-effect-tsgo: version=${effectLsp.releaseTag} typescript=${nativeLsp.version} command=${effectLsp.command}`,
 			);
 			const proc = await launchLSP(
 				effectLsp.command,

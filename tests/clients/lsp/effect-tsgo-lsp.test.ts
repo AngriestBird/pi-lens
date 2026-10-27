@@ -1,3 +1,4 @@
+// flake-shape: in-process-mock — the child launcher (clients/lsp/launch) is the process boundary and the installer (clients/installer) the network boundary; TypeScriptServer.spawn, the project-trust gate and the selection are real, and no fake stands in for an in-process store.
 /**
  * #4914: a project that installed `@effect/tsgo` next to TypeScript 7+ gets the
  * Effect language service through its own `effect-tsgo tsc --lsp --stdio`.

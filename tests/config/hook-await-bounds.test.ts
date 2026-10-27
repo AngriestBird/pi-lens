@@ -2611,7 +2611,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// shared directory reader once per directory of its bounded (128) search.
 	// Both are local reads on the spawn-policy path of `spawnClient`, which no
 	// hook awaits; hook-signal threading stays #2523 AC4.
-	"clients/lsp/server.ts": 124,
+	// #4914: 124 -> 129. The effect-tsgo launch awaits the `@effect/tsgo`
+	// manifest read, the bin `access` probe, the finder, and the launch pair
+	// (`getToolEnvironment`, `launchLSP`). All sit on the same spawn path as the
+	// native launch, which no hook awaits; hook-signal threading stays #2523 AC4.
+	"clients/lsp/server.ts": 129,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	// #4493: 10 -> 12, the `git rev-parse` in readGitHead and the `git diff`

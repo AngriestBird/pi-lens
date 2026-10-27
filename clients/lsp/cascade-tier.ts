@@ -114,9 +114,8 @@ export function classifyCascadeWaitTier(
 	const primary = resolvePrimaryServerForWaitPolicy(filePath, snapshots);
 	if (
 		primary?.serverId === "typescript" &&
-		primary.snapshot &&
-		isTsgoLaunchVariant(primary.snapshot.launchVariant) &&
-		primary.snapshot.workspaceDiagnosticsSupport?.mode === "push-only"
+		isTsgoLaunchVariant(primary.snapshot?.launchVariant) &&
+		primary.snapshot?.workspaceDiagnosticsSupport?.mode === "push-only"
 	) {
 		return "collect-later";
 	}
