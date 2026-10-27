@@ -15,7 +15,16 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL, URL } from "node:url";
 import { BoundedFifoMap } from "../bounded-cache.js";
-import { workspaceFileCreatedAtFor } from "./workspace-diagnostics-session.js";
+import {
+	CONTENT_HASH_MAX_BYTES,
+	type ContentStamp,
+	stampContentBytes,
+} from "../content-stamp.js";
+import { FILE_CHANGED, WATCH_BIRTH_MARGIN_MS } from "./watch-queue.js";
+import {
+	noteWorkspaceFilesChangedOnDisk,
+	workspaceFileCreatedAtFor,
+} from "./workspace-diagnostics-session.js";
 import {
 	emitCreatedImportScanRollupAtSessionEnd,
 	goPackageFilesToAnnounce,
@@ -1204,7 +1213,18 @@ async function collectWorkspaceDiagnosticFiles(
 
 export class LSPService {
 	private static readonly MAX_SIBLING_ANNOUNCEMENTS = 1024;
+	private static readonly MAX_UNHELD_STAMPS = 4096;
 	private state: LSPState;
+	/**
+	 * #4532 gap 13: per path no live client holds open, the content stamp it
+	 * had when this service last brought its live servers' view up to date.
+	 * Two writers, one meaning: the check (`unheldBytesMoved`) and every
+	 * watched-files event this service sends (`noteUnheldSent`). Dropped with
+	 * the service; an evicted path is read as one seen for the first time.
+	 */
+	private readonly unheldStamps = new BoundedFifoMap<string, ContentStamp>(
+		LSPService.MAX_UNHELD_STAMPS,
+	);
 	/** Content hashes already announced to a sibling root in this service. */
 	private readonly siblingAnnouncementHashes = new BoundedFifoMap<
 		string,
@@ -1531,7 +1551,7 @@ export class LSPService {
 		}
 		// #4320: a file new to a sibling's server must reach it as Created, as
 		// it does its owner; Pyrefly keeps a failed lookup through Changed.
-		this.announceCreatedFiles([filePath]);
+		this.announceCreatedTo([filePath]);
 		return Promise.all(
 			getServersForFileWithConfig(filePath).map((server) =>
 				this.clientRegistry.resolveServerRoot(server, filePath).then((root) => {
@@ -3578,9 +3598,36 @@ export class LSPService {
 			]);
 			for (const serverId of serverIds)
 				this.notifyLiveClientsForServer(serverId, filePath, type, "", true);
+			this.noteUnheldSent(filePath);
 		}
 		for (const client of this.state.clients.values())
 			if (client.isAlive()) client.notify.flushWatched?.();
+	}
+
+	/**
+	 * #4532 gap 13: an event sent for `filePath` brought its live servers' view
+	 * up to date, so its {@link unheldStamps} record moves to the stat now (the
+	 * bytes hash is kept when the stat is the one already recorded), or goes
+	 * with the file (a Deleted event, or a path that cannot be statted). Without this, a sender that announces after it notifies
+	 * (#4742's head-move phase) had each path sent twice.
+	 */
+	private noteUnheldSent(filePath: string): void {
+		const key = normalizeMapKey(filePath);
+		let stat: nodeFs.Stats | undefined;
+		try {
+			stat = nodeFs.statSync(filePath, { throwIfNoEntry: false });
+		} catch {
+			// none: an unstattable path drops its record, and its next sighting
+			// takes the first-sighting rule, which errs toward sending.
+			stat = undefined;
+		}
+		if (stat === undefined) {
+			this.unheldStamps.delete(key);
+			return;
+		}
+		const seen = this.unheldStamps.get(key);
+		if (seen?.size === stat.size && seen.mtimeMs === stat.mtimeMs) return;
+		this.unheldStamps.set(key, { size: stat.size, mtimeMs: stat.mtimeMs });
 	}
 
 	/**
@@ -3614,8 +3661,25 @@ export class LSPService {
 	 * workspace sweep (which looks every file up before it touches any), is
 	 * answered from cache, or by a server that has not heard of the module yet.
 	 * Each client decides which entries are new to it (`watchedTypeForExisting`).
+	 *
+	 * #4532 gap 13: first, a file no client holds whose bytes moved since its
+	 * servers last saw them goes out as Changed (`sendUnheldChanges`). The
+	 * diagnostics routes hand this the files their targets import directly
+	 * (`importTargetsToAnnounce`), so a module changed outside pi is re-read
+	 * before the importer's answer.
 	 */
 	announceCreatedFiles(filePaths: readonly string[]): void {
+		if (this.checkDestroyed() || this.state.clients.size === 0) return;
+		this.sendUnheldChanges(filePaths);
+		this.announceCreatedTo(filePaths);
+	}
+
+	/**
+	 * #4320's per-client half of {@link announceCreatedFiles}, alone: a touch's
+	 * sibling announcement names the file it is about to open, whose bytes the
+	 * open itself sends.
+	 */
+	private announceCreatedTo(filePaths: readonly string[]): void {
 		if (this.checkDestroyed() || this.state.clients.size === 0) return;
 		const byServer = new Map<
 			string,
@@ -3642,6 +3706,119 @@ export class LSPService {
 			// Called with no entries too: the client still sends a waiting Created.
 			client.notify.announceCreated(entries);
 		}
+	}
+
+	/**
+	 * #4532 gap 13: send Changed, now, for each of `filePaths` that no live
+	 * client holds open and whose bytes moved since its live servers last saw
+	 * them ({@link unheldBytesMoved}), before the caller's read. Each such path
+	 * is also noted as changed on disk under the root of every live client of
+	 * its servers, the record #4476 writes for a change seen on disk: a cached
+	 * answer whose dependency scope holds the path is refused, and a touch
+	 * debounced before the change pushes again.
+	 */
+	private sendUnheldChanges(filePaths: readonly string[]): void {
+		const changed: Array<{ filePath: string; type: number }> = [];
+		const at = Date.now();
+		for (const filePath of filePaths) {
+			let stat: nodeFs.Stats;
+			try {
+				stat = nodeFs.statSync(filePath);
+			} catch {
+				continue; // absent: no bytes to compare
+			}
+			const servers = getServersForFileWithConfig(filePath);
+			if (!this.unheldBytesMoved(filePath, stat, servers)) continue;
+			changed.push({ filePath, type: FILE_CHANGED });
+			for (const client of this.liveClientsOf(servers))
+				noteWorkspaceFilesChangedOnDisk(
+					client.root,
+					[normalizeMapKey(filePath)],
+					at,
+				);
+		}
+		if (changed.length === 0) return;
+		this.notifyOutOfBandFileChanges(changed);
+		logLatency({
+			type: "phase",
+			phase: "lsp_unheld_dependency_changed",
+			filePath: changed[0]?.filePath ?? "",
+			durationMs: Date.now() - at,
+			result: `changed:${changed.length}`,
+			metadata: {
+				changed: changed.length,
+				paths: changed.slice(0, 5).map((change) => change.filePath),
+			},
+		});
+	}
+
+	/**
+	 * #4532 gap 13: whether `filePath`, which no live client holds open, has
+	 * bytes a live server of its may not have read. A server keeps the bytes of
+	 * a closed module it read for an importer and re-reads them only when a
+	 * watched-files event names the file (pyright 1.1.414, measured), so a
+	 * module changed outside pi left its importer's answer stale for the
+	 * server's life, on the first call and every call after it.
+	 *
+	 * The record ({@link unheldStamps}) is the content stamp the path had when
+	 * this service last brought its live servers' view up to date. An equal
+	 * stat is unchanged; a moved stat is read and compared by its bytes, so a
+	 * rewrite of the same bytes sends nothing. A path seen for the first time
+	 * has no record to compare, so it is treated as the client-start rule
+	 * treats a birth ({@link WATCH_BIRTH_MARGIN_MS}): bytes written at or after
+	 * the earliest live server of the path started may be newer than the bytes
+	 * that server read, and older ones are what it read. A held path is
+	 * skipped: the open-document sync keeps its view current.
+	 */
+	private unheldBytesMoved(
+		filePath: string,
+		stat: nodeFs.Stats,
+		servers: ReadonlyArray<{ id: string }>,
+	): boolean {
+		if (this.hasLiveClientHoldingDocument(filePath)) return false;
+		const key = normalizeMapKey(filePath);
+		const seen = this.unheldStamps.get(key);
+		if (seen?.size === stat.size && seen.mtimeMs === stat.mtimeMs) return false;
+		let stamp: ContentStamp = { size: stat.size, mtimeMs: stat.mtimeMs };
+		if (stat.size <= CONTENT_HASH_MAX_BYTES) {
+			try {
+				stamp = stampContentBytes(nodeFs.readFileSync(filePath), stat.mtimeMs);
+			} catch (cause) {
+				// The stat alone is compared: a read that failed is no proof the
+				// bytes are unchanged, so a moved stat sends the event.
+				recordDegradationOnce({
+					kind: "lsp-unheld-dependency-unreadable",
+					subject: key,
+					reason: `could not read a closed module to compare its bytes; a change of its stat is sent as a change: ${cause instanceof Error ? cause.message : String(cause)}`,
+				});
+			}
+		}
+		this.unheldStamps.set(key, stamp);
+		// With no live server of the path, nothing read older bytes: a baseline.
+		if (seen === undefined)
+			return this.liveClientsOf(servers).some(
+				(client) => stat.mtimeMs >= client.launchedAt - WATCH_BIRTH_MARGIN_MS,
+			);
+		return seen.sha256 === undefined || seen.sha256 !== stamp.sha256;
+	}
+
+	/**
+	 * The live clients of `servers`, each with its root and the launch epoch
+	 * from which that server could read a project file.
+	 */
+	private liveClientsOf(
+		servers: ReadonlyArray<{ id: string }>,
+	): Array<{ root: string; launchedAt: number }> {
+		const live: Array<{ root: string; launchedAt: number }> = [];
+		for (const [key, client] of this.state.clients) {
+			if (!client.isAlive()) continue;
+			if (!servers.some((server) => key.startsWith(`${server.id}:`))) continue;
+			live.push({
+				root: client.root,
+				launchedAt: this.clientRegistry.clientLaunchStartedAt.get(key) ?? 0,
+			});
+		}
+		return live;
 	}
 
 	/**
