@@ -267,6 +267,10 @@ describe("TypeScript LSP ancestor walks stop at a linked home (#4911)", () => {
 		launchLSP.mockResolvedValue(fakeProcess);
 	});
 
+	afterEach(() => {
+		for (const dir of dirs.splice(0)) removeTempDirSync(dir);
+	});
+
 	const cells = (["native", "classic"] as const).flatMap((walk) =>
 		(["home-link", "root-link"] as const).map((kind) => [walk, kind] as const),
 	);
