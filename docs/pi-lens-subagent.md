@@ -143,10 +143,13 @@ the brief gives.
   is that summary and nothing else: the full evidence (probe transcripts,
   tables, mutation logs) goes in the declared deliverable file or, when there
   is none, `~/.local/share/pi-lens-orchestrator/tmp/<lane>-tmp/REPORT.md`, and
-  the summary names that path. The orchestrator reads the summary alone to
-  route the lane and opens the file only when routing a fix round, so a claim
-  made only in the file does not route. (Full reports pasted into the reply
-  were the largest orchestrator token cost on 2026-10-07.)
+  the summary names that path. The hand-back file a brief names is a required
+  lane record, kept outside the repo; the harness default against report `.md`
+  files does not cover it. A lane that skips the file has not delivered. The
+  orchestrator reads the summary alone to route the lane and opens the file only
+  when routing a fix round, so a claim made only in the file does not route.
+  (Full reports pasted into the reply were the largest orchestrator token cost
+  on 2026-10-07.)
 - **Handbacks between rounds.** Every lane's returned summary for PR #N is
   kept at `~/.local/share/pi-lens-orchestrator/tmp/handbacks/pr-<N>.md` (the
   orchestrator's hooks write it; a fixer may also write it). A reviewer or
