@@ -419,8 +419,9 @@ function projectDataDirReadableSlug(canonicalRoot: string): string {
  * names the directory it will have once created. On win32 it stays the
  * resolved path, as in every earlier version: a win32 name has never followed
  * the realpath, and changing it would rename directories for 8.3, junction
- * and casing spellings alike. `realpathSync` is probed only to expose a
- * boundary failure. The hash is the first 8 hex chars of SHA-256 over the
+ * and casing spellings alike. `fallback` is true when the root is not on disk
+ * (yet) or cannot be reached, and the name then rests on the nearest existing
+ * ancestor. The hash is the first 8 hex chars of SHA-256 over the
  * root. A collision needs the same readable slug and the same 32-bit prefix,
  * so the practical collision population is readable-slug twin pairs.
  */
@@ -433,13 +434,10 @@ export function dataDirCanonicalRoot(
 } {
 	const resolved = path.resolve(cwd);
 	const root = platform === "win32" ? resolved : realpathOrResolve(resolved);
-	try {
-		fs.realpathSync(resolved);
-	} catch {
-		// Best-effort: the root may not exist yet.
-		return { root, fallback: true };
-	}
-	return { root, fallback: false };
+	// Best-effort: the root may not exist yet. Existence is all the old
+	// `realpathSync` probe's throw ever answered, and `existsSync` answers it
+	// without a second identity walk (#4689 batch 8).
+	return { root, fallback: !fs.existsSync(resolved) };
 }
 
 function projectDataDirRootHash(canonicalRoot: string): string {
