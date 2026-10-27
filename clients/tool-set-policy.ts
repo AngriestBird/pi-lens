@@ -189,11 +189,16 @@ export interface ToolSetPlan {
  * and this restores the parent's posture character-for-character — which both
  * preserves the model's activations and keeps the advertised tool list equal
  * to the one the prompt cache prefix was built from.
+ *
+ * `disabled` names the registered tools the session turned off after they
+ * registered (`--no-tool`, whose value pi applies after the factory ran,
+ * #4913). They are in neither the kept set nor the restored one.
  */
 export function planToolSet(
 	active: readonly string[],
 	lazyNames: ReadonlySet<string>,
 	remembered: ReadonlySet<string>,
+	disabled: ReadonlySet<string> = new Set(),
 ): ToolSetPlan {
 	const desired = active.filter(
 		// Lazy tools are dropped here and re-appended below in REMEMBERED
@@ -201,13 +206,13 @@ export function planToolSet(
 		// position would restore the right SET in the wrong ARRAY order, and
 		// the active-tools array is what serializes into the request's tool
 		// block — a transposition is a changed prefix, i.e. a cache miss.
-		(name) => !lazyNames.has(name),
+		(name) => !lazyNames.has(name) && !disabled.has(name),
 	);
 	// A remembered tool the host did not list as active still belongs in the
 	// set (defensive: the host controls what `getActiveTools` returns).
 	const desiredSet = new Set(desired);
 	for (const name of remembered) {
-		if (!desiredSet.has(name)) {
+		if (!desiredSet.has(name) && !disabled.has(name)) {
 			desired.push(name);
 			desiredSet.add(name);
 		}

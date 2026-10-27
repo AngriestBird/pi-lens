@@ -11,6 +11,10 @@ import { removeTempDirSync } from "./clients/test-utils.js";
 // bespoke ExtensionAPI mock. Run the real entry, then invoke the registered
 // command handler and assert captured UI calls.
 //
+// #4913 moved the "session started with --no-lens" case to tier 2
+// (`tests/index-4913-cli-flag-timing.test.ts`): the double applies a flag value
+// before the factory runs, and pi applies it after.
+//
 // #4632 slice 9 moved the REGISTRATION case onto tier 1: the real host's
 // loader holds the flags and resolves the commands, so a command that pi drops
 // (or a name it prefixes) is a red here, not a value the double recorded. The
@@ -45,10 +49,8 @@ afterEach(() => {
 	}
 });
 
-function installLens(
-	flagValues: Record<string, boolean | string> = {},
-): PiMock {
-	const pi = createPiMock(flagValues);
+function installLens(): PiMock {
+	const pi = createPiMock();
 	piLens(pi.asExtensionAPI());
 	return pi;
 }
@@ -89,18 +91,6 @@ describe("lens-toggle command", () => {
 			type: "warning",
 		});
 		expect(ctx.notifications[1]).toEqual({
-			message: "pi-lens enabled for this session.",
-			type: "info",
-		});
-	});
-
-	it("re-enables a session started with --no-lens", async () => {
-		const pi = installLens({ "no-lens": true });
-		const ctx = makeCtx();
-
-		await pi.runCommand("lens-toggle", "", ctx);
-
-		expect(ctx.notifications).toContainEqual({
 			message: "pi-lens enabled for this session.",
 			type: "info",
 		});

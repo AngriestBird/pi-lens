@@ -709,6 +709,8 @@ file-scoped worklist and receives no project-wide scanner output.
     state by session identity, or decide from live membership. Instances:
     #4554 (fixed by #4563, still open) and #4564. No guard yet: not scanned.
 
+87. **Factory-time read of a host value set later:** pi applies an extension flag's command-line value after every factory has run, so a flag read while the factory runs answers the registered default. Screen: does any flag read run while the factory runs, and does the host test apply the value after the factory, as pi does? Read it in a handler, a command or a tool, or once in `session_start`. Enforcer: `tests/config/factory-flag-read-sweep.test.ts` (partial: a reader handed to a callee that invokes it synchronously is not seen). Instances and dates: `HISTORY.md`.
+
 **Expired successor hand-off:** an expired successor marker may authorize
     its named interrupted successor only for the fixed retention window in
     `clients/session-lifecycle.ts`; the shared slot retires at that boundary

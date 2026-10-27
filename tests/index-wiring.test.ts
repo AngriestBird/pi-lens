@@ -142,8 +142,6 @@ vi.mock("../clients/quiet-window.js", async (importOriginal) => {
 	};
 });
 
-import { CacheManager } from "../clients/cache-manager.js";
-import { snapshotAdvisoryProvenance } from "../clients/advisory-provenance.js";
 import { getLatencyLogPath } from "../clients/latency-logger.js";
 import { LENS_FLAGS } from "../clients/lens-flag-registry.js";
 import {
@@ -936,56 +934,6 @@ describe("index.ts extension wiring", () => {
 				}
 			});
 
-			it("flag on: wraps tools that have renderResult with a compact renderCall + one-line renderResult", async () => {
-				const pi = createPiMock({ "lens-compact-tool-line": true });
-				extension(pi.asExtensionAPI());
-
-				const tool = pi.getTool("lens_diagnostics") as {
-					renderCall?: (...a: unknown[]) => { render: (w: number) => string[] };
-					renderResult?: (...a: unknown[]) => {
-						render: (w: number) => string[];
-					};
-				};
-				expect(tool.renderCall).toBeTypeOf("function");
-				expect(tool.renderResult).toBeTypeOf("function");
-
-				const theme = {
-					fg: (_c: string, t: string) => t,
-					bold: (t: string) => t,
-				};
-				const ctx = {
-					args: { mode: "all" },
-					toolCallId: "x",
-					invalidate: () => {},
-					lastComponent: undefined,
-					state: {},
-					cwd: "/repo",
-					executionStarted: true,
-					argsComplete: true,
-					isPartial: false,
-					expanded: false,
-					showImages: false,
-					isError: false,
-				};
-
-				// Call row blanks out once a settled result exists (collapsed).
-				const callComponent = tool.renderCall?.({ mode: "all" }, theme, ctx);
-				expect(callComponent?.render(80)).toEqual([]);
-
-				const resultComponent = tool.renderResult?.(
-					{
-						content: [],
-						details: { mode: "all", totalBlocking: 0, filesWithIssues: 0 },
-					},
-					{ expanded: false, isPartial: false },
-					theme,
-					ctx,
-				);
-				const lines = resultComponent?.render(200) ?? [];
-				expect(lines).toHaveLength(1);
-				expect(lines[0]).toContain("lens_diagnostics");
-			});
-
 			it("registers the lens-compact-tool-line flag from the registry (name + description + default false)", () => {
 				const pi = createPiMock();
 				extension(pi.asExtensionAPI());
@@ -1066,89 +1014,6 @@ describe("index.ts extension wiring", () => {
 					(group) => group.kind === "skills-dir-missing",
 				),
 			).toBeUndefined();
-		});
-	});
-
-	describe("context injection gating + toggle", () => {
-		let tmp: string;
-		let prevDataDir: string | undefined;
-
-		beforeEach(() => {
-			tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-wiring-"));
-			prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-		});
-
-		afterEach(() => {
-			if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-			else process.env.PILENS_DATA_DIR = prevDataDir;
-			removeTempDirSync(tmp);
-		});
-
-		function seedTurnEndFindings(
-			cwd: string,
-			content: string,
-			sessionId: string,
-		): void {
-			const file = path.join(cwd, "unchanged.ts");
-			fs.writeFileSync(file, "export const unchanged = true;\n");
-			const provenance = snapshotAdvisoryProvenance({
-				cwd,
-				runtime: { telemetrySessionId: sessionId, projectSeq: 0, turnIndex: 0 },
-				generation: 1,
-				files: [{ path: file, role: "affected" }],
-			});
-			new CacheManager().writeCache(
-				"turn-end-findings",
-				{ content, provenance },
-				cwd,
-			);
-		}
-
-		it("suppresses injection when --no-lens-context is set, then injects after /lens-context-toggle", async () => {
-			// Start OFF deterministically via the CLI flag (env → CLI → config).
-			_resetSessionLifecycleForTests();
-			const pi = createPiMock({ "no-lens-context": true });
-			extension(pi.asExtensionAPI());
-			// #1681: the host never puts sessionId on the session_start event — see
-			// index.ts's own comment at the `stableSessionId` read ("the event
-			// carries none"). It belongs on ctx, via makeCtx below.
-			await pi.emit(
-				"session_start",
-				makeSessionStartEvent(),
-				makeCtx({ cwd: tmp, sessionId: "wiring-session" }),
-			);
-			seedTurnEndFindings(tmp, "TESTFINDINGS_XYZZY", "wiring-session");
-
-			const existing = [{ role: "system", content: "orig" }];
-
-			// Gated off: the context hook returns nothing and leaves findings intact.
-			const off = await pi.emit(
-				"context",
-				{ messages: existing },
-				makeCtx({ cwd: tmp }),
-			);
-			expect(off).toBeUndefined();
-
-			// Flip it on through the real command handler.
-			await pi.runCommand("lens-context-toggle", "", makeCtx({ cwd: tmp }));
-
-			// Now the same hook injects the cached findings into the transcript.
-			// The lone existing message is a `system` message (not a plain user
-			// prompt), so the #1016/#3693 placement guard appends the findings after it
-			// rather than prepending — the original message stays first (so a real
-			// user prompt / system preamble keeps its position and the prompt-cache
-			// prefix), and the findings land at the tail.
-			const on = (await pi.emit(
-				"context",
-				{ messages: existing },
-				makeCtx({ cwd: tmp }),
-			)) as { messages: Array<{ role: string; content: string }> } | undefined;
-
-			expect(on?.messages, "expected injected messages").toBeDefined();
-			expect(on?.messages[0]).toEqual({ role: "system", content: "orig" });
-			expect(on?.messages.at(-1)?.content).toMatch(/TESTFINDINGS_XYZZY/);
-			expect(on?.messages.at(-1)?.content).toContain("Address 🔴 blockers");
 		});
 	});
 

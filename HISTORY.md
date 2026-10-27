@@ -1,5 +1,17 @@
 # HISTORY
 
+## 2026-10-27 — factory-time read of a host value set later (shape 87)
+
+#4913: `pi --no-lens` still started language servers and ran the write-time
+runners. pi applies an extension flag's command-line value after every factory
+has run (`agent-session-services.js` `applyExtensionFlagValues`), and
+`index.ts` read `no-lens`, `no-lens-context`, `lens-compact-tool-line` and
+`--no-tool` inside the factory, where `pi.getFlag` answers the registered
+default. The pi double (`tests/support/pi-mock.ts`) applied flag values before
+the factory, so no test saw it (#4632). The four reads now happen in
+`session_start`; `tests/config/factory-flag-read-sweep.test.ts` refuses a new
+one, and `tests/index-4913-cli-flag-timing.test.ts` drives the real host order.
+
 ## 2026-10-25 — turn-count wait for real I/O (shape 86)
 
 Two tests waited for real I/O by counting event-loop turns. #4850 waited for the loss-notice bound in `tests/clients/fix-run-restore.test.ts`. #4830 did the same in `tests/index-3521-fork-tree-witness.test.ts`. Both went red on loaded CI runners, and #4852 moved both onto `waitFor`'s real-clock deadline. Master run 40191426869 went red on the #4850 cell before #4852 landed. The detector is tracked in #4865.
