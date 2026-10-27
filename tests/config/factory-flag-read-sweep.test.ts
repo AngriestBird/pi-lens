@@ -261,6 +261,11 @@ describe("factory-time flag reads (#4913)", () => {
 				"factory:on:getFlag:call",
 			],
 			[
+				"a read in the default export after an export whose body has a `switch` default",
+				`export function pick(x: number) { switch (x) { default: return 1; } }\nexport default function (pi: any) { ${read} return activateExtension(pi); }`,
+				"<default>:on:getFlag:call",
+			],
+			[
 				"a read in an arrow the default export passes to a call",
 				`export default function (pi: any) { return run(() => { ${read} return activateExtension(pi); }); }`,
 				"<default>:on:getFlag:call",

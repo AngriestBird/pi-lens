@@ -250,12 +250,22 @@ function nameOf(fn: SgNode): string {
 		: "<anonymous>";
 }
 
+/** True when `parent` is the node directly above `node`. */
+function isChildOf(node: SgNode, parent: SgNode): boolean {
+	const above = node.parent();
+	return above !== null && sameNode(above, parent);
+}
+
 /** The node a module's default export names: its value, declaration or local name. */
 function defaultExportValue(nodes: SgNode[]): SgNode {
 	for (const statement of nodes) {
 		if (kindOf(statement) !== "export_statement") continue;
 		// `export default` always holds a declaration or a value.
-		if (statement.children().some((child) => kindOf(child) === "default"))
+		if (
+			within(nodes, statement).some(
+				(node) => kindOf(node) === "default" && isChildOf(node, statement),
+			)
+		)
 			return (statement.field("declaration") ??
 				statement.field("value")) as SgNode;
 		const specifier = within(nodes, statement).find(
@@ -289,7 +299,9 @@ function factoryFunction(
 	let exported = defaultExportValue(nodes);
 	// Each wrapper kind holds the expression it wraps as its first named child.
 	while (WRAPPER_KINDS.has(kindOf(exported)))
-		exported = exported.children().find((child) => child.isNamed()) as SgNode;
+		exported = within(nodes, exported).find(
+			(node) => node.isNamed() && isChildOf(node, exported),
+		) as SgNode;
 	if (FUNCTION_KINDS.has(kindOf(exported))) return exported;
 	const named =
 		kindOf(exported) === "identifier"
