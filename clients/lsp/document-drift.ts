@@ -492,11 +492,10 @@ export class DocumentDriftTracker {
 		const full = options.full === true;
 		// #4532 gap 13: a full pass must not join a capped pass already in flight,
 		// which started before the caller's change and checks 64 documents. Let
-		// that pass settle, then run this one.
+		// that pass settle, then run this one. A rejection of that pass reaches
+		// this caller as it would have when joining it.
 		if (full && this.flight.has(SWEEP_KEY))
-			await this.flight
-				.run(SWEEP_KEY, () => this.runSweep(deps, now))
-				.catch(() => {});
+			await this.flight.run(SWEEP_KEY, () => this.runSweep(deps, now));
 		return this.flight.run(SWEEP_KEY, () => this.runSweep(deps, now, full));
 	}
 
