@@ -11,6 +11,7 @@
 
 import { promises as fs } from "node:fs";
 import * as fsSync from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { BoundedLruCache } from "../clients/bounded-cache.js";
 import { Type } from "../clients/deps/typebox.js";
@@ -3178,7 +3179,10 @@ async function formatFullMode(
 	// bypasses both walks, so it is never unsafe. Their empty results in that
 	// case are "walked nothing", not "clean" — say so, matching the fresh-fetch
 	// unsafeRoot note above.
-	const walkUnsafeRoot = explicitFiles === undefined && isAtOrAboveHomeDir(cwd);
+	// By real path on both sides, the same verdict the two walks reach (#4911).
+	const walkUnsafeRoot =
+		explicitFiles === undefined &&
+		isAtOrAboveHomeDir(realpathOrResolve(cwd), realpathOrResolve(os.homedir()));
 	const walkUnsafeRootNote = walkUnsafeRoot
 		? `\n\nproject file walk skipped: the working directory resolves at or above the home directory, so the cheap project scan and the LSP workspace sweep would each enumerate every unrelated tree under it. Re-run from inside a project directory. Absence of their findings is NOT a clean verdict.`
 		: "";

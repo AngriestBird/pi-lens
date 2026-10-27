@@ -11,6 +11,7 @@
 import { CASCADE_DIAGNOSTICS_TTL_MS } from "../cascade-types.js";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL, URL } from "node:url";
 import { BoundedFifoMap } from "../bounded-cache.js";
@@ -54,6 +55,7 @@ import {
 import {
 	isAtOrAboveHomeDir,
 	normalizeMapKey,
+	realpathOrResolve,
 	uriToPath,
 } from "../path-utils.js";
 import type {
@@ -1148,8 +1150,14 @@ async function collectWorkspaceDiagnosticFiles(
 	// nothing is the honest result; the caller (runWorkspaceDiagnostics →
 	// tools/lens-diagnostics.ts) renders "unsafe root" so an empty sweep never
 	// reads as a clean project. Same ceiling as fresh-fetch.ts / the cheap-tier
-	// scanner.
-	if (isAtOrAboveHomeDir(root, homeDir)) return files;
+	// scanner. By real path on both sides (#4911).
+	if (
+		isAtOrAboveHomeDir(
+			realpathOrResolve(root),
+			realpathOrResolve(homeDir ?? os.homedir()),
+		)
+	)
+		return files;
 	const ignoreMatcher = getProjectIgnoreMatcher(root);
 	// #703: prime the tracked-files set once before the walk so a tracked file
 	// matching a `.gitignore`/global pattern still gets its workspace

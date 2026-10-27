@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Worker } from "node:worker_threads";
 import { constants as zlibConstants, gunzipSync, gzipSync } from "node:zlib";
@@ -38,6 +39,7 @@ import {
 	isUnderDir,
 	normalizeFilePath,
 	normalizeMapKey,
+	realpathOrResolve,
 	toProjectRelativePath,
 } from "../path-utils.js";
 import { collectProjectSourceFilesWithBudgetAsync } from "../project-scan-policy.js";
@@ -5711,8 +5713,9 @@ async function _doBuildGraph(
 	// already IS the project root, so there is no safe substitute root to fall
 	// back to here — skip graph construction entirely (matching #622's own
 	// stated expected behavior) rather than walking a directory the caller never
-	// asked for.
-	if (isAtOrAboveHomeDir(path.resolve(cwd))) {
+	// asked for. Both sides are real paths (#4911): `normalizedCwd` is the
+	// cwd's path identity, so a cwd or a HOME spelled through a link is refused.
+	if (isAtOrAboveHomeDir(normalizedCwd, realpathOrResolve(os.homedir()))) {
 		const graph = createEmptyGraph();
 		for (const file of normalizedChanged) {
 			upsertChangedSymbols(graph, facts, file);

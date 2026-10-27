@@ -2300,7 +2300,11 @@ async function findAncestorFileAmong(
 ): Promise<string | undefined> {
 	const fs = await import("node:fs/promises");
 	let currentDir = path.resolve(startDir);
-	while (!isAtOrAboveHomeDir(currentDir)) {
+	// The walk keeps the caller's spelling (a returned binary is classified by
+	// where it is spelled); the home ceiling compares real paths (#4911), so a
+	// HOME or an ancestor spelled through a link still stops it.
+	const home = realpathOrResolve(os.homedir());
+	while (!isAtOrAboveHomeDir(realpathOrResolve(currentDir), home)) {
 		for (const segments of candidateSegmentLists) {
 			const candidate = path.join(currentDir, ...segments);
 			try {
@@ -2593,8 +2597,10 @@ async function findNativeTypeScriptLsp(
 	root: string,
 ): Promise<NativeTypeScriptLsp | undefined> {
 	let currentDir = path.resolve(root);
+	// Spelled walk, real-path ceiling, as in `findAncestorFileAmong` (#4911).
+	const home = realpathOrResolve(os.homedir());
 
-	while (!isAtOrAboveHomeDir(currentDir)) {
+	while (!isAtOrAboveHomeDir(realpathOrResolve(currentDir), home)) {
 		const typescriptDir = path.join(currentDir, "node_modules", "typescript");
 		const packageJsonPath = path.join(typescriptDir, "package.json");
 
