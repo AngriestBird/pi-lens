@@ -409,6 +409,21 @@ describe("factory-time flag reads (#4913)", () => {
 			expect(scan.unadmitted.map((site) => site.key)).toContain(key);
 		});
 
+		it("refuses a closure that hands pi to a reading helper, called at factory time", () => {
+			const source = [
+				"function readNoLens(api: any) { return api.getFlag('no-lens'); }",
+				"function activateExtension(pi: any) {",
+				"\tconst go = () => readNoLens(pi);",
+				"\tconst on = go();",
+				"}",
+				"export default function (pi: any) { return activateExtension(pi); }",
+				"",
+			].join("\n");
+			expect(
+				scanFactoryFlagReads(source).unadmitted.map((site) => site.key),
+			).toEqual(["activateExtension:on:go:call"]);
+		});
+
 		it("refuses a destructured parameter that receives pi", () => {
 			const source = [
 				'function activateExtension({ getFlag: read }: any) { const on = read("no-lens"); }',
