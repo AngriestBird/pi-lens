@@ -201,9 +201,10 @@ describe("the pre-answer sweep reaches every held document (#4532 gap 13)", () =
 	// Recurrence: round 1b changed `tools/lsp-navigation.ts` to
 	// `{ force: true, full: true }` and no cell pinned it; a later edit to
 	// `{ force: true }` would have reinstated the 64-document window on that route
-	// with every test green (review F6). 70 fillers put the modules out of reach.
+	// with every test green (review F6). The baseline call moves the cursor by 64,
+	// so 200 fillers keep the modules outside the next capped window too.
 	it("lsp_navigation workspaceDiagnostics clears changed modules held past the 64-document window", async () => {
-		const { dir, importer, modules } = await heldProject(70, 2);
+		const { dir, importer, modules } = await heldProject(200, 2);
 		expect(await navigate(dir, importer)).toContain(MISSING_B);
 
 		copyInOutsidePi(modules);
