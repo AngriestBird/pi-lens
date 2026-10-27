@@ -20,3 +20,6 @@ what is specific to the Claude Code harness.
   `gh` access.
 - Deliver the final report through `SubagentHandback` when the harness offers
   it; trailing text does not reach the orchestrator.
+- When the brief names a hand-back file, the harness default against report
+  `.md` files does not cover it. Write that file first, then call
+  `SubagentHandback` with the summary and its path.
