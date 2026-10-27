@@ -61,6 +61,15 @@ function factory(body: string): string {
 describe("factory-time flag reads (#4913)", () => {
 	it("reads no flag at the top of index.ts's factory, apart from the admitted registration sites", () => {
 		const scan = scanFactoryFlagReads(indexSource, ADMITTED);
+		// #4917 F6: the population starts at the function pi calls, the default
+		// export itself; a scan seeded from its callees missed a read in its body.
+		expect(
+			scan.population.length,
+			"the population is not empty",
+		).toBeGreaterThan(0);
+		expect(scan.population[0], "the scan starts at the default export").toBe(
+			"<default>",
+		);
 		expect(scan.population, "the scan reached the factory").toContain(
 			"activateExtension",
 		);
@@ -190,7 +199,11 @@ describe("factory-time flag reads (#4913)", () => {
 				"",
 			].join("\n");
 			const scan = scanFactoryFlagReads(source);
-			expect(scan.population).toEqual(["activateExtension", "readNoLens"]);
+			expect(scan.population).toEqual([
+				"<default>",
+				"activateExtension",
+				"readNoLens",
+			]);
 			expect(scan.unadmitted.map((site) => site.key)).toContain(
 				"readNoLens:<top>:getFlag:call",
 			);
@@ -205,10 +218,57 @@ describe("factory-time flag reads (#4913)", () => {
 				"",
 			].join("\n");
 			const scan = scanFactoryFlagReads(source);
-			expect(scan.population).toEqual(["activateExtension", "outer", "inner"]);
+			expect(scan.population).toEqual([
+				"<default>",
+				"activateExtension",
+				"outer",
+				"inner",
+			]);
 			expect(scan.unadmitted.map((site) => site.key)).toContain(
 				"inner:<top>:getFlag:call",
 			);
+		});
+
+		// #4917 F6: a read in the function pi calls as the factory, in each form a
+		// default export takes. Each scanned green while the population started
+		// at the export's callees instead of the export itself.
+		const helper = "function activateExtension(pi: any) { return 1; }";
+		const read = "const on = pi.getFlag('no-lens');";
+		const defaultExports: Array<[string, string, string]> = [
+			[
+				"a read in an inline default-export function declaration",
+				`export default function factory(pi: any) { ${read} return activateExtension(pi); }`,
+				"factory:on:getFlag:call",
+			],
+			[
+				"a read in a default-export function expression",
+				`export default function (pi: any) { ${read} return activateExtension(pi); }`,
+				"<default>:on:getFlag:call",
+			],
+			[
+				"a read in a default-export arrow behind a type assertion",
+				`export default ((pi: any) => { ${read} return activateExtension(pi); }) as any;`,
+				"<default>:on:getFlag:call",
+			],
+			[
+				"a read in the function `export default <name>` names",
+				`function factory(pi: any) { ${read} return activateExtension(pi); }\nexport default factory;`,
+				"factory:on:getFlag:call",
+			],
+			[
+				"a read in the function `export { x as default }` names",
+				`const factory = (pi: any) => { ${read} return activateExtension(pi); };\nexport { factory as default };`,
+				"factory:on:getFlag:call",
+			],
+			[
+				"a read in an arrow the default export passes to a call",
+				`export default function (pi: any) { return run(() => { ${read} return activateExtension(pi); }); }`,
+				"<default>:on:getFlag:call",
+			],
+		];
+		it.each(defaultExports)("refuses %s", (_name, body, key) => {
+			const scan = scanFactoryFlagReads(`${helper}\n${body}\n`);
+			expect(scan.unadmitted.map((site) => site.key)).toEqual([key]);
 		});
 
 		const admitted: Array<[string, string]> = [
@@ -261,7 +321,7 @@ describe("factory-time flag reads (#4913)", () => {
 				"",
 			].join("\n");
 			const scan = scanFactoryFlagReads(source);
-			expect(scan.population).toEqual(["activateExtension"]);
+			expect(scan.population).toEqual(["<default>", "activateExtension"]);
 			expect(scan.unadmitted).toEqual([]);
 		});
 	});
@@ -270,5 +330,18 @@ describe("factory-time flag reads (#4913)", () => {
 		expect(() => scanFactoryFlagReads("function a() {}")).toThrow(
 			/no default export/,
 		);
+	});
+
+	it("fails closed on a default export it cannot resolve to a function", () => {
+		// #4917 F6: `export default wrap(factory)` scanned a population of [] and
+		// passed, with a read in `factory` unseen.
+		expect(() =>
+			scanFactoryFlagReads(
+				"function factory(pi: any) { const on = pi.getFlag('no-lens'); }\nexport default wrap(factory);\n",
+			),
+		).toThrow(/is not a function this module defines/);
+		expect(() =>
+			scanFactoryFlagReads("export { default } from './factory';\n"),
+		).toThrow(/re-exported from another module/);
 	});
 });

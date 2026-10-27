@@ -8,10 +8,15 @@
  * `no-lens-context`, `lens-compact-tool-line` and `--no-tool` there, and
  * `pi --no-lens` still started language servers.
  *
- * Population: the body of every module-level function the default export
- * calls (today `activateExtension`) AND, transitively, every module-level
- * function or function-valued constant those bodies call while they run (a
- * helper the factory calls synchronously is part of the factory). It is parsed
+ * Population: the function pi calls as the factory, which is the default
+ * export's own function node (inline, or the module-level function that
+ * `export default f` / `export { f as default }` names), AND, transitively,
+ * every module-level function or function-valued constant those bodies call
+ * while they run (a helper the factory calls synchronously is part of the
+ * factory; today the chain reaches `activateExtension`). A default export the
+ * scan cannot resolve to one such function throws instead of passing. The
+ * module top level is not in it: it runs at import, before pi hands the
+ * factory its API. It is parsed
  * from COMMENT-AND-STRING-BLANKED text (`stripSource`, so a comment that
  * quotes `getLensFlag(` is not a read), through the census AST seam
  * (`ast-census.ts`).
@@ -233,53 +238,101 @@ function moduleFunctionOf(node: SgNode): { name: string; fn: SgNode } | null {
 	return null;
 }
 
-/** A population function's reporting name. */
+/** A population function's reporting name; `<default>` for an inline default export. */
 function nameOf(fn: SgNode): string {
 	if (kindOf(fn) === "function_declaration")
 		return boundName(fn) ?? "<anonymous>";
-	const holder = fn.parent();
+	let holder = fn.parent();
+	while (holder && WRAPPER_KINDS.has(kindOf(holder))) holder = holder.parent();
+	if (holder && kindOf(holder) === "export_statement") return "<default>";
 	return holder && kindOf(holder) === "variable_declarator"
 		? (boundName(holder) ?? "<anonymous>")
 		: "<anonymous>";
 }
 
+/** The node a module's default export names: its value, declaration or local name. */
+function defaultExportValue(nodes: SgNode[]): SgNode {
+	for (const statement of nodes) {
+		if (kindOf(statement) !== "export_statement") continue;
+		// `export default` always holds a declaration or a value.
+		if (statement.children().some((child) => kindOf(child) === "default"))
+			return (statement.field("declaration") ??
+				statement.field("value")) as SgNode;
+		const specifier = within(nodes, statement).find(
+			(node) =>
+				kindOf(node) === "export_specifier" &&
+				(node.field("alias") ?? node.field("name"))?.text() === "default",
+		);
+		const local = specifier?.field("name");
+		if (!local) continue;
+		if (statement.field("source"))
+			throw new Error(
+				"factory-flag scan: the default export is re-exported from another module",
+			);
+		return local;
+	}
+	throw new Error("factory-flag scan: no default export found");
+}
+
 /**
- * Module-level functions that run while the factory runs: the ones the default
- * export calls by name, then, transitively, the ones those bodies call by name
- * at factory time (a call inside a function that only defers its body is not
- * one).
+ * The function pi calls as the factory: the default export's own node. An
+ * inline function (through expression wrappers) is that node; a name
+ * (`export default f`, `export { f as default }`) resolves to the module-level
+ * function `f`. Anything else (a call, a class, a re-export, a name this module
+ * does not define as a function) throws: the scan cannot say what runs, so it
+ * does not pass (#4917 F6).
+ */
+function factoryFunction(
+	nodes: SgNode[],
+	moduleFunctions: ReadonlyMap<string, SgNode>,
+): SgNode {
+	let exported = defaultExportValue(nodes);
+	// Each wrapper kind holds the expression it wraps as its first named child.
+	while (WRAPPER_KINDS.has(kindOf(exported)))
+		exported = exported.children().find((child) => child.isNamed()) as SgNode;
+	if (FUNCTION_KINDS.has(kindOf(exported))) return exported;
+	const named =
+		kindOf(exported) === "identifier"
+			? moduleFunctions.get(exported.text())
+			: undefined;
+	if (!named)
+		throw new Error(
+			`factory-flag scan: the default export \`${exported.text()}\` is not a function this module defines`,
+		);
+	return named;
+}
+
+/**
+ * The functions that run while the factory runs: the default export's own
+ * function, then, transitively, every module-level function those bodies call
+ * by name at factory time (a call inside a function that only defers its body
+ * is not one).
  */
 function populationFunctions(nodes: SgNode[]): SgNode[] {
-	const exported = nodes.find(
-		(node) =>
-			kindOf(node) === "export_statement" &&
-			node.text().startsWith("export default"),
-	);
-	if (!exported) throw new Error("factory-flag scan: no default export found");
 	const moduleFunctions = new Map<string, SgNode>();
 	for (const node of nodes) {
 		const found = moduleFunctionOf(node);
 		if (found && !moduleFunctions.has(found.name))
 			moduleFunctions.set(found.name, found.fn);
 	}
-	const calledBy = (root: SgNode, runs: (node: SgNode) => boolean): string[] =>
-		within(nodes, root)
-			.filter((node) => kindOf(node) === "call_expression" && runs(node))
-			.map((node) => node.field("function"))
-			.filter((callee): callee is SgNode => callee !== null)
-			.filter((callee) => kindOf(callee) === "identifier")
-			.map((callee) => callee.text());
 	const population: SgNode[] = [];
-	const queue = calledBy(exported, () => true);
-	const seen = new Set<string>();
+	const queue = [factoryFunction(nodes, moduleFunctions)];
+	const seen = new Set<number>();
 	while (queue.length > 0) {
-		const name = queue.shift() as string;
-		if (seen.has(name)) continue;
-		seen.add(name);
-		const fn = moduleFunctions.get(name);
-		if (!fn) continue;
+		const fn = queue.shift() as SgNode;
+		const start = fn.range().start.index;
+		if (seen.has(start)) continue;
+		seen.add(start);
 		population.push(fn);
-		queue.push(...calledBy(fn, (node) => runsWithin(node, fn)));
+		for (const node of within(nodes, fn)) {
+			if (kindOf(node) !== "call_expression" || !runsWithin(node, fn)) continue;
+			const callee = node.field("function");
+			const helper =
+				callee && kindOf(callee) === "identifier"
+					? moduleFunctions.get(callee.text())
+					: undefined;
+			if (helper) queue.push(helper);
+		}
 	}
 	return population;
 }
@@ -336,7 +389,11 @@ function defersTheFunction(fn: SgNode): boolean {
 	if (fnKind === "generator_function_declaration") return true;
 	let current: SgNode = fn;
 	let viaObject = false;
-	for (let parent = current.parent(); parent; parent = current.parent()) {
+	// Every kind the walk climbs through (a wrapper, a pair, an object, a call)
+	// sits below the program node, so a parent always exists; the last
+	// `return false` below is the fall-through for every other parent kind.
+	for (;;) {
+		const parent = current.parent() as SgNode;
 		const parentKind = kindOf(parent);
 		if (WRAPPER_KINDS.has(parentKind)) {
 			current = parent;
@@ -367,7 +424,6 @@ function defersTheFunction(fn: SgNode): boolean {
 		}
 		return false;
 	}
-	return false;
 }
 
 /**
