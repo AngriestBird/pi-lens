@@ -535,6 +535,8 @@ Thanks goes to these wonderful people:
       <td align="center" valign="top" width="14.28%"><a href="http://wayneh.tw/"><img src="https://avatars.githubusercontent.com/u/5166321?v=4" width="100px;" alt=""/><br /><sub><b>WeiHung</b></sub></a><br /><a href="#code-wayne930242" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/wertyMSD"><img src="https://avatars.githubusercontent.com/u/130595241?v=4" width="100px;" alt=""/><br /><sub><b>wertyMSD</b></sub></a><br /><a href="#bug-wertyMSD" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/rcdailey"><img src="https://avatars.githubusercontent.com/u/1768054?v=4" width="100px;" alt=""/><br /><sub><b>Robert Dailey</b></sub></a><br /><a href="#bug-rcdailey" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://twitter.com/letwir"><img src="https://avatars.githubusercontent.com/u/16576177?v=4" width="100px;" alt=""/><br /><sub><b>letwir</b></sub></a><br /><a href="#doc-letwir" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://www.erikdarling.com/"><img src="https://avatars.githubusercontent.com/u/2136037?v=4" width="100px;" alt=""/><br /><sub><b>Erik Darling</b></sub></a><br /><a href="#bug-erikdarlingdata" title="Bug reports">🐛</a></td>
     </tr>
   </tbody>
 </table>

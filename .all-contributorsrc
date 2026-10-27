@@ -2038,6 +2038,24 @@
       "contributions": [
         "bug"
       ]
+    },
+    {
+      "login": "letwir",
+      "name": "letwir",
+      "avatar_url": "https://avatars.githubusercontent.com/u/16576177?v=4",
+      "profile": "https://twitter.com/letwir",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "erikdarlingdata",
+      "name": "Erik Darling",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2136037?v=4",
+      "profile": "http://www.erikdarling.com/",
+      "contributions": [
+        "bug"
+      ]
     }
   ]
 }
