@@ -29,32 +29,72 @@ const ROOT = path.resolve(
 );
 const indexSource = fs.readFileSync(path.join(ROOT, "index.ts"), "utf-8");
 
-/** Refused sites the tree admits, each keyed `<function>:<binding>:<reader>:<form>`. */
+/**
+ * Refused sites the tree admits, each keyed `<function>:<binding>:<reader>:<form>`.
+ * `count` is the number of sites the row admits: a key with more sites reds
+ * every one of them, and a key with fewer reds as stale (#4917 F11).
+ */
 const ADMITTED: FactoryFlagAdmission = {
-	"activateExtension:<top>:getLensFlag:assignment_expression":
-		"`_bridgeGetFlag = getLensFlag` stores the closure for the read/mutation/io bridges, which call it per event, never while the factory runs",
-	"activateExtension:enabledLazyTools:isToolEnabled:call":
-		"registration decides on the config tiers, which are readable at factory time; the CLI value reaches `applyToolSetPlan` and `pi_lens_activate_tools` through `isToolEnabled` at use",
-	"activateExtension:toolsToRegister:isToolEnabled:call":
-		"same registration filter as `enabledLazyTools`: config tiers at registration, the CLI value at session_start",
-	"activateExtension:alwaysActiveTools:getLensFlag:call":
-		"closures handed to the tool constructors (`createLensDiagnosticsTool`), which store them and call them per tool execution",
-	"activateExtension:lazyTools:getLensFlag:call":
-		"the closure handed to `createLspNavigationTool`, which stores it and calls it per tool execution",
-	"activateExtension:<top>:pi:initI18n()":
-		"`initI18n` (i18n.ts) only calls `pi.events?.emit?.(..)` to register the bundle; it reads no flag",
-	"activateExtension:activateToolsTool:pi:createActivateToolsTool()":
-		"`createActivateToolsTool` (tools/activate-tools.ts) stores `pi` and calls `getActiveTools`/`setActiveTools` per tool execution",
-	"activateExtension:<top>:pi:.events":
-		"`pi.events` is the event bus handed to `wireAgentNudgeSubscriber`; it carries no flag value",
-	"createHostPorts:activeTools:pi:variable_declarator":
-		"a type-asserted alias whose `getActiveTools`/`setActiveTools` run only inside the ports' `tools.getActive`/`setActive` closures, at event time",
-	"createHostPorts:<top>:emit:pair-value":
-		"the ports table's `emit.bus` closure reads `pi.events` when a consumer emits, never while `createHostPorts` builds the table",
-	"createHostPorts:<top>:pi:.getFlag":
-		"the ports table's `flags.get` closure: its consumers call it at event time, never while `createHostPorts` builds the table",
-	"createHostPorts:<top>:pi:.getTool":
-		"the ports table's `tools.has` closure: it calls `getTool` when a consumer asks, at event time",
+	"activateExtension:<top>:getLensFlag:assignment_expression": {
+		count: 1,
+		reason:
+			"`_bridgeGetFlag = getLensFlag` stores the closure for the read/mutation/io bridges, which call it per event, never while the factory runs",
+	},
+	"activateExtension:enabledLazyTools:isToolEnabled:call": {
+		count: 1,
+		reason:
+			"registration decides on the config tiers, which are readable at factory time; the CLI value reaches `applyToolSetPlan` and `pi_lens_activate_tools` through `isToolEnabled` at use",
+	},
+	"activateExtension:toolsToRegister:isToolEnabled:call": {
+		count: 1,
+		reason:
+			"same registration filter as `enabledLazyTools`: config tiers at registration, the CLI value at session_start",
+	},
+	"activateExtension:alwaysActiveTools:getLensFlag:call": {
+		count: 2,
+		reason:
+			"closures handed to the tool constructors (`createLensDiagnosticsTool`), which store them and call them per tool execution",
+	},
+	"activateExtension:lazyTools:getLensFlag:call": {
+		count: 1,
+		reason:
+			"the closure handed to `createLspNavigationTool`, which stores it and calls it per tool execution",
+	},
+	"activateExtension:<top>:pi:initI18n()": {
+		count: 1,
+		reason:
+			"`initI18n` (i18n.ts) only calls `pi.events?.emit?.(..)` to register the bundle; it reads no flag",
+	},
+	"activateExtension:activateToolsTool:pi:createActivateToolsTool()": {
+		count: 1,
+		reason:
+			"`createActivateToolsTool` (tools/activate-tools.ts) stores `pi` and calls `getActiveTools`/`setActiveTools` per tool execution",
+	},
+	"activateExtension:<top>:pi:.events": {
+		count: 2,
+		reason:
+			"`pi.events` is the event bus handed to `wireAgentNudgeSubscriber`; it carries no flag value",
+	},
+	"createHostPorts:activeTools:pi:variable_declarator": {
+		count: 1,
+		reason:
+			"a type-asserted alias whose `getActiveTools`/`setActiveTools` run only inside the ports' `tools.getActive`/`setActive` closures, at event time",
+	},
+	"createHostPorts:<top>:emit:pair-value": {
+		count: 1,
+		reason:
+			"the ports table's `emit.bus` closure reads `pi.events` when a consumer emits, never while `createHostPorts` builds the table",
+	},
+	"createHostPorts:<top>:pi:.getFlag": {
+		count: 1,
+		reason:
+			"the ports table's `flags.get` closure: its consumers call it at event time, never while `createHostPorts` builds the table",
+	},
+	"createHostPorts:<top>:pi:.getTool": {
+		count: 1,
+		reason:
+			"the ports table's `tools.has` closure: it calls `getTool` when a consumer asks, at event time",
+	},
 };
 
 /** A factory whose body is `body`, with the readers a real one has. */
@@ -106,6 +146,56 @@ describe("factory-time flag reads (#4913)", () => {
 		expect(scan.unadmitted.map((site) => site.key)).toEqual([
 			"activateExtension:lensEnabled:getLensFlag:call",
 		]);
+	});
+
+	describe("an admission row admits a stated number of sites (#4917 F11)", () => {
+		// RECURRENCE THIS PREVENTS: #4917 F11. A row admitted every site sharing
+		// its key, so a factory-time `pi.getFlag` at the top of `createHostPorts`
+		// hid behind the row written for the deferred `flags.get` closure.
+		it("refuses a second site under an admitted key", () => {
+			const mutated = indexSource.replace(
+				"\tconst context = () => options.getContext() as any;",
+				'\tconst context = () => options.getContext() as any;\n\tif (pi.getFlag("no-lens")) context();',
+			);
+			expect(mutated, "the mutation applied").not.toBe(indexSource);
+			const scan = scanFactoryFlagReads(mutated, ADMITTED);
+			expect(scan.unadmitted.map((site) => site.key)).toEqual([
+				"createHostPorts:<top>:pi:.getFlag",
+				"createHostPorts:<top>:pi:.getFlag",
+			]);
+		});
+
+		const twoSites = factory(
+			'register(getLensFlag("a")); register(getLensFlag("b"));',
+		);
+		const key = "activateExtension:<top>:getLensFlag:call";
+		const admit = (count: number): FactoryFlagAdmission => ({
+			[key]: { count, reason: "a planted row" },
+		});
+
+		it("admits the stated number of sites under one key", () => {
+			const scan = scanFactoryFlagReads(twoSites, admit(2));
+			expect(scan.sites.map((site) => site.key)).toEqual([key, key]);
+			expect(scan.unadmitted).toEqual([]);
+			expect(scan.staleAdmissions).toEqual([]);
+		});
+
+		it("refuses every site under a key whose row admits fewer", () => {
+			const scan = scanFactoryFlagReads(twoSites, admit(1));
+			expect(scan.unadmitted.map((site) => site.key)).toEqual([key, key]);
+			expect(scan.staleAdmissions).toEqual([]);
+		});
+
+		it("reports an admission row that admits more sites than the tree has", () => {
+			const scan = scanFactoryFlagReads(twoSites, admit(3));
+			expect(scan.unadmitted).toEqual([]);
+			expect(scan.staleAdmissions).toEqual([key]);
+		});
+
+		it("reports an admission row whose sites went away", () => {
+			const scan = scanFactoryFlagReads(factory(""), admit(1));
+			expect(scan.staleAdmissions).toEqual([key]);
+		});
 	});
 
 	describe("spellings the author did not design for", () => {
@@ -422,6 +512,37 @@ describe("factory-time flag reads (#4913)", () => {
 			expect(
 				scanFactoryFlagReads(source).unadmitted.map((site) => site.key),
 			).toEqual(["activateExtension:on:go:call"]);
+		});
+
+		// #4917 F10: the destructured-parameter arm of a helper reached through a
+		// closure, and a non-zero argument index, each had no red.
+		it("refuses a closure that hands pi to a helper with a destructured parameter", () => {
+			const source = [
+				"function boot({ getFlag }: any) { return getFlag('no-lens'); }",
+				"function activateExtension(pi: any) {",
+				"\tconst go = () => boot(pi);",
+				"\tconst on = go();",
+				"}",
+				"export default function (pi: any) { return activateExtension(pi); }",
+				"",
+			].join("\n");
+			expect(
+				scanFactoryFlagReads(source).unadmitted.map((site) => site.key),
+			).toEqual(["activateExtension:on:go:call"]);
+		});
+
+		it("follows pi handed at a helper's second parameter", () => {
+			const source = [
+				"function boot(name: string, api: any) { return api.getFlag('no-lens'); }",
+				"function activateExtension(pi: any) {",
+				"\tboot('x', pi);",
+				"}",
+				"export default function (pi: any) { return activateExtension(pi); }",
+				"",
+			].join("\n");
+			expect(
+				scanFactoryFlagReads(source).unadmitted.map((site) => site.key),
+			).toEqual(["boot:<top>:api:.getFlag"]);
 		});
 
 		it("refuses a destructured parameter that receives pi", () => {

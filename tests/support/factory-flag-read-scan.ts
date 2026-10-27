@@ -57,7 +57,9 @@
  *
  * A refused site is reported keyed `<function>:<binding>:<name>:<form>`; an
  * {@link FactoryFlagAdmission} row with that key carries the reason the tree
- * admits it.
+ * admits it and the number of sites it admits. A key with more sites than the
+ * row states reports every one of them; with fewer, the row is stale (#4917
+ * F11: a row admitted every site sharing its key, so a new read hid behind it).
  *
  * RESIDUALS, named. The call graph follows direct calls by name only: a helper
  * reached through a variable, a method or a dynamic `import()` is invisible. A
@@ -90,8 +92,10 @@ const HOST_REGISTRARS = new Set([
  */
 const PI_WRAPPERS = new Set(["withConsoleCaptureWindows"]);
 
-/** A refused site the tree admits, with the reason it is not a defect. */
-export type FactoryFlagAdmission = Readonly<Record<string, string>>;
+/** Refused sites the tree admits under one key: how many, and why none is a defect. */
+export type FactoryFlagAdmission = Readonly<
+	Record<string, { readonly count: number; readonly reason: string }>
+>;
 
 export interface FactoryFlagRead {
 	readonly line: number;
@@ -109,9 +113,9 @@ export interface FactoryFlagScan {
 	readonly population: readonly string[];
 	/** Every refused site, admitted or not. */
 	readonly sites: readonly FactoryFlagRead[];
-	/** The sites no admission row covers. */
+	/** The sites no admission row covers, or every site of a key with more sites than its row admits. */
 	readonly unadmitted: readonly FactoryFlagRead[];
-	/** Admission keys no site used (a stale row). */
+	/** Admission keys with fewer sites than the row admits (a stale row). */
 	readonly staleAdmissions: readonly string[];
 }
 
@@ -493,7 +497,7 @@ function closureForm(node: SgNode): string | undefined {
 
 /**
  * Scan one source text. `admissions` carries the refused sites the tree
- * admits, each with its reason.
+ * admits, each key with its site count and reason.
  */
 export function scanFactoryFlagReads(
 	source: string,
@@ -665,11 +669,17 @@ export function scanFactoryFlagReads(
 		]);
 	}
 	const sites = [...sitesOf.values()].flat();
-	const used = new Set(sites.map((read) => read.key));
+	const live = new Map<string, number>();
+	for (const read of sites) live.set(read.key, (live.get(read.key) ?? 0) + 1);
 	return {
 		population: [...indexesOf.keys()].map(nameOf),
 		sites,
-		unadmitted: sites.filter((read) => !(read.key in admissions)),
-		staleAdmissions: Object.keys(admissions).filter((key) => !used.has(key)),
+		unadmitted: sites.filter(
+			(read) =>
+				(live.get(read.key) as number) > (admissions[read.key]?.count ?? 0),
+		),
+		staleAdmissions: Object.keys(admissions).filter(
+			(key) => (live.get(key) ?? 0) < admissions[key].count,
+		),
 	};
 }
