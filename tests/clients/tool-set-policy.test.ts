@@ -208,7 +208,7 @@ describe("tool-set cache policy", () => {
 			// both go; the plan counts what it removed from the host's set.
 			expect(plan.removedCount).toBe(ALL_ACTIVE.length - 2);
 			// #4917 F3: the two the command line named, apart from the lazy rest.
-			expect(plan.cliDisabledCount).toBe(2);
+			expect(plan.policyDisabledCount).toBe(2);
 		});
 
 		it("re-adds no disabled tool the host did not report as active", () => {

@@ -2399,14 +2399,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 			);
 			if (!plan.changed) return;
 			piWithActiveTools.setActiveTools(plan.desired);
-			// #4913: a `--no-tool` removal has its own row; the lazy posture's
-			// row counts only what the posture itself added or removed.
-			const lazyRemoved = plan.removedCount - plan.cliDisabledCount;
-			if (plan.cliDisabledCount > 0)
+			// #4913: a policy removal (config or `--no-tool`) has its own row; the
+			// lazy posture's row counts only what the posture itself added or removed.
+			const lazyRemoved = plan.removedCount - plan.policyDisabledCount;
+			if (plan.policyDisabledCount > 0)
 				recordToolSetMutation({
 					addedCount: 0,
-					removedCount: plan.cliDisabledCount,
-					reason: "cli_disabled_tool",
+					removedCount: plan.policyDisabledCount,
+					reason: "policy_disabled_tool",
 					deferralApplies: supportsDeferredTools(model),
 				});
 			if (plan.addedCount > 0 || lazyRemoved > 0)

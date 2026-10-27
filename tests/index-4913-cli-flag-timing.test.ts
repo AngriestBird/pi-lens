@@ -371,7 +371,7 @@ describe("#4913: --no-tool reaches the tool set pi holds", () => {
 			.filter((row) => row.phase === "tool_set_mutation")
 			.map((row) => row.metadata as Record<string, unknown>);
 		expect(
-			mutations.filter((m) => m.reason === "cli_disabled_tool"),
+			mutations.filter((m) => m.reason === "policy_disabled_tool"),
 			"one row for the one tool the flag named",
 		).toEqual([expect.objectContaining({ removedCount: 1, addedCount: 0 })]);
 		const lazyRemoved = new Set(
@@ -403,7 +403,7 @@ describe("#4913: --no-tool reaches the tool set pi holds", () => {
 			.filter((row) => row.phase === "tool_set_mutation")
 			.at(-1)?.metadata as Record<string, unknown> | undefined;
 		expect(last).toMatchObject({
-			reason: "cli_disabled_tool",
+			reason: "policy_disabled_tool",
 			removedCount: 1,
 			addedCount: 0,
 		});

@@ -12,9 +12,10 @@ type ToolSetMutationReason =
 	| "session_rebuild_restore"
 	| "model_switch"
 	| "lazy_activation"
-	// A tool the command line named (`--no-tool`) dropped from the active set
-	// (#4913): its own reason, so a monitor does not read it as lazy posture.
-	| "cli_disabled_tool";
+	// A registered tool the policy disabled (config or command line, such as
+	// `--no-tool`, #4913) dropped from the active set: its own reason, so a
+	// monitor does not read it as lazy posture.
+	| "policy_disabled_tool";
 
 export interface ToolSetMutation {
 	addedCount: number;
@@ -179,10 +180,11 @@ export interface ToolSetPlan {
 	addedCount: number;
 	removedCount: number;
 	/**
-	 * How many of `removedCount` are active tools named in `disabled`, which
-	 * are removed for that reason whatever the lazy posture would have done.
+	 * How many of `removedCount` are active tools named in `disabled` (off by
+	 * config or command line), removed for that reason whatever the lazy
+	 * posture would have done.
 	 */
-	cliDisabledCount: number;
+	policyDisabledCount: number;
 	/** False when `desired` already equals the host's active set. */
 	changed: boolean;
 }
@@ -198,8 +200,8 @@ export interface ToolSetPlan {
  * preserves the model's activations and keeps the advertised tool list equal
  * to the one the prompt cache prefix was built from.
  *
- * `disabled` names the registered tools the session turned off after they
- * registered (`--no-tool`, whose value pi applies after the factory ran,
+ * `disabled` names the registered tools the policy turns off, by config or
+ * command line (`--no-tool`, whose value pi applies after the factory ran,
  * #4913). They are in neither the kept set nor the restored one.
  */
 export function planToolSet(
@@ -228,13 +230,13 @@ export function planToolSet(
 	const activeSet = new Set(active);
 	const removedCount = active.filter((name) => !desiredSet.has(name)).length;
 	const addedCount = desired.filter((name) => !activeSet.has(name)).length;
-	let cliDisabledCount = 0;
-	for (const name of active) if (disabled.has(name)) cliDisabledCount++;
+	let policyDisabledCount = 0;
+	for (const name of active) if (disabled.has(name)) policyDisabledCount++;
 	return {
 		desired,
 		addedCount,
 		removedCount,
-		cliDisabledCount,
+		policyDisabledCount,
 		changed: addedCount > 0 || removedCount > 0,
 	};
 }
