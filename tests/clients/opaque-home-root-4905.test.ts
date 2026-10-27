@@ -12,6 +12,11 @@
  * (`walkTreeStackAsync` resets its deadline after every directory read), so a
  * non-home root over the cap paid the same per-call cost.
  *
+ * The same session root also reached `lookForOutOfBandChanges`, the declaration
+ * file walk `resyncHeadMove` runs at every tool_call and bash tool_result
+ * (`clients/out-of-band-changes.ts`): it walked up to 4096 directories of the
+ * home folder per bash result, 255-315 ms on a 6000-directory fixture home.
+ *
  * Real here: `handleToolCall` and `handleToolResult`, the runtime coordinator,
  * the baseline store, the degradation ledger, the latency log, real trees on
  * disk and the real `HOME` pin (`pinFixtureHome`, the value `os.homedir()`
@@ -193,6 +198,43 @@ describe("the opaque prescan at the home root (#4905)", () => {
 		).length;
 	}
 
+	let readdirSpy: ReturnType<typeof vi.spyOn> | undefined;
+	afterEach(() => {
+		readdirSpy?.mockRestore();
+		readdirSpy = undefined;
+	});
+
+	/**
+	 * Count the listings of a fixture directory (`dirN`, see `fillTree`) under
+	 * `root` from here on, through a pass-through spy on the filesystem
+	 * boundary. The opaque walk is refused or memoized in the cases that use it,
+	 * so a listing here is the declaration walk's.
+	 */
+	function countFixtureListings(root: string): () => number {
+		const real = fs.promises.readdir.bind(fs.promises);
+		const spy = vi
+			.spyOn(fs.promises, "readdir")
+			.mockImplementation(((...args: Parameters<typeof real>) =>
+				real(...args)) as never);
+		readdirSpy = spy;
+		return () =>
+			spy.mock.calls.filter(([dir]) => {
+				const listed = String(dir);
+				return (
+					path.basename(listed).startsWith("dir") &&
+					listed.startsWith(root + path.sep)
+				);
+			}).length;
+	}
+
+	const declarationLookRecords = () =>
+		getDegradationSummary()
+			.filter((group) => group.kind === "lsp-declaration-look-capped")
+			.map((group) => ({
+				count: group.count,
+				subjects: group.latestReasons.map((entry) => entry.subject),
+			}));
+
 	const refusedRecords = () =>
 		getDegradationSummary()
 			.filter((group) => group.kind === "opaque-capture-refused")
@@ -309,5 +351,55 @@ describe("the opaque prescan at the home root (#4905)", () => {
 		resetOpaqueMutationState();
 		await call(runtime, project, "some_ext_tool", 4);
 		expect(await walksOf(offset, project)).toBe(2);
+	});
+	it(
+		"does not walk the home folder's declaration files at a bash result, and says so once",
+		{
+			timeout: 60_000,
+		},
+		async () => {
+			// RECURRENCE GUARDED: #4905 (same class, second scanner). The head-move
+			// look at every tool_call and bash tool_result walked the home folder for
+			// declaration files, up to 4096 directories each time, with no home ceiling.
+			fillTree(home, OVER_CAP);
+			expect(await isGitWorktree(home)).toBe(false);
+			resetOpaqueMutationState();
+			const listings = countFixtureListings(home);
+			const runtime = runtimeFor(home, "4905-oob-home");
+			for (const n of [1, 2, 3]) await call(runtime, home, "bash", n);
+			expect(listings()).toBe(0);
+			// The look is refused, not clean: one record says declaration and install
+			// changes under this root are not looked for, whatever the call count.
+			expect(declarationLookRecords()).toEqual([
+				{ count: 1, subjects: ["home-root"] },
+			]);
+		},
+	);
+
+	it("does not walk declaration files in a folder above the home", async () => {
+		// RECURRENCE GUARDED: #4905. `isAtOrAboveHomeDir` is the ancestor test
+		// too: a session started in `/Users` reaches the home through the walk.
+		const above = path.dirname(home);
+		fillTree(home, OVER_CAP);
+		const listings = countFixtureListings(above);
+		const runtime = runtimeFor(above, "4905-oob-above");
+		await call(runtime, above, "bash", 1);
+		expect(listings()).toBe(0);
+		expect(declarationLookRecords()).toEqual([
+			{ count: 1, subjects: ["home-root"] },
+		]);
+	});
+
+	it("still walks declaration files in a project folder under the home", async () => {
+		// RECURRENCE GUARDED: #4905 (shape 54, both directions). The ceiling is the
+		// home and its ancestors: a project under the home keeps its look, and no
+		// refusal is recorded for it.
+		const project = path.join(home, "project");
+		fillTree(project, 3);
+		const listings = countFixtureListings(project);
+		const runtime = runtimeFor(project, "4905-oob-project");
+		await call(runtime, project, "bash", 1);
+		expect(listings()).toBeGreaterThan(0);
+		expect(declarationLookRecords()).toEqual([]);
 	});
 });

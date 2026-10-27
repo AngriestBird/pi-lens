@@ -48,7 +48,11 @@ import {
 } from "./disk-change-subscribers.js";
 import { isExcludedDirName } from "./file-utils.js";
 import { logLatency } from "./latency-logger.js";
-import { isUnderDir, normalizeMapKey } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	isUnderDir,
+	normalizeMapKey,
+} from "./path-utils.js";
 import { createSingleFlight } from "./single-flight.js";
 import { compareOrdinal } from "./string-utils.js";
 
@@ -455,6 +459,20 @@ export function lookForOutOfBandChanges(
 	runtime?: DiskChangeRuntime,
 	options: OutOfBandLookOptions = {},
 ): Promise<void> {
+	// #4905: the home folder (or a folder above it) holds more directories than
+	// the declaration walk's cap on any real machine, so each look would spend
+	// its time and end capped. Same ceiling as the opaque prescan, `analysis-root`
+	// and `jscpd-client` (#4760): refused, and said once per session, because a
+	// look that did not run is not a look that found nothing.
+	if (isAtOrAboveHomeDir(root)) {
+		recordDegradationOnce({
+			kind: "lsp-declaration-look-capped",
+			subject: "home-root",
+			reason:
+				"a session root that is the home folder or above it is not looked at for a dependency install or a declaration file changed outside pi-lens; such a change under it is not looked for",
+		});
+		return Promise.resolve();
+	}
 	const key = normalizeMapKey(root);
 	return looks.run(key, () => lookOnce(root, key, trigger, runtime, options));
 }

@@ -13,12 +13,14 @@ logging one `lsp-diagnostics-compatibility` degradation per session. Callers
 should move to `pilens_diagnostics`.
 
 
-**Dynamic tooling.** Five tools stay always-active: `lens_diagnostics`,
-	`module_report`, `read_symbol`, `read_enclosing`,
-`symbol_search`. Five situational tools — `ast_grep_search`, `ast_grep_replace`,
+**Dynamic tooling.** Seven tools stay always-active on pi unless
+`tools.<name>.enabled: false` turns one off: `lens_diagnostics`,
+`module_report`, `project_report`, `read_symbol`, `read_enclosing`,
+`symbol_search`, `effective_config`. Five situational tools — `ast_grep_search`, `ast_grep_replace`,
 `ast_grep_outline`, `lsp_navigation`, `lens_diagnostic_mark` —
 are registered but
-inactive by default; the model activates the ones it needs via the always-active
+inactive by default under pi's lazy posture (`tools.lazy: false`, or a host
+without the dynamic-tool API, keeps them active); the model activates the ones it needs via the always-active
 loader tool `pi_lens_activate_tools`, per pi's dynamic-tool-loading API
 (`pi.setActiveTools`/`pi.getActiveTools`). The loader explicitly reports
 "Available starting next turn"; do not retry the tool in the same turn.
@@ -171,6 +173,24 @@ and `[]` mean no arguments.
   self-builds in the background and never blocks the call. See
   [docs/word-index.md](word-index.md) for how the index is built and kept
   warm.
+- **`project_report`** — Project orientation from the cached review graph, the
+  top of the discovery funnel (`project_report` → `module_report` →
+  `read_symbol`). Returns ranked hubs (top fan-in files), entry points,
+  subsystem cycles and layering violations, risk hotspots, and low-confidence
+  dead weight. `limit` scales every section's cap (default 10), `focus` re-ranks
+  toward a task hint without widening scope, and `view: "compact"` returns a
+  line-oriented text rendering instead of JSON. Read-only: a cold cache returns
+  `available: false` with a retry hint and starts a non-blocking background
+  build. On a project over `maxProjectFiles` that first build records a
+  size-skip verdict; later calls name the cap and start no build, so raise it
+  in `.pi-lens.json` instead of retrying.
+- **`effective_config`** — Explains the resolved configuration and its
+  provenance. Pass `file` to add that file's language and the per-server and
+  per-runner selection decisions. The result holds no environment values and
+  no command arguments beyond the binary, and it shows paths under the home
+  folder home-relative (a path outside it stays absolute). `file` must resolve
+  inside `cwd`. See
+  [configuration.md](configuration.md#asking-what-is-actually-in-effect).
 - **`module_report`** — Navigable outline of a file: every symbol's name/kind/
   startLine/endLine/signature, exported vs internal split, class/interface
   member nesting, who-uses-this, fanout/complexity risk flags, and a
@@ -222,9 +242,10 @@ and `[]` mean no arguments.
 
 ## Session
 
-- **`lens_health`** — Runtime health, latency telemetry, and current LSP
-  status.
-- **`lens_project_scan`** — Cheap project-wide scans (knip, jscpd, duplicates).
+- **Health, latency and the cheap project scan are not pi tools.** pi has the
+  `/lens-health` slash command ([tools.md](tools.md)); the MCP mirror alone
+  exposes `pilens_health`, `pilens_latency` and `pilens_project_scan`
+  ([mcp.md](mcp.md)).
 - **`lens_diagnostics mode=full`** — full project-wide review: LSP + the cached
   heavyweight analyzers (jscpd, madge, gitleaks, govulncheck, trivy, dead-code)
   folded in via `refreshRunners`.
