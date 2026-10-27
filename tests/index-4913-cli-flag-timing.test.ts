@@ -350,7 +350,46 @@ describe("#4913: --no-tool reaches the tool set pi holds", () => {
 		expect(replayToolNames(handle.requests[0] ?? [])).toContain(ALWAYS_ACTIVE);
 	});
 
+	/**
+	 * The `tool_set_mutation` rows stamped at or after `since`. The file's
+	 * sessions share one `latency.log` and CI's shuffle step reorders the
+	 * cases, so a case reads only what its own session wrote (#4917: under
+	 * `--sequence.seed=2` another case's `--no-tool` row reached this one).
+	 */
+	async function mutationsSince(
+		handle: PiSession,
+		since: string,
+	): Promise<Array<Record<string, unknown>>> {
+		const read = await handle.latencyRows();
+		expect(read.skipped, "every latency row parsed").toBe(0);
+		return read.rows
+			.filter(
+				(row) => row.phase === "tool_set_mutation" && String(row.ts) >= since,
+			)
+			.map((row) => row.metadata as Record<string, unknown>);
+	}
+
+	/** The counts the lazy posture's session-start rows removed. */
+	const lazyRemovedCounts = (rows: Array<Record<string, unknown>>) =>
+		rows
+			.filter((m) => m.reason === "fresh_session_lazy_deactivation")
+			.map((m) => m.removedCount);
+
 	it("drops a tool named by `--no-tool <name>` from the set the model is offered", async () => {
+		// The control runs inside this case, so the comparison below does not
+		// depend on which case ran first.
+		const controlSince = new Date().toISOString();
+		const control = await startPiSession({
+			root: fixture.root,
+			cwd: project("tool-off-control"),
+			responses: [endTurn("hello")],
+		});
+		await control.prompt("hello");
+		const controlLazy = lazyRemovedCounts(
+			await mutationsSince(control, controlSince),
+		);
+		expect(controlLazy, "the control's lazy posture row").toHaveLength(1);
+		const since = new Date().toISOString();
 		const handle = await startPiSession({
 			root: fixture.root,
 			cwd: project("tool-off"),
@@ -366,29 +405,22 @@ describe("#4913: --no-tool reaches the tool set pi holds", () => {
 		// Only the named tool goes.
 		expect(offered).toContain("lens_diagnostics");
 		// #4917 F3: the removal has its own record, and the lazy posture's row
-		// does not count it (the control's row and this case's row agree).
-		const mutations = (await handle.latencyRows()).rows
-			.filter((row) => row.phase === "tool_set_mutation")
-			.map((row) => row.metadata as Record<string, unknown>);
+		// does not count it (the control's row and this session's row agree).
+		const mutations = await mutationsSince(handle, since);
 		expect(
 			mutations.filter((m) => m.reason === "policy_disabled_tool"),
 			"one row for the one tool the flag named",
 		).toEqual([expect.objectContaining({ removedCount: 1, addedCount: 0 })]);
-		const lazyRemoved = new Set(
-			mutations
-				.filter((m) => m.reason === "fresh_session_lazy_deactivation")
-				.map((m) => m.removedCount),
-		);
 		expect(
-			[...lazyRemoved],
+			lazyRemovedCounts(mutations),
 			"the lazy posture removes the same tools with and without the flag",
-		).toHaveLength(1);
+		).toEqual(controlLazy);
 	});
 
 	it("writes no empty lazy-posture row when the flag is the only change", async () => {
 		// #4917 F3: with lazy tools off the posture changes nothing, so the only
-		// row this session writes is the flag's own. Rows accumulate across the
-		// file's sessions, so the session's rows are the newest ones.
+		// row this session writes is the flag's own.
+		const since = new Date().toISOString();
 		const handle = await startPiSession({
 			root: fixture.root,
 			cwd: project("tool-off-not-lazy"),
@@ -399,14 +431,13 @@ describe("#4913: --no-tool reaches the tool set pi holds", () => {
 			responses: [endTurn("hello")],
 		});
 		await handle.prompt("hello");
-		const last = (await handle.latencyRows()).rows
-			.filter((row) => row.phase === "tool_set_mutation")
-			.at(-1)?.metadata as Record<string, unknown> | undefined;
-		expect(last).toMatchObject({
-			reason: "policy_disabled_tool",
-			removedCount: 1,
-			addedCount: 0,
-		});
+		expect(await mutationsSince(handle, since)).toEqual([
+			expect.objectContaining({
+				reason: "policy_disabled_tool",
+				removedCount: 1,
+				addedCount: 0,
+			}),
+		]);
 	});
 
 	it("does not let pi_lens_activate_tools bring back a situational tool the flag named", async () => {
