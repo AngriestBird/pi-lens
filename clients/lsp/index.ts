@@ -20,7 +20,11 @@ import {
 	type ContentStamp,
 	stampContentBytes,
 } from "../content-stamp.js";
-import { FILE_CHANGED, WATCH_BIRTH_MARGIN_MS } from "./watch-queue.js";
+import {
+	FILE_CHANGED,
+	FILE_CREATED,
+	watchedTypeForOpen,
+} from "./watch-queue.js";
 import {
 	noteWorkspaceFilesChangedOnDisk,
 	workspaceFileCreatedAtFor,
@@ -3725,7 +3729,9 @@ export class LSPService {
 			try {
 				stat = nodeFs.statSync(filePath);
 			} catch {
-				continue; // absent: no bytes to compare
+				// none: an absent path has no bytes to compare, and a module
+				// deleted outside pi is an accepted residual of #4532 gap 13.
+				continue;
 			}
 			const servers = getServersForFileWithConfig(filePath);
 			if (!this.unheldBytesMoved(filePath, stat, servers)) continue;
@@ -3764,10 +3770,10 @@ export class LSPService {
 	 * this service last brought its live servers' view up to date. An equal
 	 * stat is unchanged; a moved stat is read and compared by its bytes, so a
 	 * rewrite of the same bytes sends nothing. A path seen for the first time
-	 * has no record to compare, so it is treated as the client-start rule
-	 * treats a birth ({@link WATCH_BIRTH_MARGIN_MS}): bytes written at or after
-	 * the earliest live server of the path started may be newer than the bytes
-	 * that server read, and older ones are what it read. A held path is
+	 * has no record to compare, so its bytes take the client-start rule a
+	 * birth takes ({@link watchedTypeForOpen}, #4320): bytes written at or
+	 * after a live server of the path started (less the margin) may be newer
+	 * than the bytes that server read, and older ones are what it read. A held path is
 	 * skipped: the open-document sync keeps its view current.
 	 */
 	private unheldBytesMoved(
@@ -3797,7 +3803,8 @@ export class LSPService {
 		// With no live server of the path, nothing read older bytes: a baseline.
 		if (seen === undefined)
 			return this.liveClientsOf(servers).some(
-				(client) => stat.mtimeMs >= client.launchedAt - WATCH_BIRTH_MARGIN_MS,
+				(client) =>
+					watchedTypeForOpen(stat.mtimeMs, client.launchedAt) === FILE_CREATED,
 			);
 		return seen.sha256 === undefined || seen.sha256 !== stamp.sha256;
 	}
