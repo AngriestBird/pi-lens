@@ -464,22 +464,27 @@ export function lookForOutOfBandChanges(
 	// #4905: the home folder (or a folder above it) holds more directories than
 	// the declaration walk's cap on any real machine, so each look would spend
 	// its time and end capped. Same ceiling as the opaque prescan, `analysis-root`
-	// and `jscpd-client` (#4760): refused, and said once per session, because a
-	// look that did not run is not a look that found nothing.
+	// and `jscpd-client` (#4760): the walk is skipped, and said once per session,
+	// because a walk that did not run is not a walk that found nothing. Only the
+	// walk: the install stamp (one listing and a few stats) is still read and
+	// compared, so an install under this root still publishes and restarts the
+	// client rooted here.
 	// By real path on both sides, as `analysis-root` does (#4689).
-	if (
-		isAtOrAboveHomeDir(realpathOrResolve(root), realpathOrResolve(os.homedir()))
-	) {
+	const homeRoot = isAtOrAboveHomeDir(
+		realpathOrResolve(root),
+		realpathOrResolve(os.homedir()),
+	);
+	if (homeRoot)
 		recordDegradationOnce({
 			kind: "lsp-declaration-look-capped",
 			subject: "home-root",
 			reason:
-				"a session root that is the home folder or above it is not looked at for a dependency install or a declaration file changed outside pi-lens; such a change under it is not looked for",
+				"a session root that is the home folder or above it is not walked for declaration files changed outside pi-lens; such a change under it is not looked for (a dependency install still is)",
 		});
-		return Promise.resolve();
-	}
 	const key = normalizeMapKey(root);
-	return looks.run(key, () => lookOnce(root, key, trigger, runtime, options));
+	return looks.run(key, () =>
+		lookOnce(root, key, trigger, runtime, options, homeRoot),
+	);
 }
 
 /** `diffDeclarations`'s watched-files type codes, as the record names them. */
@@ -533,16 +538,19 @@ async function lookOnce(
 	trigger: "tool_call" | "tool_result",
 	runtime: DiskChangeRuntime | undefined,
 	options: OutOfBandLookOptions,
+	/** The root is the home folder or above it: no declaration walk (#4905). */
+	skipWalk: boolean,
 ): Promise<void> {
 	const started = Date.now();
 	const prior = records.get(key);
 	const walkDue =
-		options.walk === "interval"
+		!skipWalk &&
+		(options.walk === "interval"
 			? prior === undefined ||
 				started - prior.walkedAt >= declarationLookIntervalMs()
 			: trigger === "tool_result" ||
 				prior === undefined ||
-				started - prior.walkedAt >= declarationLookIntervalMs();
+				started - prior.walkedAt >= declarationLookIntervalMs());
 	const [install, walked] = await Promise.all([
 		readInstallStamp(root),
 		walkDue ? walkDeclarations(root) : Promise.resolve(undefined),

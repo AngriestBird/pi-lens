@@ -796,9 +796,10 @@ export type DegradationKind =
 	 * diagnostics-cache entry. Subject is the root. Once per root.
 	 *
 	 * #4905, the home ceiling: the root is the home folder or above it
-	 * (compared by real path), so the whole look is refused, the install stamp
-	 * read included, and an install or declaration change under it is not looked
-	 * for. Subject is `home-root`. Once per session.
+	 * (compared by real path), so the declaration walk is skipped and a
+	 * declaration file changed outside pi-lens under it is not looked for. The
+	 * install stamp is still read and compared, so an install still publishes.
+	 * Subject is `home-root`. Once per session.
 	 */
 	| "lsp-declaration-look-capped"
 	/**

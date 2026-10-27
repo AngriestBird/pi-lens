@@ -35,6 +35,7 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { subscribeDiskChange } from "../../clients/disk-changes.js";
 import {
 	flushLatencyLog,
 	getLatencyLogPath,
@@ -380,13 +381,48 @@ describe("the opaque prescan at the home root (#4905)", () => {
 			const runtime = runtimeFor(home, "4905-oob-home");
 			for (const n of [1, 2, 3]) await call(runtime, home, "bash", n);
 			expect(listings()).toBe(0);
-			// The look is refused, not clean: one record says declaration and install
-			// changes under this root are not looked for, whatever the call count.
+			// The walk is skipped, not clean: one record says declaration files changed
+			// under this root are not looked for, whatever the call count.
 			expect(declarationLookRecords()).toEqual([
 				{ count: 1, subjects: ["home-root"] },
 			]);
 		},
 	);
+
+	it("still publishes an install change at the home root, without walking it", async () => {
+		// RECURRENCE GUARDED: #4905 review (CodeRabbit, out-of-band-changes.ts). The
+		// first home refusal returned before the install stamp was read, so a
+		// lockfile written under a home-rooted session (or a client rooted at ~)
+		// published nothing and restarted nobody, which the code before the PR did.
+		// The refusal skips the declaration walk only. Two calls: the first look
+		// records the stamp, the lockfile lands, the second look publishes it.
+		fillTree(home, 3);
+		const listings = countFixtureListings(home);
+		const published: Array<{ root: string; paths: unknown }> = [];
+		const off = subscribeDiskChange(
+			"4905-home-install",
+			(change) => {
+				published.push({ root: change.root, paths: change.paths });
+			},
+			["out-of-band"],
+		);
+		try {
+			const runtime = runtimeFor(home, "4905-oob-install");
+			await call(runtime, home, "bash", 1);
+			expect(published).toEqual([]);
+			fs.writeFileSync(path.join(home, "package-lock.json"), "{}\n");
+			await call(runtime, home, "bash", 2);
+		} finally {
+			off();
+		}
+		// An install cannot be enumerated: the change carries `"unknown"` paths.
+		expect(published.map((change) => change.paths)).toEqual(["unknown"]);
+		// The declaration walk still never ran, and the refusal is said once.
+		expect(listings()).toBe(0);
+		expect(declarationLookRecords()).toEqual([
+			{ count: 1, subjects: ["home-root"] },
+		]);
+	});
 
 	it("does not walk declaration files in a folder above the home", async () => {
 		// RECURRENCE GUARDED: #4905. `isAtOrAboveHomeDir` is the ancestor test
