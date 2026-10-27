@@ -521,14 +521,17 @@ describe("#3814: deferred blocking findings gate the commit", () => {
 		await host.edit();
 		await settle();
 		expect((await host.gate()).block).toBe(true);
-		await host.turnEnd();
+		const delivered = await host.turnEnd();
+		// #4921: the merged set reaches the agent once; a later turn that adds
+		// nothing does not send it again, and the gate still holds it.
 		const replay = await (async () => {
 			await host.turnStart();
 			return await host.turnEnd();
 		})();
 
-		expect(replay).toContain("inline finding on beta");
-		expect(replay).toContain("alpha is not a function");
+		expect(delivered).toContain("inline finding on beta");
+		expect(delivered).toContain("alpha is not a function");
+		expect(replay).toBe("");
 		expect((await host.gate()).block).toBe(true);
 	});
 

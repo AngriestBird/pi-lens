@@ -6012,10 +6012,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 		};
 		const content = capTurnEndMessage(joined, holdPlan.heldCount);
-		const signature = `${files
-			.slice()
-			.sort((a, b) => compareOrdinal(a, b))
-			.join("|")}::${content}`;
+		// #4921: the delivered content names its blockers (file, rule, line,
+		// message), so the content IS the identity of what the agent was told. The
+		// turn's written-file set is not part of it: keying on it re-delivered an
+		// unchanged blocker on every turn that wrote a different file. It stays
+		// in the key only while a count-driven hold (#1950's drift cap) is in the
+		// message, because that hold advances only on a delivery, and the cap that
+		// retires the record is never reached through suppression.
+		const countDrivenFileSet = deliveryHolds.some(
+			(hold) => hold.skipOnSuppressed === true,
+		)
+			? files
+					.slice()
+					.sort((a, b) => compareOrdinal(a, b))
+					.join("|")
+			: "";
+		const signature = `${countDrivenFileSet}::${content}`;
 		const last = cacheManager.readCache<{
 			signature: string;
 			sessionId: string;
@@ -6078,7 +6090,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 								]),
 						),
 						fileContentHashes: {},
-						consumed: false,
+						// #4921: this turn's content was already delivered (the signature
+						// matched), so the rewrite keeps the record current for the gate
+						// without handing the same text to the model again.
+						consumed: true,
 					});
 					// #4750: the write, not the read, records what it left out.
 					logCarriedDrops(cwd, dropped);

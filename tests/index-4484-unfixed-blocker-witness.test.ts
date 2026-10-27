@@ -664,8 +664,11 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 		expect(w2).toMatch(STILL_UNFIXED);
 		expect(await s.commitBlocked()).toBe(true);
 		const turnEnd = await s.endTurn();
-		expect(turnEnd).toContain("Unresolved from this turn — src/cell-i.ts:");
-		expect(turnEnd).not.toMatch(/Resolved (this turn|since)/);
+		// #4921: the unchanged error was delivered at the first turn end and is
+		// not sent again; it is still held, which the gate and the session store
+		// say, and nothing calls it resolved.
+		expect(turnEnd).toBe("");
+		expect(await s.sessionDiagnostics()).toContain("src/cell-i.ts");
 		expect(await s.commitBlocked()).toBe(true);
 		await fixAndDrain(s);
 	}, 120_000);

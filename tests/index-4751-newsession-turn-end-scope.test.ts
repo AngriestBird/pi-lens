@@ -79,11 +79,19 @@ function readRecord(proj: string): GuardRecord {
 	return JSON.parse(fs.readFileSync(file, "utf8")) as GuardRecord;
 }
 
-/** Every `user`-role text the model received in one request, prompts included. */
+/**
+ * Every `user`-role text the model received in any request, prompts included.
+ * A turn-end finding rides the one request that follows its turn, and pi does
+ * not carry it into the next. This read the LAST request only, so it saw a
+ * finding only when a later duplicate turn end delivered it a second time
+ * (#4921); it reads them all.
+ */
 function userTexts(handle: PiSession): string[] {
-	return (handle.requests.at(-1) ?? [])
-		.filter((message) => message.role === "user")
-		.flatMap((message) => textBlocks(message));
+	return handle.requests.flatMap((request) =>
+		request
+			.filter((message) => message.role === "user")
+			.flatMap((message) => textBlocks(message)),
+	);
 }
 
 /**
