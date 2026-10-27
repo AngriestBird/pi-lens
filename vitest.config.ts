@@ -472,6 +472,10 @@ const lspSpawnHeavyInclude = [
 	// edit applier over a real stdio fake-server child (a project custom
 	// server); waits on a real handshake and diagnostics rounds like #4320's.
 	"tests/tools/lsp-diagnostics-created-outside-4346.test.ts",
+	// #4532 gap 13: the production lsp_diagnostics and lsp_navigation handlers and
+	// LSPService over a real stdio fake-server child (a project custom server);
+	// waits on a real handshake and pull rounds like #4320's.
+	"tests/tools/lsp-diagnostics-drift-sweep-4532.test.ts",
 	// #3310: launches the fake server THROUGH the production `PHPServer` entry
 	// (an executable node_modules/.bin/intelephense shim) and waits on a real
 	// initialize handshake plus a two-publish diagnostics sequence per case —

@@ -21,6 +21,11 @@
  * witness for the control: the trace names the bytes every didOpen/didChange
  * carried.
  *
+ * The cells cover both tool bodies that answer one file from the server's
+ * diagnostics: `lsp_diagnostics` (the `path` and `paths` routes; `lens_diagnostics
+ * source=lsp` calls the same body) and `lsp_navigation workspaceDiagnostics`
+ * with a file path.
+ *
  * Real pyright cannot run in the test lanes (it is not an install of this
  * repo), so the real-server transcript lives in the PR body and this fake
  * profile pins the behaviour in the lanes that do run.
@@ -197,6 +202,32 @@ describe("a held document changed outside pi (#4532 gap 13)", () => {
 
 		expect(first.text).not.toContain(MISSING_B);
 		expect(first.details.primaryDiagnosticsCount).toBe(0);
+	}, 30_000);
+
+	// The second tool body that answers from the server's diagnostics for one
+	// file: `lsp_navigation operation=workspaceDiagnostics` with a file path.
+	it("reads clean on the first lsp_navigation workspaceDiagnostics call too", async () => {
+		const { m, a } = await heldPair("navigation");
+		const { createLspNavigationTool } =
+			await import("../../tools/lsp-navigation.js");
+		const navigate = async () =>
+			String(
+				(
+					(await createLspNavigationTool(() => false).execute(
+						"probe-4532-g13-nav",
+						{ operation: "workspaceDiagnostics", path: a },
+						undefined as unknown as AbortSignal,
+						null,
+						{ cwd: workspace },
+					)) as { content: Array<{ text?: string }> }
+				).content[0]?.text,
+			);
+		expect(await navigate()).toContain(MISSING_B);
+
+		fs.writeFileSync(m, MODULE_AFTER);
+		const first = await navigate();
+
+		expect(first).not.toContain(MISSING_B);
 	}, 30_000);
 
 	// Control: a held file whose bytes did not change must cost no content push.
