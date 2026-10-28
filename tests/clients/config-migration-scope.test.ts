@@ -519,12 +519,25 @@ function validFillerFor(key: string): unknown {
 	return true;
 }
 
+/**
+ * The summary that closes the LEGACY list for one file: the first suppression
+ * notice the file earns, in emission order.
+ *
+ * A file that spells every recognized key ends up to two bounded lists, each
+ * with its own summary: the legacy moves, and the global-only settings the
+ * project loader refuses (#4946 added three global-only sections and tipped
+ * that second list past its bound). Counting every summary for the file made
+ * these probes depend on how many global-only sections the registry holds; the
+ * bound under test is the legacy one, which is emitted first.
+ */
 const suppressionNoticesFor = (file: string): string[] =>
-	notices.filter(
-		(message) =>
-			message.includes(file) &&
-			message.includes("further config notices were suppressed"),
-	);
+	notices
+		.filter(
+			(message) =>
+				message.includes(file) &&
+				message.includes("further config notices were suppressed"),
+		)
+		.slice(0, 1);
 
 const deprecationNoticesFor = (file: string): string[] =>
 	deprecationNotices().filter((message) => message.includes(file));

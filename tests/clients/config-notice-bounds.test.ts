@@ -282,9 +282,16 @@ describe("F2: a suppression notice never reads as an ignored config", () => {
 				message.includes(legacyFile) &&
 				message.includes("further config notices were suppressed"),
 		);
-		expect(suppression, JSON.stringify(notices)).toHaveLength(1);
-		expect(suppression[0]).not.toContain("ignoring invalid");
-		expect(suppression[0]).not.toContain("invalid");
+		// One summary per bounded list the file ends: the legacy moves and, since
+		// #4946 pushed the global-only refusals past their own bound, that list.
+		expect(suppression.length, JSON.stringify(notices)).toBeGreaterThanOrEqual(
+			1,
+		);
+		expect(suppression.length, JSON.stringify(notices)).toBeLessThanOrEqual(2);
+		for (const summary of suppression) {
+			expect(summary).not.toContain("ignoring invalid");
+			expect(summary).not.toContain("invalid");
+		}
 
 		// The SUPPRESSION row, wherever it landed: every ledger row carrying the
 		// truncation reason must be the neutral kind, and none of them the

@@ -791,6 +791,8 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			// #4590: walks both trees, so both change kinds must arm it.
 			"tests/config/env-path-key-composition-sweep.test.ts",
 			"tests/config/git-fixture-governance.test.ts",
+			// #4946: walks the four production roots for flag reads.
+			"tests/config/flag-read-registry-sweep.test.ts",
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
