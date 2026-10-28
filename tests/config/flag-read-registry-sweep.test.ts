@@ -31,6 +31,11 @@ const ROOT = path.resolve(
  * with fewer reds as stale.
  */
 const ADMITTED: FlagReadAdmission = {
+	"clients/dispatch/auxiliary-lsp.ts:getFlag(profile.killSwitchFlag)": {
+		count: 1,
+		reason:
+			"`profile` is an `AuxiliaryLspProfile`; its `killSwitchFlag` is only ever assigned by the profile table's pairs, each checked as a literal against the registry",
+	},
 	"clients/runtime-session.ts:analyzerEnabled(flag)": {
 		count: 1,
 		reason:
@@ -124,18 +129,142 @@ describe("the detector's admitted forms and refusals (#4946)", () => {
 		]);
 	});
 
-	it("covers every <x>Flag profile field, and a record read of one", () => {
-		const profile = 'const p = { optInFlag: "no-lsp" };';
-		expect(refused(profile)).toEqual([]);
+	it("covers every <x>Flag profile field", () => {
+		expect(refused('const p = { optInFlag: "no-lsp" };')).toEqual([]);
 		expect(refused('const p = { optInFlag: "lens-fallow" };')).toEqual([
 			"unregistered optInFlag `lens-fallow`",
 		]);
-		// A record read is admitted only while a pair of that name is scanned.
-		expect(refused(`${profile}\ngetFlag(p.optInFlag);`)).toEqual([]);
-		expect(refused("getFlag(p.optInFlag);")).toEqual(["getFlag(p.optInFlag)"]);
-		expect(refused(`${profile}\ngetFlag(p.otherFlag);`)).toEqual([
-			"getFlag(p.otherFlag)",
+		expect(refused("const p = { optInFlag: name };")).toEqual([
+			"optInFlag without a literal name",
 		]);
+	});
+
+	describe("a <x>Flag field is a flag name however it is written (#4946 review r1, F2)", () => {
+		// Recurrence: r1 scanned only object-literal pairs and admitted any
+		// `getFlag(<record>.<x>Flag)` once some pair of that name existed anywhere.
+		// A member assignment, a shorthand field and a read off another record
+		// passed with no site. Every name in a field position now goes through one
+		// check, and a container the check does not list is a refusal.
+		const ghost = "unregistered killSwitchFlag `no-ghost`";
+
+		it("refuses a member assignment, plain, compound and string-keyed", () => {
+			const record = "const p: Record<string, unknown> = {};\n";
+			expect(refused(`${record}p.killSwitchFlag = "no-ghost";`)).toEqual([
+				ghost,
+			]);
+			expect(refused(`${record}p["killSwitchFlag"] = "no-ghost";`)).toEqual([
+				ghost,
+			]);
+			expect(refused(`${record}p.killSwitchFlag ??= "no-ghost";`)).toEqual([
+				ghost,
+			]);
+			expect(refused(`${record}p.killSwitchFlag = "no-lsp";`)).toEqual([]);
+			expect(refused(`${record}p.killSwitchFlag = name;`)).toEqual([
+				"killSwitchFlag without a literal name",
+			]);
+		});
+
+		it("refuses a shorthand field: it carries a binding, never a literal", () => {
+			expect(
+				refused(
+					'const killSwitchFlag = "no-ghost";\nconst p = { killSwitchFlag };',
+				),
+			).toEqual(["killSwitchFlag without a literal name"]);
+		});
+
+		it("refuses a quoted, computed or class-field spelling of a pair", () => {
+			expect(refused('const p = { "killSwitchFlag": "no-ghost" };')).toEqual([
+				ghost,
+			]);
+			expect(refused('const p = { ["killSwitchFlag"]: "no-ghost" };')).toEqual([
+				ghost,
+			]);
+			expect(refused('class A { killSwitchFlag = "no-ghost"; }')).toEqual([
+				ghost,
+			]);
+			expect(refused('class A { killSwitchFlag = "no-lsp"; }')).toEqual([]);
+		});
+
+		it("refuses an accessor or method that defines the field: a getter returns the name", () => {
+			expect(
+				refused('const p = { get killSwitchFlag() { return "no-ghost"; } };'),
+			).toEqual(["killSwitchFlag as form `method_definition`"]);
+			expect(
+				refused('class A { get optInFlag() { return "no-ghost"; } }'),
+			).toEqual(["optInFlag as form `method_definition`"]);
+		});
+
+		it("refuses a destructured field: a read of the record's name", () => {
+			expect(refused("const { killSwitchFlag } = p;")).toEqual([
+				"killSwitchFlag as form `object_pattern`",
+			]);
+			expect(refused("const { killSwitchFlag: k } = p;")).toEqual([
+				"killSwitchFlag as form `pair_pattern`",
+			]);
+			expect(refused('const { killSwitchFlag = "no-ghost" } = p;')).toEqual([
+				ghost,
+			]);
+		});
+
+		it("admits a record read only through a counted row, whichever record carries it", () => {
+			const pair = 'const p = { killSwitchFlag: "no-lsp" };\n';
+			// A pair of that name elsewhere no longer admits a read off another record.
+			expect(
+				refused(
+					`${pair}const q: any = somewhere();\ngetFlag(q.killSwitchFlag);`,
+				),
+			).toEqual(["getFlag(q.killSwitchFlag)"]);
+			expect(refused("getFlag(p.killSwitchFlag);")).toEqual([
+				"getFlag(p.killSwitchFlag)",
+			]);
+			const row = {
+				"x.ts:getFlag(q.killSwitchFlag)": { count: 1, reason: "test" },
+			};
+			const read = `${pair}getFlag(q.killSwitchFlag);`;
+			expect(scanOne(read, row).unadmitted).toEqual([]);
+			expect(scanOne(read, row).staleAdmissions).toEqual([]);
+			// The row names one receiver and one count: another receiver or a second
+			// site is refused.
+			expect(
+				scanOne(`${read}\ngetFlag(r.killSwitchFlag);`, row).unadmitted.map(
+					(s) => s.detail,
+				),
+			).toEqual(["getFlag(r.killSwitchFlag)"]);
+			expect(
+				scanOne(`${read}\ngetFlag(q.killSwitchFlag);`, row).unadmitted,
+			).toHaveLength(2);
+		});
+
+		it("admits a read that cannot pass the name on, and refuses one that can", () => {
+			for (const read of [
+				"if (p.killSwitchFlag) {}",
+				"const a = !p.killSwitchFlag;",
+				"const a = p.killSwitchFlag === undefined;",
+				"const a = p.killSwitchFlag && ok;",
+				"const a = p.killSwitchFlag ? 1 : 2;",
+			])
+				expect(refused(read), read).toEqual([]);
+			expect(refused("const n = p.killSwitchFlag;")).toEqual([
+				"p.killSwitchFlag read as form `variable_declarator`",
+			]);
+			expect(refused("const n = ok && p.killSwitchFlag;")).toEqual([
+				"p.killSwitchFlag read as an operand of `&&`",
+			]);
+			expect(refused('const n = p.killSwitchFlag ?? "no-ghost";')).toEqual([
+				"p.killSwitchFlag read as an operand of `??`",
+			]);
+			expect(refused("use(p.killSwitchFlag);")).toEqual([
+				"p.killSwitchFlag read as an argument of `use`",
+			]);
+		});
+
+		it("leaves type-level fields, methods and plain locals alone", () => {
+			expect(refused("interface I { killSwitchFlag?: string }")).toEqual([]);
+			expect(refused('pi.registerFlag("no-lsp", {});')).toEqual([]);
+			expect(
+				refused("const applyFlag = true;\nuse(applyFlag, !applyFlag);"),
+			).toEqual([]);
+		});
 	});
 
 	it("takes a registerFlag literal as a registered name", () => {

@@ -12,12 +12,13 @@
  * `mcp/`, `index.ts`). Input: the raw source, parsed by the census AST seam
  * (`ast-census.ts`). No regex reads source text: a comment is a `comment` node
  * and a string (a template's fixed parts included) is a `string` node, so
- * neither can hold a call or a `killSwitchFlag:` pair (a template's `${..}`
+ * neither can hold a call or a `<x>Flag` field (a template's `${..}`
  * substitution is code and is scanned), and a comment that quotes
  * `getFlag("x")` is no read (engineering principles §2, detectors match
  * code, not prose; AGENTS.md shape 69). The flag name IS a string
- * literal, so the only string the scan reads is the first argument of a call it
- * found as code.
+ * literal, so the only strings the scan reads are the first argument of a call
+ * it found as code, a string KEY in a field position, and the value a `<x>Flag`
+ * field is given.
  *
  * Registered names (the closed set): every `LENS_FLAGS` name the caller passes,
  * plus every literal first argument of a `registerFlag(...)` call in the scanned
@@ -27,17 +28,28 @@
  *
  * - R1: a call to a reader whose first argument is a string literal naming a
  *   registered flag.
- * - R2: a profile field named `<x>Flag` (`killSwitchFlag`, `optInFlag`: the
- *   auxiliary-LSP profile fields `isEnabledByConfiguration` hands to `getFlag`)
- *   whose value is a string literal naming a registered flag. A `<x>Flag` pair
- *   with any other value is refused.
+ * - R2: a field named `<x>Flag` (`killSwitchFlag`, `optInFlag`: the
+ *   auxiliary-LSP profile fields `isEnabledByConfiguration` hands to `getFlag`),
+ *   however its name is spelled (identifier, quoted or computed string key,
+ *   subscript with a string index). The scan keys on the NAME, never on one
+ *   write form: every name in a field position is classified by its container,
+ *   and a container not listed here is refused. Listed containers: an
+ *   object-literal pair, a member or subscript assignment (plain or compound),
+ *   a class field with a value, or a destructuring default, whose value is a
+ *   string literal naming a registered flag (any other value, and a shorthand
+ *   `{ xFlag }`, is refused); a type-level `property_signature` or
+ *   `method_signature` (no value); a method call `a.xFlag(..)` (a method, not a
+ *   field); and a READ in a context that cannot pass the name on (a comparison,
+ *   `!`, a condition, the left side of `&&`). A method or accessor definition,
+ *   a destructured read and any other read are refused.
  * - R3: a call to a reader whose first argument is a parameter of the enclosing
  *   function (a forwarder). A forwarder bound to a bare name (`const f = (p) =>
  *   getFlag(p)`, `function f(p)`) makes `f` a reader too, so its callers are
- *   scanned (derived, to a fixpoint). A first argument that reads one of the R2
- *   fields off a record (`getFlag(profile.killSwitchFlag)`) is admitted when
- *   the scan found a pair of that name: the names it can carry are the R2
- *   literals, each checked.
+ *   scanned (derived, to a fixpoint). A first argument that reads an R2 field off
+ *   a record (`getFlag(profile.killSwitchFlag)`) is refused like any other
+ *   non-literal and admitted only by a counted R5 row keyed on the receiver's
+ *   spelling: the scan cannot tell which record the receiver holds, so a row
+ *   names it and a new receiver or a new site is a new refusal.
  * - R4: a reader named as a call argument, a declaration or parameter name, a
  *   shorthand property, a `pair` key, the value of a `pair` under the same key,
  *   the left side of an assignment, an operand of a comparison, logical or
@@ -52,6 +64,13 @@
  * call argument" lets the receiving function name its parameter anything and
  * call it with a literal; R3's anonymous forwarder (`(f) => getFlag(f)` handed
  * to a callee) leaves the names to that callee.
+ *
+ * NOT READ (spellings whose field name is not written in the source, reported
+ * to the maintainer, not admitted): a name built at run time (`const k =
+ * "killSwitchFlag"; p[k] = ..`, `{ [k]: .. }`), reflection by string argument
+ * (`Object.defineProperty(p, "killSwitchFlag", ..)`, `Reflect.set`), and a
+ * forwarder parameter's default value (`function f(name = "x") { getFlag(name)
+ * }`). Each needs dataflow the AST seam does not do.
  */
 import type { SgNode } from "@ast-grep/napi";
 import { parseNodes } from "./ast-census.js";
@@ -246,6 +265,96 @@ function boundName(fn: SgNode): string | undefined {
 		: undefined;
 }
 
+/** A name that ends in `Flag` and is not a reader: a field that carries a flag name. */
+const isFlagFieldName = (name: string | undefined): name is string =>
+	name !== undefined && /Flag$/.test(name) && !READER_NAME.test(name);
+
+/**
+ * The static field name a node spells in a NAME position, and the node that
+ * stands in the parent's name slot (a computed `["x"]` key is wrapped, a bare
+ * identifier or string is the slot itself). Anything else returns undefined:
+ * a value, a callee, a local variable.
+ */
+function fieldNameAt(node: SgNode): { name: string; slot: SgNode } | undefined {
+	const kind = kindOf(node);
+	if (
+		kind === "property_identifier" ||
+		kind === "shorthand_property_identifier" ||
+		kind === "shorthand_property_identifier_pattern"
+	)
+		return { name: node.text(), slot: node };
+	if (kind !== "string" && kind !== "template_string") return undefined;
+	const value = literalValue(node);
+	const parent = node.parent();
+	if (value === undefined || !parent) return undefined;
+	if (kindOf(parent) === "computed_property_name")
+		return { name: value, slot: parent };
+	const slotField =
+		kindOf(parent) === "subscript_expression"
+			? "index"
+			: ["pair", "pair_pattern"].includes(kindOf(parent))
+				? "key"
+				: ["public_field_definition", "property_signature"].includes(
+							kindOf(parent),
+					  )
+					? "name"
+					: undefined;
+	return slotField && sameNode(parent.field(slotField), node)
+		? { name: value, slot: node }
+		: undefined;
+}
+
+/** True when `node` is the callee of the call it sits in (`a.xFlag(...)`: a method, not a field). */
+const isCallee = (node: SgNode): boolean => {
+	const parent = node.parent();
+	return (
+		parent !== null &&
+		kindOf(parent) === "call_expression" &&
+		sameNode(parent.field("function"), node)
+	);
+};
+
+const COMPARISONS = new Set(["===", "!==", "==", "!="]);
+
+/**
+ * Why a read of a `<x>Flag` field is refused, or undefined when an admitted
+ * context holds it. The field's value is a flag NAME; a context that cannot
+ * pass the name on is admitted (a comparison, a negation, a condition, the
+ * left side of `&&`). The first argument of a reader call is reported by the
+ * call itself, so it returns `"reader"` and the caller skips it.
+ */
+function refusedFieldRead(
+	ref: SgNode,
+	isReader: (name: string | undefined) => boolean,
+): string | undefined | "reader" {
+	const parent = ref.parent();
+	if (!parent) return `read as a top-level expression`;
+	const kind = kindOf(parent);
+	if (kind === "arguments") {
+		const call = parent.parent();
+		const first = call ? firstArgument(call) : undefined;
+		const name = call
+			? calleeName(call.field("function") as SgNode).name
+			: undefined;
+		if (call && sameNode(first, ref) && isReader(name)) return "reader";
+		return `read as an argument of \`${call?.field("function")?.text()}\``;
+	}
+	if (kind === "unary_expression") return undefined;
+	if (kind === "binary_expression") {
+		const operator = parent.field("operator")?.text() ?? "";
+		if (COMPARISONS.has(operator)) return undefined;
+		if (operator === "&&" && sameNode(parent.field("left"), ref))
+			return undefined;
+		return `read as an operand of \`${operator}\``;
+	}
+	if (kind === "if_statement" || kind === "while_statement") return undefined;
+	if (kind === "ternary_expression")
+		return sameNode(parent.field("condition"), ref)
+			? undefined
+			: "read as a ternary branch";
+	return `read as form \`${kind}\``;
+}
+
 /**
  * Scan source texts. `files` maps a repo-relative path to its raw source;
  * `registeredByRegistry` is the registry's names; `admitted` is the R5 table.
@@ -293,17 +402,6 @@ export function scanFlagReads(
 			}
 	}
 
-	// R2 fields: every `<x>Flag` pair key (a reader name is a function slot).
-	const flagFieldKey = (key: string | undefined): key is string =>
-		key !== undefined && /Flag$/.test(key) && !READER_NAME.test(key);
-	const flagFields = new Set<string>();
-	for (const { nodes } of parsed)
-		for (const node of nodes) {
-			const key =
-				kindOf(node) === "pair" ? node.field("key")?.text() : undefined;
-			if (flagFieldKey(key)) flagFields.add(key);
-		}
-
 	const literalReads: FlagReadScan["literalReads"][number][] = [];
 	const sites: FlagReadSite[] = [];
 	const refuse = (file: string, text: string, node: SgNode, form: string) =>
@@ -329,6 +427,70 @@ export function scanFlagReads(
 		else refuse(file, text, node, `unregistered ${form} \`${value}\``);
 	};
 
+	/** A value assigned to a `<x>Flag` field: a registered literal, or refused (R2). */
+	const checkValue = (
+		file: string,
+		text: string,
+		name: string,
+		value: SgNode | undefined,
+		at: SgNode,
+	) => {
+		const literal = value ? literalValue(value) : undefined;
+		if (literal === undefined)
+			refuse(file, text, at, `${name} without a literal name`);
+		else checkLiteral(file, text, value as SgNode, literal, name);
+	};
+	/**
+	 * Every `<x>Flag` name in a NAME position goes through here, however it is
+	 * spelled (R2). The container decides; every container not listed is refused,
+	 * so a spelling nobody planned for is a refusal, not a pass.
+	 */
+	const checkField = (
+		file: string,
+		text: string,
+		name: string,
+		slot: SgNode,
+	) => {
+		const container = slot.parent();
+		if (!container) return;
+		const kind = kindOf(container);
+		const valueOf = (value: SgNode | null | undefined) =>
+			checkValue(file, text, name, value ?? undefined, slot);
+		if (kind === "pair" && sameNode(container.field("key"), slot))
+			return valueOf(container.field("value"));
+		if (kind === "object" || kind === "object_assignment_pattern")
+			// `{ xFlag }` (shorthand: a binding, never a literal) or the default of
+			// a destructured field.
+			return kind === "object"
+				? valueOf(undefined)
+				: valueOf(container.field("right"));
+		if (kind === "public_field_definition")
+			return container.field("value")
+				? valueOf(container.field("value"))
+				: undefined;
+		// A type-level slot holds no value. A method DEFINITION does (a getter
+		// returns the name), so it is not listed and falls to the refusal below.
+		if (["property_signature", "method_signature"].includes(kind)) return;
+		if (kind === "member_expression" || kind === "subscript_expression") {
+			if (isCallee(container)) return; // a method named `<x>Flag`, not a field
+			const ref = referenceOf(container);
+			const parent = ref.parent();
+			if (
+				parent &&
+				["assignment_expression", "augmented_assignment_expression"].includes(
+					kindOf(parent),
+				) &&
+				sameNode(parent.field("left"), ref)
+			)
+				return valueOf(parent.field("right"));
+			const why = refusedFieldRead(ref, isReader);
+			if (why === "reader") return; // the call reports its own first argument
+			if (why !== undefined) refuse(file, text, slot, `${ref.text()} ${why}`);
+			return;
+		}
+		refuse(file, text, slot, `${name} as form \`${kind}\``);
+	};
+
 	for (const { file, text, nodes } of parsed)
 		for (const node of nodes) {
 			const kind = kindOf(node);
@@ -350,11 +512,6 @@ export function scanFlagReads(
 					checkLiteral(file, text, first, value, `${name}(...)`);
 					continue;
 				}
-				if (
-					kindOf(first) === "member_expression" &&
-					flagFields.has(first.field("property")?.text() ?? "")
-				)
-					continue; // R3: a record's R2 field, checked at its literals
 				const fn = enclosingFunction(node);
 				if (
 					kindOf(first) === "identifier" &&
@@ -378,15 +535,10 @@ export function scanFlagReads(
 					if (!parent || kindOf(parent) !== "call_expression")
 						refuse(file, text, node, `computed reader \`[${value}]\``);
 				}
-			} else if (kind === "pair") {
-				const field = node.field("key")?.text();
-				if (!flagFieldKey(field)) continue;
-				const value = node.field("value");
-				const literal = value ? literalValue(value) : undefined;
-				if (literal === undefined)
-					refuse(file, text, node, `${field} without a literal name`);
-				else checkLiteral(file, text, value as SgNode, literal, field);
 			}
+			const field = fieldNameAt(node);
+			if (field === undefined || !isFlagFieldName(field.name)) continue;
+			checkField(file, text, field.name, field.slot);
 		}
 
 	const counts = new Map<string, number>();
