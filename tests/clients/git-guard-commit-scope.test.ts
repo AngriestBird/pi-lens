@@ -257,6 +257,27 @@ describe("#4941: the commit gate's blocker state is read per working tree", () =
 });
 
 describe("#4941 r2: the record-failure latch is one record per repository", () => {
+	it("counts a latch about a project outside every checkout for each repository's commit", () => {
+		// RECURRENCE GUARDED: #4941 r2 (CodeRabbit): a latch about a workspace
+		// root that is no checkout was "not in" either repository below it, so
+		// both scoped commits skipped it and the missing record let them through.
+		const env = setupTestEnvironment("pi-lens-4941-latch-unplaced-");
+		try {
+			const repoA = repo(env.tmpDir, "a");
+			const repoB = repo(env.tmpDir, "b");
+			const workspace = fs.realpathSync.native(env.tmpDir);
+			const runtime = new RuntimeCoordinator();
+			runtime.markGitGuardCacheUnknown("cache_write_failed", workspace);
+			expect(verdictOf(runtime, repoA, COMMIT).block).toBe(true);
+			expect(
+				verdictOf(runtime, repoA, commit(`git -C ${repoB} commit -m wip`))
+					.block,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("keeps repository A's latched record failure when only B's record is marked or cleared", () => {
 		// RECURRENCE GUARDED: #4941 r2 F1: the read was scoped but the store was
 		// one slot, so B's failed write replaced A's uncertainty and any
@@ -383,6 +404,13 @@ describe("#4941: resolveCommitScope reads only forms it can place in a tree", ()
 				expect(scopeOf(command, repoA), command).toBeUndefined();
 			}
 			expect(scopeOf("git commit -m wip", notARepo)).toBeUndefined();
+			// A target a stat fails on (ELOOP here; EACCES likewise, but only for a
+			// non-root user) is unscoped, not a throw that skips the gate
+			// (CodeRabbit on #4952: `statSync` throws for all but ENOENT).
+			const loop = path.join(fs.realpathSync.native(env.tmpDir), "loop");
+			fs.symlinkSync(`${loop}-b`, loop);
+			fs.symlinkSync(loop, `${loop}-b`);
+			expect(scopeOf(`git -C ${loop} commit -m wip`, repoA)).toBeUndefined();
 			// One target in a tree and one not: the scope cannot name both.
 			expect(
 				scopeOf(`git -C ${notARepo} commit -m wip; git commit -m wip`, repoA),

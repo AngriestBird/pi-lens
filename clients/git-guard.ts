@@ -1071,6 +1071,20 @@ const GIT_RETARGETING_ENV: readonly string[] = [
 	"GIT_COMMON_DIR",
 ];
 
+/** A stat that fails any way but ENOENT leaves the target unreadable, not scoped. */
+function isExistingDirectory(directory: string): boolean {
+	try {
+		return (
+			nodeFs.statSync(directory, { throwIfNoEntry: false })?.isDirectory() ??
+			false
+		);
+	} catch {
+		// none: an unreadable `-C` target (EACCES, ELOOP) is not a tree the gate
+		// can place, so the command goes unscoped and every blocker is judged.
+		return false;
+	}
+}
+
 /**
  * The trees a bash `git commit`/`git push` command targets, or `undefined`
  * when it is not a form this reads, in which case the gate judges every
@@ -1119,9 +1133,7 @@ export function resolveCommitScope(
 			}
 		}
 		const directory = resolveGitTargetDirectory(tokens, cwd);
-		if (!nodeFs.statSync(directory, { throwIfNoEntry: false })?.isDirectory()) {
-			return undefined;
-		}
+		if (!isExistingDirectory(directory)) return undefined;
 		const checkout = resolveGitCheckout(directory);
 		if (!checkout) return undefined;
 		trees.push(checkout);
@@ -2481,6 +2493,14 @@ export function evaluateGitGuard(
 	const inScope = scope
 		? (target: string) => scope.contains(resolveGuardPath(target, cwd))
 		: undefined;
+	// A record-failure latch names a project directory. One outside every
+	// checkout (a workspace root above several repositories) cannot be placed
+	// in a tree, so it counts for every commit (fail closed).
+	const latchInScope = scope
+		? (project: string) =>
+				!resolveGitCheckout(resolveGuardPath(project, cwd)) ||
+				scope.contains(resolveGuardPath(project, cwd))
+		: undefined;
 	// #2535 F3: a known tool with no mapping on this host resolves to
 	// undefined — rephrase rather than naming a dead tool. `lens_diagnostics`
 	// is pinned available on both hosts, so the fallback is defensive only.
@@ -2545,7 +2565,7 @@ export function evaluateGitGuard(
 		unconfirmedRecordRemedy(stored, inspection, me, cwd) ?? RECHECK_REMEDY;
 	// #4941: a reason latched about another tree's stored record is not this
 	// commit's; any form scoping does not read still refuses on every reason.
-	const latched = runtime.gitGuardCacheUnknownFor(inScope);
+	const latched = runtime.gitGuardCacheUnknownFor(latchInScope);
 	if (latched) return unknown(cwd, latched, {}, recordRemedy());
 	// #4733 r2 F12: a dispatch that never answered refuses until that file's own
 	// dispatch returns, whatever happened to the record since. #4733 r3 F16: a
