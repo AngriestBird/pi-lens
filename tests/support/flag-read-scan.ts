@@ -27,12 +27,17 @@
  *
  * - R1: a call to a reader whose first argument is a string literal naming a
  *   registered flag.
- * - R2: `killSwitchFlag: "<literal>"` (the auxiliary-LSP profile field that
- *   `isEnabledByConfiguration` hands to `getFlag`) naming a registered flag.
+ * - R2: a profile field named `<x>Flag` (`killSwitchFlag`, `optInFlag`: the
+ *   auxiliary-LSP profile fields `isEnabledByConfiguration` hands to `getFlag`)
+ *   whose value is a string literal naming a registered flag. A `<x>Flag` pair
+ *   with any other value is refused.
  * - R3: a call to a reader whose first argument is a parameter of the enclosing
  *   function (a forwarder). A forwarder bound to a bare name (`const f = (p) =>
  *   getFlag(p)`, `function f(p)`) makes `f` a reader too, so its callers are
- *   scanned (derived, to a fixpoint).
+ *   scanned (derived, to a fixpoint). A first argument that reads one of the R2
+ *   fields off a record (`getFlag(profile.killSwitchFlag)`) is admitted when
+ *   the scan found a pair of that name: the names it can carry are the R2
+ *   literals, each checked.
  * - R4: a reader named as a call argument, a declaration or parameter name, a
  *   shorthand property, a `pair` key, the value of a `pair` under the same key,
  *   the left side of an assignment, an operand of a comparison, logical or
@@ -288,6 +293,17 @@ export function scanFlagReads(
 			}
 	}
 
+	// R2 fields: every `<x>Flag` pair key (a reader name is a function slot).
+	const flagFieldKey = (key: string | undefined): key is string =>
+		key !== undefined && /Flag$/.test(key) && !READER_NAME.test(key);
+	const flagFields = new Set<string>();
+	for (const { nodes } of parsed)
+		for (const node of nodes) {
+			const key =
+				kindOf(node) === "pair" ? node.field("key")?.text() : undefined;
+			if (flagFieldKey(key)) flagFields.add(key);
+		}
+
 	const literalReads: FlagReadScan["literalReads"][number][] = [];
 	const sites: FlagReadSite[] = [];
 	const refuse = (file: string, text: string, node: SgNode, form: string) =>
@@ -334,6 +350,11 @@ export function scanFlagReads(
 					checkLiteral(file, text, first, value, `${name}(...)`);
 					continue;
 				}
+				if (
+					kindOf(first) === "member_expression" &&
+					flagFields.has(first.field("property")?.text() ?? "")
+				)
+					continue; // R3: a record's R2 field, checked at its literals
 				const fn = enclosingFunction(node);
 				if (
 					kindOf(first) === "identifier" &&
@@ -358,13 +379,13 @@ export function scanFlagReads(
 						refuse(file, text, node, `computed reader \`[${value}]\``);
 				}
 			} else if (kind === "pair") {
-				if (node.field("key")?.text() !== "killSwitchFlag") continue;
+				const field = node.field("key")?.text();
+				if (!flagFieldKey(field)) continue;
 				const value = node.field("value");
 				const literal = value ? literalValue(value) : undefined;
 				if (literal === undefined)
-					refuse(file, text, node, "killSwitchFlag without a literal name");
-				else
-					checkLiteral(file, text, value as SgNode, literal, "killSwitchFlag");
+					refuse(file, text, node, `${field} without a literal name`);
+				else checkLiteral(file, text, value as SgNode, literal, field);
 			}
 		}
 

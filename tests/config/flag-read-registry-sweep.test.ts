@@ -31,11 +31,6 @@ const ROOT = path.resolve(
  * with fewer reds as stale.
  */
 const ADMITTED: FlagReadAdmission = {
-	"clients/dispatch/auxiliary-lsp.ts:getFlag(profile.killSwitchFlag)": {
-		count: 1,
-		reason:
-			"the name comes from the `killSwitchFlag` field of the profile table in this file, and the scan reads each of those literals against the registry (R2)",
-	},
 	"clients/runtime-session.ts:analyzerEnabled(flag)": {
 		count: 1,
 		reason:
@@ -126,6 +121,20 @@ describe("the detector's admitted forms and refusals (#4946)", () => {
 		expect(refused('const p = { killSwitchFlag: "no-lsp" };')).toEqual([]);
 		expect(refused("const p = { killSwitchFlag: name };")).toEqual([
 			"killSwitchFlag without a literal name",
+		]);
+	});
+
+	it("covers every <x>Flag profile field, and a record read of one", () => {
+		const profile = 'const p = { optInFlag: "no-lsp" };';
+		expect(refused(profile)).toEqual([]);
+		expect(refused('const p = { optInFlag: "lens-fallow" };')).toEqual([
+			"unregistered optInFlag `lens-fallow`",
+		]);
+		// A record read is admitted only while a pair of that name is scanned.
+		expect(refused(`${profile}\ngetFlag(p.optInFlag);`)).toEqual([]);
+		expect(refused("getFlag(p.optInFlag);")).toEqual(["getFlag(p.optInFlag)"]);
+		expect(refused(`${profile}\ngetFlag(p.otherFlag);`)).toEqual([
+			"getFlag(p.otherFlag)",
 		]);
 	});
 
