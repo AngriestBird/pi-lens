@@ -2174,6 +2174,10 @@ describe("index.ts integration", () => {
 					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = mockReadGuard;
+					// #4942: the session's guard; one session here, so the one guard.
+					readGuardFor() {
+						return this.readGuard;
+					}
 					shouldWarmLspOnRead() {
 						return true;
 					}
@@ -2286,6 +2290,10 @@ describe("index.ts integration", () => {
 						checkEdit,
 						contentMatchesLastRead: () => undefined,
 					};
+					// #4942: the session's guard; one session here, so the one guard.
+					readGuardFor() {
+						return this.readGuard;
+					}
 					shouldWarmLspOnRead() {
 						return false;
 					}
@@ -2402,6 +2410,10 @@ describe("index.ts integration", () => {
 						checkEdit,
 						contentMatchesLastRead: () => undefined,
 					};
+					// #4942: the session's guard; one session here, so the one guard.
+					readGuardFor() {
+						return this.readGuard;
+					}
 					shouldWarmLspOnRead() {
 						return false;
 					}
@@ -2533,6 +2545,10 @@ describe("index.ts integration", () => {
 						checkEdit: () => ({ action: "allow" as const }),
 						contentMatchesLastRead: () => undefined,
 					};
+					// #4942: the session's guard; one session here, so the one guard.
+					readGuardFor() {
+						return this.readGuard;
+					}
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted = markLspReadWarmStarted;
 					markLspReadWarmCompleted = markLspReadWarmCompleted;
@@ -2643,6 +2659,10 @@ describe("index.ts integration", () => {
 						checkEdit: () => ({ action: "allow" as const }),
 						contentMatchesLastRead: () => undefined,
 					};
+					// #4942: the session's guard; one session here, so the one guard.
+					readGuardFor() {
+						return this.readGuard;
+					}
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted() {}
 					markLspReadWarmCompleted() {}
@@ -2748,6 +2768,10 @@ describe("index.ts integration", () => {
 						checkEdit: () => ({ action: "allow" as const }),
 						contentMatchesLastRead: () => undefined,
 					};
+					// #4942: the session's guard; one session here, so the one guard.
+					readGuardFor() {
+						return this.readGuard;
+					}
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted() {}
 					markLspReadWarmCompleted() {}

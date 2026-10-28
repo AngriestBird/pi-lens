@@ -2025,7 +2025,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			const targetPath = path.isAbsolute(rawTarget)
 				? rawTarget
 				: path.resolve(ctx.cwd ?? runtime.projectRoot, rawTarget);
-			runtime.readGuard.addExemption(targetPath);
+			runtime.readGuardFor(getStableSessionId(ctx)).addExemption(targetPath);
 			notifyUi(
 				ctx,
 				`Read guard override armed for next edit: ${targetPath}`,
@@ -2070,25 +2070,29 @@ function activateExtension(hostPi: ExtensionAPI) {
 			() => runtime.projectRoot,
 			// Read-substitute tie-in (#245): a returned symbol body is a genuine read
 			// of that range, so record it as read-guard coverage for the symbol.
-			(filePath, symbol, toolCallId) =>
-				runtime.readGuard.recordSymbolRead(
-					filePath,
-					symbol,
-					runtime.turnIndex,
-					runtime.peekWriteIndex(),
-					sanitizeCorrelationId(toolCallId),
-				),
+			(filePath, symbol, toolCallId, ctx) =>
+				runtime
+					.readGuardFor(getStableSessionId(ctx))
+					.recordSymbolRead(
+						filePath,
+						symbol,
+						runtime.turnIndex,
+						runtime.peekWriteIndex(),
+						sanitizeCorrelationId(toolCallId),
+					),
 		),
 		createReadEnclosingTool(
 			() => runtime.projectRoot,
-			(filePath, symbol, toolCallId) =>
-				runtime.readGuard.recordSymbolRead(
-					filePath,
-					symbol,
-					runtime.turnIndex,
-					runtime.peekWriteIndex(),
-					sanitizeCorrelationId(toolCallId),
-				),
+			(filePath, symbol, toolCallId, ctx) =>
+				runtime
+					.readGuardFor(getStableSessionId(ctx))
+					.recordSymbolRead(
+						filePath,
+						symbol,
+						runtime.turnIndex,
+						runtime.peekWriteIndex(),
+						sanitizeCorrelationId(toolCallId),
+					),
 		),
 	];
 
@@ -3215,7 +3219,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 					ruffClient: resident?.ruffClient,
 					metricsClient: resident?.metricsClient,
 					resetLSPService,
-					readGuard: runtime.readGuard,
+					// #4942: the read guard of the session whose tool result this is.
+					readGuard: runtime.readGuardFor(getStableSessionId(ctx)),
 					agentBehaviorRecord: (toolName, filePath) =>
 						(
 							resident?.agentBehaviorClient ?? getAgentBehaviorClient()
@@ -3279,8 +3284,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// the host or blocked by a later extension after pi-lens captured it (pi
 	// then emits no tool_result), releases its capture here, before the next
 	// tool_call of the run can count it.
-	pi.on("tool_execution_end", (event) => {
-		handleToolExecutionEnd(event, runtime.readGuard);
+	pi.on("tool_execution_end", (event, ctx) => {
+		handleToolExecutionEnd(
+			event,
+			runtime.readGuardFor(getStableSessionId(ctx)),
+		);
 	});
 
 	/** #1123 item 2 / #1332: one `memory_sample` latency record. `idleGapMs` is

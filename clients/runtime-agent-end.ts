@@ -161,11 +161,12 @@ function retireChangedAuthorshipBeforeDrain(
 	session: LineageHandle,
 	filePath: string,
 	getFlag: (name: string, filePath?: string) => boolean | string | undefined,
+	sessionId: string | undefined,
 ): void {
 	if (getFlag("no-read-guard")) return;
 	// Optional, as the guard's other per-write members are to a host double.
 	session.guardedWrite(filePath, () =>
-		runtime.readGuard.retireChangedAuthorship?.(filePath),
+		runtime.readGuardFor(sessionId).retireChangedAuthorship?.(filePath),
 	);
 }
 
@@ -191,7 +192,7 @@ export async function handleAgentEnd({
 	// pi's agent loop takes `handleRunFailure`, which emits agent_end and no
 	// tool_execution_end) leaves one, and it must not license an edit in the
 	// next run.
-	runtime.readGuard.dropProvisionalReads();
+	runtime.readGuardFor(currentSessionId).dropProvisionalReads();
 	// #791: ownership-filtered drain — records queued by a DIFFERENT known
 	// session (e.g. a concurrent in-process secondary/subagent) stay queued
 	// for their owner's own agent_end, unless they've been stale long enough
@@ -555,7 +556,13 @@ export async function handleAgentEnd({
 		executedAutofixScopes.add(scopeKey);
 		// #4131: the fixer's recordWritten below credits authorship without
 		// bytes the agent saw, so it may only advance one whose bytes still hold.
-		retireChangedAuthorshipBeforeDrain(runtime, session, filePath, getFlag);
+		retireChangedAuthorshipBeforeDrain(
+			runtime,
+			session,
+			filePath,
+			getFlag,
+			currentSessionId,
+		);
 		// #3506: the fixer rewrites the file in place, inside pi's queue, which
 		// runAutofix enters only once the fixer is resolved.
 		const fixHold = holdFileMutationQueue(filePath);
@@ -597,7 +604,7 @@ export async function handleAgentEnd({
 					});
 					// #3525: bytes the agent never saw; authorship, not FileTime.
 					if (!getFlag("no-read-guard"))
-						runtime.readGuard.recordWritten(changedPath, {
+						runtime.readGuardFor(currentSessionId).recordWritten(changedPath, {
 							authorship: "whole-file",
 							branchEpoch: queuedBranchEpoch,
 							stampFileTime: false,
@@ -802,7 +809,13 @@ export async function handleAgentEnd({
 					continue;
 				}
 				// #4131: as in the autofix loop, before the formatter rewrites it.
-				retireChangedAuthorshipBeforeDrain(runtime, session, filePath, getFlag);
+				retireChangedAuthorshipBeforeDrain(
+					runtime,
+					session,
+					filePath,
+					getFlag,
+					currentSessionId,
+				);
 				// #3506: the formatter rewrites the file in place, and its read-back
 				// belongs to the same hold. The release follows the phase itself,
 				// not this bound, and an abandoned formatter keeps it until its
@@ -1047,7 +1060,7 @@ export async function handleAgentEnd({
 					});
 					// #3525: bytes the agent never saw; authorship, not FileTime.
 					if (!getFlag("no-read-guard")) {
-						runtime.readGuard.recordWritten(filePath, {
+						runtime.readGuardFor(currentSessionId).recordWritten(filePath, {
 							authorship: "whole-file",
 							branchEpoch: queuedBranchEpoch,
 							stampFileTime: false,
@@ -1318,6 +1331,7 @@ export async function handleAgentEnd({
 						session,
 						file.filePath,
 						getFlag,
+						currentSessionId,
 					);
 				const mutationContext: LspMutationContext = {
 					cwd: fixCwd,
@@ -1342,11 +1356,13 @@ export async function handleAgentEnd({
 									// (retire before, advance over its rewrite) and not an
 									// unlicensed advance over a byte nothing checked.
 									recordWritten: (filePath: string) =>
-										runtime.readGuard.recordWritten(filePath, {
-											authorship: "whole-file",
-											branchEpoch: credit,
-											stampFileTime: false,
-										}),
+										runtime
+											.readGuardFor(currentSessionId)
+											.recordWritten(filePath, {
+												authorship: "whole-file",
+												branchEpoch: credit,
+												stampFileTime: false,
+											}),
 								},
 					// #3576: a /new during the pass stops it and its bookkeeping.
 					session,

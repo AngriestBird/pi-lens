@@ -3388,7 +3388,11 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 				runtime,
 				...args.secondSettle,
 			});
-			return runtime.readGuard.checkEdit(filePath, [1, 1]).action;
+			// #4942: the verdict is the claiming session's own guard, the one the
+			// drain credits (`currentSessionId`, the coordinator's when omitted).
+			return runtime
+				.readGuardFor(args.secondSettle?.currentSessionId)
+				.checkEdit(filePath, [1, 1]).action;
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
