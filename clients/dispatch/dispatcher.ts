@@ -619,6 +619,9 @@ function isUnusedValueDiagnostic(d: Diagnostic): boolean {
 
 function promoteDeltaUnusedToBlockers(diagnostics: Diagnostic[]): Diagnostic[] {
 	return diagnostics.map((d) => {
+		// #4130: a runner fault is never a finding about the code, so it never
+		// becomes a blocker, whatever its message says (`faultResult`).
+		if (d.runnerFault === true) return d;
 		if (!isUnusedValueDiagnostic(d)) return d;
 		if (d.semantic === "blocking" || d.severity === "error") return d;
 		return {
