@@ -1062,36 +1062,6 @@ describe("RuntimeCoordinator", () => {
 			});
 		});
 
-		it("files a collect-later settle's new record under the deferring session", () => {
-			// RECURRENCE GUARDED: #4921 for the second writer of the map
-			// (#3814): an unowned settle would reach the primary's turn end.
-			const runtime = new RuntimeCoordinator();
-			runtime.setSessionLifecycle({ sessionId: PRIMARY });
-			const late: Diagnostic = {
-				id: "late:1",
-				message: "late blocker",
-				filePath: subagentFile,
-				line: 1,
-				severity: "error",
-				semantic: "blocking",
-				tool: "late",
-				rule: "late:rule",
-				runnerId: "late",
-			};
-			expect(
-				runtime.recordDeferredInlineBlockers(subagentFile, [late], {
-					recordedAtMs: 1_000,
-					sessionId: SUBAGENT,
-				}),
-			).toBe(1);
-			expect(
-				files(runtime.getInlineBlockersSnapshot({ sessionId: PRIMARY })),
-			).toEqual([]);
-			expect(
-				files(runtime.getInlineBlockersSnapshot({ sessionId: SUBAGENT })),
-			).toEqual([subagentFile]);
-		});
-
 		it("lets one session's policy pass set verdicts on its own records only", () => {
 			// RECURRENCE GUARDED: the pass rewrites the whole verdict axis it
 			// judged; run over every record, the subagent's empty pass cleared

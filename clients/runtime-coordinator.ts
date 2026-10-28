@@ -1855,12 +1855,6 @@ export class RuntimeCoordinator {
 		analysed: {
 			recordedAtMs: number;
 			contentBaseline?: { size: number; sha256: string };
-			/**
-			 * #4921: the deferring dispatch's turn session
-			 * (`PendingRunnerFindings.sessionId`). It names a NEW record only; a
-			 * merge keeps the existing record's owner.
-			 */
-			sessionId?: string;
 		},
 	): number {
 		const key = filePath;
@@ -1886,7 +1880,6 @@ export class RuntimeCoordinator {
 							recordedHash: analysed.contentBaseline.sha256,
 						}
 					: {}),
-				...this.recordSession(analysed.sessionId),
 			}),
 			summary: formatDiagnostics(diagnostics, "blocking").trim(),
 			diagnostics,
