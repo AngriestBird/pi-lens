@@ -2194,12 +2194,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 				const sectionRun = runByResult.get(result);
 				if (sectionRun) sectionRuns.push(sectionRun);
-				// #4617: the section speaks for the run's primary and the
-				// neighbours it owns, clean or not.
-				provenanceCitedFiles.push(
-					result.filePath,
-					...ownedNeighbors.map((n) => n.filePath),
-				);
+				// #4617: the section speaks for the run's primary file (a neighbour
+				// error it shows is in `affectedFiles` already).
+				provenanceCitedFiles.push(result.filePath);
 				for (const n of ownedNeighbors) {
 					if (n.diagnostics.length === 0) continue;
 					// #4495 round 3: a neighbour pi edited this turn is reported by
