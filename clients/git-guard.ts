@@ -9,7 +9,10 @@ import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import { isOutsideProjectRoot, toProjectRelativePath } from "./path-utils.js";
 import { decodeShellWords, type DecodedShellWord } from "./bash-file-access.js";
-import { incrementDegradationCount } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { absorbSettledRunnerBlockers } from "./deferred-runner-blockers.js";
 import { logLatency } from "./latency-logger.js";
 import { resolveLensToolName, type LensToolHost } from "./tool-config.js";
@@ -2026,6 +2029,19 @@ export function syncGitGuardRecord(
 		droppedForeign === 0 &&
 		droppedOwn === 0
 	) {
+		// #4921 r2 F1: the latch is process-wide, so it speaks for the record's
+		// owner. Only the coordinator's own write may say "another session's
+		// record"; a concurrent session's clean write leaves the record and the
+		// latch to the session that owns them.
+		if (sessionId !== undefined && !runtime.isCoordinatorSession(sessionId)) {
+			recordDegradationOnce({
+				kind: "git-guard-non-owner-write",
+				subject: sessionId,
+				reason:
+					"a concurrent session's clean write left another session's commit-gate record and latch untouched",
+			});
+			return;
+		}
 		markCacheUnknown(runtime, "session_mismatch");
 		return;
 	}

@@ -39,6 +39,14 @@
   `record_retired` row (#4725). A dispatch that never answered
   (`pipeline_crash`, `pipeline_error`) is latched per file, apart from the
   record's latch, and only that file's own returning dispatch clears it.
+- Inline blockers have owners (#4921). A blocker belongs to the turn session
+  whose write recorded it; a record with no `session` is the coordinator's.
+  The commit gate reads every record, whoever owns it, because the tree is
+  shared. A turn end reads only its own session's records: it delivers,
+  sweeps, re-judges and consumes those, and files its guard section under its
+  own id. Only a write by the coordinator's session latches
+  `session_mismatch`; a concurrent session's clean write leaves another
+  session's record and the latch alone.
 - The shared-checkout guard refuses unsafe worktree mutation when another live
   session and uncommitted work are both proven. It never auto-stashes.
 - `mcp/server.ts` talks to pi-lens through `clients/lens-engine.ts`. A mirrored

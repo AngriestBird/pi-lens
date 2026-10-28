@@ -30,6 +30,10 @@ import { normalizeFilePath } from "../../clients/path-utils.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { readNdjsonRows } from "../support/ndjson-rows.js";
 import { tokenizeShellCommand } from "../../clients/bash-file-access.js";
 
@@ -4025,6 +4029,48 @@ describe("#4921: a turn end's own partition is its turn session's", () => {
 				evaluateGitGuard(runtime, cache, env.tmpDir, "pi", SUBAGENT).reason,
 			).not.toContain(foreignRemedy);
 		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("leaves the primary's record and the latch alone when a subagent writes a clean file", () => {
+		// RECURRENCE GUARDED: #4921 review r1 F1 (probe P5). Judged by the
+		// writing session, the subagent's clean write latched the process-wide
+		// `session_mismatch` on the primary's record, so the primary's commit
+		// refusal said "blocker state is unknown" instead of naming its blocker.
+		const env = setupTestEnvironment("pi-lens-git-guard-4921-clean-write-");
+		resetDegradationLedger();
+		try {
+			const { mine, theirs } = twoPartitionRecord(env.tmpDir);
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			ownBlocker(runtime, mine);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, mine);
+			const before = storedData(cache, env.tmpDir);
+			for (let write = 0; write < 2; write += 1)
+				syncGitGuardRecord(
+					runtime,
+					cache,
+					env.tmpDir,
+					theirs,
+					"session",
+					false,
+					SUBAGENT,
+				);
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(storedData(cache, env.tmpDir)).toEqual(before);
+			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
+			expect(refusal.block).toBe(true);
+			expect(refusal.reason).toContain("unresolved blockers must be fixed");
+			expect(refusal.reason).not.toContain("session_mismatch");
+			// One record per writing session, not one per write.
+			const row = getDegradationSummary().find(
+				(group) => group.kind === "git-guard-non-owner-write",
+			);
+			expect(row?.count).toBe(1);
+			expect(row?.latestReasons[0]?.subject).toBe(SUBAGENT);
+		} finally {
+			resetDegradationLedger();
 			env.cleanup();
 		}
 	});
