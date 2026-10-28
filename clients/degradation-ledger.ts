@@ -477,6 +477,13 @@ export type DegradationKind =
 	 */
 	| "generation-lock-wait-skipped"
 	/**
+	 * #4921: a concurrent in-process session's write, with no blocker of its
+	 * own, met a commit-gate record another session owns and left it (and the
+	 * process-wide latch) untouched. Subject is the writing session; once per
+	 * session, because each of its clean writes meets the same record.
+	 */
+	| "git-guard-non-owner-write"
+	/**
 	 * Failed-first test state was retired only after ENOENT/ENOTDIR evidence,
 	 * retained when the filesystem probe was indeterminate, or evicted at the
 	 * state cap (#2044). Subject is outcome + runner + bounded path, so repeated

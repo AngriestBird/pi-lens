@@ -443,6 +443,9 @@ The four primary host hooks are:
   by the lane's next successful run and offered only while that run still
   reports them (#3901); count-and-pointer advisories (actionable and
   code-quality warnings) are not held, their report is the pull record.
+  A turn end reads only the inline blockers its own session's writes
+  recorded; the commit gate reads every one
+  ([git-guard invariants](docs/invariants/git-guard-host.md), #4921).
 - Only the write/edit `tool_result` path may block the host; `session_start`, `turn_end`, `agent_end`, `agent_settled`, and read-only `tool_result` are bounded by the outer wall; new hook awaits register in `tests/config/hook-await-bounds.test.ts`.
 
 `RuntimeCoordinator.recordProjectMutation` is the one mutation bookkeeping seam.

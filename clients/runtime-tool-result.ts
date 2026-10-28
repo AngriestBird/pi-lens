@@ -1371,6 +1371,8 @@ function publishInlineVerdict(args: {
 	getFlag: ToolResultDeps["getFlag"];
 	turnStateCwd: string;
 	analysisRootMode: AnalysisRootMode;
+	/** #4921: the write's turn session, which owns the blocker it records. */
+	sessionId: string | undefined;
 }): void {
 	const {
 		runtime,
@@ -1384,6 +1386,7 @@ function publishInlineVerdict(args: {
 		getFlag,
 		turnStateCwd,
 		analysisRootMode,
+		sessionId,
 	} = args;
 	// #3596: a replaced session's handler latches nothing in the live session.
 	const resultLive = writeSession.guardedWrite(filePath, () => true) === true;
@@ -1415,6 +1418,7 @@ function publishInlineVerdict(args: {
 					result.orderTurn ?? writeOrderTurn,
 					// #3503: the freshness baseline is the analysis read.
 					result.analysisReadAtMs,
+					sessionId,
 				),
 			) !== undefined;
 	} else {
@@ -1479,6 +1483,7 @@ function publishInlineVerdict(args: {
 				wholeFileClean || ownBlockerRetired ? filePath : undefined,
 				analysisRootMode,
 				wholeFileClean,
+				sessionId,
 			);
 		}
 	}
@@ -3669,6 +3674,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							getFlag,
 							turnStateCwd: observedTurnStateCwd,
 							analysisRootMode: observedRootMode,
+							sessionId: deps.sessionId,
 						});
 					}
 				}
@@ -4406,6 +4412,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		getFlag,
 		turnStateCwd,
 		analysisRootMode,
+		sessionId: deps.sessionId,
 	});
 
 	// #2050 AC3 / #2657: `linked-worktree` is a WRITABLE class

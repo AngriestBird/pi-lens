@@ -182,6 +182,57 @@ describe("handleToolCall", () => {
 		}
 	});
 
+	it("judges the commit gate's record as the session that runs the commit (#4921)", async () => {
+		// RECURRENCE GUARDED: #4921. The gate compared the record's owner with
+		// the coordinator's id, so a subagent's commit was refused with
+		// `session_mismatch` over a record only it owns, whose file is gone.
+		const env = setupTestEnvironment("pi-lens-4921-gate-session-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-4921-primary" });
+			const cacheManager = new CacheManager(false);
+			const gone = path.join(env.tmpDir, "gone.ts");
+			cacheManager.writeCache(
+				"turn-end-findings",
+				{
+					content: "blocker",
+					hasBlockers: true,
+					affectedFiles: [gone],
+					sessionId: "session-4921-subagent",
+					projectSeqStart: 0,
+					projectSeqEnd: 0,
+					fileSeqByPath: { [gone.replace(/\\/g, "/")]: 0 },
+					fileContentHashes: {},
+				},
+				env.tmpDir,
+			);
+			const commit = (sessionId: string) =>
+				runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						baseDeps({
+							runtime,
+							cacheManager,
+							sessionId,
+							ctx: { cwd: env.tmpDir },
+							getFlag: (name) => name === "lens-guard",
+							event: {
+								toolName: "bash",
+								input: { command: "git commit -m x" },
+							},
+						}),
+					),
+				);
+			expect(await commit("session-4921-subagent")).toBeUndefined();
+			expect(await commit("session-4921-primary")).toMatchObject({
+				block: true,
+				reason: expect.stringContaining("session_mismatch"),
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("does not let heredoc body words trigger the real git guard", async () => {
 		const env = setupTestEnvironment("pi-lens-2726-heredoc-guard-");
 		try {

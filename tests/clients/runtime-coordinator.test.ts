@@ -993,4 +993,112 @@ describe("RuntimeCoordinator", () => {
 			}
 		});
 	});
+
+	describe("inline blockers belong to the turn session that wrote them (#4921)", () => {
+		// A concurrent in-process subagent (#473) shares this coordinator; its
+		// writes and the primary's land in one path-keyed map. Real files: the
+		// snapshot drops a record whose file is gone (#1245).
+		let dir = "";
+		let primaryFile = "";
+		let subagentFile = "";
+		beforeEach(() => {
+			dir = mkdtempSync(path.join(tmpdir(), "pi-lens-4921-owner-"));
+			primaryFile = path.join(dir, "primary.ts");
+			subagentFile = path.join(dir, "subagent.ts");
+			writeFileSync(primaryFile, "debugger;\n");
+			writeFileSync(subagentFile, "debugger;\n");
+		});
+		afterEach(() => rmSync(dir, { recursive: true, force: true }));
+		const PRIMARY = "primary-session";
+		const SUBAGENT = "subagent-session";
+		const record = (
+			runtime: RuntimeCoordinator,
+			filePath: string,
+			sessionId: string | undefined,
+		) =>
+			runtime.recordInlineBlockers(
+				filePath,
+				"🔴 STOP",
+				1,
+				undefined,
+				[1],
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				sessionId,
+			);
+		const files = (records: { filePath: string }[]) =>
+			records.map((entry) => entry.filePath);
+		const twoSessions = (): RuntimeCoordinator => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setSessionLifecycle({ sessionId: PRIMARY });
+			record(runtime, primaryFile, PRIMARY);
+			record(runtime, subagentFile, SUBAGENT);
+			return runtime;
+		};
+
+		it("shows each turn session only its own records, and the commit gate every record", () => {
+			// RECURRENCE GUARDED: #4921. The subagent's turn end read the whole
+			// map and told it about the primary's file.
+			const runtime = twoSessions();
+			expect({
+				primary: files(
+					runtime.getInlineBlockersSnapshot({ sessionId: PRIMARY }),
+				),
+				subagent: files(
+					runtime.getInlineBlockersSnapshot({ sessionId: SUBAGENT }),
+				),
+				// A turn with no session id of its own is the coordinator's.
+				unnamed: files(
+					runtime.getInlineBlockersSnapshot({ sessionId: undefined }),
+				),
+				gate: files(runtime.getInlineBlockersSnapshot()).sort(),
+			}).toEqual({
+				primary: [primaryFile],
+				subagent: [subagentFile],
+				unnamed: [primaryFile],
+				gate: [primaryFile, subagentFile].sort(),
+			});
+		});
+
+		it("lets one session's policy pass set verdicts on its own records only", () => {
+			// RECURRENCE GUARDED: the pass rewrites the whole verdict axis it
+			// judged; run over every record, the subagent's empty pass cleared
+			// the primary's suppression and reopened its commit gate latch.
+			const runtime = twoSessions();
+			runtime.applyInlineBlockerPolicyVerdicts([primaryFile], {
+				sessionId: PRIMARY,
+			});
+			runtime.applyInlineBlockerPolicyVerdicts([], { sessionId: SUBAGENT });
+			const verdicts = Object.fromEntries(
+				runtime
+					.getInlineBlockersSnapshot()
+					.map((entry) => [entry.filePath, entry.policySuppressed ?? false]),
+			);
+			expect(verdicts).toEqual({
+				[primaryFile]: true,
+				[subagentFile]: false,
+			});
+		});
+
+		it("says Resolved only to the session whose blocker a clean write retired", () => {
+			// RECURRENCE GUARDED: the Resolved note is the same store's; the
+			// primary's turn end consumed the subagent's note.
+			const runtime = twoSessions();
+			expect(runtime.clearInlineBlockers(subagentFile, 2)).toBe(true);
+			expect(
+				runtime.consumeResolvedBlockerFiles(() => false, {
+					sessionId: PRIMARY,
+				}).files,
+			).toEqual([]);
+			expect(
+				files(
+					runtime.consumeResolvedBlockerFiles(() => false, {
+						sessionId: SUBAGENT,
+					}).files,
+				),
+			).toEqual([subagentFile]);
+		});
+	});
 });
