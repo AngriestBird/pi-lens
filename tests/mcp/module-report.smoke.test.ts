@@ -132,11 +132,13 @@ describe("module_report + read_symbol over MCP (tiny project)", () => {
 			name: "pilens_read_symbol",
 			arguments: { file: path.join(projectDir, "bad.py"), symbol: "after" },
 		});
-		expect(textOf(miss)).toContain("Syntax errors in this file");
+		expect(textOf(miss)).toContain(
+			"tree-sitter could not parse part of this file",
+		);
 		const hit = await harness.request(14, "tools/call", {
 			name: "pilens_read_symbol",
 			arguments: { file: path.join(projectDir, "bad.py"), symbol: "good" },
 		});
-		expect(textOf(hit)).not.toContain("Syntax errors");
+		expect(textOf(hit)).not.toContain("could not parse part");
 	}, 30_000);
 });

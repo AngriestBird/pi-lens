@@ -19,7 +19,7 @@ import {
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 const WARNING =
-	"Syntax errors in this file (tree-sitter recovered); the symbol list may be incomplete.";
+	"tree-sitter could not parse part of this file; the symbol list may be incomplete.";
 
 // Valid TypeScript that the shipped grammar cannot parse: `importOriginal<typeof
 // import("./t.js")>()` makes tree-sitter recover and drop `errorDiag`.
@@ -164,7 +164,7 @@ describe("tool text renders the warning (#4949)", () => {
 			null,
 			ctx(env.tmpDir),
 		);
-		expect(String(hit.content[0]?.text)).not.toContain("Syntax errors");
+		expect(String(hit.content[0]?.text)).not.toContain("could not parse part");
 		const enc = await readEnc.execute(
 			"3",
 			{ path: "m.ts", line: 8 },
@@ -181,5 +181,24 @@ describe("tool text renders the warning (#4949)", () => {
 			ctx(env.tmpDir),
 		);
 		expect(String(rep.content[0]?.text)).toContain(WARNING);
+	});
+
+	// Recurrence: a recovered parse that drops EVERY declaration makes the report
+	// unavailable, and the compact view's early return dropped the warning
+	// exactly there (#4949 review F1).
+	it("module_report view=compact on a zero-symbol error file keeps the warning", async () => {
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "garbage.py", "def (:\n  x = [\n )) garbage\n");
+		const report = createModuleReportTool(() => env.tmpDir);
+		const result = await report.execute(
+			"5",
+			{ path: "garbage.py", view: "compact" },
+			undefined,
+			null,
+			ctx(env.tmpDir),
+		);
+		const text = String(result.content[0]?.text);
+		expect(text).toContain("unavailable");
+		expect(text).toContain(`WARNING: ${WARNING}`);
 	});
 });

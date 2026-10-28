@@ -484,7 +484,7 @@ function diagnosticMessage(err: unknown): string {
 }
 
 const SYNTAX_ERRORS_WARNING =
-	"Syntax errors in this file (tree-sitter recovered); the symbol list may be incomplete.";
+	"tree-sitter could not parse part of this file; the symbol list may be incomplete.";
 
 async function extractFile(
 	absPath: string,
@@ -2278,7 +2278,12 @@ function compactCallbackLine(
  */
 export function renderCompactModuleReport(report: ModuleReport): string {
 	if (!report.available) {
-		return `${report.path} — unavailable${report.error ? `: ${report.error}` : ""}`;
+		// #4949: a parse that recovered zero symbols lands here, the case the
+		// disclosure matters most for; keep the warning lines.
+		return [
+			`${report.path} — unavailable${report.error ? `: ${report.error}` : ""}`,
+			...(report.warnings ?? []).map((warning) => `WARNING: ${warning}`),
+		].join("\n");
 	}
 	const allEntries = [...report.api, ...report.internal];
 	const allRanges = allEntries.flatMap((e) => [e, ...(e.members ?? [])]);
