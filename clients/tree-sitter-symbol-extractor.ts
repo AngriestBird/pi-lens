@@ -1099,7 +1099,7 @@ export class TreeSitterSymbolExtractor {
 			if (str?.type === "string") {
 				// Plain, `r` and `u` strings only: `b`/`f` prefixes are not docstrings.
 				const m = /^[rRuU]?("""|'''|"|')([\s\S]*)\1$/.exec(String(str.text));
-				const text = m ? this.summarizeDocComment(m[2]) : undefined;
+				const text = m ? this.summarizeDocComment(m[2] ?? "") : undefined;
 				if (text) return { text };
 			}
 		}
