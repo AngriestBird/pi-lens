@@ -577,6 +577,9 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		resetLSPService,
 		getTreeSitterClient = getSharedTreeSitterClient,
 	} = deps;
+	// #4943: the calling session, which this call's read-guard log rows name
+	// (an in-process subagent's call is its own, not the coordinator's).
+	const callSessionId = deps.sessionId ?? runtime.telemetrySessionId;
 
 	// #2423 review round 4, finding F5: the hashline anchor memo is keyed by
 	// mtime+size, which a same-size rewrite inside one mtime tick cannot
@@ -1212,7 +1215,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				}
 				logToolReadGuardEvent({
 					event: "ts_range_expanded",
-					sessionId: runtime.telemetrySessionId,
+					sessionId: callSessionId,
 					filePath,
 					requestedOffset: requestedReadOffset,
 					requestedLimit: requestedReadLimit,
@@ -1263,7 +1266,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		const lineHashes = readScan?.hashes(effectiveReadOffset, deliveredLimit);
 		logToolReadGuardEvent({
 			event: "read_pattern",
-			sessionId: runtime.telemetrySessionId,
+			sessionId: callSessionId,
 			filePath,
 			requestedOffset: requestedReadOffset,
 			requestedLimit: requestedReadLimit ?? deliveredLimit,
@@ -1489,7 +1492,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				entry.value = escaped;
 				logToolReadGuardEvent({
 					event: "oldtext_escape_autopatched",
-					sessionId: runtime.telemetrySessionId,
+					sessionId: callSessionId,
 					filePath,
 					metadata: { tool: "edit", label: entry.label },
 				});
@@ -1520,7 +1523,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				}
 				logToolReadGuardEvent({
 					event: "oldtext_trailing_ws_autopatched",
-					sessionId: runtime.telemetrySessionId,
+					sessionId: callSessionId,
 					filePath,
 					metadata: {
 						tool: "edit",
@@ -1640,7 +1643,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				}
 				logToolReadGuardEvent({
 					event: "oldtext_indent_autopatched",
-					sessionId: runtime.telemetrySessionId,
+					sessionId: callSessionId,
 					filePath,
 					metadata: {
 						tool: "edit",
@@ -1690,7 +1693,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			} = getTouchedLinesForGuard(
 				event,
 				filePath,
-				runtime.telemetrySessionId,
+				callSessionId,
 				readGuardCorrelationId,
 				runtime.partialApplyRecords,
 				readGuard.contentMatchesLastRead(filePath),
@@ -1791,7 +1794,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 						if (partial.appliedCount > 0) {
 							logToolReadGuardEvent({
 								event: "edit_partial_apply",
-								sessionId: runtime.telemetrySessionId,
+								sessionId: callSessionId,
 								filePath,
 								metadata: {
 									appliedCount: partial.appliedCount,
@@ -1822,7 +1825,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			}
 			logToolReadGuardEvent({
 				event: "edit_check_started",
-				sessionId: runtime.telemetrySessionId,
+				sessionId: callSessionId,
 				filePath,
 				metadata: {
 					tool: mutation?.kind ?? "edit",
@@ -1869,7 +1872,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 					});
 					logToolReadGuardEvent({
 						event: "edit_range_relocated",
-						sessionId: runtime.telemetrySessionId,
+						sessionId: callSessionId,
 						filePath,
 						metadata: {
 							tool: "edit",

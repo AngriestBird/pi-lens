@@ -1120,6 +1120,47 @@ describe("RuntimeCoordinator", () => {
 			});
 		});
 
+		it("files a settled collect-later blocker under the session whose write it answered (#4943)", () => {
+			// RECURRENCE GUARDED: #4943 (the #4940 review's probe P6). The recorder
+			// took no session, so a subagent's settled deferred-runner blocker
+			// became a coordinator-owned record and the primary's turn end
+			// delivered it as its own.
+			const runtime = new RuntimeCoordinator();
+			runtime.setSessionLifecycle({ sessionId: PRIMARY });
+			const blocking: Diagnostic = {
+				id: "late-1",
+				message: "late blocker",
+				filePath: subagentFile,
+				line: 1,
+				column: 1,
+				severity: "error",
+				semantic: "blocking",
+				tool: "slow-runner",
+				runnerId: "slow-runner",
+			};
+			const analysed = { recordedAtMs: Date.now() };
+			runtime.recordDeferredInlineBlockers(
+				subagentFile,
+				[blocking],
+				analysed,
+				SUBAGENT,
+			);
+			runtime.recordDeferredInlineBlockers(
+				primaryFile,
+				[{ ...blocking, filePath: primaryFile }],
+				analysed,
+				PRIMARY,
+			);
+			expect({
+				primary: files(
+					runtime.getInlineBlockersSnapshot({ sessionId: PRIMARY }),
+				),
+				subagent: files(
+					runtime.getInlineBlockersSnapshot({ sessionId: SUBAGENT }),
+				),
+			}).toEqual({ primary: [primaryFile], subagent: [subagentFile] });
+		});
+
 		it("lets one session's policy pass set verdicts on its own records only", () => {
 			// RECURRENCE GUARDED: the pass rewrites the whole verdict axis it
 			// judged; run over every record, the subagent's empty pass cleared

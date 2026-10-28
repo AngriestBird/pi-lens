@@ -168,6 +168,8 @@ export function recordDeferredRunnerBlockers(
 					}
 				: {}),
 		},
+		// #4943: the producing write's session, stamped by the dispatch.
+		pending.sessionId,
 	);
 	// Same recompute every recording seam does: the latch re-derives from the map.
 	if (recorded > 0) runtime.updateGitGuardStatus(false, "");

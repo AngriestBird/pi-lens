@@ -1101,6 +1101,12 @@ export class RuntimeCoordinator {
 		/** When set, a durable change-log entry is appended for this cwd. */
 		cwd?: string;
 		changedRange?: ProjectChangeRange;
+		/**
+		 * #4943: the turn session of the writer, which the change-log row names
+		 * (an in-process subagent's write is its own). Omitted, it is this
+		 * coordinator's session, as before.
+		 */
+		sessionId?: string | undefined;
 		onAppendError?: (err: unknown) => void;
 	}): { projectSeq: number; fileSeq: number } {
 		// #3511: a logged mutation takes its seq from the shared change log,
@@ -1118,7 +1124,7 @@ export class RuntimeCoordinator {
 					return {
 						seq: logged.projectSeq,
 						timestamp: new Date().toISOString(),
-						sessionId: this.telemetrySessionId,
+						sessionId: this.turnSession(args.sessionId),
 						turnIndex: this.turnIndex,
 						source: args.source,
 						filePath: path.resolve(args.filePath),
@@ -1873,6 +1879,12 @@ export class RuntimeCoordinator {
 			recordedAtMs: number;
 			contentBaseline?: { size: number; sha256: string };
 		},
+		/**
+		 * #4943: the turn session of the write the settled runner answered
+		 * (`PendingRunnerFindings.sessionId`). A new record is that session's;
+		 * a merge keeps the existing record's owner.
+		 */
+		sessionId?: string,
 	): number {
 		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
@@ -1897,6 +1909,7 @@ export class RuntimeCoordinator {
 							recordedHash: analysed.contentBaseline.sha256,
 						}
 					: {}),
+				...this.recordSession(sessionId),
 			}),
 			summary: formatDiagnostics(diagnostics, "blocking").trim(),
 			diagnostics,

@@ -200,8 +200,10 @@ export interface SessionConfigRoot {
  * (a directory link from outside into it), the link's entry is registered (see
  * `configRootOnFileSpelling`). When no ancestor is even inside the root (a
  * file link from outside), no registrable spelling holds the file, so the
- * session root is registered as the host spelled it: the entry `session_start`
- * made, restored if the cap dropped it, never a new one.
+ * owning root the class resolved is registered by its identity (the
+ * kernel-real path): the session root, or for a linked worktree the worktree
+ * root, which the #2052 gate needs to admit the file. Never the host's
+ * spelling of the session root.
  */
 export function resolveSessionConfigRoot(
 	filePath: string,
@@ -218,8 +220,7 @@ export function resolveSessionConfigRoot(
 	// The owner the class resolved — the session root or the worktree root —
 	// never the edited file's directory and never a re-derived eligibility.
 	return {
-		register:
-			configRootOnFileSpelling(filePath, root) ?? nodePath.resolve(sessionRoot),
+		register: configRootOnFileSpelling(filePath, root) ?? root,
 		mode,
 	};
 }

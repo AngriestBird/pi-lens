@@ -54,6 +54,7 @@ import {
 	resolveTreeSitterLanguage,
 } from "./tree-sitter-shared.js";
 import {
+	type ExtractedSymbols,
 	type ImportRef,
 	symbolExtractionGrammar,
 	TreeSitterSymbolExtractor,
@@ -482,6 +483,9 @@ function diagnosticMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
+const SYNTAX_ERRORS_WARNING =
+	"tree-sitter could not parse part of this file; the symbol list may be incomplete.";
+
 async function extractFile(
 	absPath: string,
 	languageId: string,
@@ -522,9 +526,15 @@ async function extractFile(
 				const warnings = extractor
 					? []
 					: [`Symbol extractor not available for ${languageId}`];
-				const result = extractor
+				const result: Pick<
+					ExtractedSymbols,
+					"symbols" | "imports" | "syntaxErrors"
+				> = extractor
 					? extractor.extract(tree, absPath, content)
 					: { symbols: [], imports: [] };
+				// #4949: a recovered parse drops declarations silently; say so, so a
+				// miss is not read as absence. Disclosure only; coverage unchanged.
+				if (result.syntaxErrors) warnings.push(SYNTAX_ERRORS_WARNING);
 				const owners = result.symbols
 					.filter((candidate) => !candidate.local)
 					.map((candidate) => ({
@@ -2268,7 +2278,12 @@ function compactCallbackLine(
  */
 export function renderCompactModuleReport(report: ModuleReport): string {
 	if (!report.available) {
-		return `${report.path} — unavailable${report.error ? `: ${report.error}` : ""}`;
+		// #4949: a parse that recovered zero symbols lands here, the case the
+		// disclosure matters most for; keep the caveat lines.
+		return [
+			`${report.path} — unavailable${report.error ? `: ${report.error}` : ""}`,
+			...(report.warnings ?? []).map((note) => `WARNING: ${note}`),
+		].join("\n");
 	}
 	const allEntries = [...report.api, ...report.internal];
 	const allRanges = allEntries.flatMap((e) => [e, ...(e.members ?? [])]);
@@ -2578,7 +2593,16 @@ export async function readSymbol(
 			metadata: { symbol: symbolName, error: message },
 		});
 		log(false);
-		return { found: false, path: absPath, name: symbolName, error: message };
+		// #4949: this early return follows the extraction caveat; keep it.
+		return {
+			found: false,
+			path: absPath,
+			name: symbolName,
+			error: message,
+			...(extractionWarnings?.length
+				? { warnings: [...extractionWarnings] }
+				: {}),
+		};
 	}
 	const callbackWarnings = [...(extractionWarnings ?? [])];
 	const callback = allCallbacks.find(
