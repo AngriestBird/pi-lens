@@ -63,10 +63,11 @@
   option `-C <existing, unexpanded directory>` only) beside a short list of
   neutral commands (`echo`, `tail`, ...) are placed in a tree, and only in a
   process whose environment sets none of `GIT_DIR`, `GIT_WORK_TREE`,
-  `GIT_COMMON_DIR`. `cd`, an assignment, `--git-dir`, `--work-tree`, `-c`, a
-  wrapper or any other path named `git`, a `~` operand, a substitution that
-  runs git, any other command in the chain, or a directory outside a checkout
-  leaves the command unscoped, and an unscoped command, a verdict that names no
+  `GIT_COMMON_DIR`. The gate never resolves PATH, so a bare `git` is trusted
+  whatever executable the shell finds under that name. `cd`, an assignment,
+  `--git-dir`, `--work-tree`, `-c`, a wrapper or any other path named `git`, a
+  `~` operand, a substitution that runs git, any other command in the chain,
+  or a directory outside a checkout leaves the command unscoped, and an unscoped command, a verdict that names no
   file, and a caller that passes no command are judged by every blocker. The
   persisted `turn-end-findings` record stays the committing session's
   project's (`cwd`): for `git -C <other repo> commit` it is not read for the

@@ -1001,12 +1001,6 @@ export class RuntimeCoordinator {
 		this._gitGuardCacheUnknown.delete(cwd);
 	}
 
-	/** The first latched reason, whichever project it is about. */
-	get gitGuardCacheUnknownReason(): string | undefined {
-		for (const [, reason] of this._gitGuardCacheUnknown) return reason;
-		return undefined;
-	}
-
 	/**
 	 * The first latched reason about a project `inScope` accepts, or the first
 	 * of all when `inScope` is absent (a command the gate cannot place in a

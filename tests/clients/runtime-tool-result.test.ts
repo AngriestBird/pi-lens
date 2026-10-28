@@ -3471,7 +3471,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 				runtime.beginTurn();
 				release.resolve();
 				await handler;
-				expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+				expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			},
 		);
 	});

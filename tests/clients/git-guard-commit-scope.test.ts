@@ -300,9 +300,9 @@ describe("#4941 r2: the record-failure latch is one record per repository", () =
 			// A record about one project replaces only that project's reason.
 			runtime.markGitGuardCacheUnknown("cache_write_failed", repoA);
 			runtime.markGitGuardCacheUnknown("cache_stale", repoA);
-			expect(runtime.gitGuardCacheUnknownReason).toBe("cache_stale");
+			expect(runtime.gitGuardCacheUnknownFor()).toBe("cache_stale");
 			runtime.clearGitGuardCacheUnknown(repoA);
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}

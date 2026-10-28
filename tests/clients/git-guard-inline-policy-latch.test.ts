@@ -976,7 +976,7 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 			fs.writeFileSync(filePath, "safeAlpha();\n");
 			editDispatch(runtime, cacheManager, cwd, filePath, []);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
 				block: false,
 			});
@@ -1020,7 +1020,7 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 			fs.writeFileSync(blocking, "safeAlpha();\n");
 			editDispatch(runtime, cacheManager, cwd, blocking, []);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
 				block: false,
 			});
@@ -1060,7 +1060,7 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 			fs.writeFileSync(filePath, "safeAlpha();\nsafeBeta();\n");
 			editDispatch(runtime, cacheManager, cwd, filePath, []);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
 				block: false,
 			});
