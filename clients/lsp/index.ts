@@ -37,6 +37,7 @@ import {
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
 import {
 	applyAuxiliarySuppressions,
+	findAuxiliaryProfileForSource,
 	isOptInAuxiliaryServerId,
 	dropExcludedServers,
 } from "../dispatch/auxiliary-lsp.js";
@@ -7302,13 +7303,15 @@ export class LSPService {
 			// #4956 r6: and only a candidate's rows. The live path below rewrites the
 			// store from `spawned`, so a row of a server this read does not name (an
 			// opt-in fallow the per-edit door stored, switched off since) is no part
-			// of its answer. A row naming no server stays, as `dropExcludedServers`
-			// documents.
+			// of its answer. `candidateServerIds` already leaves out every excluded
+			// server, so this one set covers #4323's exclusions too. A row naming no
+			// server stays, as `dropExcludedServers` documents.
 			const stored = this.lastKnownDiagnostics.get(normalizedPath);
-			const notCandidates = new Set(excludeServerIds);
+			const notCandidates = new Set<string>();
 			for (const d of stored ?? []) {
-				if (d.serverId && !candidateServerIds.includes(d.serverId))
-					notCandidates.add(d.serverId);
+				const id =
+					d.serverId ?? findAuxiliaryProfileForSource(d.source)?.serverId;
+				if (id && !candidateServerIds.includes(id)) notCandidates.add(id);
 			}
 			const stale =
 				stored &&

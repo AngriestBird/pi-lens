@@ -570,6 +570,13 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 				.sort(),
 		).toEqual(["fallow finding", "typescript finding", "typos finding"]);
 
+		// A stored row that names its server only through `source` is attributed
+		// the same way (the #4323 contract for a row with no `serverId`).
+		service.getLastKnownDiagnostics(`${ROOT}/a.ts`)?.push({
+			...makeDiagnostic("source-only fallow finding"),
+			source: "fallow",
+		});
+
 		// Every server is now down: the read acquires nothing and serves the store.
 		(
 			service as unknown as { state: { clients: Map<string, unknown> } }
