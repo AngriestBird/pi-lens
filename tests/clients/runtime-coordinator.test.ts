@@ -171,7 +171,14 @@ describe("RuntimeCoordinator", () => {
 			runtime.setSessionLifecycle({ sessionId: "primary-f8" });
 			runtime.readGuard.recordWritten(file);
 			runtime.readGuardFor("sub-f8-a").recordWritten(file);
-			runtime.readGuardFor("sub-f8-b").recordWritten(file);
+			const liveSecondary = runtime.readGuardFor("sub-f8-b");
+			liveSecondary.recordWritten(file);
+			// #4955 review F14: releasing the bucket must not move the shared
+			// branch epoch, so the coordinator's and the live secondary's stay put.
+			const epochsBefore = {
+				primary: runtime.readGuard.currentBranchEpoch,
+				liveSecondary: liveSecondary.currentBranchEpoch,
+			};
 
 			runtime.forgetTurnSession("sub-f8-a");
 
@@ -180,10 +187,42 @@ describe("RuntimeCoordinator", () => {
 				liveSecondary: createFileTime("sub-f8-b").get(file) !== undefined,
 				primary:
 					createFileTime(runtime.telemetrySessionId).get(file) !== undefined,
-			}).toEqual({ forgotten: undefined, liveSecondary: true, primary: true });
+				epochs: {
+					primary: runtime.readGuard.currentBranchEpoch,
+					liveSecondary: liveSecondary.currentBranchEpoch,
+				},
+			}).toEqual({
+				forgotten: undefined,
+				liveSecondary: true,
+				primary: true,
+				epochs: epochsBefore,
+			});
 			runtime.forgetTurnSession("sub-f8-b");
 			createFileTime(runtime.telemetrySessionId).clear();
 		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("resetForSession releases a dropped secondary's FileTime bucket with its guard (#4942 F13)", () => {
+		// RECURRENCE GUARDED: #4955 review F13 (AGENTS shape 46). The primary's
+		// reset drops every secondary guard. Only forgetTurnSession released the
+		// guard's FileTime bucket, so a reset left it behind, and a guard built
+		// again for the same id read the stamps from before the reset.
+		const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-f13-"));
+		try {
+			const file = path.join(dir, "a.ts");
+			writeFileSync(file, "export const a = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.setSessionLifecycle({ sessionId: "primary-f13" });
+			runtime.readGuardFor("sub-f13").recordWritten(file);
+			expect(createFileTime("sub-f13").get(file)).toBeDefined();
+
+			runtime.resetForSession();
+
+			expect(createFileTime("sub-f13").get(file)).toBeUndefined();
+		} finally {
+			createFileTime("sub-f13").clear();
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});

@@ -31,8 +31,9 @@
   the half of #3613 this paragraph used to leave open):
   `RuntimeCoordinator.readGuardFor(sessionId)` answers with the coordinator's
   own guard for a turn with no session id of its own, and with a guard of its
-  own, built on first use and dropped at its shutdown, for a concurrent
-  secondary. It keys that guard by the opaque owner the inline blockers use
+  own, built on first use and dropped at its shutdown or at the coordinator's
+  own reset, for a concurrent secondary. It keys that guard by the opaque owner
+  the inline blockers use
   (#4921, `recordSession`), so an edit is judged by the reads and writes of
   the session that edits. The coordinator's own guard is the primary's only
   while the ctx's stable session id equals the pinned telemetry id

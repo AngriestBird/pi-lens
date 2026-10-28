@@ -854,6 +854,8 @@ export class RuntimeCoordinator {
 		this._gitGuardCacheUnknown.clear();
 		this._gitGuardUnansweredDispatches.clear();
 		this._readGuard = null;
+		for (const guard of this._foreignReadGuards.values())
+			guard.releaseFileTime();
 		this._foreignReadGuards.clear();
 		this._pendingDeferredMutations.clear();
 		// #1642 F5: every sibling correlation/state map is cleared here. A
