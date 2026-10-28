@@ -1045,7 +1045,12 @@ export class TreeSitterSymbolExtractor {
 			...(decorators.length > 0 ? { decorators } : {}),
 			...(isAsync ? { isAsync: true } : {}),
 			...(docInfo
-				? { doc: docInfo.text, docStartLine: docInfo.startLine }
+				? {
+						doc: docInfo.text,
+						...(docInfo.startLine !== undefined
+							? { docStartLine: docInfo.startLine }
+							: {}),
+					}
 				: {}),
 		};
 	}
@@ -1072,11 +1077,32 @@ export class TreeSitterSymbolExtractor {
 	 * summarized text (`doc`) and the 1-based start line of the attached comment
 	 * block (`docStartLine`, #523) — readSymbol extends its returned range to that
 	 * line so an agent reading a symbol sees its contract, not just its body.
+	 * A Python docstring (#4948) is the first string statement INSIDE the body, so
+	 * it yields `text` only: its `startLine` stays undefined, because a start line
+	 * below the signature would make readSymbol's range cut the signature off.
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter node
 	private extractDocCommentInfo(
 		declNode: any,
-	): { text: string; startLine: number } | undefined {
+	): { text: string; startLine?: number } | undefined {
+		if (
+			declNode.type === "function_definition" ||
+			declNode.type === "class_definition"
+		) {
+			// Only the FIRST statement of the body counts, as in Python itself; a
+			// string after other code is a no-op expression, not a docstring.
+			const first = declNode.childForFieldName("body")?.namedChild(0);
+			const str =
+				first?.type === "expression_statement" && first.namedChildCount === 1
+					? first.namedChild(0)
+					: undefined;
+			if (str?.type === "string") {
+				// Plain, `r` and `u` strings only: `b`/`f` prefixes are not docstrings.
+				const m = /^[rRuU]?("""|'''|"|')([\s\S]*)\1$/.exec(String(str.text));
+				const text = m ? this.summarizeDocComment(m[2]) : undefined;
+				if (text) return { text };
+			}
+		}
 		const isComment = (n: any): boolean =>
 			!!n && n.type === TreeSitterSymbolExtractor.COMMENT_NODE_KIND;
 		const isDeco = (n: any) =>
