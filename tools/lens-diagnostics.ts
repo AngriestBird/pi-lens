@@ -3063,13 +3063,16 @@ async function formatFullMode(
 	// #4944: an auxiliary the operator turned off was never asked, so it is in
 	// neither list above; say so, as `lsp_diagnostics` does ("Switched off, not
 	// run"), so a sweep with no ast-grep rows is not read as an ast-grep result.
-	// Code-unit order, for the same determinism as the lane names above.
+	// The switch names the auxiliary LSP server only: the project scan above
+	// still reports `ast-grep-napi` rows under `--no-ast-grep`, so the note says
+	// which ast-grep did not run. Code-unit order, for the same determinism as
+	// the lane names above.
 	const switchedOffServerIds = [...(options.excludeServerIds ?? [])].sort(
 		(a, b) => Number(a > b) - Number(a < b),
 	);
 	const switchedOffNote =
 		switchedOffServerIds.length > 0
-			? `\n\nSwitched off, not run: ${switchedOffServerIds.join(", ")}.`
+			? `\n\nSwitched off, not run (auxiliary LSP): ${switchedOffServerIds.join(", ")}.`
 			: "";
 	// #646: primary-vs-auxiliary split of the raw LSP-sweep findings (before
 	// they're merged into the widget-state summaries below), mirroring

@@ -419,10 +419,12 @@ function expectedLines(route: RouteId, column: Column): string[] {
 		case "lens_diagnostics mode=full":
 			// #4403 N3: no retry hint where only a denial kept the server out.
 			// #4944 F5: a server an operator switch turned off is named, as the
-			// single-file renderer names it.
+			// single-file renderer names it. #4947 r2 N2: as an auxiliary LSP
+			// server, because this result can carry the project scan's
+			// `ast-grep-napi` rows, which the switch does not turn off.
 			return clean
 				? column.switchedOff
-					? [`Switched off, not run: ${column.switchedOff}.`]
+					? [`Switched off, not run (auxiliary LSP): ${column.switchedOff}.`]
 					: []
 				: [
 						`⚠ LSP sweep: 0 file(s) confirmed via LSP, 1 unconfirmed (no primary language server answered (${CAUSE[primary]})) — NOT the same as 0 diagnostics for: <ws>/sweep${ext}. These files' LSP contribution is excluded from this result${primary === "disabled" ? "" : "; re-run mode=full to retry them"} (they may still show findings above from cached/project-runner state).`,
@@ -600,7 +602,7 @@ function sweepLines(text: string, workspace: string): string[] {
 	return shownLines(text, workspace).filter(
 		(line) =>
 			line.startsWith("⚠ LSP sweep:") ||
-			line.startsWith("Switched off, not run:"),
+			line.startsWith("Switched off, not run"),
 	);
 }
 
