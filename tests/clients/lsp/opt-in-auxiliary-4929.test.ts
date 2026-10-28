@@ -19,6 +19,9 @@
  *    download and a process the operator never asked for.
  *  - trust: an untrusted project must neither launch nor install the server.
  */
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const launchMock = vi.hoisted(() => vi.fn());
@@ -79,6 +82,7 @@ function makeClient(serverId: string) {
 		notify: {
 			open: vi.fn(async () => undefined),
 			change: vi.fn(async () => undefined),
+			announceCreated: vi.fn(),
 		},
 		getDiagnostics: vi.fn(() => []),
 		getAllDiagnostics: vi.fn(() => new Map()),
@@ -317,6 +321,13 @@ describe("a default-off fallow adds no per-file root resolution (#4956 F1)", () 
 			diagnostics: "none",
 		});
 		await service.getDiagnostics(TS_FILE);
+		// #4956 F6: the all-server door of a content sync (drift resync, open
+		// import touch) may reach a held opt-in client, so it lists servers
+		// through the same live-client gate; with none held it walks nothing.
+		await service.touchFile(TS_FILE, "export const a = 2;\n", {
+			diagnostics: "none",
+			clientScope: "all",
+		});
 		// The unheld-document filter (the head-move and full-sweep touches) is
 		// private and reached only with live documents, so it is called directly.
 		await (
@@ -357,6 +368,54 @@ describe("a default-off fallow adds no per-file root resolution (#4956 F1)", () 
 		const warm = await service.getWarmClientForFile(TS_FILE);
 		expect(warm?.info.id).toBe("fallow");
 		expect(resolved).toContain("fallow");
+		await service.shutdown();
+	});
+
+	/**
+	 * #4956 F5. Recurrence: `skippedAuxiliaryServerIds` listed every unattached
+	 * auxiliary of a collecting all-server touch, fallow included, and resolved
+	 * its root to check the breaker, so the real sweep walked the default-off
+	 * root once per swept file (verify probe: 6 files, 6 walks; master 0), up
+	 * to the 5000-file cap. That door never admits fallow, so it is no gap.
+	 */
+	it("the real workspace sweep never walks a default-off fallow root", async () => {
+		const { service, resolved, rootWalks } = await watch();
+		const root = mkdtempSync(path.join(os.tmpdir(), "pi-lens-4956-f5-"));
+		try {
+			writeFileSync(path.join(root, "package.json"), '{"name":"f5"}\n');
+			const files = [0, 1, 2, 3].map((i) => {
+				const file = path.join(root, `f${i}.ts`);
+				writeFileSync(file, `export const v${i} = ${i};\n`);
+				return file;
+			});
+			const results = await service.runWorkspaceDiagnostics(root, { files });
+			// Positive control: the sweep touched every file through the primary.
+			expect(results).toHaveLength(files.length);
+			expect(resolved).toContain("typescript");
+			expect(resolved.filter((id) => id === "fallow")).toEqual([]);
+			expect(rootWalks).toEqual([]);
+			expect(launchedCommands()).not.toContain("fallow-lsp");
+		} finally {
+			await service.shutdown();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("the collecting all-server door leaves even a held fallow client out", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const held = await service.getAuxiliaryClientsForFile(
+			TS_FILE,
+			new Set(["fallow"]),
+		);
+		expect(held.map((entry) => entry.info.id)).toEqual(["fallow"]);
+		// The door every collecting check uses (`getDiagnostics`, the sweep's
+		// per-file touch, `lsp_diagnostics`): it never names fallow, so a warm
+		// client must not make its answer depend on an earlier edit.
+		const { clients } = await service.getClientsForFile(TS_FILE);
+		// Positive control: the door is not vacuous, a default-on auxiliary is in.
+		expect(clients.map((entry) => entry.info.id)).toContain("typos");
+		expect(clients.map((entry) => entry.info.id)).not.toContain("fallow");
 		await service.shutdown();
 	});
 

@@ -2752,7 +2752,13 @@ export class LSPService {
 		const attached = new Set(spawned.map((entry) => entry.info.id));
 		const brokenSkippedServerIds: string[] = [];
 		const policySkippedServerIds: string[] = [];
-		for (const server of getServersForFileWithConfig(filePath)) {
+		// #4956 F5: an opt-in auxiliary is a gap only for the door that names it.
+		// The all-server door never admits one to a collecting touch, so it lists
+		// what it may admit and never walks an opt-in root per file.
+		const candidates = enabledAuxiliaries
+			? getServersForFileWithConfig(filePath)
+			: aggregateServersForFile(filePath);
+		for (const server of candidates) {
 			if (!isAuxiliary(server)) continue;
 			if (attached.has(server.id)) continue;
 			// An explicitly excluded server (the #584 workspace-sweep exclusion) was
@@ -3297,8 +3303,18 @@ export class LSPService {
 		 * the primary's.
 		 */
 		auxiliaryRoots?: Map<string, string>,
+		/**
+		 * #4956 F6: the touch only syncs content (`diagnostics: "none"`). This door
+		 * never names an opt-in auxiliary, so it never starts one; a sync still
+		 * reaches one whose live client already holds this file's root, or the
+		 * drift resync would leave that view stale for good. A collecting touch
+		 * never consults an opt-in server it did not name.
+		 */
+		syncOnly = false,
 	): Promise<{ clients: SpawnedServer[]; serverCountAttempted: number }> {
-		const allServers = aggregateServersForFile(filePath);
+		const allServers = syncOnly
+			? this.serversWithLiveReaderRoots(filePath)
+			: aggregateServersForFile(filePath);
 		const servers =
 			excludeServerIds && excludeServerIds.size > 0
 				? allServers.filter((s) => !excludeServerIds.has(s.id))
@@ -3306,6 +3322,8 @@ export class LSPService {
 		if (servers.length === 0) return { clients: [], serverCountAttempted: 0 };
 
 		// Resolve once to keep the attempted count tied to servers with a real root.
+		// An opt-in auxiliary stays only where a live client already holds its
+		// root, so the acquisition below is that client's warm reuse.
 		const rootedServers = (
 			await Promise.all(
 				servers.map(async (server) => ({
@@ -3315,7 +3333,11 @@ export class LSPService {
 			)
 		).filter(
 			(entry): entry is { server: LSPServerInfo; root: string } =>
-				entry.root !== undefined,
+				entry.root !== undefined &&
+				(!isOptInAuxiliaryServerId(entry.server.id) ||
+					this.state.clients
+						.get(`${entry.server.id}:${normalizeMapKey(entry.root)}`)
+						?.isAlive() === true),
 		);
 
 		for (const { server, root } of rootedServers)
@@ -4456,6 +4478,7 @@ export class LSPService {
 				options.excludeServerIds,
 				resolvedPrimaryRoots,
 				attemptedAuxiliaryRoots,
+				diagnosticsMode === "none",
 			);
 			spawned = result.clients;
 			serverCountAttempted = result.serverCountAttempted;

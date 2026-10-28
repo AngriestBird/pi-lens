@@ -483,6 +483,52 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		);
 	});
 
+	// #4956 F5: an opt-in scanner (fallow) is a gap only for the door that names
+	// it. The per-edit door names it when the operator turned it on, so its open
+	// breaker must still read `"partial"`; the all-server door never admits it,
+	// so the same breaker is no gap there. Recurrence: round 3 listed every
+	// unattached auxiliary of an all-server touch, which walked fallow's root
+	// per file and named a scanner that door would never have started.
+	it("an opt-in scanner's open breaker is a gap only for the door that names it", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const primary = makeClient("typescript", 0, [
+			makeDiagnostic("primary finding"),
+		]);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("fallow", "auxiliary"),
+		]);
+		createLSPClient.mockResolvedValue(primary);
+		(
+			service as unknown as { state: { broken: Map<string, number> } }
+		).state.broken.set(`fallow:${normalizeMapKey(ROOT)}`, Date.now() + 15_000);
+
+		const touch = async (options: Record<string, unknown>) => {
+			const pending = service.touchFile(`${ROOT}/a.ts`, "content", {
+				diagnostics: "document",
+				collectDiagnostics: true,
+				source: "cascade",
+				...options,
+			});
+			await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 20);
+			return (await pending) as
+				| { confirmation?: string; unconfirmedServerIds?: string[] }
+				| undefined;
+		};
+
+		const named = await touch({
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["fallow"],
+		});
+		expect(named?.confirmation).toBe("partial");
+		expect(named?.unconfirmedServerIds).toEqual(["fallow"]);
+
+		const unnamed = await touch({ clientScope: "all" });
+		expect(unnamed?.confirmation).toBe("confirmed");
+		expect(unnamed?.unconfirmedServerIds ?? []).toEqual([]);
+	});
+
 	// #4760 / #4769 review F2: the root-policy door. A scanner declined because
 	// its root is `$HOME` never spawned, so the touch that skipped it must read
 	// `"partial"` and name it, never `"confirmed"`: the #1459 false-clean shape
