@@ -2031,14 +2031,14 @@ export function syncGitGuardRecord(
 	) {
 		// #4921 r2 F1: the latch is process-wide, so it speaks for the record's
 		// owner. Only the coordinator's own write may say "another session's
-		// record"; a concurrent session's clean write leaves the record and the
+		// record"; a concurrent session's write leaves the record and the
 		// latch to the session that owns them.
 		if (sessionId !== undefined && !runtime.isCoordinatorSession(sessionId)) {
 			recordDegradationOnce({
 				kind: "git-guard-non-owner-write",
 				subject: sessionId,
 				reason:
-					"a concurrent session's clean write left another session's commit-gate record and latch untouched",
+					"a concurrent session's write left another session's commit-gate record and latch untouched",
 			});
 			return;
 		}
