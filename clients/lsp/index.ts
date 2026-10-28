@@ -38,6 +38,7 @@ import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
 import {
 	applyAuxiliarySuppressions,
 	isOptInAuxiliaryServerId,
+	dropExcludedServers,
 } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { emitBounded } from "../bounded-telemetry.js";
@@ -7277,11 +7278,9 @@ export class LSPService {
 			// them for callers that did not exclude it.
 			const stored = this.lastKnownDiagnostics.get(normalizedPath);
 			const stale =
-				excludeServerIds !== undefined && excludeServerIds.size > 0
-					? stored?.filter(
-							(diagnostic) => !excludeServerIds.has(diagnostic.serverId ?? ""),
-						)
-					: stored;
+				stored &&
+				dropExcludedServers({ diagnostics: stored }, excludeServerIds)
+					.diagnostics;
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
 			// #4322: with nothing acquired, every primary that resolved a root went
 			// unanswered, so an empty answer here is not a clean one.
@@ -8965,6 +8964,12 @@ export class LSPService {
 			 * the walk does before calling in).
 			 */
 			files?: string[];
+			/**
+			 * Auxiliary servers the operator's configuration turns off
+			 * (`--no-ast-grep`, `astGrep.enabled=false`; #4944), left unstarted on
+			 * top of `WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`.
+			 */
+			excludeServerIds?: ReadonlySet<string>;
 		} = {},
 	): Promise<LSPWorkspaceDiagnosticResult[]> {
 		// #1618: hold the shared sweep gate for this call's ENTIRE lifetime —
@@ -8990,10 +8995,15 @@ export class LSPService {
 			onServerReady?: () => void;
 			nextWriteIndex?: () => number;
 			files?: string[];
+			excludeServerIds?: ReadonlySet<string>;
 		} = {},
 	): Promise<LSPWorkspaceDiagnosticResult[]> {
 		const startedAt = Date.now();
 		const root = path.resolve(cwd);
+		const sweepExcludedServerIds: ReadonlySet<string> = new Set([
+			...WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+			...(options.excludeServerIds ?? []),
+		]);
 		const { signal } = options;
 		// #1783: second heartbeat for the drift backstop. The per-file touch
 		// below already carries one, but a round that answers every file from
@@ -9040,7 +9050,7 @@ export class LSPService {
 		const workspaceDiagnosticsCacheCtx =
 			createWorkspaceDiagnosticsCacheContext(root);
 		const workspaceSweepScopeKey = buildScopeKey("all", [
-			...WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+			...sweepExcludedServerIds,
 		]);
 		const touchScopedOpenDependencies = async (
 			filePath: string,
@@ -9309,7 +9319,7 @@ export class LSPService {
 					(async () => {
 						const { clients } = await this.getClientsForFile(
 							filePath,
-							WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+							sweepExcludedServerIds,
 						);
 						for (const entry of clients) {
 							// #1714: this pass is the sweep's SECOND source of `didOpen`
@@ -9429,7 +9439,13 @@ export class LSPService {
 				// carry no binding, and the IPC client already rejects an inconclusive
 				// answer, so `available` implies confirmed) — wrap it as `{ diags }`;
 				// the incumbent branch already returns the wrapper.
-				const touchResult = attached?.available
+				// #4944: the incumbent answers every auxiliary; drop the rows and the
+				// coverage-gap names of the ones this sweep's exclusion set (the
+				// scope key below claims) leaves out, and read the answer from here.
+				const answer = attached?.available
+					? dropExcludedServers(attached.response, sweepExcludedServerIds)
+					: undefined;
+				const touchResult = answer
 					? {
 							// #4645: the incumbent's membership answer, applied on receipt
 							// through the owner's rule. This sweep records its rows into
@@ -9439,25 +9455,22 @@ export class LSPService {
 							// environment rule still runs at render, against the install
 							// state of that render.
 							diags:
-								attached.response.projectIdentity === undefined
-									? attached.response.diagnostics
-									: await demoteInferredProjectDiagnostics(
-											attached.response.diagnostics,
-											{
-												filePath,
-												cwd,
-												identityCache: new Map([
-													[filePath, attached.response.projectIdentity],
-												]),
-											},
-										),
+								answer.projectIdentity === undefined
+									? answer.diagnostics
+									: await demoteInferredProjectDiagnostics(answer.diagnostics, {
+											filePath,
+											cwd,
+											identityCache: new Map([
+												[filePath, answer.projectIdentity],
+											]),
+										}),
 							// #1470: the incumbent's coverage gap crosses the socket as an
 							// explicit DTO field, so carry it onto the wrapper the sweep
 							// reads. Dropping it here would let a partially covered
 							// incumbent answer be persisted as a confirmed sweep result —
 							// the same false clean this change closes on the local route.
-							...(attached.response.unconfirmedServerIds !== undefined && {
-								unconfirmedServerIds: attached.response.unconfirmedServerIds,
+							...(answer.unconfirmedServerIds !== undefined && {
+								unconfirmedServerIds: answer.unconfirmedServerIds,
 							}),
 						}
 					: await withDeadline(
@@ -9470,7 +9483,7 @@ export class LSPService {
 								// `opengrep-client.ts` CLI extractor (one project-wide scan,
 								// cached, read via extractors.ts) instead — see the
 								// `excludeServerIds` doc on `LSPTouchFileOptions`.
-								excludeServerIds: WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+								excludeServerIds: sweepExcludedServerIds,
 								// #645: lets a workspaceIndexing server (marksman) pay its
 								// full wait budget only once across this whole sweep.
 								sweepIndexGate,

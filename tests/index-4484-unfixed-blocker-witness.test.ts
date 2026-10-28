@@ -384,6 +384,14 @@ const scrub = (s: string) =>
 		.replace(/·\s*\d+ms/g, "· <MS>ms")
 		.trim();
 
+/**
+ * The CLI spelling that retires the ast-grep auxiliary server, applied after
+ * the factory as pi applies it (#4944: the flag was unregistered, so the old
+ * double only appeared to honor it). The napi-only cells pass it so the
+ * runner under test is the per-edit one, not the substitute for a server.
+ */
+const AST_GREP_OFF = { "no-ast-grep": true };
+
 /** One host session over one file, through the registered handlers. */
 async function openSession(
 	name: string,
@@ -820,6 +828,7 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 			"src/scope-ag.ts",
 			AST_GREP_FIXED,
 			SCOPED,
+			AST_GREP_OFF,
 		);
 		const w1 = await s.write(AST_GREP_SRC);
 		expect(w1).toContain("🔴 STOP");
@@ -838,7 +847,13 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 
 	// Recurrence: tree-sitter's edit-range gate did the same before #4482.
 	it("keeps a tree-sitter blocker pending after an edit to another line (row 7)", async () => {
-		const s = await openSession("st", "src/scope-ts.ts", TS_FIXED, SCOPED);
+		const s = await openSession(
+			"st",
+			"src/scope-ts.ts",
+			TS_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		const w1 = await s.write(TS_SRC);
 		expect(w1).toContain("🔴 STOP");
 		expect(w1).toContain("debugger");
@@ -858,7 +873,13 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 		const file = "src/scope-pre.ts";
 		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, file), AST_GREP_SRC);
-		const s = await openSession("sp", file, AST_GREP_EDITED, SCOPED);
+		const s = await openSession(
+			"sp",
+			file,
+			AST_GREP_EDITED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		const w1 = await s.edit(AST_GREP_EDITED, [1]);
 		expect(w1).not.toContain("🔴 STOP");
 		expect(w1).not.toMatch(/Still unfixed/);
@@ -1093,7 +1114,7 @@ describe("#4484 witness, round 3: position, verdict and owed lines", () => {
 		const file = "src/twin-ag.ts";
 		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, file), AG_PRE);
-		const s = await openSession("ta", file, AG_PRE, SCOPED);
+		const s = await openSession("ta", file, AG_PRE, SCOPED, AST_GREP_OFF);
 		const w1 = await s.edit(AG_TWIN, [6, 7, 8]);
 		expect(w1).toContain("🔴 STOP");
 		expect(w1).toContain("L6:");
@@ -1113,7 +1134,7 @@ describe("#4484 witness, round 3: position, verdict and owed lines", () => {
 		const file = "src/twin-ts.ts";
 		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, file), TS_PRE);
-		const s = await openSession("tt", file, TS_PRE, SCOPED);
+		const s = await openSession("tt", file, TS_PRE, SCOPED, AST_GREP_OFF);
 		const w1 = await s.edit(TS_TWIN, [5, 6, 7]);
 		expect(w1).toContain("🔴 STOP");
 		expect(w1).toContain("L6:");
@@ -1132,7 +1153,7 @@ describe("#4484 witness, round 3: position, verdict and owed lines", () => {
 		const file = "src/twin-move.ts";
 		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, file), AG_PRE);
-		const s = await openSession("tm", file, AG_PRE, SCOPED);
+		const s = await openSession("tm", file, AG_PRE, SCOPED, AST_GREP_OFF);
 		expect(await s.edit(AG_TWIN, [6, 7, 8])).toContain("🔴 STOP");
 		const moved = `// header\n${AG_TWIN}`;
 		const w2 = await s.edit(moved, [1]);
@@ -1188,7 +1209,13 @@ describe("#4484 witness, round 3: position, verdict and owed lines", () => {
 	// Recurrence (F2, review probe P2): the ast-grep runner skips a file over
 	// 1 MiB without reading it, and the edit said clean.
 	it("keeps an ast-grep blocker pending when the file outgrows the runner's size cap (row 11)", async () => {
-		const s = await openSession("sg", "src/skip-ag.ts", AG_PRE, SCOPED);
+		const s = await openSession(
+			"sg",
+			"src/skip-ag.ts",
+			AG_PRE,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		const AG_FIXED = AG_PRE.replace("): unknown {", "): string {");
 		await s.write(AG_FIXED);
 		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
@@ -1210,7 +1237,13 @@ describe("#4484 witness, round 3: position, verdict and owed lines", () => {
 	// range (TLC MutOwedRanges).
 	it("records a blocker first written while its runner had no verdict once the runner next answers (row 15)", async () => {
 		const AG_FIXED = AG_PRE.replace("): unknown {", "): string {");
-		const s = await openSession("ow", "src/owed-ag.ts", AG_FIXED, SCOPED);
+		const s = await openSession(
+			"ow",
+			"src/owed-ag.ts",
+			AG_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		await s.write(AG_FIXED);
 		// One edit adds the blocker at L3 and grows the file past the cap, so
 		// the ast-grep run skips without reading it.
@@ -1265,7 +1298,13 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 	// ast-grep blocker still on disk: `✓ clean`, the gate open, and "Resolved"
 	// at turn end (TLC MutUnaligned).
 	it("keeps an ast-grep blocker pending when the write cannot be aligned (row 4, P11c)", async () => {
-		const s = await openSession("uc", "src/unaligned-ag.ts", AG_FIXED, SCOPED);
+		const s = await openSession(
+			"uc",
+			"src/unaligned-ag.ts",
+			AG_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		await s.write(AG_FIXED);
 		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
 		const big = `${PAD}\n${AG_PRE}export const tail = 1;\n`;
@@ -1279,7 +1318,13 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 
 	// Recurrence (G1, verify probe P11d): the same through tree-sitter.
 	it("keeps a tree-sitter blocker pending when the write cannot be aligned (row 4, P11d)", async () => {
-		const s = await openSession("ud", "src/unaligned-ts.ts", TS_FIXED, SCOPED);
+		const s = await openSession(
+			"ud",
+			"src/unaligned-ts.ts",
+			TS_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		await s.write(TS_FIXED);
 		expect(await s.edit(TS_PRE, [2])).toContain("🔴 STOP");
 		const big = `${PAD}\n${TS_PRE}export const tail = 1;\n`;
@@ -1295,7 +1340,13 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 	// 256-entry cache apart from the record. Writes to 260 other files evicted
 	// it, and the next edit above the blocker retired it with nothing to align.
 	it("keeps a tree-sitter blocker's anchor across writes to 260 other files (row 10, P18)", async () => {
-		const s = await openSession("evict", "src/evicted-ts.ts", TS_FIXED, SCOPED);
+		const s = await openSession(
+			"evict",
+			"src/evicted-ts.ts",
+			TS_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		await s.write(TS_FIXED);
 		expect(await s.edit(TS_PRE, [2])).toContain("🔴 STOP");
 		for (let i = 0; i < 260; i += 1)
@@ -1313,7 +1364,13 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 	// G1's third path (round-4 brief item 4): past the blocker baseline's
 	// 2 MiB cap the write's bytes get no line hashes, so it has no alignment.
 	it("keeps a tree-sitter blocker pending when the file outgrows the 2 MiB hash cap (row 4)", async () => {
-		const s = await openSession("ug", "src/hashcap-ts.ts", TS_FIXED, SCOPED);
+		const s = await openSession(
+			"ug",
+			"src/hashcap-ts.ts",
+			TS_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		await s.write(TS_FIXED);
 		expect(await s.edit(TS_PRE, [2])).toContain("🔴 STOP");
 		const wide = Array.from(
@@ -1342,7 +1399,13 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 		// delivers or records it (#4481).
 		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, "src/slide-ts.ts"), OLD);
-		const s = await openSession("uf", "src/slide-ts.ts", FIXED, SCOPED);
+		const s = await openSession(
+			"uf",
+			"src/slide-ts.ts",
+			FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		const w1 = await s.edit(`${NEU}${OLD}`, [1, 2, 3]);
 		expect(w1).toContain("🔴 STOP");
 		expect(w1).toContain("L2:");
@@ -1380,7 +1443,13 @@ describe("#4484 witness, round 5: a fallback holds only what its evidence names"
 		const FIXED = OLD.replace("\tdebugger; // old\n", "\treturn;\n");
 		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, "src/adopt-ts.ts"), OLD);
-		const s = await openSession("adopt", "src/adopt-ts.ts", FIXED, SCOPED);
+		const s = await openSession(
+			"adopt",
+			"src/adopt-ts.ts",
+			FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		const w1 = await s.edit(`${NEU}${OLD}`, [1, 2, 3]);
 		expect(w1).toContain("🔴 STOP");
 		expect(w1).toContain("L2:");
@@ -1400,7 +1469,13 @@ describe("#4484 witness, round 5: a fallback holds only what its evidence names"
 	// aligned that stale number to another line, found nothing there, and
 	// retired the blocker while it was still on disk.
 	it("keeps a blocker its runner skipped on an unaligned write once the next write aligns (row 6b)", async () => {
-		const s = await openSession("stale", "src/stale-ag.ts", AG_FIXED, SCOPED);
+		const s = await openSession(
+			"stale",
+			"src/stale-ag.ts",
+			AG_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		await s.write(AG_FIXED);
 		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
 		// Unaligned, and past the runner's size cap: no verdict, no position.
@@ -1425,7 +1500,13 @@ describe("#4484 witness, round 5: a fallback holds only what its evidence names"
 		const BASE = `${AG_PRE}export const k = 1;\n`;
 		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, "src/owed-pre.ts"), BASE);
-		const s = await openSession("owpre", "src/owed-pre.ts", AG_FIXED, SCOPED);
+		const s = await openSession(
+			"owpre",
+			"src/owed-pre.ts",
+			AG_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		const W0 = BASE.replace("k = 1", "k = 2");
 		expect(await s.edit(W0, [6])).toMatch(/✓ .*clean/);
 		// The skipped lines hold a copy of the pre-existing finding's own line,
@@ -1448,7 +1529,13 @@ describe("#4484 witness, round 5: a fallback holds only what its evidence names"
 		const TS_OK = "// top\n";
 		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, "src/owed-rec.ts"), AG_PRE);
-		const s = await openSession("owrec", "src/owed-rec.ts", AG_PRE, SCOPED);
+		const s = await openSession(
+			"owrec",
+			"src/owed-rec.ts",
+			AG_PRE,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		// The debugger blocks (tree-sitter, recorded); the ast-grep runner skips
 		// the file past its size cap and owes the edit's lines.
 		const w1 = await s.edit(`${TS_BAD}${AG_PRE}${OVER_CAP}\n`, [1, 7]);
@@ -1918,7 +2005,13 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 		padc[2] = AG_PRE.split("\n")[2] ?? "";
 		padc[1099] = "*/";
 		const PADC = padc.join("\n");
-		const s = await openSession("p29", "src/p29.ts", AG_FIXED, SCOPED);
+		const s = await openSession(
+			"p29",
+			"src/p29.ts",
+			AG_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		await s.write(AG_FIXED);
 		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
 		// Unaligned, and past napi's size cap: no verdict, and no place.
@@ -1942,7 +2035,13 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 	// the file, so the sweep read the whole record as stale and retired it
 	// with the violation on disk.
 	it("keeps a blocker carried without a place when its old line number is past the end of the file (row 35)", async () => {
-		const s = await openSession("eof", "src/stale-eof.ts", AG_FIXED, SCOPED);
+		const s = await openSession(
+			"eof",
+			"src/stale-eof.ts",
+			AG_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		const big = `${PAD}\n${AG_FIXED}`;
 		await s.write(big);
 		expect(await s.edit(`${PAD}\n${AG_PRE}`, [1103])).toContain("🔴 STOP");
@@ -1983,6 +2082,7 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 			"src/p31b.ts",
 			Q.replace("if (true)", "if (Math.random() > 2)"),
 			SCOPED,
+			AST_GREP_OFF,
 		);
 		const W0 = BASE.replace("k = 1", "k = 2");
 		expect(await s.edit(W0, [7])).not.toContain("STOP");
@@ -2097,7 +2197,13 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 	// the old number as the blocker's position, saw nothing there and retired
 	// it: an open gate and "Resolved" with the violation on disk.
 	it("keeps a blocker carried without a place when its runner's deferred run settles (row 39)", async () => {
-		const s = await openSession("stl", "src/stale-settle.ts", AG_FIXED, SCOPED);
+		const s = await openSession(
+			"stl",
+			"src/stale-settle.ts",
+			AG_FIXED,
+			SCOPED,
+			AST_GREP_OFF,
+		);
 		await s.write(AG_FIXED);
 		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
 		observeRunnerLatency({

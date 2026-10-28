@@ -363,14 +363,12 @@ describe("git-guard", () => {
 	});
 
 	it("blocks runtime blockers and preserves their details", () => {
-		const runtime = {
-			gitGuardHasBlockers: true,
-			gitGuardSummary: "blocker in src/app.ts:12",
-		};
+		const runtime = new RuntimeCoordinator();
+		runtime.updateGitGuardStatus(true, "blocker in src/app.ts:12");
 		const env = setupTestEnvironment("pi-lens-git-guard-runtime-");
 		try {
 			const result = evaluateGitGuard(
-				runtime as any,
+				runtime,
 				new CacheManager(false),
 				env.tmpDir,
 			);
@@ -870,7 +868,7 @@ describe("git-guard", () => {
 			runtime.recordInlineBlockers(file, summary, 2, ["ast-grep"]);
 			runtime.updateGitGuardStatus(true, summary);
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 
 			// Edit 3: the agent FIXED it — a clean dispatch, no marks involved.
 			runtime.clearInlineBlockers(file);
@@ -920,7 +918,7 @@ describe("git-guard", () => {
 			runtime.updateGitGuardStatus(false, "");
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
 				block: false,
 			});
@@ -962,7 +960,7 @@ describe("git-guard", () => {
 			// The file dispatches clean. The CVE section is not its to clear.
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBe(
+			expect(runtime.gitGuardCacheUnknownFor()).toBe(
 				"blocking_provenance_untrusted",
 			);
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toMatchObject({
@@ -1018,7 +1016,7 @@ describe("git-guard", () => {
 
 			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			const after = cache.readCache<Partial<TurnEndFindingsCache>>(
 				"turn-end-findings",
 				env.tmpDir,
@@ -1081,7 +1079,7 @@ describe("git-guard", () => {
 						env.tmpDir,
 					)?.data?.blockerContent,
 				).toBe(blockerContent);
-				expect(runtime.gitGuardCacheUnknownReason).toBe(
+				expect(runtime.gitGuardCacheUnknownFor()).toBe(
 					"blocking_provenance_untrusted",
 				);
 				expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toMatchObject({
@@ -1125,7 +1123,7 @@ describe("git-guard", () => {
 
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBe(
+			expect(runtime.gitGuardCacheUnknownFor()).toBe(
 				"blocking_provenance_untrusted",
 			);
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
@@ -1151,11 +1149,11 @@ describe("git-guard", () => {
 			// A reason about the record latched earlier in the session (a write of
 			// the record that failed). #4733 r2 F12: a dispatch that never answered
 			// is latched per file instead, and a sync does not clear it.
-			runtime.markGitGuardCacheUnknown("cache_write_failed");
+			runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
 				block: false,
 			});
@@ -1258,7 +1256,7 @@ describe("#4725: the record's writers read it whatever its age", () => {
 
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(storedData(cache, env.tmpDir)).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
 				block: false,
@@ -1312,7 +1310,7 @@ describe("#4725: the record's writers read it whatever its age", () => {
 			syncGitGuardRecord(runtime, cache, env.tmpDir, files[1], "session", true);
 
 			expect(storedData(cache, env.tmpDir)).toBeUndefined();
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
 				block: false,
 			});
@@ -1414,7 +1412,7 @@ describe("#4725: the record's writers read it whatever its age", () => {
 			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
 			syncGitGuardRecord(runtime, cache, env.tmpDir, files[1]);
 
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(storedData(cache, env.tmpDir)).toBeUndefined();
 		} finally {
 			env.cleanup();
@@ -1558,7 +1556,7 @@ describe("#4725: the record's writers read it whatever its age", () => {
 					blockingFiles: [file],
 				}),
 			);
-			runtime.markGitGuardCacheUnknown("cache_write_failed");
+			runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
 			expect(refusal.reason).toContain(
 				"Write the affected files again so pi-lens re-checks them",
@@ -2006,7 +2004,7 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
 				true,
 			);
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
 				block: false,
 			});
@@ -2129,7 +2127,7 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 				const runtime = sessionA(env.tmpDir);
 				const cache = new CacheManager(false);
 				cache.clearCache("turn-end-findings", env.tmpDir);
-				runtime.markGitGuardCacheUnknown("cache_write_failed");
+				runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 				writer(runtime, cache);
 				return [label, evaluateGitGuard(runtime, cache, env.tmpDir).unknown];
 			});
@@ -2275,12 +2273,12 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			);
 			ageRecord(env.tmpDir);
 			syncGitGuardRecord(runtime, cache, env.tmpDir, other, "session", true);
-			expect(runtime.gitGuardCacheUnknownReason).toBe("session_mismatch");
+			expect(runtime.gitGuardCacheUnknownFor()).toBe("session_mismatch");
 
 			clearGitGuardTestFailure(cache, env.tmpDir, runtime, [testFile]);
 
 			expect(storedData(cache, env.tmpDir)).toBeUndefined();
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
 				block: false,
 			});
@@ -2302,7 +2300,7 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			mergeGitGuardTestFailure(cache, env.tmpDir, runtime, "FAIL 0p/1f", [
 				testFile,
 			]);
-			runtime.markGitGuardCacheUnknown("cache_write_failed");
+			runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 
 			const reason = evaluateGitGuard(runtime, cache, env.tmpDir).reason ?? "";
 
@@ -2784,7 +2782,7 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 			fs.rmSync(gone);
 			syncGitGuardRecord(runtime, cache, env.tmpDir, clean, "session", true);
 			expect(storedData(cache, env.tmpDir)).toBeUndefined();
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(phaseRows("record_retired")[0]).toEqual({
 				by: "write",
 				basis: "file_gone",
@@ -2828,6 +2826,10 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 				basis: "file_gone",
 			});
 
+			// RECURRENCE GUARDED: #4941 r2 (verify V1): the retire below answers
+			// the project's latched record failure; with its clear deleted, 322
+			// tests stayed green and every later commit was refused as unknown.
+			runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 			fs.rmSync(live);
 			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
 				true,
@@ -2836,6 +2838,7 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 				by: "turn_end",
 				basis: "file_gone",
 			});
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(false);
 		} finally {
 			env.cleanup();
 		}
@@ -4020,7 +4023,7 @@ describe("#4921: a turn end's own partition is its turn session's", () => {
 				env.tmpDir,
 				foreignRecord([theirs], SUBAGENT),
 			);
-			runtime.markGitGuardCacheUnknown("cache_stale");
+			runtime.markGitGuardCacheUnknown("cache_stale", env.tmpDir);
 			const foreignRemedy = "The record names blockers in subagent.ts";
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
 				foreignRemedy,
@@ -4057,7 +4060,7 @@ describe("#4921: a turn end's own partition is its turn session's", () => {
 					false,
 					SUBAGENT,
 				);
-			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownFor()).toBeUndefined();
 			expect(storedData(cache, env.tmpDir)).toEqual(before);
 			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
 			expect(refusal.block).toBe(true);

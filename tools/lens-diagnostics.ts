@@ -139,6 +139,7 @@ import { logExtension } from "../clients/extension-log.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import {
+	configDisabledAuxiliaryLspServerIds,
 	findAuxiliaryProfileForSource,
 	retagAuxiliaryDiagnostics,
 } from "../clients/dispatch/auxiliary-lsp.js";
@@ -197,6 +198,7 @@ type LSPServiceLike = ReturnType<typeof getLSPService> & {
 			onServerReady?: () => void;
 			nextWriteIndex?: () => number;
 			files?: string[];
+			excludeServerIds?: ReadonlySet<string>;
 		},
 	) => Promise<WorkspaceLspDiagnosticResult[]>;
 };
@@ -819,6 +821,14 @@ export function createLensDiagnosticsTool(
 							? params.analysisRoot
 							: undefined,
 					host: ctx.host ?? "pi",
+					// #4944: the sweep leaves an auxiliary the operator turned off
+					// (`--no-ast-grep`, `astGrep.enabled=false`) unstarted, as the
+					// `source=lsp` probe does.
+					...(getFlag && {
+						excludeServerIds: configDisabledAuxiliaryLspServerIds((name) =>
+							getFlag(name, cwd),
+						),
+					}),
 				});
 			}
 			return formatDeltaMode(cacheManager, cwd, severity, pathsScope);
@@ -2436,6 +2446,8 @@ async function formatFullMode(
 		onServerReady?: () => void;
 		pathsScope?: PathsScope;
 		nextWriteIndex?: () => number;
+		/** Auxiliary servers the operator's configuration turns off (#4944). */
+		excludeServerIds?: ReadonlySet<string>;
 		runtime?: import("../clients/runtime-coordinator.js").RuntimeCoordinator;
 		/**
 		 * #1107 phase 2 review: scan WITHOUT the generated/artifact NAME-
@@ -2531,6 +2543,7 @@ async function formatFullMode(
 			onServerReady: options.onServerReady,
 			nextWriteIndex: options.nextWriteIndex,
 			files: explicitFiles,
+			excludeServerIds: options.excludeServerIds,
 		}),
 		getProjectDiagnosticsSnapshotForFullMode(cwd, {
 			...options,
@@ -3047,6 +3060,20 @@ async function formatFullMode(
 		uncoveredScannerIds.length > 0
 			? `\n\n⚠ Auxiliary coverage incomplete: ${uncoveredScannerIds.join(", ")} did not answer for ${partiallyCoveredLspResults.length} file(s). Findings from answering servers are included; this is not a clean verdict for the named scanner lane(s).`
 			: "";
+	// #4944: an auxiliary the operator turned off was never asked, so it is in
+	// neither list above; say so, as `lsp_diagnostics` does ("Switched off, not
+	// run"), so a sweep with no ast-grep rows is not read as an ast-grep result.
+	// The switch names the auxiliary LSP server only: the project scan above
+	// still reports `ast-grep-napi` rows under `--no-ast-grep`, so the note says
+	// which ast-grep did not run. Code-unit order, for the same determinism as
+	// the lane names above.
+	const switchedOffServerIds = [...(options.excludeServerIds ?? [])].sort(
+		(a, b) => Number(a > b) - Number(a < b),
+	);
+	const switchedOffNote =
+		switchedOffServerIds.length > 0
+			? `\n\nSwitched off, not run (auxiliary LSP): ${switchedOffServerIds.join(", ")}.`
+			: "";
 	// #646: primary-vs-auxiliary split of the raw LSP-sweep findings (before
 	// they're merged into the widget-state summaries below), mirroring
 	// `lsp_diagnostics`' "Primary findings"/"Auxiliary findings" separation —
@@ -3366,6 +3393,7 @@ async function formatFullMode(
 						note +
 						unconfirmedLspNote +
 						auxiliaryCoverageNote +
+						switchedOffNote +
 						lspPrimaryVsAuxiliaryNote +
 						partialNote +
 						coldNote +
@@ -3399,6 +3427,7 @@ async function formatFullMode(
 		cheapScanStatusNote ||
 		unconfirmedLspNote ||
 		auxiliaryCoverageNote ||
+		switchedOffNote ||
 		lspPrimaryVsAuxiliaryNote
 	) {
 		return {
@@ -3409,6 +3438,7 @@ async function formatFullMode(
 						result.content[0].text +
 						unconfirmedLspNote +
 						auxiliaryCoverageNote +
+						switchedOffNote +
 						lspPrimaryVsAuxiliaryNote +
 						partialNote +
 						coldNote +

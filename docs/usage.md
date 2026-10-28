@@ -109,6 +109,7 @@ pi --no-delta            # Disable delta mode (show all diagnostics, not just ne
 pi --lens-guard          # Block git commit/push when unresolved blockers exist (experimental)
 pi --lens-checkout-guard # Decline git commands that rewrite the working tree while another live pi-lens session shares this dirty checkout (experimental)
 pi --no-opengrep         # Disable the Opengrep security scanner (default-on auxiliary LSP)
+pi --no-ast-grep         # Disable the ast-grep auxiliary LSP server (default-on)
 pi --no-read-guard       # Disable the read-before-edit behavior monitor
 pi --lens-retain-injections # Re-send injected findings unchanged in later requests, for exact-prefix (local) prompt caches
 pi --lens-turn-summary   # Persist a per-turn summary of diagnostics, autofixes, and autoformats

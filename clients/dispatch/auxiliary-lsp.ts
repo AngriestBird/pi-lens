@@ -415,6 +415,36 @@ export function isAuxiliaryDiagnosticSuppressed(
 }
 
 /**
+ * #4944: drop everything a switched-off server contributed to an answer: its
+ * rows and its name in the answer's coverage gap. A warm-attached peer answers
+ * every auxiliary (`clientScope: "with-auxiliary"`) whatever this process's
+ * `excludeServerIds` says, so each receipt filters the peer's answer once and
+ * reads every field from the copy. A local touch never asks an excluded server
+ * and never lists it as unconfirmed (`LSPService.touchFile`'s gap loop); the
+ * filtered answer reads the same. A row with no `serverId` is mapped through
+ * its `source`; a row neither names stays, because nothing says it came from an
+ * excluded server.
+ */
+export function dropExcludedServers<
+	A extends {
+		readonly diagnostics: readonly LSPDiagnostic[];
+		readonly unconfirmedServerIds?: readonly string[];
+	},
+>(answer: A, excludeServerIds: ReadonlySet<string> | undefined): A {
+	const kept = (serverId: string | undefined): boolean =>
+		!excludeServerIds?.has(serverId ?? "");
+	return {
+		...answer,
+		diagnostics: answer.diagnostics.filter((d) =>
+			kept(d.serverId ?? findAuxiliaryProfileForSource(d.source)?.serverId),
+		),
+		...(answer.unconfirmedServerIds !== undefined && {
+			unconfirmedServerIds: answer.unconfirmedServerIds.filter(kept),
+		}),
+	};
+}
+
+/**
  * Filter a diagnostic list down to the ones NOT suppressed by their
  * auxiliary profile's native inline-comment syntax (#586). This is the
  * shared helper `tools/lsp-diagnostics.ts` and `clients/lsp/index.ts`'s

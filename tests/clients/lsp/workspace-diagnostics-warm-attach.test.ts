@@ -249,4 +249,122 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		expect(createLSPClient).toHaveBeenCalledTimes(1);
 		expect(warmAttached).toBe(false);
 	});
+
+	// Recurrence (#4944 review F2): the sweep's exclusion reached only the local
+	// touch. A warm incumbent answers every auxiliary, so its ast-grep rows were
+	// recorded under a scope key that claimed ast-grep was excluded.
+	it("drops a switched-off auxiliary's warm-attached rows and keeps the others (#4944)", async () => {
+		const file = path.join(tmp, "a.ts");
+		fs.writeFileSync(file, "const x = 1;\n");
+		tryWarmAttachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: {
+				diagnostics: [
+					{
+						...diagnostic("ts finding"),
+						source: "typescript",
+						serverId: "typescript",
+					},
+					{
+						...diagnostic("ast-grep finding"),
+						source: "ast-grep",
+						serverId: "ast-grep",
+					},
+					// No serverId: mapped through its source.
+					{ ...diagnostic("ast-grep sourced finding"), source: "ast-grep" },
+				],
+			},
+		});
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const [result] = await new LSPService().runWorkspaceDiagnostics(tmp, {
+			files: [file],
+			excludeServerIds: new Set(["ast-grep"]),
+		});
+
+		expect(result?.diagnostics.map((d) => d.message)).toEqual(["ts finding"]);
+	});
+
+	// Recurrence (#4947 r2 verify N1): the receipt dropped a switched-off
+	// server's rows but kept its id in the incumbent's coverage gap, so the
+	// sweep reported "ast-grep did not answer" for a scanner it never asked, and
+	// never cached the file. The #584 baseline (opengrep) is the same shape.
+	it("drops a switched-off auxiliary from the incumbent's coverage gap and keeps the others (#4944)", async () => {
+		const file = path.join(tmp, "a.ts");
+		fs.writeFileSync(file, "const x = 1;\n");
+		tryWarmAttachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: {
+				diagnostics: [],
+				confirmation: "partial",
+				unconfirmedServerIds: ["ast-grep", "opengrep", "typos"],
+			},
+		});
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const gap = async (excludeServerIds?: ReadonlySet<string>) =>
+			(
+				await new LSPService().runWorkspaceDiagnostics(tmp, {
+					files: [file],
+					...(excludeServerIds && { excludeServerIds }),
+				})
+			)[0]?.unconfirmedServerIds;
+
+		// The control: with nothing switched off only the #584 baseline goes.
+		expect(await gap()).toEqual(["ast-grep", "typos"]);
+		expect(await gap(new Set(["ast-grep"]))).toEqual(["typos"]);
+	});
+
+	// Recurrence (#4944 review F3): removing the caller's ids from the sweep's
+	// scope key survived every test, so an entry swept with ast-grep on could be
+	// replayed to a sweep with it switched off. The entry is seeded under the key
+	// a sweep with no exclusion writes, as the cache's other suites do.
+	it("does not replay a sweep's cached entry to a sweep with another exclusion set (#4944)", async () => {
+		fs.mkdirSync(path.join(tmp, ".pi-lens"));
+		const file = path.join(tmp, "a.ts");
+		fs.writeFileSync(file, "const x = 1;\n");
+		const cache =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+		const session =
+			await import("../../../clients/lsp/workspace-diagnostics-session.js");
+		// Inside the session and the age ceiling, so only the key decides.
+		session.resetWorkspaceDiagnosticsCacheSession(Date.now() - 60 * 60_000);
+		cache.saveWorkspaceDiagnosticsCache(tmp, {
+			version: cache.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cache.cacheKeyFor(file)]: {
+					diagnostics: [
+						{
+							...diagnostic("cached ast-grep finding"),
+							severity: 1 as const,
+							source: "ast-grep",
+							serverId: "ast-grep",
+						},
+					],
+					count: 1,
+					mtimeMs: fs.statSync(file).mtimeMs,
+					scannedAt: Date.now() - 60_000,
+					scopeKey: cache.buildScopeKey("all", ["opengrep"]),
+				},
+			},
+		});
+		tryWarmAttachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: { diagnostics: [] },
+		});
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+
+		// No `files` option: a scoped sweep has no dependency claim for the entry.
+		// The control: the same exclusion set is served from the cache.
+		const [on] = await new LSPService().runWorkspaceDiagnostics(tmp);
+		expect(on?.diagnostics.map((d) => d.message)).toEqual([
+			"cached ast-grep finding",
+		]);
+		expect(tryWarmAttachedDiagnostics).not.toHaveBeenCalled();
+
+		const [off] = await new LSPService().runWorkspaceDiagnostics(tmp, {
+			excludeServerIds: new Set(["ast-grep"]),
+		});
+		expect(tryWarmAttachedDiagnostics).toHaveBeenCalledTimes(1);
+		expect(off?.diagnostics).toEqual([]);
+	});
 });

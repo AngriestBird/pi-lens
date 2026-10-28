@@ -77,6 +77,7 @@ column is the effective behavior when nothing is set.
 | `--lens-guard` | `guard.enabled` | global | **off** |
 | `--lens-checkout-guard` | `guard.sharedCheckout` | global | **off** |
 | `--no-opengrep` | `opengrep.enabled` | global | Opengrep scanner **on** |
+| `--no-ast-grep` | `astGrep.enabled` | global | ast-grep auxiliary server **on** |
 | `--no-read-guard` | `readGuard.enabled` | global | read-before-edit monitor **on** |
 | `--no-lens-context` | `contextInjection.enabled` | global | context injection **on** |
 | `--lens-retain-injections` | `contextInjection.retain` | global | **off** |
