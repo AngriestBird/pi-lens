@@ -19,6 +19,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { readChangesSince } from "../clients/project-changes.js";
 import { describe, expect, it } from "vitest";
 import {
 	CLEAN_FILE,
@@ -344,6 +345,37 @@ describe("#4942: an edit is licensed only by a read in the editing session", () 
 			expect(editResult(secondary)).not.toContain(EDIT_WITHOUT_READ);
 			expect(fs.readFileSync(shared, "utf8")).toContain("return 2;");
 			expect(secondary.errors).toEqual([]);
+			await secondary.dispose();
+			await primary.dispose();
+		},
+	);
+	it(
+		"sweeps the files a secondary read at the secondary's own settle",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
+		async () => {
+			// RECURRENCE GUARDED: #4942 review r1 F2. The observed settled sweep
+			// took its tracked-path population from `runtime.readGuard`, so a
+			// secondary's settle swept the primary's set and a file only the
+			// secondary read drifted unnoticed (the sweep ran on the union before
+			// the partition). The sweep must see the settling session's reads.
+			const { proj, shared } = project("sweep-secondary");
+			const { primary, secondary } = await pair(
+				proj,
+				[endTurn("idle")],
+				[
+					step(readTarget(shared), "reading"),
+					endTurn("read"),
+					endTurn("settled again"),
+				],
+			);
+			await secondary.prompt("read it");
+			// An out-of-band writer no tool call explains.
+			fs.writeFileSync(shared, `export function shared() {\n\treturn 3;\n}\n`);
+			await secondary.prompt("settle again");
+			const sweeps = readChangesSince(proj, 0).filter((entry) =>
+				entry.filePath?.endsWith("shared.ts"),
+			);
+			expect(sweeps.length).toBeGreaterThan(0);
 			await secondary.dispose();
 			await primary.dispose();
 		},

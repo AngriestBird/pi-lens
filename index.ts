@@ -2112,6 +2112,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			runtime,
 			cacheManager,
 			readGuard: runtime.readGuard,
+			readGuardFor: (sessionId) => runtime.readGuardFor(sessionId),
 			dbg,
 		}),
 		createLensDiagnosticMarkTool(
@@ -3512,12 +3513,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 		lineage: LineageHandle,
 	): Promise<void> {
 		const cwd = ctx.cwd ?? runtime.projectRoot;
+		// #4942: the files THIS settling session read or wrote are the ones to
+		// sweep; the coordinator's guard holds only the primary's. The replay
+		// below still stamps the coordinator's guard (the mutation bridge
+		// carries no session id), which only ever tightens it: settled-sweep
+		// drift never creates an authorship (#4210).
+		const settleGuard = runtime.readGuardFor(getStableSessionId(ctx));
 		try {
 			const result = await runObservedSettledSweep({
 				turnIndex: runtime.turnIndex,
 				getTrackedPaths: () =>
 					collectTrackedPaths({
-						readGuard: runtime.readGuard,
+						readGuard: settleGuard,
 						cwd,
 						limit: OBSERVED_TRACKED_MAX_FILES,
 					}),
@@ -3531,7 +3538,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						lineage,
 					}),
 				getStoredLineHashes: (candidate) =>
-					storedLineHashesFor(runtime.readGuard, candidate),
+					storedLineHashesFor(settleGuard, candidate),
 				// Merge of #2449 into #2450: #2449 wrote this gate as the
 				// hand-spelled `isPathIgnoredByProject` + `isExternalOrVendorFile`
 				// pair, which is the duplication #2450's review round 2 (F4)
@@ -3589,7 +3596,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// gets its baseline from the read-guard's stored per-line hashes
 				// rather than a read (#2449 review round 2, F3).
 				getStoredLineHashes: (candidate) =>
-					storedLineHashesFor(runtime.readGuard, candidate),
+					storedLineHashesFor(
+						runtime.readGuardFor(getStableSessionId(ctx)),
+						candidate,
+					),
 				signal,
 			});
 		} catch (refreshErr) {
@@ -3611,6 +3621,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// "primary" and runs as before.
 		const emission = classifyOwnedSessionEmission(ctx, currentSessionId);
 		if (emission === "concurrent-secondary") {
+			// #4942: the backstop for read captures a dead run left (see the top of
+			// `handleAgentEnd`) is per session now. The coordinator's settle no
+			// longer reaches a secondary's guard, and this arm returns before
+			// `handleAgentEnd`, so the secondary releases its own here.
+			runtime.readGuardFor(currentSessionId).dropProvisionalReads();
 			dbg(
 				`deferred_mutation_drain: concurrent secondary session detected — skipping (sessionId=${currentSessionId})`,
 			);

@@ -34,7 +34,13 @@
   own, built on first use and dropped at its shutdown, for a concurrent
   secondary. It keys that guard by the opaque owner the inline blockers use
   (#4921, `recordSession`), so an edit is judged by the reads and writes of
-  the session that edits. A read or write reported through the mutation or
+  the session that edits. The coordinator's own guard is the primary's only
+  while the ctx's stable session id equals the pinned telemetry id
+  (`setSessionLifecycle`); a start that cannot read its id would leave the
+  primary's turns on a foreign guard, where a primary `/tree` no longer
+  filters their reads (a hypothesis, reproduced only as a composite probe,
+  #4955 review F3).
+  A read or write reported through the mutation or
   read bridge names no session and is the coordinator's. A concurrent
   secondary still shares the turn-end worklist. State `turn_end` parks
   in a scope cell for a later turn lives on the activation's own scope
