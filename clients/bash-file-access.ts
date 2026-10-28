@@ -445,6 +445,8 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 export interface DecodedShellWord {
 	text: string;
 	hidden?: "expansion";
+	/** Bash expands this word's leading `~` to a home directory (see {@link ShellWord.tildeExpands}); `text` keeps the `~`. */
+	tildeExpands?: true;
 }
 
 export interface DecodedShellSegment {
@@ -470,6 +472,7 @@ export function decodeShellWords(command: string): DecodedShellSegment[] {
 				{
 					text: wordValue(word, true),
 					...(hidden && { hidden: "expansion" as const }),
+					...(word.tildeExpands && { tildeExpands: true as const }),
 				},
 			];
 		}),

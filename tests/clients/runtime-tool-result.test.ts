@@ -4025,7 +4025,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 				await entered.promise;
 				runtime.resetForSession();
 				runtime.beginTurn();
-				runtime.markGitGuardCacheUnknown("cache_corrupt");
+				runtime.markGitGuardCacheUnknown("cache_corrupt", tmpDir);
 				release.resolve();
 				await handler;
 				expect(evaluateGitGuard(runtime, cacheManager, tmpDir).block).toBe(

@@ -1149,7 +1149,7 @@ describe("git-guard", () => {
 			// A reason about the record latched earlier in the session (a write of
 			// the record that failed). #4733 r2 F12: a dispatch that never answered
 			// is latched per file instead, and a sync does not clear it.
-			runtime.markGitGuardCacheUnknown("cache_write_failed");
+			runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
@@ -1556,7 +1556,7 @@ describe("#4725: the record's writers read it whatever its age", () => {
 					blockingFiles: [file],
 				}),
 			);
-			runtime.markGitGuardCacheUnknown("cache_write_failed");
+			runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
 			expect(refusal.reason).toContain(
 				"Write the affected files again so pi-lens re-checks them",
@@ -2127,7 +2127,7 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 				const runtime = sessionA(env.tmpDir);
 				const cache = new CacheManager(false);
 				cache.clearCache("turn-end-findings", env.tmpDir);
-				runtime.markGitGuardCacheUnknown("cache_write_failed");
+				runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 				writer(runtime, cache);
 				return [label, evaluateGitGuard(runtime, cache, env.tmpDir).unknown];
 			});
@@ -2300,7 +2300,7 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			mergeGitGuardTestFailure(cache, env.tmpDir, runtime, "FAIL 0p/1f", [
 				testFile,
 			]);
-			runtime.markGitGuardCacheUnknown("cache_write_failed");
+			runtime.markGitGuardCacheUnknown("cache_write_failed", env.tmpDir);
 
 			const reason = evaluateGitGuard(runtime, cache, env.tmpDir).reason ?? "";
 
@@ -4018,7 +4018,7 @@ describe("#4921: a turn end's own partition is its turn session's", () => {
 				env.tmpDir,
 				foreignRecord([theirs], SUBAGENT),
 			);
-			runtime.markGitGuardCacheUnknown("cache_stale");
+			runtime.markGitGuardCacheUnknown("cache_stale", env.tmpDir);
 			const foreignRemedy = "The record names blockers in subagent.ts";
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
 				foreignRemedy,

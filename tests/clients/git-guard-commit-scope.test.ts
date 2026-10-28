@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { getRecentLoggedPhases } from "../../clients/latency-logger.js";
 import {
@@ -230,7 +230,7 @@ describe("#4941: the commit gate's blocker state is read per working tree", () =
 		}
 	});
 
-	it("scopes a latched record failure to the project it is about, and keeps one with no project global", () => {
+	it("scopes a latched record failure to the project it is about", () => {
 		// RECURRENCE GUARDED: #4941: `gitGuardCacheUnknownReason` was one slot
 		// for the process, so A's failed record write refused B's commit.
 		const env = setupTestEnvironment("pi-lens-4941-cache-unknown-");
@@ -241,12 +241,47 @@ describe("#4941: the commit gate's blocker state is read per working tree", () =
 			runtime.markGitGuardCacheUnknown("cache_write_failed", repoA);
 			expect(verdictOf(runtime, repoA, COMMIT).block).toBe(true);
 			expect(verdictOf(runtime, repoB, COMMIT)).toEqual({ block: false });
-			runtime.markGitGuardCacheUnknown("cache_write_failed");
-			expect(verdictOf(runtime, repoB, COMMIT).block).toBe(true);
+			// A form the scope does not read is judged by every project's reason.
 			expect(
-				verdictOf(runtime, repoA, commit(`git -C ${repoB} commit -m wip`))
+				verdictOf(runtime, repoB, commit(`cd ${repoA} && git commit -m wip`))
 					.block,
 			).toBe(true);
+			expect(
+				verdictOf(runtime, repoB, commit(`git -C ${repoA} commit -m wip`))
+					.block,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("#4941 r2: the record-failure latch is one record per repository", () => {
+	it("keeps repository A's latched record failure when only B's record is marked or cleared", () => {
+		// RECURRENCE GUARDED: #4941 r2 F1: the read was scoped but the store was
+		// one slot, so B's failed write replaced A's uncertainty and any
+		// repository's successful write cleared it; a commit in A then went from
+		// refused to allowed with A's record still unconfirmed.
+		const env = setupTestEnvironment("pi-lens-4941-latch-store-");
+		try {
+			const repoA = repo(env.tmpDir, "a");
+			const repoB = repo(env.tmpDir, "b");
+			const runtime = new RuntimeCoordinator();
+			runtime.markGitGuardCacheUnknown("cache_write_failed", repoA);
+			runtime.markGitGuardCacheUnknown("cache_corrupt", repoB);
+			expect(verdictOf(runtime, repoA, COMMIT).block).toBe(true);
+			expect(verdictOf(runtime, repoB, COMMIT).block).toBe(true);
+			runtime.clearGitGuardCacheUnknown(repoB);
+			expect(verdictOf(runtime, repoA, COMMIT).block).toBe(true);
+			expect(verdictOf(runtime, repoB, COMMIT)).toEqual({ block: false });
+			runtime.clearGitGuardCacheUnknown(repoA);
+			expect(verdictOf(runtime, repoA, COMMIT)).toEqual({ block: false });
+			// A record about one project replaces only that project's reason.
+			runtime.markGitGuardCacheUnknown("cache_write_failed", repoA);
+			runtime.markGitGuardCacheUnknown("cache_stale", repoA);
+			expect(runtime.gitGuardCacheUnknownReason).toBe("cache_stale");
+			runtime.clearGitGuardCacheUnknown(repoA);
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}
@@ -355,6 +390,104 @@ describe("#4941: resolveCommitScope reads only forms it can place in a tree", ()
 			expect(
 				resolveCommitScope("write", { command: "git commit" }, repoA),
 			).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("counts a checkout nested inside the committed tree, but not a linked worktree of it", () => {
+		// RECURRENCE GUARDED: #4941 r2 F2: a blocker under `A/vendor/lib` whose
+		// nearest `.git` is a nested checkout resolved to that nested root, so
+		// the commit in A (which stages the same bytes when the file is tracked)
+		// was allowed with the blocker live.
+		const env = setupTestEnvironment("pi-lens-4941-scope-nested-");
+		try {
+			const main = repo(env.tmpDir, "main");
+			const nested = repo(main, path.join("vendor", "lib"));
+			const linked = linkedWorktree(
+				main,
+				path.join(main, ".claude", "worktrees", "w1"),
+			);
+			const fromMain = scopeOf("git commit -m wip", main);
+			expect(fromMain?.contains(path.join(nested, "src", "a.ts"))).toBe(true);
+			expect(fromMain?.contains(path.join(linked, "src", "a.ts"))).toBe(false);
+			// The nested checkout's own commit does not count its parent's files.
+			const fromNested = scopeOf("git commit -m wip", nested);
+			expect(fromNested?.contains(path.join(main, "src", "a.ts"))).toBe(false);
+			const runtime = new RuntimeCoordinator();
+			blockerIn(runtime, path.join(nested, "src", "a.ts"), "nested blocker");
+			expect(verdictOf(runtime, main, COMMIT).block).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("leaves a command unscoped when the process environment retargets git", () => {
+		// RECURRENCE GUARDED: #4941 r2 F3: an inherited GIT_DIR or GIT_WORK_TREE
+		// moves git without appearing in the command, so a scope read from the
+		// cwd named the wrong tree and exempted the blockers of the tree git
+		// committed into.
+		const env = setupTestEnvironment("pi-lens-4941-scope-env-");
+		try {
+			const repoA = repo(env.tmpDir, "a");
+			const repoB = repo(env.tmpDir, "b");
+			expect(scopeOf("git commit -m wip", repoB)).toBeDefined();
+			for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]) {
+				vi.stubEnv(name, name === "GIT_DIR" ? `${repoA}/.git` : repoA);
+				try {
+					expect(scopeOf("git commit -m wip", repoB), name).toBeUndefined();
+				} finally {
+					vi.unstubAllEnvs();
+				}
+			}
+			vi.stubEnv("GIT_DIR", "");
+			try {
+				expect(scopeOf("git commit -m wip", repoB)).toBeDefined();
+			} finally {
+				vi.unstubAllEnvs();
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("trusts only a bare git or a known system path as the git executable", () => {
+		// RECURRENCE GUARDED: #4941 r2 F4: any path whose basename was `git`
+		// (`/tmp/evil/git`, `./git`, `git.cmd`) was scoped by the cwd, though a
+		// wrapper under that name can retarget before it execs git.
+		const env = setupTestEnvironment("pi-lens-4941-scope-exe-");
+		try {
+			const repoA = repo(env.tmpDir, "a");
+			for (const command of [
+				"git commit -m wip",
+				"/usr/bin/git commit -m wip",
+				"/usr/local/bin/git push",
+			]) {
+				expect(scopeOf(command, repoA), command).toBeDefined();
+			}
+			for (const command of [
+				"/tmp/evil/git commit -m wip",
+				"./git commit -m wip",
+				"git.cmd commit -m wip",
+				"~/bin/git commit -m wip",
+				`${repoA}/git commit -m wip`,
+			]) {
+				expect(scopeOf(command, repoA), command).toBeUndefined();
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("leaves a tilde operand of -C unscoped, even when a directory of that literal name exists", () => {
+		// RECURRENCE GUARDED: #4941 r2 F5: bash expands `~` to $HOME, while the
+		// scope resolved the literal `<cwd>/~/r` and named that tree.
+		const env = setupTestEnvironment("pi-lens-4941-scope-tilde-");
+		try {
+			repo(env.tmpDir, path.join("~", "r"));
+			const cwd = fs.realpathSync.native(env.tmpDir);
+			expect(scopeOf("git -C ~/r commit -m wip", cwd)).toBeUndefined();
+			expect(scopeOf("git -C ./~/r commit -m wip", cwd)).toBeDefined();
 		} finally {
 			env.cleanup();
 		}

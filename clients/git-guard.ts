@@ -9,10 +9,15 @@ import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import {
 	isOutsideProjectRoot,
+	isUnderDir,
 	pathsEqual,
 	toProjectRelativePath,
 } from "./path-utils.js";
-import { resolveGitCheckout } from "./review-graph/git-identity.js";
+import {
+	resolveGitCheckout,
+	sameCheckoutOtherRoot,
+	type GitCheckout,
+} from "./review-graph/git-identity.js";
 import { decodeShellWords, type DecodedShellWord } from "./bash-file-access.js";
 import {
 	incrementDegradationCount,
@@ -1041,13 +1046,40 @@ const SCOPE_NEUTRAL_COMMANDS: readonly string[] = [
 ];
 
 /**
+ * The words a scoped command may run as `git`: the bare name the shell finds
+ * on PATH and the system locations a resolved path takes. Any other spelling
+ * (`/tmp/evil/git`, `./git`, `git.cmd`) is a file the gate cannot vouch for,
+ * which may retarget before it execs git, so the command goes unscoped
+ * (#4941 r2 F4).
+ */
+const SCOPE_GIT_HEADS: readonly string[] = [
+	"git",
+	"/usr/bin/git",
+	"/usr/local/bin/git",
+	"/bin/git",
+	"/opt/homebrew/bin/git",
+];
+
+/**
+ * Variables git reads to find its repository or working tree before it looks
+ * at the cwd. Set in the process, they retarget a command that names none of
+ * them, so a scope read from the cwd would name the wrong tree (#4941 r2 F3).
+ */
+const GIT_RETARGETING_ENV: readonly string[] = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_COMMON_DIR",
+];
+
+/**
  * The trees a bash `git commit`/`git push` command targets, or `undefined`
  * when it is not a form this reads, in which case the gate judges every
  * blocker. Admitted: segments that are a plain `git` (no assignment,
- * wrapper or substitution that runs git) or a {@link SCOPE_NEUTRAL_COMMANDS}
- * word, with at least one commit/push segment whose only global options are
- * `-C <readable existing directory>` and whose directory is inside a git
- * checkout.
+ * wrapper or substitution that runs git, and only a {@link SCOPE_GIT_HEADS}
+ * spelling of it) or a {@link SCOPE_NEUTRAL_COMMANDS} word, with at least one
+ * commit/push segment whose only global options are `-C <readable existing
+ * directory>` and whose directory is inside a git checkout, in a process
+ * whose environment does not retarget git ({@link GIT_RETARGETING_ENV}).
  */
 export function resolveCommitScope(
 	toolName: string,
@@ -1055,18 +1087,19 @@ export function resolveCommitScope(
 	cwd: string,
 ): CommitScope | undefined {
 	if (toolName !== "bash") return undefined;
+	if (GIT_RETARGETING_ENV.some((name) => process.env[name])) return undefined;
 	const command = getShellCommand(input);
 	if (!command) return undefined;
 	const canonical = canonicalizeGuardCommand(command);
 	if (containsGuardedSubstitution(canonical, 0, COMMIT_PUSH_MATCHER)) {
 		return undefined;
 	}
-	const roots: string[] = [];
+	const trees: GitCheckout[] = [];
 	for (const segment of decodeShellWords(canonical)) {
 		const words = segment.words;
 		const head = words[0]?.text;
 		if (head === undefined) continue;
-		if (!isGitExecutable(head)) {
+		if (!SCOPE_GIT_HEADS.includes(head)) {
 			if (!SCOPE_NEUTRAL_COMMANDS.includes(head)) return undefined;
 			continue;
 		}
@@ -1076,7 +1109,12 @@ export function resolveCommitScope(
 		if (verbAt === undefined) return undefined;
 		for (let i = 1; i < verbAt; i += 2) {
 			const value = words[i + 1];
-			if (tokens[i] !== "-C" || value === undefined || value.hidden) {
+			if (
+				tokens[i] !== "-C" ||
+				value === undefined ||
+				value.hidden ||
+				value.tildeExpands
+			) {
 				return undefined;
 			}
 		}
@@ -1086,13 +1124,23 @@ export function resolveCommitScope(
 		}
 		const checkout = resolveGitCheckout(directory);
 		if (!checkout) return undefined;
-		roots.push(checkout.root);
+		trees.push(checkout);
 	}
-	if (roots.length === 0) return undefined;
+	if (trees.length === 0) return undefined;
 	return {
+		// The target's own checkout, or one nested inside a committed tree: the
+		// parent's commit stages a tracked file under it (#4941 r2 F2). A linked
+		// worktree of the committed repository is a tree of its own, never the
+		// parent's.
 		contains: (target) => {
-			const root = resolveGitCheckout(target)?.root;
-			return root !== undefined && roots.some((tree) => pathsEqual(tree, root));
+			const owner = resolveGitCheckout(target);
+			if (!owner) return false;
+			return trees.some(
+				(tree) =>
+					pathsEqual(tree.root, owner.root) ||
+					(isUnderDir(owner.root, tree.root) &&
+						!sameCheckoutOtherRoot(tree, owner)),
+			);
 		},
 	};
 }
@@ -1590,7 +1638,7 @@ export function retireSettledGitGuardRecord(
 				: undefined;
 	if (basis) {
 		cacheManager.clearCache("turn-end-findings", cwd);
-		runtime.clearGitGuardCacheUnknown();
+		runtime.clearGitGuardCacheUnknown(cwd);
 		logRecordRetired(cwd, "turn_end", basis);
 		return true;
 	}
@@ -1646,7 +1694,7 @@ function retireOwnPartition(
 	// of theirs.
 	if (kept.length === 0 && !testFailures) {
 		cacheManager.clearCache("turn-end-findings", cwd);
-		runtime.clearGitGuardCacheUnknown();
+		runtime.clearGitGuardCacheUnknown(cwd);
 		logRecordRetired(cwd, "turn_end", dropped.noFile ? "no_file" : "file_gone");
 		return true;
 	}
@@ -1761,7 +1809,7 @@ export function writeGitGuardRecord(
 	};
 	try {
 		cacheManager.writeCache("turn-end-findings", data, cwd);
-		runtime.clearGitGuardCacheUnknown();
+		runtime.clearGitGuardCacheUnknown(cwd);
 		return true;
 	} catch {
 		markCacheUnknown(runtime, "cache_write_failed", cwd);
@@ -2069,7 +2117,7 @@ export function syncGitGuardRecord(
 	// replaces a missing record (the clear branch below).
 	if (entries.length === 0 && claimsNoBlocker(stored)) {
 		cacheManager.clearCache("turn-end-findings", cwd);
-		runtime.clearGitGuardCacheUnknown();
+		runtime.clearGitGuardCacheUnknown(cwd);
 		logRecordRetired(cwd, "write", "no_blocker");
 		return;
 	}
@@ -2215,7 +2263,7 @@ export function syncGitGuardRecord(
 		// this, a reason latched earlier in the session outlived the record it
 		// described and refused every commit after it, with no re-run able to
 		// clear it.
-		runtime.clearGitGuardCacheUnknown();
+		runtime.clearGitGuardCacheUnknown(cwd);
 		if (droppedForeign > goneForeign)
 			logRecordRetired(cwd, "write", "rechecked");
 		else if (goneForeign > 0) logRecordRetired(cwd, "write", "file_gone");
@@ -2317,7 +2365,7 @@ export function clearGitGuardTestFailure(
 	const blockerContent = existing.blockerContent ?? "";
 	if (!blockerContent && remainingFiles.length === 0) {
 		cacheManager.clearCache("turn-end-findings", cwd);
-		runtime.clearGitGuardCacheUnknown();
+		runtime.clearGitGuardCacheUnknown(cwd);
 		return;
 	}
 	// #4738: every owner's blocking files stay affected, not only the top
@@ -2496,13 +2544,9 @@ export function evaluateGitGuard(
 	const recordRemedy = () =>
 		unconfirmedRecordRemedy(stored, inspection, me, cwd) ?? RECHECK_REMEDY;
 	// #4941: a reason latched about another tree's stored record is not this
-	// commit's; one that names no project (or any form scoping does not read)
-	// still refuses.
-	const latched = runtime.gitGuardCacheUnknownReason;
-	const latchedCwd = runtime.gitGuardCacheUnknownCwd;
-	if (latched && (!inScope || !latchedCwd || inScope(latchedCwd))) {
-		return unknown(cwd, latched, {}, recordRemedy());
-	}
+	// commit's; any form scoping does not read still refuses on every reason.
+	const latched = runtime.gitGuardCacheUnknownFor(inScope);
+	if (latched) return unknown(cwd, latched, {}, recordRemedy());
 	// #4733 r2 F12: a dispatch that never answered refuses until that file's own
 	// dispatch returns, whatever happened to the record since. #4733 r3 F16: a
 	// latch whose file is gone has no dispatch left to answer it, so it is

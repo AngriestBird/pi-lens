@@ -686,9 +686,15 @@ export class RuntimeCoordinator {
 	 * for all of them.
 	 */
 	private _gitGuardMemo: GitGuardMemo = EMPTY_GIT_GUARD_MEMO;
-	private _gitGuardCacheUnknown:
-		| { reason: string; cwd: string | undefined }
-		| undefined;
+	/**
+	 * Per project (the `cwd` whose stored record the reason is about), the
+	 * reason that record cannot be confirmed (#4941 r2 F1). One record per
+	 * repository: a failure about B must not replace, and a write about B must
+	 * not clear, the uncertainty about A.
+	 */
+	private readonly _gitGuardCacheUnknown = new PathKeyedMap<string>(
+		normalizeMapKey,
+	);
 	/**
 	 * #4733 r2 F12: per file, a dispatch that never answered
 	 * (`pipeline_crash`, `pipeline_error`). It is about that file, not the
@@ -838,7 +844,7 @@ export class RuntimeCoordinator {
 		this._fileSeq.clear();
 		this._fileLastProjectSeq.clear();
 		this._gitGuardMemo = EMPTY_GIT_GUARD_MEMO;
-		this._gitGuardCacheUnknown = undefined;
+		this._gitGuardCacheUnknown.clear();
 		this._gitGuardUnansweredDispatches.clear();
 		this._readGuard = null;
 		this._pendingDeferredMutations.clear();
@@ -986,21 +992,33 @@ export class RuntimeCoordinator {
 	}
 
 	/** `cwd` is the project whose stored record the reason is about (#4941). */
-	markGitGuardCacheUnknown(reason: string, cwd?: string): void {
-		this._gitGuardCacheUnknown = { reason, cwd };
+	markGitGuardCacheUnknown(reason: string, cwd: string): void {
+		this._gitGuardCacheUnknown.set(cwd, reason);
 	}
 
-	clearGitGuardCacheUnknown(): void {
-		this._gitGuardCacheUnknown = undefined;
+	/** A write or retirement of `cwd`'s record answers that project's reason only. */
+	clearGitGuardCacheUnknown(cwd: string): void {
+		this._gitGuardCacheUnknown.delete(cwd);
 	}
 
+	/** The first latched reason, whichever project it is about. */
 	get gitGuardCacheUnknownReason(): string | undefined {
-		return this._gitGuardCacheUnknown?.reason;
+		for (const [, reason] of this._gitGuardCacheUnknown) return reason;
+		return undefined;
 	}
 
-	/** The directory the latched reason is about; none when it names none. */
-	get gitGuardCacheUnknownCwd(): string | undefined {
-		return this._gitGuardCacheUnknown?.cwd;
+	/**
+	 * The first latched reason about a project `inScope` accepts, or the first
+	 * of all when `inScope` is absent (a command the gate cannot place in a
+	 * tree is judged by every project's reason).
+	 */
+	gitGuardCacheUnknownFor(
+		inScope?: (cwd: string) => boolean,
+	): string | undefined {
+		for (const [cwd, reason] of this._gitGuardCacheUnknown) {
+			if (!inScope || inScope(cwd)) return reason;
+		}
+		return undefined;
 	}
 
 	markGitGuardDispatchUnanswered(filePath: string, reason: string): void {
