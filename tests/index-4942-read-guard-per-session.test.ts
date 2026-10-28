@@ -211,12 +211,16 @@ describe("#4942: an edit is licensed only by a read in the editing session", () 
 		{ timeout: TWO_SESSION_TIMEOUT_MS },
 		async () => {
 			const { proj, shared } = project("own-secondary");
-			const { primary, secondary } = await pair(proj, readTurn(shared), [
-				step(readTarget(shared), "reading"),
-				step(editShared(shared), "editing"),
-				endTurn("edited"),
-			]);
-			await primary.prompt("read it");
+			// The primary never reads: only the secondary's own read can license it.
+			const { primary, secondary } = await pair(
+				proj,
+				[endTurn("idle")],
+				[
+					step(readTarget(shared), "reading"),
+					step(editShared(shared), "editing"),
+					endTurn("edited"),
+				],
+			);
 			await secondary.prompt("read and edit it");
 			expect(editResult(secondary)).not.toContain(EDIT_WITHOUT_READ);
 			expect(fs.readFileSync(shared, "utf8")).toContain(SHARED_AFTER);
