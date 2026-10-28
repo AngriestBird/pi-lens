@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CacheManager } from "../../clients/cache-manager.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setHostFileMutationQueueLoader } from "../../clients/file-mutation-queue.js";
 import { LSPService } from "../../clients/lsp/index.js";
@@ -74,6 +75,7 @@ const importEdit = () => ({
 describe("#4942 F1: a secondary's lsp_navigation rename_file licenses only its own session", () => {
 	it("credits the rewritten importer to the secondary's guard and leaves the primary's refused", async () => {
 		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
 		runtime.setSessionLifecycle({ sessionId: "primary-session" });
 		const realService = new LSPService();
 		addRenameClient(
@@ -95,7 +97,13 @@ describe("#4942 F1: a secondary's lsp_navigation rename_file licenses only its o
 		);
 		// The wiring `index.ts` gives the tool: the captured coordinator guard
 		// and the per-call lookup.
+		// Production's direct branch: `index.ts` hands the tool the runtime and
+		// the cache manager, so the write is recorded through `recordLspMutation`
+		// itself, not the mutation bridge's fallback for a tool built without
+		// them (verify r2 N1).
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp", {
+			runtime,
+			cacheManager: new CacheManager(false),
 			readGuard: runtime.readGuard,
 			readGuardFor: (sessionId) => runtime.readGuardFor(sessionId),
 		});
