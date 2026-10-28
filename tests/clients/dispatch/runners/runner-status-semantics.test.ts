@@ -1068,6 +1068,10 @@ describe("runner status/semantic edge cases", () => {
 			expect(result.status).toBe("failed");
 			expect(result.semantic).toBe("warning");
 			expect(result.diagnostics[0]?.message).toContain("LSP server failed");
+			expect(result.diagnostics[0]).toMatchObject({
+				runnerFault: true,
+				semantic: "warning",
+			});
 		} finally {
 			env.cleanup();
 		}

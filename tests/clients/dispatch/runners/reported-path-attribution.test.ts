@@ -1086,8 +1086,9 @@ describe("gleam-check reported-path attribution (#3285)", () => {
 		expect(observed.diagnostics[0]).toMatchObject({
 			id: "gleam-check-nonzero-no-diagnostics",
 			message: "error: Could not find a package required by this project",
-			severity: "error",
-			semantic: "blocking",
+			severity: "warning",
+			semantic: "warning",
+			runnerFault: true,
 		});
 		expect(observed.diagnostics[0]?.line).toBeUndefined();
 		expect(observed.diagnostics[0]?.column).toBeUndefined();

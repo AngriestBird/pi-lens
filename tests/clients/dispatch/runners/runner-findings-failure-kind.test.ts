@@ -1366,6 +1366,13 @@ describe("runner findings carry failureKind when they fail the check (#3781)", (
 			expect(observed.row?.failureKind).not.toBe("blocking_diagnostics");
 			// The coverage rule's owner reads it as no usable result.
 			expect(hasUsableResult(observed.result as RunnerResult)).toBe(false);
+			// #4130: the synthetic diagnostic is the fault, never a blocker, and it
+			// says so (`runnerFault`) so turn end delivers it once, as the note.
+			expect(observed.result?.semantic).not.toBe("blocking");
+			for (const d of observed.result?.diagnostics ?? []) {
+				expect(d.runnerFault).toBe(true);
+				expect(d.semantic).not.toBe("blocking");
+			}
 			if (kind !== undefined) {
 				expect(observed.result?.failureKind).toBe(kind);
 				expect(observed.row?.failureKind).toBe(kind);
