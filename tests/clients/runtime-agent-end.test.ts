@@ -3506,6 +3506,31 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 			).toBe(verdict);
 		});
 
+		it(`drains a secondary's stale-orphan autofix ${where} as ${verdict}`, async () => {
+			expect(
+				await acrossSettles({
+					onX: async (runtime, filePath, _base, cwd) => {
+						withBiomeProject(cwd);
+						runtime.deferMutation(
+							filePath,
+							cwd,
+							"edit",
+							cwd,
+							"autofix",
+							"secondary",
+						);
+					},
+					moved,
+					// #4942: the claiming session's settle credits its own guard.
+					secondSettle: {
+						...autofixClients,
+						currentSessionId: "primary",
+						staleAfterMs: -1,
+					},
+				}),
+			).toBe(verdict);
+		});
+
 		it(`drains a secondary's stale-orphan format ${where} as ${verdict}`, async () => {
 			expect(
 				await acrossSettles({
