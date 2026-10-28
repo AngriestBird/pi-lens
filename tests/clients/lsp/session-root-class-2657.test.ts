@@ -473,14 +473,43 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 		expect(registry.fileIsOutsideRegisteredRoots(file)).toBe(false);
 		expect(registry.analysisRootModeForFile(file)).toBe("session");
 
-		// A FILE link from outside has no ancestor inside the root: the session's
-		// host spelling, as before, and never `ext`.
+		// A FILE link from outside has no ancestor inside the root: the session
+		// root's identity (item 7: the register is never the host's spelling),
+		// and never `ext`.
 		const fileLink = path.join(ext, "f.ts");
 		fs.symlinkSync(real(fx, "src", "real.ts"), fileLink);
 		expect(resolveSessionConfigRoot(fileLink, session)).toEqual({
-			register: session,
+			register: fx.repo,
 			mode: "session",
 		});
+	});
+
+	it("row 17 a file link from outside registers the session root's identity, through a link-spelled root", async (ctx) => {
+		// Recurrence it prevents: `resolveSessionConfigRoot` fell back to
+		// `nodePath.resolve(sessionRoot)` when no ancestor of the file's
+		// spelling is inside the root (#4689 item 7, probe row h), so the host
+		// handed `ensureLSPConfigInitialized` the link spelling of the session
+		// root while every classification above it compared identities. The
+		// register is the session root's identity, whatever the host spelled.
+		const fx = createPathIdentityFixture(env.tmpDir);
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		const ext = path.join(env.tmpDir, "ext");
+		fs.mkdirSync(ext, { recursive: true });
+		const fileLink = path.join(ext, "f.ts");
+		fs.symlinkSync(real(fx, "src", "real.ts"), fileLink);
+		runtime.projectRoot = fx.aliasRoot;
+		await initLSPConfig(fx.aliasRoot);
+
+		expect(resolveAnalysisRoot(fileLink, fx.aliasRoot)).toBe("session");
+		expect(resolveSessionConfigRoot(fileLink, fx.aliasRoot)).toEqual({
+			register: fx.repo,
+			mode: "session",
+		});
+		await readCall(fileLink, fx.aliasRoot, 4693);
+		expect([...getSessionRootsForTelemetry(200)].sort()).toEqual(
+			[fx.aliasRoot, fx.repo].sort(),
+		);
+		expect(isSessionRootRegistered(ext)).toBe(false);
 	});
 
 	it("row 16 a linked worktree registers its nested config owner", async () => {
