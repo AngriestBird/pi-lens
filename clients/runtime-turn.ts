@@ -131,6 +131,7 @@ import { createTurnEndTestRoots } from "./test-target-roots.js";
 import {
 	MAX_ADVISORY_AFFECTED_FILES,
 	gateFindingsByPathFreshness,
+	advisoryPathKey,
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
 import {
@@ -1393,6 +1394,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const staleSecretParts: string[] = [];
 	const advisoryParts: string[] = [];
 	/**
+	 * #4617: the files the delivered cascade sections cite. A no-write turn has
+	 * no edited file to bind the provenance stamp to, and a stamp over no file
+	 * proves nothing (`isWellFormed`), so every section that cites a file the
+	 * turn did not write records it here. Provenance only: neither the
+	 * commit gate's `affectedFiles` nor its `blockingFiles` read it.
+	 */
+	const provenanceCitedFiles: string[] = [];
+	/**
 	 * #3813: one-shot state a producer consumes for a part of this message,
 	 * held until the cap has said what the message kept (see
 	 * `clients/turn-end/delivery-holds.ts`). It folds in #1950 fix-round F1's
@@ -2185,6 +2194,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 				const sectionRun = runByResult.get(result);
 				if (sectionRun) sectionRuns.push(sectionRun);
+				// #4617: the section speaks for the run's primary and the
+				// neighbours it owns, clean or not.
+				provenanceCitedFiles.push(
+					result.filePath,
+					...ownedNeighbors.map((n) => n.filePath),
+				);
 				for (const n of ownedNeighbors) {
 					if (n.diagnostics.length === 0) continue;
 					// #4495 round 3: a neighbour pi edited this turn is reported by
@@ -2399,6 +2414,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 	}
 	if (pendingBlocks.length > 0) {
+		// #4617: the lines name these neighbours, not an edited file.
+		provenanceCitedFiles.push(
+			...unresolvedNeighbors.slice(-maxShown).map((entry) => entry.filePath),
+			...changedShown.map((entry) => entry.filePath),
+		);
 		const pendingSection = pendingBlocks.join("\n");
 		// @delivery-surface: runtime-turn:cascade-pending-errors
 		blockerParts.push(pendingSection);
@@ -2572,6 +2592,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				r.indeterminate?.budget !== undefined,
 		);
 
+		// #4617: each advisory below is about these runs' primary files.
+		provenanceCitedFiles.push(
+			...[...graphRuns, ...bindingRuns, ...budgetRuns].map((r) => r.filePath),
+		);
+
 		// Factual/informational phrasing — the advisory tier wraps this with an
 		// "ℹ️ Advisory — no action required this turn:" label, so an imperative
 		// ("review dependents manually") would contradict it. The #533 substance
@@ -2698,6 +2723,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					bucket.waitMs = Math.max(bucket.waitMs, group.waitMs);
 					bucket.primaries.add(toRunnerDisplayPath(cwd, run.filePath));
 					bucket.paths.set(nk, toRunnerDisplayPath(cwd, neighborPath));
+					// #4617: the line names the primary and the unanswered neighbour.
+					provenanceCitedFiles.push(run.filePath, neighborPath);
 					byServer.set(group.serverId, bucket);
 				}
 			}
@@ -5769,6 +5796,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					const lateAuxPart = `🕐 Late auxiliary diagnostics (${pair.serverId} answered after its grace window${lateAuxSuppressedNote}):\n${lines.join("\n")}`;
 					// @delivery-surface: runtime-turn:late-auxiliary-findings
 					advisoryParts.push(lateAuxPart);
+					// #4617: the part is about this file, which a no-write turn did not edit.
+					provenanceCitedFiles.push(lateAuxPath);
 					// #3813: the drain cleared the pair. A cut part re-arms it under
 					// the pair's own TTL and ceiling, with its baseline unmoved, so
 					// the scanner's findings are probed and re-gated next turn.
@@ -6191,6 +6220,36 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			carried,
 			dropped,
 		} = readTurnEndGuardRecord(cacheManager, runtime, cwd, sessionId);
+		// #4617: the stamp binds the content to every file it speaks for, which a
+		// no-write turn does not list as edited: the files a resolution retired
+		// and the files its sections cite join the record's own affected list.
+		// Its input only: `affectedFiles` and `blockingFiles` stay what the commit
+		// gate reads.
+		const stampProvenance = (
+			affectedFiles: readonly string[],
+			affectedTruncated = false,
+		) => {
+			const byKey = new Map<string, string>();
+			for (const file of [
+				...affectedFiles,
+				...resolvedBlockerFileList.map((entry) => entry.filePath),
+				...provenanceCitedFiles,
+			]) {
+				const resolved = resolveRunnerPath(cwd, file);
+				byKey.set(advisoryPathKey(resolved, cwd), resolved);
+			}
+			const stamped = [...byKey.values()].slice(0, MAX_ADVISORY_AFFECTED_FILES);
+			return snapshotAdvisoryProvenance({
+				cwd,
+				runtime,
+				generation: 0,
+				files: stamped.map((file) => ({
+					path: file,
+					role: "affected" as const,
+				})),
+				truncated: affectedTruncated || byKey.size > stamped.length,
+			});
+		};
 		if (getFlag("lens-guard") || carried.length > 0) {
 			// With `--lens-guard` off this session claims nothing, so a record that
 			// holds another session's blocker keeps theirs alone.
@@ -6229,6 +6288,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				hasBlockers:
 					blockers.owner !== undefined || existingGuard?.testFailures === true,
 				affectedFiles,
+				provenance: stampProvenance(affectedFiles),
 				sessionId: blockers.owner ?? deliverySessionId,
 				projectSeqStart: runtime.turnStartProjectSeq,
 				projectSeqEnd: runtime.projectSeq,
@@ -6241,8 +6301,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		} else {
 			const allAffectedFiles = [
-				// #4617: confirmed-clean checks can resolve a file without writing it.
-				...resolvedBlockerFileList.map((entry) => entry.filePath),
 				...files.map((file) => resolveRunnerPath(cwd, file)),
 				...cascadeResults.flatMap((result) =>
 					result.neighbors
@@ -6262,16 +6320,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					content,
 					affectedFiles,
 					affectedFilesTruncated,
-					provenance: snapshotAdvisoryProvenance({
-						cwd,
-						runtime,
-						generation: 0,
-						files: affectedFiles.map((file) => ({
-							path: file,
-							role: "affected" as const,
-						})),
-						truncated: affectedFilesTruncated,
-					}),
+					provenance: stampProvenance(affectedFiles, affectedFilesTruncated),
 				},
 				cwd,
 			);
