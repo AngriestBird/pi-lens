@@ -1394,13 +1394,18 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const staleSecretParts: string[] = [];
 	const advisoryParts: string[] = [];
 	/**
-	 * #4617: the files the delivered cascade sections cite. A no-write turn has
-	 * no edited file to bind the provenance stamp to, and a stamp over no file
-	 * proves nothing (`isWellFormed`), so every section that cites a file the
-	 * turn did not write records it here. Provenance only: neither the
-	 * commit gate's `affectedFiles` nor its `blockingFiles` read it.
+	 * #4617: the files each composed part names, keyed by the part's text. A
+	 * no-write turn has no edited file to bind the provenance stamp to, and a
+	 * stamp over no file proves nothing (`isWellFormed`), so a part that names
+	 * a file the turn did not write records it here. The stamp reads only the
+	 * parts the delivered message carries (`deliveredCitedFiles`), never one
+	 * the cap cut. Provenance only: neither the commit gate's `affectedFiles`
+	 * nor its `blockingFiles` read it.
 	 */
-	const provenanceCitedFiles: string[] = [];
+	const provenanceCitations = new Map<string, string[]>();
+	const citePart = (part: string, files: readonly string[]): void => {
+		provenanceCitations.set(part, [...files]);
+	};
 	/**
 	 * #3813: one-shot state a producer consumes for a part of this message,
 	 * held until the cap has said what the message kept (see
@@ -2135,6 +2140,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// superseded at this turn_end, or a cut section, does not use up the
 		// line.
 		const shownUnansweredServerIds = new Set<string>();
+		const sectionPrimaries: string[] = [];
 		// Round 6 (W2): the kept lines head the section (`renderCascadeResult`).
 		const unansweredLines: string[] = [];
 		for (const result of seen.values()) {
@@ -2196,7 +2202,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (sectionRun) sectionRuns.push(sectionRun);
 				// #4617: the section speaks for the run's primary file (a neighbour
 				// error it shows is in `affectedFiles` already).
-				provenanceCitedFiles.push(result.filePath);
+				sectionPrimaries.push(result.filePath);
 				for (const n of ownedNeighbors) {
 					if (n.diagnostics.length === 0) continue;
 					// #4495 round 3: a neighbour pi edited this turn is reported by
@@ -2270,6 +2276,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const section = parts.join("\n\n");
 			// @delivery-surface: runtime-turn:cascade-blocker
 			blockerParts.push(section);
+			citePart(section, sectionPrimaries);
 			const shownServerIds = [...shownUnansweredServerIds];
 			deliveryHolds.push({
 				part: section,
@@ -2411,14 +2418,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 	}
 	if (pendingBlocks.length > 0) {
-		// #4617: the lines name these neighbours, not an edited file.
-		provenanceCitedFiles.push(
-			...unresolvedNeighbors.slice(-maxShown).map((entry) => entry.filePath),
-			...changedShown.map((entry) => entry.filePath),
-		);
 		const pendingSection = pendingBlocks.join("\n");
 		// @delivery-surface: runtime-turn:cascade-pending-errors
 		blockerParts.push(pendingSection);
+		// #4617: the lines name these neighbours, not an edited file.
+		citePart(pendingSection, [
+			...unresolvedNeighbors.slice(-maxShown).map((entry) => entry.filePath),
+			...changedShown.map((entry) => entry.filePath),
+		]);
 		if (changedShown.length > 0) {
 			// Peek-then-commit: a cut line keeps its entries for the next turn.
 			deliveryHolds.push({
@@ -2540,18 +2547,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				lead: (fileCount: number, reasons: string) => string;
 				fallbackDetail: (r: (typeof indeterminateRuns)[number]) => string;
 			},
+			/** #4617: receives the run paths the advisory names. */
+			named: string[],
 		): string | undefined => {
 			if (runs.length === 0) return undefined;
 			const byDetail = new Map<string, string[]>();
+			const runPathOf = new Map<string, string>();
 			for (const r of runs) {
 				const detail = r.indeterminate?.detail ?? frame.fallbackDetail(r);
 				const files = byDetail.get(detail) ?? [];
-				files.push(toRunnerDisplayPath(cwd, r.filePath));
+				const display = toRunnerDisplayPath(cwd, r.filePath);
+				files.push(display);
+				runPathOf.set(display, r.filePath);
 				byDetail.set(detail, files);
 			}
 			const lines: string[] = [];
 			for (const [detail, filesRaw] of byDetail) {
 				const files = [...new Set(filesRaw)];
+				// The line shows five files per reason; the rest are counted, not named.
+				for (const display of files.slice(0, 5)) {
+					named.push(runPathOf.get(display) ?? display);
+				}
 				const shown = files.slice(0, 5).join(", ");
 				const more = files.length > 5 ? ` (+${files.length - 5} more)` : "";
 				lines.push(`  • ${detail}: ${shown}${more}`);
@@ -2589,65 +2605,85 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				r.indeterminate?.budget !== undefined,
 		);
 
-		// #4617: each advisory below is about these runs' primary files.
-		provenanceCitedFiles.push(
-			...[...graphRuns, ...bindingRuns, ...budgetRuns].map((r) => r.filePath),
-		);
-
 		// Factual/informational phrasing — the advisory tier wraps this with an
 		// "ℹ️ Advisory — no action required this turn:" label, so an imperative
 		// ("review dependents manually") would contradict it. The #533 substance
 		// stays: a clean cascade result does NOT cover these files' dependents.
+		const graphNamed: string[] = [];
 		const graphAdvisory = withCarryLabel(
-			buildAdvisory(graphRuns, {
-				lead: (fileCount, reasons) =>
-					`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
-					`the review graph was unavailable (${reasons}), so their dependents were not ` +
-					`cascade-checked and a clean cascade result does not cover them.`,
-				fallbackDetail: (r) =>
-					r.indeterminate?.reason === "missing_node"
-						? "changed file not in the review graph"
-						: "review graph unavailable",
-			}),
+			buildAdvisory(
+				graphRuns,
+				{
+					lead: (fileCount, reasons) =>
+						`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
+						`the review graph was unavailable (${reasons}), so their dependents were not ` +
+						`cascade-checked and a clean cascade result does not cover them.`,
+					fallbackDetail: (r) =>
+						r.indeterminate?.reason === "missing_node"
+							? "changed file not in the review graph"
+							: "review graph unavailable",
+				},
+				graphNamed,
+			),
 			graphRuns,
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
-		if (graphAdvisory) advisoryParts.push(graphAdvisory);
+		if (graphAdvisory) {
+			advisoryParts.push(graphAdvisory);
+			citePart(graphAdvisory, graphNamed);
+		}
 		holdAdvisory(graphAdvisory, graphRuns, "indeterminate");
 
+		const bindingNamed: string[] = [];
 		const bindingAdvisory = withCarryLabel(
-			buildAdvisory(bindingRuns, {
-				lead: (fileCount, reasons) =>
-					`Cascade identified dependents for ${fileCount} edited file(s) this turn, but their ` +
-					`diagnostics could not be freshly confirmed (${reasons}) and were withheld — a clean ` +
-					`cascade result does not cover them.`,
-				fallbackDetail: () => "cascade diagnostics withheld (binding rejected)",
-			}),
+			buildAdvisory(
+				bindingRuns,
+				{
+					lead: (fileCount, reasons) =>
+						`Cascade identified dependents for ${fileCount} edited file(s) this turn, but their ` +
+						`diagnostics could not be freshly confirmed (${reasons}) and were withheld — a clean ` +
+						`cascade result does not cover them.`,
+					fallbackDetail: () =>
+						"cascade diagnostics withheld (binding rejected)",
+				},
+				bindingNamed,
+			),
 			bindingRuns,
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
-		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
+		if (bindingAdvisory) {
+			advisoryParts.push(bindingAdvisory);
+			citePart(bindingAdvisory, bindingNamed);
+		}
 		holdAdvisory(bindingAdvisory, bindingRuns, "indeterminate");
 
+		const budgetNamed: string[] = [];
 		const budgetAdvisory = withCarryLabel(
-			buildAdvisory(budgetRuns, {
-				lead: (fileCount, reasons) =>
-					`Cascade checked the selected neighbors for ${fileCount} edited file(s) this turn, ` +
-					`but some eligible dependents were not checked because the cascade budget ` +
-					`was exhausted (${reasons}); a clean cascade result does not cover them.`,
-				fallbackDetail: (r) => {
-					const budget = r.indeterminate?.budget;
-					if (!budget) return "cascade budget omitted eligible dependents";
-					const detail = `cascade budget checked ${budget.selectedCount} of ${budget.eligibleCount} eligible dependents (${budget.truncatedCount} omitted)`;
-					return budget.transitiveTruncated
-						? `${detail}; transitive expansion was capped before all eligible dependents were enumerated`
-						: detail;
+			buildAdvisory(
+				budgetRuns,
+				{
+					lead: (fileCount, reasons) =>
+						`Cascade checked the selected neighbors for ${fileCount} edited file(s) this turn, ` +
+						`but some eligible dependents were not checked because the cascade budget ` +
+						`was exhausted (${reasons}); a clean cascade result does not cover them.`,
+					fallbackDetail: (r) => {
+						const budget = r.indeterminate?.budget;
+						if (!budget) return "cascade budget omitted eligible dependents";
+						const detail = `cascade budget checked ${budget.selectedCount} of ${budget.eligibleCount} eligible dependents (${budget.truncatedCount} omitted)`;
+						return budget.transitiveTruncated
+							? `${detail}; transitive expansion was capped before all eligible dependents were enumerated`
+							: detail;
+					},
 				},
-			}),
+				budgetNamed,
+			),
 			budgetRuns,
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
-		if (budgetAdvisory) advisoryParts.push(budgetAdvisory);
+		if (budgetAdvisory) {
+			advisoryParts.push(budgetAdvisory);
+			citePart(budgetAdvisory, budgetNamed);
+		}
 		holdAdvisory(budgetAdvisory, budgetRuns, "indeterminate");
 
 		const fileCount = new Set(
@@ -2699,7 +2735,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const runOrder = new Map(cascadeRuns.map((r, i) => [r, i]));
 		const byServer = new Map<
 			string,
-			{ waitMs: number; primaries: Set<string>; paths: Map<string, string> }
+			{
+				waitMs: number;
+				primaries: Set<string>;
+				paths: Map<string, string>;
+				/** #4617: display path to the path the line names. */
+				raw: Map<string, string>;
+			}
 		>();
 		for (const run of unconfirmedRuns) {
 			for (const group of run.unconfirmed?.servers ?? []) {
@@ -2716,12 +2758,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						waitMs: group.waitMs,
 						primaries: new Set<string>(),
 						paths: new Map<string, string>(),
+						raw: new Map<string, string>(),
 					};
 					bucket.waitMs = Math.max(bucket.waitMs, group.waitMs);
-					bucket.primaries.add(toRunnerDisplayPath(cwd, run.filePath));
-					bucket.paths.set(nk, toRunnerDisplayPath(cwd, neighborPath));
-					// #4617: the line names the primary and the unanswered neighbour.
-					provenanceCitedFiles.push(run.filePath, neighborPath);
+					const primaryDisplay = toRunnerDisplayPath(cwd, run.filePath);
+					const neighborDisplay = toRunnerDisplayPath(cwd, neighborPath);
+					bucket.primaries.add(primaryDisplay);
+					bucket.paths.set(nk, neighborDisplay);
+					bucket.raw.set(primaryDisplay, run.filePath);
+					bucket.raw.set(neighborDisplay, neighborPath);
 					byServer.set(group.serverId, bucket);
 				}
 			}
@@ -2731,9 +2776,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				? `${items.slice(0, max).join(", ")} (+${items.length - max} more)`
 				: items.join(", ");
 		const blocks: string[] = [];
+		/** #4617: the files the lines name, as `capped` shows them. */
+		const unconfirmedNamed: string[] = [];
 		let pathCount = 0;
 		for (const [serverId, bucket] of byServer) {
 			const paths = [...bucket.paths.values()];
+			for (const display of [
+				...[...bucket.primaries].slice(0, 3),
+				...paths.slice(0, 5),
+			]) {
+				unconfirmedNamed.push(bucket.raw.get(display) ?? display);
+			}
 			pathCount += paths.length;
 			const within = bucket.waitMs > 0 ? ` within ${bucket.waitMs} ms` : "";
 			blocks.push(
@@ -2748,7 +2801,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				unconfirmedRuns,
 			);
 			// @delivery-surface: runtime-turn:cascade-coverage-advisory
-			if (pendingAdvisory) advisoryParts.push(pendingAdvisory);
+			if (pendingAdvisory) {
+				advisoryParts.push(pendingAdvisory);
+				citePart(pendingAdvisory, unconfirmedNamed);
+			}
 			holdAdvisory(pendingAdvisory, unconfirmedRuns, "unconfirmed");
 			logCascade({
 				phase: "cascade_unconfirmed_rendered",
@@ -5794,7 +5850,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// @delivery-surface: runtime-turn:late-auxiliary-findings
 					advisoryParts.push(lateAuxPart);
 					// #4617: the part is about this file, which a no-write turn did not edit.
-					provenanceCitedFiles.push(lateAuxPath);
+					citePart(lateAuxPart, [lateAuxPath]);
 					// #3813: the drain cleared the pair. A cut part re-arms it under
 					// the pair's own TTL and ceiling, with its baseline unmoved, so
 					// the scanner's findings are probed and re-gated next turn.
@@ -6060,10 +6116,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// #3813: judge every hold against what the cap keeps, before the
 		// message is final: the marker names how many parts were held.
 		const joined = findingParts.join("\n\n");
+		const keptChars = turnEndKeptChars(joined);
 		const holdPlan = planDeliveryHolds({
 			holds: deliveryHolds,
 			parts: composedParts,
-			keptChars: turnEndKeptChars(joined),
+			keptChars,
 			separatorLength: "\n\n".length,
 		});
 		const settleHolds = (suppressed: boolean): void => {
@@ -6222,6 +6279,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// and the files its sections cite join the record's own affected list.
 		// Its input only: `affectedFiles` and `blockingFiles` stay what the commit
 		// gate reads.
+		// #4954 F1: only a part the delivered message carries, whole or in its
+		// kept prefix, binds the stamp. A part the cap cut is not in the text the
+		// model reads, so a change to its file leaves that text current.
+		const deliveredCitedFiles: string[] = [];
+		let partStart = 0;
+		for (const part of composedParts) {
+			if (partStart < keptChars) {
+				deliveredCitedFiles.push(...(provenanceCitations.get(part.raw) ?? []));
+			}
+			partStart += part.text.length + "\n\n".length;
+		}
 		const stampProvenance = (
 			affectedFiles: readonly string[],
 			affectedTruncated = false,
@@ -6230,7 +6298,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			for (const file of [
 				...affectedFiles,
 				...resolvedBlockerFileList.map((entry) => entry.filePath),
-				...provenanceCitedFiles,
+				...deliveredCitedFiles,
 			]) {
 				const resolved = resolveRunnerPath(cwd, file);
 				byKey.set(advisoryPathKey(resolved, cwd), resolved);

@@ -355,16 +355,141 @@ describe.each([false, true])(
 
 		// Fail closed on a stamp that cannot name every file the advisory cites
 		// (`truncated-provenance`): a partial stamp must not read as current.
-		it("labels a coverage advisory historical when it cites more files than a stamp holds", async () => {
+		it("labels a write turn historical when its edited and cited files exceed the stamp cap", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-over-cap-${guard}`,
 				incident: "A stamp over the first files of a larger citation set",
 				issue: "#4617",
 				async run(h) {
-					const primary = h.write("src/a.ts", "export const a = 1;\n");
-					const neighbors = Array.from(
+					for (let i = 0; i < MAX_ADVISORY_AFFECTED_FILES; i += 1) {
+						h.edit(`src/e${i}.ts`, `export const e${i} = 1;\n`);
+					}
+					const extra = h.write("src/extra.ts", "export const extra = 1;\n");
+					h.runtime.appendCascadeRun(indeterminateRun(extra));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 F3): a path cited by two sources counted twice against
+		// the cap, so a stamp of exactly MAX unique files read as truncated and a
+		// current message went out labelled historical.
+		it("counts a file cited and edited once against the stamp cap", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-dedupe-${guard}`,
+				incident: "The same path from two sources crossed the stamp cap",
+				issue: "#4617",
+				async run(h) {
+					const edited = Array.from(
 						{ length: MAX_ADVISORY_AFFECTED_FILES },
-						(_, i) => h.write(`src/n${i}.ts`, `export const n${i} = 1;\n`),
+						(_, i) => h.edit(`src/e${i}.ts`, `export const e${i} = 1;\n`),
+					);
+					h.runtime.appendCascadeRun(indeterminateRun(edited[0] as string));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 F1, Sourcery thread): the stamp was built from the
+		// parts the composer produced, so the file of a part the 20-line cap cut
+		// still bound the delivered text, and a change to a file the model never
+		// saw labelled live findings historical.
+		it("ignores the file of an advisory the cap cut out of the message", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-cut-part-${guard}`,
+				incident: "A cut advisory's file bound the delivered section",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					const cut = h.write("src/cut.ts", "export const cut = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [neighborError(neighbor)],
+								},
+							],
+							formatted: Array.from(
+								{ length: 22 },
+								(_, i) => `Cascade error line ${i}`,
+							).join("\n"),
+						},
+						neighborCount: 1,
+						diagnosticCount: 1,
+					});
+					h.runtime.appendCascadeRun(indeterminateRun(cut));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(cut, "export const cut = 2;\n");
+						},
+					});
+					expect(view.text).toContain("Cascade error line 0");
+					expect(view.text).not.toContain("Cascade could not compute");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Same recurrence, the display bound: an advisory shows five files per
+		// reason and "(+N more)" for the rest, so a file it does not name is not
+		// one it speaks for.
+		it("ignores a run the coverage advisory counts but does not name", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-unnamed-run-${guard}`,
+				incident: "A run behind (+N more) bound the delivered advisory",
+				issue: "#4617",
+				async run(h) {
+					const runs = Array.from({ length: 7 }, (_, i) =>
+						h.write(`src/r${i}.ts`, `export const r${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					for (const run of runs)
+						h.runtime.appendCascadeRun(indeterminateRun(run));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runs[6] as string, "export const r6 = 2;\n");
+						},
+					});
+					expect(view.text).toContain("(+2 more)");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("ignores a neighbour the unconfirmed line counts but does not name", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-unnamed-neighbor-${guard}`,
+				incident: "A neighbour behind (+N more) bound the delivered line",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbors = Array.from({ length: 7 }, (_, i) =>
+						h.write(`src/n${i}.ts`, `export const n${i} = 1;\n`),
 					);
 					h.runtime.beginTurn();
 					h.runtime.appendCascadeRun({
@@ -377,8 +502,41 @@ describe.each([false, true])(
 							servers: [{ serverId: "ts", waitMs: 500, paths: neighbors }],
 						},
 					});
-					const view = await h.turnEnd({ flags });
-					expect(view.text).toContain("no answer arrived");
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(
+								neighbors[6] as string,
+								"export const n6 = 2;\n",
+							);
+						},
+					});
+					expect(view.text).toContain("(+2 more)");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("labels a coverage advisory historical when a file it names changed", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-named-run-${guard}`,
+				incident: "A named run's file changed after the turn end",
+				issue: "#4617",
+				async run(h) {
+					const runs = Array.from({ length: 7 }, (_, i) =>
+						h.write(`src/r${i}.ts`, `export const r${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					for (const run of runs)
+						h.runtime.appendCascadeRun(indeterminateRun(run));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runs[0] as string, "export const r0 = 2;\n");
+						},
+					});
+					expect(view.text).toContain("(+2 more)");
 					expect(view.text).toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
