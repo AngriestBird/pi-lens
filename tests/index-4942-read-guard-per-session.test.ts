@@ -283,4 +283,36 @@ describe("#4942: an edit is licensed only by a read in the editing session", () 
 			await primary.dispose();
 		},
 	);
+
+	it(
+		"credits an indentation-autopatched edit to the secondary that made it",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
+		async () => {
+			// RECURRENCE GUARDED: #4942's synthetic-read writer. A unique-match
+			// autopatch proves the model's oldText reflects the file and records a
+			// read for the matched range; recorded on the coordinator's guard it
+			// would credit the primary and leave the editing subagent refused.
+			const { proj, shared } = project("autopatch");
+			const { primary, secondary } = await pair(
+				proj,
+				[endTurn("idle")],
+				[
+					step(
+						fauxToolCall("edit", {
+							path: shared,
+							edits: [{ oldText: "  return 1;", newText: "  return 2;" }],
+						}),
+						"editing with the wrong indentation",
+					),
+					endTurn("edited"),
+				],
+			);
+			await secondary.prompt("edit it");
+			expect(editResult(secondary)).not.toContain(EDIT_WITHOUT_READ);
+			expect(fs.readFileSync(shared, "utf8")).toContain("return 2;");
+			expect(secondary.errors).toEqual([]);
+			await secondary.dispose();
+			await primary.dispose();
+		},
+	);
 });
