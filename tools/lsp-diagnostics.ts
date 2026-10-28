@@ -2124,10 +2124,12 @@ async function runFileDiagnostics(
 			: [];
 	// #4956 F2: an enabled opt-in server is not "switched off"; the all-server
 	// door simply does not start it (its findings arrive with edits).
-	const switchedOffServerIds = notRunServerIds.filter(
-		(id) => !isOptInAuxiliaryServerId(id),
+	const switchedOffServerIds = notRunServerIds.flatMap((id) =>
+		isOptInAuxiliaryServerId(id) ? [] : [id],
 	);
-	const optInNotRunServerIds = notRunServerIds.filter(isOptInAuxiliaryServerId);
+	const optInNotRunServerIds = notRunServerIds.flatMap((id) =>
+		isOptInAuxiliaryServerId(id) ? [id] : [],
+	);
 	const noAuxiliaryLine = [
 		"No auxiliary findings.",
 		...(switchedOffServerIds.length > 0

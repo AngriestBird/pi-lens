@@ -1597,10 +1597,11 @@ export class LSPService {
 	 * state in which these readers can find anything to act on.
 	 */
 	private serversWithLiveReaderRoots(filePath: string): LSPServerInfo[] {
-		return getServersForFileWithConfig(filePath).filter(
-			(server) =>
-				!isOptInAuxiliaryServerId(server.id) ||
-				this.holdsClientForServer(server.id),
+		return getServersForFileWithConfig(filePath).flatMap((server) =>
+			!isOptInAuxiliaryServerId(server.id) ||
+			this.holdsClientForServer(server.id)
+				? [server]
+				: [],
 		);
 	}
 

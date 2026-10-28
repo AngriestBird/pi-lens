@@ -284,7 +284,8 @@ describe("a default-off fallow adds no per-file root resolution (#4956 F1)", () 
 
 	async function watch() {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const { getServerById } = await import("../../../clients/lsp/server.js");
+		const { getServersForFileWithConfig } =
+			await import("../../../clients/lsp/config.js");
 		const service = new LSPService();
 		const resolved: string[] = [];
 		const registry = (service as unknown as RegistryProbe).clientRegistry;
@@ -293,7 +294,9 @@ describe("a default-off fallow adds no per-file root resolution (#4956 F1)", () 
 			resolved.push(server.id);
 			return original(server, filePath);
 		};
-		const row = getServerById("fallow")!;
+		const row = getServersForFileWithConfig(TS_FILE).find(
+			(server) => server.id === "fallow",
+		)!;
 		const rootWalks: string[] = [];
 		const originalRoot = row.root.bind(row);
 		vi.spyOn(row, "root").mockImplementation((filePath: string) => {
