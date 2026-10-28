@@ -517,6 +517,60 @@ describe.each([false, true])(
 			});
 		});
 
+		// The other arm of the reach rule (#4954 F5): a leading section too long
+		// for the cap reaches the model from its head, so it binds its files. A
+		// "whole parts only" stamp would read it current after its file changed.
+		it("binds the files of a leading section the cap cut part-way", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-leading-cut-${guard}`,
+				incident: "An oversized leading section must keep binding its file",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [neighborError(neighbor)],
+								},
+							],
+							formatted: Array.from(
+								{ length: 22 },
+								(_, i) => `Cascade error line ${i}`,
+							).join("\n"),
+						},
+						neighborCount: 1,
+						diagnosticCount: 1,
+					});
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(primary, "export const a = 2;\n");
+						},
+					});
+					expect(view.text).toContain("Cascade error line 0");
+					expect(view.text).not.toContain("Cascade error line 21");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// Recurrence (#4954 F6, CodeRabbit thread): a stamp of cited files only
 		// dropped the whole message once they were deleted (`allFilesDeleted`),
 		// where master delivered it labelled historical. A cited file is
@@ -606,7 +660,7 @@ describe.each([false, true])(
 
 		// The drop rule the cited role leaves standing: once every file the
 		// turn wrote is gone, its findings have no file left to fix, even while
-		// a cited file survives.
+		// a cited file survives. The edited file is cited too, and stays edited.
 		it("drops a write turn's message once every edited file is deleted", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-edited-deleted-${guard}`,
@@ -616,6 +670,7 @@ describe.each([false, true])(
 					const edited = h.edit("src/e.ts", "export const e = 1;\n");
 					const cited = h.write("src/c.ts", "export const c = 1;\n");
 					h.blocker("src/e.ts", "L1: type mismatch");
+					h.runtime.appendCascadeRun(indeterminateRun(edited));
 					h.runtime.appendCascadeRun(indeterminateRun(cited));
 					const view = await h.turnEnd({
 						flags,
