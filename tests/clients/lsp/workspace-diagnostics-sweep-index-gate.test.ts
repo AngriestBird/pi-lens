@@ -26,6 +26,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
+import { makeClientNotifyDouble } from "../../support/lsp-client-notify-double.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -77,10 +78,7 @@ describe("runWorkspaceDiagnostics — sweep-scoped index gate for workspaceIndex
 			}),
 			getOperationSupport: () => ({}),
 			serverId: "marksman",
-			notify: {
-				announceCreated: () => undefined,
-				open: vi.fn(async () => {}),
-			},
+			notify: makeClientNotifyDouble(),
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				waitCalls.push({ filePath, ms });
 				fileIndex += 1;
@@ -168,10 +166,7 @@ describe("runWorkspaceDiagnostics — sweep-scoped index gate for workspaceIndex
 			}),
 			getOperationSupport: () => ({}),
 			serverId: "python",
-			notify: {
-				announceCreated: () => undefined,
-				open: vi.fn(async () => {}),
-			},
+			notify: makeClientNotifyDouble(),
 			waitForDiagnostics: vi.fn(async (_filePath: string, ms: number) => {
 				waitCalls.push(ms);
 				return undefined;

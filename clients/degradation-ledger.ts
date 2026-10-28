@@ -1095,6 +1095,14 @@ export type DegradationKind =
 	 */
 	| "lsp-sibling-announcement"
 	/**
+	 * #4532 gap 13: a module a diagnostics call's target imports, open in no
+	 * server, could not be read to compare its bytes with the ones last seen
+	 * (clients/lsp/index.ts `unheldBytesMoved`). Its stat alone is compared, so
+	 * a rewrite of the same bytes is sent as a change. Subject is the path.
+	 * Once per path per session.
+	 */
+	| "lsp-unheld-dependency-unreadable"
+	/**
 	 * A language-server child process CLOSED without pi-lens having asked it to
 	 * (#1969). `clientShutdown()` sets `state.shutdownRequested`, so evictions
 	 * and ordinary teardown never reach this kind — only a mid-session death.
