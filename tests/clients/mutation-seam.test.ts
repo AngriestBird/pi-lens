@@ -24,6 +24,7 @@ import {
 } from "../../clients/generation-lock.js";
 import { getProjectChangeLogPath } from "../../clients/project-changes.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
+import { readNdjsonRows } from "../support/ndjson-rows.js";
 
 /** Derive the receipt key exactly as the seam does - never hardcode it. */
 const keyOf = (p: string) => normalizeMapKey(path.resolve(p));
@@ -379,11 +380,11 @@ describe("recordProjectMutation — the one mutation seam", () => {
 				cwd,
 				sessionId: "subagent-session",
 			});
-			const rows = fs
-				.readFileSync(getProjectChangeLogPath(cwd), "utf8")
-				.split("\n")
-				.filter((l) => l.trim())
-				.map((l) => JSON.parse(l) as { sessionId: string; filePath: string });
+			const { rows, skipped } = readNdjsonRows<{
+				sessionId: string;
+				filePath: string;
+			}>(getProjectChangeLogPath(cwd));
+			expect(skipped).toBe(0);
 			expect(
 				rows.map((row) => [path.basename(row.filePath), row.sessionId]),
 			).toEqual([
