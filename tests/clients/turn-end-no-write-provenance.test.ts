@@ -377,6 +377,37 @@ describe.each([false, true])(
 			});
 		});
 
+		// Recurrence (#4954 r5, CodeRabbit thread): a truncated stamp omits a
+		// cited file, so "every stamped file is deleted" no longer means every
+		// file the text names is gone. Dropping the message there discarded text
+		// whose omitted, still-existing file master delivered labelled historical.
+		it("keeps a truncated stamp's message labelled historical when every stamped file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-over-cap-deleted-${guard}`,
+				incident:
+					"Deleting every stamped file dropped a message citing an omitted one",
+				issue: "#4617",
+				async run(h) {
+					const edited = Array.from(
+						{ length: MAX_ADVISORY_AFFECTED_FILES },
+						(_, i) => h.edit(`src/e${i}.ts`, `export const e${i} = 1;\n`),
+					);
+					const extra = h.write("src/extra.ts", "export const extra = 1;\n");
+					h.runtime.appendCascadeRun(indeterminateRun(extra));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							for (const file of edited) fs.unlinkSync(file);
+						},
+					});
+					expect(fs.existsSync(extra)).toBe(true);
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// Recurrence (#4954 F3): a path cited by two sources counted twice against
 		// the cap, so a stamp of exactly MAX unique files read as truncated and a
 		// current message went out labelled historical.

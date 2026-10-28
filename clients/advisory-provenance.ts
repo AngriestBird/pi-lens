@@ -233,8 +233,12 @@ export function validateAdvisoryProvenance(
 		if (reasons.length > reasonsBefore)
 			changedPaths.add(advisoryPathKey(resolved, cwd));
 	}
+	// A truncated stamp omits cited files, so "every stamped file is gone" does
+	// not mean every file the text names is.
 	const allFilesDeleted =
-		subjectFiles > 0 && deletedFiles === provenance.files.length;
+		subjectFiles > 0 &&
+		provenance.truncated !== true &&
+		deletedFiles === provenance.files.length;
 	if (unknown)
 		return {
 			status: "unknown",
