@@ -2483,8 +2483,7 @@ function isTmpWriteTarget(word, cwd, env) {
 		isUnderTmpCheckoutRoot(path) &&
 		!(
 			HARNESS_TMP_DIR !== undefined &&
-			(isUnderTmpRoot(path, HARNESS_TMP_DIR) ||
-				isUnderTmpRoot(path, physicalPath(HARNESS_TMP_DIR, HARNESS_TMP_DIR)))
+			isUnderTmpRoot(path, physicalPath(HARNESS_TMP_DIR, HARNESS_TMP_DIR))
 		)
 	);
 }
