@@ -4001,6 +4001,34 @@ describe("#4921: a turn end's own partition is its turn session's", () => {
 		}
 	});
 
+	it("names the subagent's own record's remedy as its own, not another session's", () => {
+		// RECURRENCE GUARDED: #4921 in the refusal text. Read against the
+		// coordinator's id, a latched refusal of the subagent's commit told it
+		// to wait out another session's record that is its own.
+		const env = setupTestEnvironment("pi-lens-git-guard-4921-remedy-");
+		try {
+			const { theirs } = twoPartitionRecord(env.tmpDir);
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				foreignRecord([theirs], SUBAGENT),
+			);
+			runtime.markGitGuardCacheUnknown("cache_stale");
+			const foreignRemedy = "The record names blockers in subagent.ts";
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
+				foreignRemedy,
+			);
+			expect(
+				evaluateGitGuard(runtime, cache, env.tmpDir, "pi", SUBAGENT).reason,
+			).not.toContain(foreignRemedy);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("lets the subagent judge a record only it owns at its own commit", () => {
 		// RECURRENCE GUARDED: #4921 at the commit gate. Compared with the
 		// coordinator's id, the subagent's own record read `session_mismatch`
