@@ -41,7 +41,9 @@
   filters their reads (a hypothesis, reproduced only as a composite probe,
   #4955 review F3).
   A read or write reported through the mutation or
-  read bridge names no session and is the coordinator's. A concurrent
+  read bridge is credited to the coordinator's guard, even when the
+  mutation entry names a session (`BridgeMutationEntry.sessionId` routes
+  only the turn state and the change log, #4955 review F11). A concurrent
   secondary still shares the turn-end worklist. State `turn_end` parks
   in a scope cell for a later turn lives on the activation's own scope
   (`TurnEndDeps.sessionScope`, passed by `index.ts`), never on
