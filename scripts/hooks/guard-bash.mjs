@@ -245,7 +245,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"worktreeUnresolved"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"tmpWrite"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"|"npmLinkedInstall"|"linkedNodeModulesDelete"} DenyRule */
+/** @typedef {"stash"|"reset"|"worktreeForce"|"worktreeSymlink"|"worktreeUnresolved"|"probe"|"tmpdirCollision"|"sharedKill"|"tmpCheckout"|"tmpWrite"|"checkUngated"|"hookBypass"|"forcePush"|"ciVerdictStatus"|"rebase"|"npmLinkedInstall"|"linkedNodeModulesDelete"|"unscannableCase"} DenyRule */
 
 /** @type {Record<DenyRule, string>} */
 export const RULE_MESSAGES = {
@@ -281,6 +281,8 @@ export const RULE_MESSAGES = {
 		"npm ci/install/update/uninstall/prune/dedupe/rebuild (and `npx npm@… ci`) is forbidden where the node_modules symlink chain cannot be safely resolved or leads into another checkout (#4044, the #3173 shape -- `npm ci` removes node_modules/* before it reifies, ignores `--dry-run` on npm 9.2.0, and follows the link, so it emptied the SHARED install under every lane on 2026-10-07; the other verbs rewrite that shared install in place) -- answer install-flag questions in a scratch copy that holds no node_modules link (copy package.json and package-lock.json into a directory under $TMPDIR and run npm there), or `rm node_modules` in a separate command first (a chain is judged before its `rm` runs) and install into the lane's own real directory, or point `--prefix` at a real directory the hook can read, such as `--prefix $TMPDIR/<name>` (a `--prefix` from `$(…)`, backticks or an unknown variable is judged as this project).",
 	linkedNodeModulesDelete:
 		"a delete whose operand passes THROUGH a node_modules symlink chain that cannot be safely resolved or leads into another checkout is forbidden (#4044, the #3173 shape -- `rm -rf node_modules/`, `rm -rf node_modules/*` and `find node_modules/ -delete` follow the link and empty the SHARED install, measured with GNU coreutils on 2026-10-07) -- unlink the link itself instead: `rm node_modules` or `unlink node_modules` (no trailing slash, no glob; it removes only the link), and delete a real node_modules directory only in a scratch copy.",
+	unscannableCase:
+		"a command substitution holds a `case` word at a position this hook cannot classify (#4060) -- bash may open a case clause there, whose pattern `)` is not the substitution's closing paren, so the hook cannot tell where the substitution ends or which command it runs. Write the `case` as its own command (`case` at the start of a command, or after `;`, `&&`, `|`, `then`, `do`, `{`), keep it out of a `for`/`select`/`coproc`/`function` header and out of `((`/`$((`, or move the substitution's work into a script.",
 	ciVerdictStatus:
 		"ci-verdict's exit status is lost through a pipe -- read the final `ci-verdict: exit <N> (<kind>)` line, or run `; echo $?` before the pipe; do not read `$?` after `ci-verdict.mjs … | …` (#3883).",
 };
@@ -296,13 +298,42 @@ export const RULE_MESSAGES = {
 const WORD_BREAK = /[\s;&|<>]/;
 
 /**
- * Does the retained text so far end where a command may start: the start, a
- * separator, an opening paren or brace, a pattern's `)`, or a keyword that
- * runs the next word? `case` and `esac` are keywords only there (#4060), so
- * `echo case x in` opens no clause.
+ * Reserved words after which the next word is still at a command position:
+ * they start or continue a command list, or negate or time the pipeline that
+ * follows (#4060). `time` also takes `-p` and `--` before that word.
  */
-const COMMAND_POSITION =
-	/(?:^|[;&|(){\n]|\b(?:then|do|else|elif|if|while|until))\s*$/;
+const LIST_OPENERS = new Set([
+	"if",
+	"then",
+	"else",
+	"elif",
+	"while",
+	"until",
+	"do",
+	"{",
+	"!",
+	"time",
+]);
+
+/**
+ * Reserved words whose grammar {@link lexRegions} does not model (`for ((…)) do
+ * case`, `coproc NAME case` and `function f case` all open a clause at a word
+ * that is not at a command position). A `case` before the next separator fails
+ * closed instead of guessing (#4060).
+ */
+const UNMODELLED_HEADS = new Set(["coproc", "function", "for", "select"]);
+
+/** One whitespace-and-metacharacter-delimited word, read from `lastIndex`. */
+const WORD_RUN = /[^\s;&|()<>]+/y;
+
+/**
+ * Left in the `lexRegions` output where a `case` word sits at a position the
+ * lexer cannot classify. Without a classification the hook cannot tell where
+ * the substitution ends, so {@link findDeny} refuses the command
+ * (`unscannableCase`) rather than guess (#4060). A private-use character,
+ * like {@link SUBSTITUTION_MARK}, so it never reads as shell syntax.
+ */
+const UNSCANNABLE_CASE = String.fromCharCode(0xe001);
 
 /**
  * Segment separators in the retained text. Single characters only: `&&`
@@ -508,6 +539,16 @@ function consumeHeredocBody(text, start, heredoc, out) {
  * span (#2699 review round 2's V1). That is a property of the shape, not a
  * case that was remembered.
  *
+ * Inside a `$( … )` body the pass also walks command positions (`mode`),
+ * because a `case` clause's pattern `)` is not the body's closing paren and
+ * only a `case` at a command position opens a clause. The positions are
+ * admitted, not guessed: the body start, a separator, `(`, a `case` pattern's
+ * `)`, a reserved word that starts a list ({@link LIST_OPENERS}). A word read
+ * at a command position that is not one of those is the command name, and
+ * everything after it is an argument. A `case` word where the walk does not
+ * know (the headers in {@link UNMODELLED_HEADS}, `((`, `$((`, `case(`) is left
+ * as {@link UNSCANNABLE_CASE}, which {@link findDeny} refuses (#4060).
+ *
  * Subtracted: comments, heredoc bodies, and substitution bodies (the last
  * are re-scanned via `out`, not discarded; each leaves one
  * {@link SUBSTITUTION_MARK} behind so a word that held one is still known to
@@ -531,12 +572,42 @@ function lexRegions(text, start, closer, out) {
 	/**
 	 * Open `case` clauses inside a `$( … )` body, innermost last (#4060). A
 	 * pattern's `)` ends the pattern, not the body, so the states are:
-	 * `subject` (`case` seen at a command position, up to its `in`), `pattern`
-	 * (after `in` or `;;`/`;&`/`;;&`, up to the pattern's `)`) and `body` (up to
+	 * `subject` (`case` seen at a command position, up to its `in`),
+	 * `patternFirst` (after `in` or `;;`/`;&`/`;;&`: the first word is `esac`
+	 * or a pattern), `pattern` (up to the pattern's `)`) and `body` (up to
 	 * `;;`, or `esac` at a command position, which pops it).
-	 * @type {Array<"subject"|"pattern"|"body">}
+	 * @type {Array<"subject"|"patternFirst"|"pattern"|"body">}
 	 */
 	const cases = [];
+	/**
+	 * Where the next word sits in a `$( … )` body (#4060). `start`: a command
+	 * position, where a reserved word is one (`case`, `esac`, the openers in
+	 * {@link LIST_OPENERS}). `args`: a command name was read, so every later
+	 * word is an argument and a keyword-shaped one is plain text (`: do`,
+	 * `echo case`). `cond`: inside `[[ … ]]`, where `case` is a plain word and
+	 * a `(` opens no command. Any word that is not a recognised opener ends
+	 * `start`, assignments and redirections included (bash reads `x=1 case` and
+	 * `>f case` with `case` as the command name).
+	 * @type {"start"|"args"|"cond"}
+	 */
+	let mode = "start";
+	/** The opener read last at `start`, so `-p`/`--` after `time` keep it. */
+	let prevOpener = "";
+	/**
+	 * `parenDepth` at a header the lexer does not model, or `null`: `for`,
+	 * `select`, `coproc`, `function`, `((` and `$((`. A `case` word while held
+	 * is unclassifiable and fails closed; a separator at or below the depth ends
+	 * the hold (`for ((;;))` keeps its inner `;` out of it).
+	 * @type {number | null}
+	 */
+	let holdDepth = closer === ")" && text[start] === "(" ? 0 : null;
+	/** `retained.length` just past each open plain `(`, to tell `f()` from `(cmd)` at its `)`. */
+	/** @type {number[]} */
+	const parenOpens = [];
+	const startCommand = () => {
+		mode = "start";
+		prevOpener = "";
+	};
 	let atWordStart = true;
 	/** Heredoc markers seen on the current line, consumed in order at its newline. */
 	/** @type {Array<{ delimiter: string; stripTabs: boolean; quoted: boolean }>} */
@@ -591,32 +662,76 @@ function lexRegions(text, start, closer, out) {
 		}
 		if (closer === ")") {
 			const open = cases.length - 1;
-			if (atWordStart && /[a-z]/.test(ch)) {
-				const word = /^[a-z]+/.exec(text.slice(i, i + 5))?.[0];
-				const next = text[i + (word?.length ?? 0)];
-				if (word && (next === undefined || /[\s;&|()<>]/.test(next))) {
-					if (word === "case" && COMMAND_POSITION.test(retained))
-						cases.push("subject");
-					else if (word === "in" && cases[open] === "subject")
-						cases[open] = "pattern";
-					else if (
-						word === "esac" &&
-						(cases[open] === "pattern" ||
-							(cases[open] === "body" && COMMAND_POSITION.test(retained)))
-					)
+			const frame = cases[open];
+			if (
+				ch === ";" ||
+				ch === "|" ||
+				ch === "\n" ||
+				(ch === "&" && isLiveSeparator(text, i))
+			) {
+				if (holdDepth === null || parenDepth <= holdDepth) {
+					holdDepth = null;
+					if (mode !== "cond") startCommand();
+				}
+			} else if (
+				atWordStart &&
+				!/[\s;&|()<>]/.test(ch) &&
+				!(ch === "\\" && text[i + 1] === "\n")
+			) {
+				WORD_RUN.lastIndex = i;
+				const word = WORD_RUN.exec(text)?.[0] ?? "";
+				const next = text[i + word.length];
+				if (frame === "subject") {
+					if (word === "in") cases[open] = "patternFirst";
+				} else if (frame === "patternFirst") {
+					if (word === "esac") {
 						cases.pop();
+						mode = "args";
+					} else cases[open] = "pattern";
+				} else if (frame === "pattern") {
+					// A pattern word: no keyword is read here.
+				} else if (holdDepth !== null) {
+					if (word === "case") out.push(UNSCANNABLE_CASE);
+				} else if (mode === "cond") {
+					if (word === "]]") mode = "args";
+				} else if (mode === "start") {
+					if (
+						LIST_OPENERS.has(word) ||
+						((word === "-p" || word === "--") &&
+							(prevOpener === "time" || prevOpener === "-p"))
+					)
+						prevOpener = word;
+					else if (word === "case") {
+						// Only `case` + whitespace is a clause bash reads; `case(`,
+						// `case;` and the like are syntax errors or forms not modelled.
+						if (next !== undefined && /\s/.test(next)) {
+							cases.push("subject");
+							mode = "args";
+						} else out.push(UNSCANNABLE_CASE);
+					} else if (word === "esac" && frame === "body") {
+						cases.pop();
+						mode = "args";
+					} else if (word === "[[") mode = "cond";
+					else if (UNMODELLED_HEADS.has(word)) holdDepth = parenDepth;
+					else mode = "args";
 				}
 			}
-			if (cases[open] === "pattern" && (ch === ")" || ch === "(")) {
-				if (ch === ")") cases[open] = "body";
+			if (
+				(frame === "patternFirst" || frame === "pattern") &&
+				(ch === ")" || ch === "(")
+			) {
+				if (ch === ")") {
+					cases[open] = "body";
+					startCommand();
+				}
 				retained += ch;
 				atWordStart = true;
 				i++;
 				continue;
 			}
-			if (cases[open] === "body" && ch === ";" && /[;&]/.test(text[i + 1])) {
+			if (frame === "body" && ch === ";" && /[;&]/.test(text[i + 1])) {
 				const end = text.startsWith(";;&", i) ? i + 3 : i + 2;
-				cases[open] = "pattern";
+				cases[open] = "patternFirst";
 				retained += text.slice(i, end);
 				atWordStart = true;
 				i = end;
@@ -626,14 +741,26 @@ function lexRegions(text, start, closer, out) {
 		if (closer === ")" && ch === ")") {
 			if (parenDepth === 0) return { end: i + 1, retained, closed: true };
 			parenDepth--;
+			// `f()` is followed by a compound command (a command position);
+			// `(cmd)` and `<(cmd)` are followed by a separator or a redirection.
+			if (holdDepth === null && mode !== "cond") {
+				if (retained.slice(parenOpens.pop() ?? 0).trim() === "") startCommand();
+				else mode = "args";
+			} else parenOpens.pop();
 			retained += ch;
 			atWordStart = true;
 			i++;
 			continue;
 		}
 		if (closer === ")" && ch === "(") {
+			// `((` at a command position is an arithmetic command, or two
+			// subshells when the arithmetic reading fails: not modelled.
+			if (holdDepth === null && mode === "start" && text[i + 1] === "(")
+				holdDepth = parenDepth;
 			parenDepth++;
 			retained += ch;
+			parenOpens.push(retained.length);
+			if (holdDepth === null && mode !== "cond") startCommand();
 			atWordStart = true;
 			i++;
 			continue;
@@ -1272,6 +1399,23 @@ function isUnderTmpRoot(absoluteDir, root = TMP_ROOT) {
 	);
 }
 
+/**
+ * {@link isUnderTmpRoot} for the `tmpCheckout` destinations, by either
+ * spelling of the root. {@link physicalPath} puts a path where the kernel does,
+ * so where `/tmp` is a symlink (macOS: `/tmp` -> `private/tmp`) a missing leaf
+ * `/tmp/new` resolves to `/private/tmp/new`, which the literal root misses;
+ * master kept the lexical `/tmp/new` there and denied it (#4060 r2, F3).
+ *
+ * @param {string} absoluteDir
+ * @returns {boolean}
+ */
+function isUnderTmpCheckoutRoot(absoluteDir) {
+	return (
+		isUnderTmpRoot(absoluteDir) ||
+		isUnderTmpRoot(absoluteDir, physicalPath(TMP_ROOT, TMP_ROOT))
+	);
+}
+
 /** Bounds {@link expandShellWord}'s indirection loop -- generous for the real
  *  shapes this repo's own sessions use (`S=...; W=$S/wt` is one hop) while
  *  still terminating a pathological or self-referential chain (`A=$A`). */
@@ -1760,7 +1904,9 @@ function classifyGit(args, cwd, env = {}, expansionEnv = env) {
 		const [pathArg] = collectPositionals(rest, WORKTREE_ADD_VALUE_FLAGS);
 		if (
 			pathArg !== undefined &&
-			isUnderTmpRoot(resolveShellPath(pathArg, gitCwd, expansionEnv).path)
+			isUnderTmpCheckoutRoot(
+				resolveShellPath(pathArg, gitCwd, expansionEnv).path,
+			)
 		)
 			return "tmpCheckout";
 		return null;
@@ -1774,7 +1920,7 @@ function classifyGit(args, cwd, env = {}, expansionEnv = env) {
 		// documented-blind-spot shape as a command word built by expansion).
 		if (
 			positionals.length >= 2 &&
-			isUnderTmpRoot(
+			isUnderTmpCheckoutRoot(
 				resolveShellPath(positionals[1], gitCwd, expansionEnv).path,
 			)
 		)
@@ -2313,7 +2459,7 @@ function classifyMktemp(args, cwd, env, expansionEnv = env) {
 	// The words are expanded already; what is left in them is unresolved in
 	// every environment, so the prefix is never consulted again (#4057).
 	return targetDirs.some((dir) =>
-		isUnderTmpRoot(resolveShellPath(dir, cwd, {}).path),
+		isUnderTmpCheckoutRoot(resolveShellPath(dir, cwd, {}).path),
 	)
 		? "tmpCheckout"
 		: null;
@@ -3404,6 +3550,7 @@ function findPipedCiVerdictStatusRead(segments) {
  */
 export function findDeny(commandText, cwd) {
 	const unknownReading = scannableRegions(commandText);
+	if (unknownReading.includes(UNSCANNABLE_CASE)) return "unscannableCase";
 	const readings = unknownReading.some((region) =>
 		region.includes(SUBSTITUTION_MARK),
 	)

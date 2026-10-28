@@ -2628,6 +2628,17 @@ describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () =>
 			rule: "tmpCheckout",
 		},
 		{
+			// F4 (PR #4935 review): both readings of the /tmp row above deny on a
+			// host whose TMPDIR is /tmp (HOME is then under /tmp lexically too), so
+			// it never tested the walk there. This one differs by host kind: the
+			// kernel puts it under /usr (allow), the spelling under HOME.
+			label:
+				"worktree add two missing levels below a symlink to /, landing under /usr",
+			command: "git worktree add rootlink/usr/pi-lens-4060-a/b/new",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
 			label: "clone below a symlink to /, landing under /tmp",
 			command: "git clone r rootlink/tmp/pi-lens-4060-new",
 			cwd: "@HOME@",
@@ -3075,6 +3086,198 @@ describe("scripts/hooks/guard-bash.mjs -- case patterns and ANSI-C quotes (#4060
 		const result = runHook(`echo "$'" ; git stash`);
 		expect(result.stderr).toBe(`${RULE_MESSAGES.stash}\n`);
 		expect(result.status).toBe(2);
+	});
+});
+
+// #4060 round 2 (PR #4935 review F3): `physicalPath` puts a missing leaf where
+// the kernel does, so where /tmp is a symlink (macOS: /tmp -> private/tmp) the
+// destination `/tmp/new` resolves to `/private/tmp/new`, which a literal-/tmp
+// comparison misses. Master kept the lexical `/tmp/new` and denied it; head
+// allowed it, and no lane runs this suite on macOS. The hook is copied with its
+// one `TMP_ROOT` literal re-pointed at a fixture root that is a symlink, which
+// is the macOS shape on any host, and run as a child like the real hook.
+describe("scripts/hooks/guard-bash.mjs -- tmpCheckout where the tmp root is a symlink (#4060 r2)", () => {
+	let root: string;
+	let copy: string;
+
+	beforeAll(() => {
+		root = realpathSync(
+			mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-macroot-")),
+		);
+		mkdirSync(join(root, "private", "tmp"), { recursive: true });
+		symlinkSync(join("private", "tmp"), join(root, "tmp"));
+		mkdirSync(join(root, "elsewhere"));
+		mkdirSync(join(root, "private", "other"), { recursive: true });
+		const source = readFileSync(HOOK, "utf8");
+		const literal = 'const TMP_ROOT = "/tmp";';
+		// Guards the re-point itself: a renamed constant would make every row
+		// below test the real /tmp instead of the fixture.
+		expect(source.split(literal)).toHaveLength(2);
+		copy = join(root, "guard-bash-macroot.mjs");
+		writeFileSync(
+			copy,
+			source.replace(
+				literal,
+				`const TMP_ROOT = ${JSON.stringify(join(root, "tmp"))};`,
+			),
+		);
+	});
+
+	afterAll(() => {
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	function verdict(command: string) {
+		return spawnSync(process.execPath, [copy], {
+			input: JSON.stringify({
+				session_id: "test",
+				cwd: PAYLOAD_CWD,
+				permission_mode: "default",
+				hook_event_name: "PreToolUse",
+				tool_name: "Bash",
+				tool_input: { command },
+			}),
+			encoding: "utf8",
+			env: BASE_ENV,
+		});
+	}
+
+	it.each([
+		["a missing leaf", "git worktree add @R@/tmp/pi-lens-4060-new"],
+		["two missing levels", "git worktree add @R@/tmp/pi-lens-4060-a/b/new"],
+		["a clone", "git clone r @R@/tmp/pi-lens-4060-new"],
+		["an existing mktemp directory", "mktemp -d @R@/tmp/x.XXXXXX"],
+		["a missing mktemp directory", "mktemp -d @R@/tmp/gone/x.XXXXXX"],
+	])("denies %s below the symlinked root", (_name, template) => {
+		const result = verdict(template.replaceAll("@R@", root));
+		expect(result.stderr).toBe(`${RULE_MESSAGES.tmpCheckout}\n`);
+		expect(result.status).toBe(2);
+	});
+
+	it.each([
+		["a sibling of the symlinked root", "git worktree add @R@/elsewhere/new"],
+		[
+			"the root's target spelled by its own name",
+			"git worktree add @R@/private/other/new",
+		],
+	])("allows %s", (_name, template) => {
+		const result = verdict(template.replaceAll("@R@", root));
+		expect(result.stderr).toBe("");
+		expect(result.status).toBe(0);
+	});
+});
+
+// #4060 round 2 (PR #4935 review F1/F2): where a `case` clause may open inside
+// a `$( … )` body is decided by the lexer's own command-position state, never
+// by the text before the word. Each deny row below was measured against bash
+// 5.3.9 with a fake `git` that records its argv: every one runs `git stash`.
+// The first group is F1, the regression the retained-text regex introduced: a
+// keyword used as an ARGUMENT (`: do`) or a word that merely ENDS in one
+// (`-do`, `x.do`, `a=if`) opened a phantom clause, so the real `)` that closes
+// the substitution was read as a pattern's `)` and `stash` fell inside the
+// substitution, leaving `git ⟨mark⟩` outside (master denied all of them).
+describe("scripts/hooks/guard-bash.mjs -- case clauses open only at a command position (#4060 r2)", () => {
+	it.each([
+		"git $(: do case x in x) stash",
+		"git $(: then case x in x) stash",
+		"git $(: else case x in x) stash",
+		"git $(: elif case x in x) stash",
+		"git $(: if case x in x) stash",
+		"git $(: while case x in x) stash",
+		"git $(: until case x in x) stash",
+		"git $(: -do case x in x) stash",
+		"git $(: --do case x in x) stash",
+		"git $(: x.do case x in x) stash",
+		"git $(: x/then case x in x) stash",
+		"git $(: a:do case x in x) stash",
+		"git $(: a=if case x in x) stash",
+		"git $(x=1 case x in x) stash",
+		"git $(: <(:) case x in x) stash",
+		"git $(: 2>&1 case x in x) stash",
+		"git $(: -else case x in x) stash",
+		"git $(: x.elif case x in x) stash",
+		"git $(: -while case x in x) stash",
+		"git $(: x/until case x in x) stash",
+	])(
+		"an argument or word tail shaped like a keyword opens no clause: %s",
+		(command) => {
+			expect(hookVerdict(command).stderr).toBe(`${RULE_MESSAGES.stash}\n`);
+		},
+	);
+
+	// F2: `!` and `time` (with `-p` / `--`) are reserved-word prefixes the
+	// grammar accepts before a compound command, so `case` after them is at a
+	// command position and the pattern's `)` must not close the substitution.
+	it.each([
+		"git $(! case x in x) : ;; esac) stash",
+		"git $(! ! case x in x) : ;; esac) stash",
+		"git $(time case x in x) : ;; esac) stash",
+		"git $(time -p case x in x) : ;; esac) stash",
+		"git $(time -p -- case x in x) : ;; esac) stash",
+		"git $(time ! case x in x) : ;; esac) stash",
+		"git $(! time case x in x) : ;; esac) stash",
+		"git $(: && ! case x in x) : ;; esac) stash",
+	])(
+		"a reserved-word prefix before case is a command position: %s",
+		(command) => {
+			expect(hookVerdict(command).stderr).toBe(`${RULE_MESSAGES.stash}\n`);
+		},
+	);
+
+	// Positions bash does open a clause at (each measured to run `git stash`).
+	it.each([
+		"git $({ case x in x) : ;; esac; }) stash",
+		"git $(if case x in x) : ;; esac; then :; fi) stash",
+		"git $(until case x in x) : ;; esac; do break; done) stash",
+		"git $(if :; then :; elif case x in x) : ;; esac; then :; fi) stash",
+		"git $(if :; then :; else case x in x) : ;; esac; fi) stash",
+		"git $(: |case x in x) : ;; esac) stash",
+		"git $(: &case x in x) : ;; esac) stash",
+		"git $(f() case x in x) : ;; esac; f) stash",
+		"git $( (case x in x) : ;; esac) ) stash",
+		"git $(case x in x) case y in y) : ;; esac ;; esac) stash",
+		"git $(case x in x) : ;; esac;case y in y) : ;; esac) stash",
+		"git $(case x in x) : ;;esac) stash",
+		"git $(case x in(x) : ;; esac) stash",
+		"git $([[ ( case ) ]] ; case x in x) : ;; esac) stash",
+		"git $([[ a && case ]] ; case x in x) : ;; esac) stash",
+		"git $(:; \\\ncase x in x) : ;; esac) stash",
+		"git $(case x in a|esac) : ;; esac) stash",
+		"git $(case x in x) echo esac ;; y) : ;; esac) stash",
+		"git $(case in in x) : ;; esac) stash",
+		"git $(case esac in x) : ;; esac) stash",
+		"git $(case x in in) : ;; esac) stash",
+		"git $(case x in x) : ;; (y) : ;; esac) stash",
+		"git $(case x in x) (echo) ;; esac) stash",
+		"git $(case x in x) : ;; *) : ;; esac) stash",
+		"git $(for i in a; do case x in x) : ;; esac; done) stash",
+		"git $(for ((i=0;i<1;i++)) ; do case x in x) : ;; esac; break; done) stash",
+	])(
+		"a clause opened at a command position keeps its pattern paren: %s",
+		(command) => {
+			expect(hookVerdict(command).stderr).toBe(`${RULE_MESSAGES.stash}\n`);
+		},
+	);
+
+	// `case` in a position the lexer does not model fails CLOSED: the hook
+	// cannot tell whether bash opens a clause there, so it cannot tell where the
+	// substitution ends. `for ((…)) do case`, `coproc [NAME] case` and
+	// `function f case` really run `git stash` in bash 5.3.9; `$((case))` is
+	// arithmetic, and `case(` is a syntax error either way.
+	it.each([
+		"git $(for ((i=0;i<1;i++)) do case x in x) : ;; esac; done) stash",
+		"git $(coproc case x in x) : ;; esac) stash",
+		"git $(coproc NAME case x in x) : ;; esac) stash",
+		"git $(function f case x in x) : ;; esac; f) stash",
+		"git $(for i do case x in x) : ;; esac; break; done) stash",
+		"git $(select i do case x in x) : ;; esac; break; done) stash",
+		"git $((case x in x) : ;; esac)) stash",
+		"git $(((case x in x) : ;; esac) )) stash",
+		"git $(case(x) in x) : ;; esac) stash",
+	])("an unmodelled grammar position fails closed: %s", (command) => {
+		expect(hookVerdict(command).stderr).toBe(
+			`${RULE_MESSAGES.unscannableCase}\n`,
+		);
 	});
 });
 
@@ -4468,13 +4671,10 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 			"${D:0:0}",
 			"${D:-${E}}",
 		];
-		// mktemp's own /tmp fallback lands in /tmp itself, which exists. Where
-		// /tmp is a real directory (Linux, CI) the rule denies it. On macOS /tmp
-		// resolves to /private/tmp, which the rule does not count as /tmp
-		// (Accepted residual), so there the same rows pin the allow, as the bare
-		// `mktemp -d` row above shows by failing.
-		const TMP_FALLBACK_RULE: DenyRule | null =
-			realpathSync("/tmp") === "/tmp" ? "tmpCheckout" : null;
+		// mktemp's own /tmp fallback lands in /tmp itself, which exists. On macOS
+		// /tmp resolves to /private/tmp; the tmpCheckout rules compare against
+		// both spellings of the root (#4060 r2), so the rows deny there too.
+		const TMP_FALLBACK_RULE: DenyRule = "tmpCheckout";
 		const ROWS: Array<{
 			label: string;
 			command: string;
