@@ -132,4 +132,18 @@ export async function run(ctx, variant) {
 		);
 	}
 	fs.writeFileSync(path.join(ctx.evidenceDir, "analyze-last.txt"), last.text);
+	// The turn-end summary of the file just analysed: with the gate off its text
+	// is what master prints, so a run on an old tree diffs against this one.
+	await ctx.sleep(4000);
+	const turnEnd = await ctx.call(
+		"pilens_turn_end",
+		{ files: [path.join(ctx.ws, SOURCE)] },
+		"turn end",
+	);
+	fs.writeFileSync(path.join(ctx.evidenceDir, "turn-end.txt"), turnEnd.text);
+	if (!on)
+		ctx.expect(
+			"the turn-end summary names no fallow finding",
+			!FALLOW_TOOL.test(turnEnd.text),
+		);
 }
