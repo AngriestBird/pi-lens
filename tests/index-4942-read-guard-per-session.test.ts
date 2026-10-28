@@ -253,4 +253,30 @@ describe("#4942: an edit is licensed only by a read in the editing session", () 
 			await primary.dispose();
 		},
 	);
+
+	it(
+		"arms /lens-allow-edit for the invoking session only",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
+		async () => {
+			// RECURRENCE GUARDED: #4942's command writer. The one-time exemption
+			// is a license like a read: armed through the coordinator's guard it
+			// would let the subagent spend the primary user's override.
+			const { proj, shared } = project("allow-edit");
+			const { primary, secondary } = await pair(
+				proj,
+				editTurn(shared),
+				editTurn(shared),
+			);
+			await primary.prompt(`/lens-allow-edit ${shared}`);
+			await secondary.prompt("edit it");
+			expect(editResult(secondary)).toContain(EDIT_WITHOUT_READ);
+			expect(fs.readFileSync(shared, "utf8")).toContain(SHARED_BEFORE);
+			await primary.prompt("edit it");
+			expect(editResult(primary)).not.toContain(EDIT_WITHOUT_READ);
+			expect(fs.readFileSync(shared, "utf8")).toContain(SHARED_AFTER);
+			expect(primary.errors).toEqual([]);
+			await secondary.dispose();
+			await primary.dispose();
+		},
+	);
 });
