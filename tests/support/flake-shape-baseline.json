@@ -15,6 +15,7 @@
 		"clients/format-service-tab-width-real-biome.test.ts": 1,
 		"clients/formatter-template-preserve.test.ts": 2,
 		"clients/git-guard-decoded-word.test.ts": 2,
+		"clients/git-optional-locks-4930.test.ts": 5,
 		"clients/git-tracked-ignore.test.ts": 12,
 		"clients/gitleaks-scratch-exclusion.test.ts": 7,
 		"clients/head-move-resync-4493.test.ts": 1,

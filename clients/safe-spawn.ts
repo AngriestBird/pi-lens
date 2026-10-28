@@ -1333,10 +1333,15 @@ function getSpawnEnvironment(
 	overrides: NodeJS.ProcessEnv | undefined,
 	stripNpmConfig: boolean | undefined,
 ): NodeJS.ProcessEnv {
+	// #4930: `git status` writes a refreshed index back under `index.lock`, and a
+	// read killed mid-write orphans the lock. The seam, not each caller, opts out
+	// of that optional write. Ambient does not win (the guarantee is that pi-lens
+	// never takes the lock); a caller override does.
+	const ambient = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
 	const merged =
 		process.platform === "win32"
-			? mergeWindowsEnvironment(process.env, overrides)
-			: { ...process.env, ...overrides };
+			? mergeWindowsEnvironment(ambient, overrides)
+			: { ...ambient, ...overrides };
 	if (!stripNpmConfig) return merged;
 	// A copy loop rather than `Object.fromEntries(…filter(…))`: `filter` is a
 	// retired glossary identifier and a new use would move the census. This runs
