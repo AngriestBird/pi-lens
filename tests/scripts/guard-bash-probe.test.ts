@@ -139,10 +139,7 @@ describe.skipIf(process.platform === "win32")(
 						return count;
 					}, {}),
 				).sort(),
-			).toEqual([
-				["#4025", 3],
-				["#4060", 3],
-			]);
+			).toEqual([["#4025", 3]]);
 			console.info(
 				`guard-bash corpus: ${outcome.results.length} rows in ${elapsed} ms`,
 			);

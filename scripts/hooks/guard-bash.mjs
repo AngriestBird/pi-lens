@@ -132,8 +132,10 @@
  * program reads from its own env still sees it: git's hook-bypass check
  * (`HUSKY=0`), GNU mktemp's default `$TMPDIR` (no template, `-t`, bare
  * `--tmpdir`; the rule models GNU mktemp), and node's `PI_LENS_HOME` (#3997,
- * #4057). A path git or mktemp hands the kernel is resolved physically, a
- * `cd` target logically (#3997 H3). A path that cannot be
+ * #4057). A path git or mktemp hands the kernel is resolved physically: the
+ * nearest existing ancestor through `realpath`, the missing tail as written
+ * (#3997 H3, #4060). A `cd` target resolves logically, or physically after
+ * `cd -P`. A path that cannot be
  * resolved statically (`$(…)`/backticks, `~user`, a variable with no known
  * value, a glob, a cwd made unknown by an unresolvable `cd`) makes
  * `git worktree remove` fail CLOSED (`worktreeUnresolved`); the tmp-checkout
@@ -292,6 +294,15 @@ export const RULE_MESSAGES = {
  * two characters explicitly.
  */
 const WORD_BREAK = /[\s;&|<>]/;
+
+/**
+ * Does the retained text so far end where a command may start: the start, a
+ * separator, an opening paren or brace, a pattern's `)`, or a keyword that
+ * runs the next word? `case` and `esac` are keywords only there (#4060), so
+ * `echo case x in` opens no clause.
+ */
+const COMMAND_POSITION =
+	/(?:^|[;&|(){\n]|\b(?:then|do|else|elif|if|while|until))\s*$/;
 
 /**
  * Segment separators in the retained text. Single characters only: `&&`
@@ -513,10 +524,19 @@ function consumeHeredocBody(text, start, heredoc, out) {
 function lexRegions(text, start, closer, out) {
 	let retained = "";
 	let i = start;
-	/** @type {"single"|"double"|null} */
+	/** @type {"single"|"double"|"ansi"|null} */
 	let quote = null;
 	/** Nested plain `(`/`)` inside a `$( … )` body, so `$(( … ))` closes correctly. */
 	let parenDepth = 0;
+	/**
+	 * Open `case` clauses inside a `$( … )` body, innermost last (#4060). A
+	 * pattern's `)` ends the pattern, not the body, so the states are:
+	 * `subject` (`case` seen at a command position, up to its `in`), `pattern`
+	 * (after `in` or `;;`/`;&`/`;;&`, up to the pattern's `)`) and `body` (up to
+	 * `;;`, or `esac` at a command position, which pops it).
+	 * @type {Array<"subject"|"pattern"|"body">}
+	 */
+	const cases = [];
 	let atWordStart = true;
 	/** Heredoc markers seen on the current line, consumed in order at its newline. */
 	/** @type {Array<{ delimiter: string; stripTabs: boolean; quoted: boolean }>} */
@@ -527,6 +547,14 @@ function lexRegions(text, start, closer, out) {
 			retained += ch;
 			if (ch === "'") quote = null;
 			i++;
+			continue;
+		}
+		if (quote === "ansi") {
+			// `$'…'`: a backslash escapes the next character, so `\'` stays inside.
+			const taken = ch === "\\" ? text.slice(i, i + 2) : ch;
+			retained += taken;
+			if (ch === "'") quote = null;
+			i += taken.length;
 			continue;
 		}
 		if (quote === "double") {
@@ -560,6 +588,40 @@ function lexRegions(text, start, closer, out) {
 			retained += ch;
 			i++;
 			continue;
+		}
+		if (closer === ")") {
+			const open = cases.length - 1;
+			if (atWordStart && /[a-z]/.test(ch)) {
+				const word = /^[a-z]+/.exec(text.slice(i, i + 5))?.[0];
+				const next = text[i + (word?.length ?? 0)];
+				if (word && (next === undefined || /[\s;&|()<>]/.test(next))) {
+					if (word === "case" && COMMAND_POSITION.test(retained))
+						cases.push("subject");
+					else if (word === "in" && cases[open] === "subject")
+						cases[open] = "pattern";
+					else if (
+						word === "esac" &&
+						(cases[open] === "pattern" ||
+							(cases[open] === "body" && COMMAND_POSITION.test(retained)))
+					)
+						cases.pop();
+				}
+			}
+			if (cases[open] === "pattern" && (ch === ")" || ch === "(")) {
+				if (ch === ")") cases[open] = "body";
+				retained += ch;
+				atWordStart = true;
+				i++;
+				continue;
+			}
+			if (cases[open] === "body" && ch === ";" && /[;&]/.test(text[i + 1])) {
+				const end = text.startsWith(";;&", i) ? i + 3 : i + 2;
+				cases[open] = "pattern";
+				retained += text.slice(i, end);
+				atWordStart = true;
+				i = end;
+				continue;
+			}
 		}
 		if (closer === ")" && ch === ")") {
 			if (parenDepth === 0) return { end: i + 1, retained, closed: true };
@@ -641,6 +703,13 @@ function lexRegions(text, start, closer, out) {
 			i = collectBacktickSpan(text, i, out);
 			retained += SUBSTITUTION_MARK;
 			atWordStart = false;
+			continue;
+		}
+		if (ch === "$" && text[i + 1] === "'") {
+			quote = "ansi";
+			retained += "$'";
+			atWordStart = false;
+			i += 2;
 			continue;
 		}
 		if (ch === "'") {
@@ -1326,9 +1395,10 @@ function expandShellWord(word, cwd, env) {
  * `..` in `lnk/../wt`, while `path.resolve` (and `fs.realpathSync`, which
  * normalizes first) drops the pair lexically. Measured: `git worktree remove
  * scratch/lnk/../linked` removed the tree `lnk` points at. A target that does
- * not exist keeps the lexical path. `logical` is bash's own `cd`, which
- * resolves `..` lexically (`cd lnk/.. && pwd` prints the directory holding
- * `lnk`).
+ * not exist yet resolves its nearest existing ancestor physically and keeps
+ * the missing tail as written ({@link physicalPath}, #4060). `logical` is
+ * bash's own `cd`, which resolves `..` lexically (`cd lnk/.. && pwd` prints
+ * the directory holding `lnk`); `cd -P` is the physical mode.
  *
  * @param {string} word
  * @param {string | null | undefined} cwd
@@ -1342,14 +1412,37 @@ function resolveShellPath(word, cwd, env, logical = false) {
 	let path = resolve(anchor, text);
 	if (reason === undefined && cwd === null && !isAbsolute(text))
 		return { path, reason: "a working directory that is not statically known" };
-	if (!logical) {
+	if (!logical)
+		path = physicalPath(isAbsolute(text) ? text : `${anchor}/${text}`, path);
+	return reason === undefined ? { path } : { path, reason };
+}
+
+/**
+ * Where the kernel puts `spelling`: `realpath` of the nearest existing
+ * ancestor of the RAW spelling (a `..` after a symlink is the kernel's, so the
+ * spelling is never collapsed first), then the missing tail joined lexically.
+ * A destination that does not exist yet (`git worktree add tl/new`, `tl` a
+ * symlink to /tmp) still lands where its parent really is (#4060). `fallback`
+ * is the lexical path, kept when not even the root resolves.
+ *
+ * @param {string} spelling
+ * @param {string} fallback
+ * @returns {string}
+ */
+function physicalPath(spelling, fallback) {
+	/** @type {string[]} */
+	const tail = [];
+	let head = spelling;
+	for (;;) {
 		try {
-			path = realpathSync.native(isAbsolute(text) ? text : `${anchor}/${text}`);
+			return resolve(realpathSync.native(head), ...tail);
 		} catch {
-			// No such path for the kernel either: the lexical path stands.
+			const parent = dirname(head);
+			if (parent === head) return fallback;
+			tail.unshift(basename(head));
+			head = parent;
 		}
 	}
-	return reason === undefined ? { path } : { path, reason };
 }
 
 /** `git worktree add [flags] <path> [<commit-ish>]` flags that consume a
@@ -2210,10 +2303,11 @@ function classifyMktemp(args, cwd, env, expansionEnv = env) {
 			(text) => {
 				if (isAbsolute(text)) return [dirname(text)];
 				// `-t` roots a relative template at $TMPDIR; so does a template
-				// that vanished. Otherwise it lands in mktemp's cwd.
+				// that vanished. Otherwise it lands in the template's own directory
+				// under mktemp's cwd (`.` for a bare name, #4060).
 				return forceTmpdirRelative || text === ""
 					? defaultDirs()
-					: [cwd ?? process.cwd()];
+					: [dirname(text)];
 			},
 		);
 	// The words are expanded already; what is left in them is unresolved in
@@ -2943,6 +3037,15 @@ export function splitSegmentsWithSeparators(region) {
 			i++;
 			continue;
 		}
+		if (ch === "$" && region[i + 1] === "'") {
+			// ANSI-C quote: `\'` stays inside it, as splitWords reads it (#4060).
+			let end = i + 2;
+			while (end < region.length && region[end] !== "'")
+				end += region[end] === "\\" ? 2 : 1;
+			buf += region.slice(i, end + 1);
+			i = end + 1;
+			continue;
+		}
 		if (ch === "'") {
 			quote = "single";
 			buf += ch;
@@ -3318,7 +3421,9 @@ export function findDeny(commandText, cwd) {
 			const env = index === 0 ? sharedEnv : { ...sharedEnv };
 			/** @type {string | null | undefined} */
 			let effectiveCwd = cwd;
-			/** @type {Array<string | null | undefined>} the cwd to restore at each `)`: a `( cd x && … )` subshell's `cd` never leaks out */
+			/** @type {string | null | undefined} every `cd` read logically, as before #4060: after `cd -P lnk` the physical path no longer names the link, so `cd -P node_modules && rm -rf *` stays denied only through this second reading */
+			let logicalCwd = cwd;
+			/** @type {Array<[string | null | undefined, string | null | undefined]>} the cwds to restore at each `)`: a `( cd x && … )` subshell's `cd` never leaks out */
 			const subshellCwds = [];
 			const segments = splitSegmentsWithSeparators(regions[index]);
 			const ciVerdictRule = findPipedCiVerdictStatusRead(segments);
@@ -3327,13 +3432,18 @@ export function findDeny(commandText, cwd) {
 			if (chainRule) return chainRule;
 			for (const { text: segment, sep } of segments) {
 				for (const ch of sep ?? "") {
-					if (ch === "(") subshellCwds.push(effectiveCwd);
+					if (ch === "(") subshellCwds.push([effectiveCwd, logicalCwd]);
 					else if (ch === ")" && subshellCwds.length > 0)
-						effectiveCwd = subshellCwds.pop();
+						[effectiveCwd, logicalCwd] = subshellCwds.pop();
 				}
-				const rule = classifySegment(segment, env, effectiveCwd, cwd);
+				const rule =
+					classifySegment(segment, env, effectiveCwd, cwd) ??
+					(logicalCwd === effectiveCwd
+						? null
+						: classifySegment(segment, env, logicalCwd, cwd));
 				if (rule) return rule;
 				effectiveCwd = cwdAfterSegment(segment, effectiveCwd, env);
+				logicalCwd = cwdAfterSegment(segment, logicalCwd, env, false);
 			}
 		}
 	}
@@ -3347,26 +3457,39 @@ export function findDeny(commandText, cwd) {
  * (statically unknown) after a target that cannot be resolved, `cd -`, a bare
  * `pushd` (swaps with the stack) or `popd`; a later absolute `cd` recovers a
  * known cwd. Assumes the `cd` succeeded and is not backgrounded or piped
- * (documented blind spot: `cd x & …`, `cd x | …`), and resolves the target
- * logically even after `-P` (documented blind spot: `cd -P lnk/..`).
+ * (documented blind spot: `cd x & …`, `cd x | …`). The target resolves
+ * logically, or physically when the last of `-L`/`-P` is `-P` (#4060; `set -P`
+ * and `set -o physical` are not read). {@link findDeny} also reads every `cd`
+ * logically (`honorPhysical` false), because a physical cwd no longer names the
+ * link it came through. `pushd` has no `-P` (bash rejects it), so a `pushd -P`
+ * is resolved logically like any `pushd`.
  *
  * @param {string} segment
  * @param {string | null | undefined} cwd
  * @param {Record<string, string>} env
+ * @param {boolean} [honorPhysical] `false` reads every `cd` logically ({@link findDeny}'s second reading)
  * @returns {string | null | undefined}
  */
-function cwdAfterSegment(segment, cwd, env) {
+function cwdAfterSegment(segment, cwd, env, honorPhysical = true) {
 	const words = stripCommandGroupAndRunnerPrefixes(splitWords(segment));
 	const command = words[0];
 	if (command === "popd") return null;
 	if (command !== "cd" && command !== "pushd") return cwd;
 	let k = 1;
-	while (k < words.length && /^-[LPe@]+$/.test(words[k])) k++;
+	let physical = false;
+	while (k < words.length && /^-[LPe@]+$/.test(words[k])) {
+		// The last of -L/-P wins, clustered or not (`-LP` is physical, `-PL` logical).
+		for (const flag of words[k])
+			if (flag === "L" || flag === "P")
+				physical = honorPhysical && command === "cd" && flag === "P";
+		k++;
+	}
 	if (words[k] === "--") k++;
 	const target = words[k] ?? (command === "cd" ? "~" : undefined);
 	if (target === undefined || target === "-") return null;
-	// Logical, like bash's default `cd -L`: `cd lnk/..` lands beside `lnk`.
-	const resolved = resolveShellPath(target, cwd, env, true);
+	// Logical, like bash's default `cd -L`: `cd lnk/..` lands beside `lnk`;
+	// `cd -P` follows `lnk` first (#4060).
+	const resolved = resolveShellPath(target, cwd, env, !physical);
 	return resolved.reason === undefined ? resolved.path : null;
 }
 

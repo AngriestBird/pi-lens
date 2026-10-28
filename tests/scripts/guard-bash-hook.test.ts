@@ -2066,6 +2066,11 @@ describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () =>
 		// symlinked tree to the kernel and `away/wt` (absent) lexically (#3997 H3).
 		mkdirSync(join(home, "away"));
 		symlinkSync(join("..", "scratch", "wt"), join(home, "away", "lnk"));
+		// HOME/rootlink and HOME/scratch/rl -> /: a symlinked parent whose
+		// physical place differs from its spelling, for destinations that do not
+		// exist yet (#4060 item 2). /usr is off /tmp and /tmp is on it, on every host.
+		symlinkSync("/", join(home, "rootlink"));
+		symlinkSync("/", join(scratch, "rl"));
 	});
 
 	afterAll(() => {
@@ -2518,6 +2523,180 @@ describe("scripts/hooks/guard-bash.mjs -- path-argument resolver (#3988)", () =>
 		expectRule(row),
 	);
 
+	// -- #4060 item 1: `cd -P` resolves its target physically ---------------
+	// Measured with bash 5: the LAST of -L/-P in the options wins, flags may be
+	// clustered, and `-e` does not change the mode. `cd away/lnk/..` prints
+	// HOME/away (logical); `cd -P away/lnk/..` prints HOME/scratch.
+	const CD_PHYSICAL_ROWS: PathRow[] = [
+		{
+			label: "cd -P through a symlink, then ..",
+			command: "cd -P away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "cd -LP (the last flag wins)",
+			command: "cd -LP away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "cd -L -P (the last flag wins)",
+			command: "cd -L -P away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "cd -Pe (-e does not change the mode)",
+			command: "cd -Pe away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "cd -P -- (the option terminator)",
+			command: "cd -P -- away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "cd -P to the link, then a plain cd ..",
+			command: "cd -P away/lnk && cd .. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			label: "a logical cd to the link, then cd -P ..",
+			command: "cd away/lnk && cd -P .. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: "worktreeSymlink",
+		},
+		{
+			// The physical cwd is the shared install itself and no longer names the
+			// link, so only the logical reading of the same `cd` still denies this.
+			label: "cd -P into a linked node_modules, then rm -rf *",
+			command: "cd -P node_modules && rm -rf *",
+			cwd: "@W@",
+			rule: "linkedNodeModulesDelete",
+		},
+		{
+			label: "cd -PL stays logical (the last flag wins)",
+			command: "cd -PL away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "cd -P -L stays logical (the last flag wins)",
+			command: "cd -P -L away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "cd -L stays logical",
+			command: "cd -L away/lnk/.. && git worktree remove wt",
+			cwd: "@HOME@",
+			rule: null,
+		},
+	];
+
+	it.each(CD_PHYSICAL_ROWS)("cd mode (#4060 item 1): $label", (row) =>
+		expectRule(row),
+	);
+
+	// -- #4060 item 2: a destination that does not exist yet ----------------
+	// `realpath` fails on the missing leaf, so the resolver resolves the nearest
+	// existing ancestor physically and appends the missing tail. `rootlink` is a
+	// symlink to `/`: the same spelling lands under /usr (allow) and under /tmp
+	// (deny), and the fixture root itself sits under /tmp on a host whose TMPDIR
+	// is /tmp, so each direction is the red on one kind of host.
+	const MISSING_LEAF_ROWS: PathRow[] = [
+		{
+			label: "worktree add below a symlink to /, landing under /tmp",
+			command: "git worktree add rootlink/tmp/pi-lens-4060-new",
+			cwd: "@HOME@",
+			rule: "tmpCheckout",
+		},
+		{
+			label: "worktree add below a symlink to /, landing under /usr",
+			command: "git worktree add rootlink/usr/pi-lens-4060-new",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "worktree add two missing levels below a symlink to /, under /tmp",
+			command: "git worktree add rootlink/tmp/pi-lens-4060-a/b/new",
+			cwd: "@HOME@",
+			rule: "tmpCheckout",
+		},
+		{
+			label: "clone below a symlink to /, landing under /tmp",
+			command: "git clone r rootlink/tmp/pi-lens-4060-new",
+			cwd: "@HOME@",
+			rule: "tmpCheckout",
+		},
+		{
+			label: "clone below a symlink to /, landing under /usr",
+			command: "git clone r rootlink/usr/pi-lens-4060-new",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "mktemp -d template below a symlink to /, landing under /tmp",
+			command: "mktemp -d rootlink/tmp/x.XXXXXX",
+			cwd: "@HOME@",
+			rule: "tmpCheckout",
+		},
+		{
+			label: "mktemp -d template below a symlink to /, landing under /usr",
+			command: "mktemp -d rootlink/usr/x.XXXXXX",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label:
+				"mktemp -d template with a missing directory below a symlink to /, under /tmp",
+			command: "mktemp -d rootlink/tmp/pi-lens-4060-gone/x.XXXXXX",
+			cwd: "@HOME@",
+			rule: "tmpCheckout",
+		},
+		{
+			label: "git -C a symlink to /, then a missing /tmp destination",
+			command: "git -C rootlink/tmp worktree add pi-lens-4060-new",
+			cwd: "@HOME@",
+			rule: "tmpCheckout",
+		},
+		{
+			// The `..` after `lnk` is the kernel's, so the walk starts from the raw
+			// spelling: collapsing it first names HOME/away/rl/usr/…, which holds
+			// no symlink to follow.
+			label: "a symlink, then .., then a symlink to / (the raw spelling walks)",
+			command: "git worktree add away/lnk/../rl/usr/pi-lens-4060-new",
+			cwd: "@HOME@",
+			rule: null,
+		},
+		{
+			label: "a symlink, then .., then a symlink to /, landing under /tmp",
+			command: "git worktree add away/lnk/../rl/tmp/pi-lens-4060-new",
+			cwd: "@HOME@",
+			rule: "tmpCheckout",
+		},
+	];
+
+	it.each(MISSING_LEAF_ROWS)("missing leaf (#4060 item 2): $label", (row) =>
+		expectRule(row),
+	);
+
+	// lane: Linux unit shards. /proc/self/root is the hook process's own root, so
+	// the spelling is off /tmp lexically and on it physically whatever TMPDIR is.
+	it.skipIf(process.platform !== "linux").each([
+		["worktree add", "git worktree add /proc/self/root/tmp/pi-lens-4060-new"],
+		["clone", "git clone r /proc/self/root/tmp/pi-lens-4060-new"],
+		["mktemp -d", "mktemp -d /proc/self/root/tmp/x.XXXXXX"],
+	])(
+		"missing leaf below /proc/self/root/tmp (#4060 item 2): %s",
+		(_name, command) =>
+			expectRule({ label: command, command, rule: "tmpCheckout" }),
+	);
+
 	// -- the other path-taking rules go through the SAME resolver ------------
 	// tmpCheckout (#3526): worktree add, clone, mktemp -d, plus `cd`/`-C`.
 	// An unresolvable variable stays a documented fail-OPEN there: it is a
@@ -2826,6 +3005,76 @@ describe("scripts/hooks/guard-bash.mjs -- substitution next to a rule word (#399
 		const result = runHook(command);
 		expect(result.stderr).toBe("");
 		expect(result.status).toBe(0);
+	});
+});
+
+// #4060 item 3: two spans the lexer closed in the wrong place, so `git stash`
+// ran with the hook reading it as quoted text or as part of a substitution.
+// Every DENY row was measured against bash 5 with a fake `git` that touches a
+// marker: each one really runs `git stash`, except the `echo case x in` row,
+// which only pins that the span closes at its own paren (the hook denies it
+// under the empty reading of the substitution, as it denies `git $(:) stash`).
+//   (a) a case pattern's `)` closed a `$( … )` body at the first pattern;
+//   (b) `$'\''` (ANSI-C quoting, where `\'` is an escaped quote) read as a
+//       closed quote followed by an open one, in a body and at top level.
+describe("scripts/hooks/guard-bash.mjs -- case patterns and ANSI-C quotes (#4060)", () => {
+	it.each([
+		["a case pattern in a substitution", "git $(case x in x) : ;; esac) stash"],
+		["a leading-paren pattern", "git $(case x in (x) : ;; esac) stash"],
+		["an alternation pattern", "git $(case x in y|x) : ;; esac) stash"],
+		["the ;& terminator", "git $(case x in x) : ;& y) : ;; esac) stash"],
+		["esac after a plain ;", "git $(case x in x) : ; esac) stash"],
+		["newline-separated clauses", "git $(case x in\nx) :\n;;\nesac) stash"],
+		[
+			"a nested case",
+			"git $(case x in x) case y in y) : ;; esac ;; esac) stash",
+		],
+		[
+			"a substitution as the subject",
+			"git $(case $(echo x) in x) : ;; esac) stash",
+		],
+		["case after then", "git $(if :; then case x in x) : ;; esac; fi) stash"],
+		["case after a ;", "git $(: ; case x in x) : ;; esac) stash"],
+		[
+			"an ANSI-C quote in a case body",
+			"git $(case x in x) echo $'\\'' ;; esac) stash",
+		],
+		["an ANSI-C \\' in a substitution", "$(: $'\\'' ) git stash"],
+		[
+			"an ANSI-C \\' that must not swallow the closing paren",
+			"git $(: $'\\'') stash",
+		],
+		["an ANSI-C \\' at top level", "echo $'\\'' ; git stash"],
+		["an ANSI-C \\' mid-word", "echo $'a\\'b' && git stash"],
+		[
+			"a `case x in` argument whose paren must still close the substitution",
+			"git $(echo case x in) stash",
+		],
+	] as Array<[string, string]>)("denies %s", (_name, command) => {
+		const result = runHook(command);
+		expect(result.stderr).toBe(`${RULE_MESSAGES.stash}\n`);
+		expect(result.status).toBe(2);
+	});
+
+	it.each([
+		["a case in a substitution", "echo $(case x in x) echo hi ;; esac)"],
+		[
+			"a case in a quoted substitution",
+			'git commit -m "$(case x in x) echo hi ;; esac)"',
+		],
+		["an ANSI-C \\' then a harmless command", "echo $'\\'' ; echo ok"],
+		["an ANSI-C \\\\ closes at the quote", "echo $'\\\\' ; echo ok"],
+		["a `case` argument is not a case clause", "echo $(echo case x in)"],
+	])("allows %s", (_name, command) => {
+		const result = runHook(command);
+		expect(result.stderr).toBe("");
+		expect(result.status).toBe(0);
+	});
+
+	it("keeps `$'` inside double quotes literal: the next command still runs", () => {
+		const result = runHook(`echo "$'" ; git stash`);
+		expect(result.stderr).toBe(`${RULE_MESSAGES.stash}\n`);
+		expect(result.status).toBe(2);
 	});
 });
 
