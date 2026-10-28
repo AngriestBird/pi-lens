@@ -2628,10 +2628,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			graphRuns,
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
-		if (graphAdvisory) {
-			advisoryParts.push(graphAdvisory);
-			citePart(graphAdvisory, graphNamed);
-		}
+		if (graphAdvisory) advisoryParts.push(graphAdvisory);
+		if (graphAdvisory) citePart(graphAdvisory, graphNamed);
 		holdAdvisory(graphAdvisory, graphRuns, "indeterminate");
 
 		const bindingNamed: string[] = [];
@@ -2651,10 +2649,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			bindingRuns,
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
-		if (bindingAdvisory) {
-			advisoryParts.push(bindingAdvisory);
-			citePart(bindingAdvisory, bindingNamed);
-		}
+		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
+		if (bindingAdvisory) citePart(bindingAdvisory, bindingNamed);
 		holdAdvisory(bindingAdvisory, bindingRuns, "indeterminate");
 
 		const budgetNamed: string[] = [];
@@ -2680,10 +2676,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			budgetRuns,
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
-		if (budgetAdvisory) {
-			advisoryParts.push(budgetAdvisory);
-			citePart(budgetAdvisory, budgetNamed);
-		}
+		if (budgetAdvisory) advisoryParts.push(budgetAdvisory);
+		if (budgetAdvisory) citePart(budgetAdvisory, budgetNamed);
 		holdAdvisory(budgetAdvisory, budgetRuns, "indeterminate");
 
 		const fileCount = new Set(
@@ -2801,10 +2795,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				unconfirmedRuns,
 			);
 			// @delivery-surface: runtime-turn:cascade-coverage-advisory
-			if (pendingAdvisory) {
-				advisoryParts.push(pendingAdvisory);
-				citePart(pendingAdvisory, unconfirmedNamed);
-			}
+			if (pendingAdvisory) advisoryParts.push(pendingAdvisory);
+			if (pendingAdvisory) citePart(pendingAdvisory, unconfirmedNamed);
 			holdAdvisory(pendingAdvisory, unconfirmedRuns, "unconfirmed");
 			logCascade({
 				phase: "cascade_unconfirmed_rendered",
