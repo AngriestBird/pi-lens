@@ -115,7 +115,11 @@ import {
 	peekOwnedLspService,
 	resetOwnedLspService,
 } from "./service-singleton.js";
-import { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
+import {
+	aggregateServersForFile,
+	groupFilesByPrimaryServer,
+	runPerServerGroups,
+} from "./grouping.js";
 export { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
 import {
 	BROKEN_BASE_COOLDOWN_MS,
@@ -1024,20 +1028,6 @@ const WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS: ReadonlySet<string> = new Set([
 	"opengrep",
 ]);
 
-/**
- * #4929: the servers the aggregate `clientScope: "all"` door may start for a
- * file. An opt-in auxiliary (off unless the operator turned it on) is never one
- * of them: that door takes its exclusions from the caller, and a caller with no
- * flag access, or one that never asked, would start a scanner the operator did
- * not enable. The per-edit `with-auxiliary` door admits an opt-in server by its
- * enabled id list instead (`getAuxiliaryClientsForFile`).
- */
-function aggregateServersForFile(filePath: string): LSPServerInfo[] {
-	return getServersForFileWithConfig(filePath).flatMap((s) =>
-		isOptInAuxiliaryServerId(s.id) ? [] : [s],
-	);
-}
-
 // The notify write (didOpen/didChange) is normally instant, but it awaits a
 // JSON-RPC send that BACKPRESSURES when the server's stdin isn't being drained
 // (a wedged/CPU-bound server, e.g. TypeScript mid-recheck). Unbounded, that
@@ -1576,7 +1566,7 @@ export class LSPService {
 		// it does its owner; Pyrefly keeps a failed lookup through Changed.
 		this.announceCreatedFiles([filePath]);
 		return Promise.all(
-			getServersForFileWithConfig(filePath).map((server) =>
+			this.serversWithLiveReaderRoots(filePath).map((server) =>
 				this.clientRegistry.resolveServerRoot(server, filePath).then((root) => {
 					if (!root) return false;
 					const ownKey = `${server.id}:${normalizeMapKey(root)}`;
@@ -1594,6 +1584,31 @@ export class LSPService {
 			// client must receive a later A→B→A edit (#4156 M1).
 			this.siblingAnnouncementHashes.set(normalizedPath, contentHash);
 		});
+	}
+
+	/**
+	 * #4956 F1: the servers a per-file reader that acts only on LIVE clients (or
+	 * on a root decision a session already made) walks. An opt-in auxiliary
+	 * (`enabledByDefault: false`) joins every JS/TS candidate list whether or not
+	 * the operator turned it on, and each reader below resolves a root per
+	 * server (a `NearestRoot` walk; negatives are never cached), so a server
+	 * nobody started would add that walk to every touch of every file. It is
+	 * walked only while this service holds a client for it, which is the only
+	 * state in which these readers can find anything to act on.
+	 */
+	private serversWithLiveReaderRoots(filePath: string): LSPServerInfo[] {
+		return getServersForFileWithConfig(filePath).filter(
+			(server) =>
+				!isOptInAuxiliaryServerId(server.id) ||
+				this.holdsClientForServer(server.id),
+		);
+	}
+
+	private holdsClientForServer(serverId: string): boolean {
+		const prefix = `${serverId}:`;
+		for (const key of this.state.clients.keys())
+			if (key.startsWith(prefix)) return true;
+		return false;
 	}
 
 	private notifyLiveClientsForServer(
@@ -3394,7 +3409,7 @@ export class LSPService {
 		filePath: string,
 	): Promise<SpawnedServer | undefined> {
 		if (this.checkDestroyed()) return undefined;
-		const servers = getServersForFileWithConfig(filePath);
+		const servers = this.serversWithLiveReaderRoots(filePath);
 		// #1934: the (server, root) pairs that COULD have served this file and
 		// were cold. A server with no resolvable root is not a pool miss — it
 		// never had a slot to miss — so it stays out of this list.
@@ -3582,7 +3597,7 @@ export class LSPService {
 		type: number,
 	): Promise<void> {
 		if (this.checkDestroyed()) return;
-		for (const server of getServersForFileWithConfig(filePath)) {
+		for (const server of this.serversWithLiveReaderRoots(filePath)) {
 			const root = await this.clientRegistry.resolveServerRoot(
 				server,
 				filePath,
@@ -4012,7 +4027,7 @@ export class LSPService {
 		const changed = new Map<string, string>();
 		for (const changedPath of changedPaths) {
 			const resolved = path.resolve(changedPath);
-			for (const server of getServersForFileWithConfig(resolved)) {
+			for (const server of this.serversWithLiveReaderRoots(resolved)) {
 				const root = await this.clientRegistry.resolveServerRoot(
 					server,
 					resolved,
@@ -4223,7 +4238,7 @@ export class LSPService {
 		filePath: string,
 	): Promise<Set<string>> {
 		const exclude = new Set<string>();
-		for (const server of getServersForFileWithConfig(filePath)) {
+		for (const server of this.serversWithLiveReaderRoots(filePath)) {
 			const root = await this.clientRegistry.resolveServerRoot(
 				server,
 				filePath,
@@ -7124,7 +7139,7 @@ export class LSPService {
 		if (this.clientRegistry.analysisRootModeForFile(filePath) === "adopted")
 			return undefined;
 		const candidates = await Promise.all(
-			getServersForFileWithConfig(filePath).map((server) =>
+			this.serversWithLiveReaderRoots(filePath).map((server) =>
 				server.root(filePath),
 			),
 		);
@@ -7878,7 +7893,7 @@ export class LSPService {
 		if (this.checkDestroyed()) {
 			return { executed: false, reason: "lsp service destroyed" };
 		}
-		for (const server of getServersForFileWithConfig(filePath)) {
+		for (const server of this.serversWithLiveReaderRoots(filePath)) {
 			const root = await this.clientRegistry.resolveServerRoot(
 				server,
 				filePath,
@@ -7973,7 +7988,7 @@ export class LSPService {
 		const snapshots: LSPCapabilitySnapshot[] = [];
 
 		if (filePath) {
-			const servers = getServersForFileWithConfig(filePath);
+			const servers = this.serversWithLiveReaderRoots(filePath);
 			for (const server of servers) {
 				const root = await this.clientRegistry.resolveServerRoot(
 					server,

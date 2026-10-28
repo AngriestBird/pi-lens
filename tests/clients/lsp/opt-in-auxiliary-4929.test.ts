@@ -260,3 +260,103 @@ describe("fallow launch and install go through the project-trust seam (#4929)", 
 		await service.shutdown();
 	});
 });
+
+/**
+ * #4956 F1. Recurrence: fallow joined every JS/TS candidate list whether or not
+ * the operator turned it on, and eight per-file readers resolve a root per
+ * listed server (a `NearestRoot` walk whose negatives are never cached), so a
+ * default-off server cost every user a walk per touch (+0.3 ms/file in a git
+ * repo, +2.1 ms/file with no .git). The shipped workaround, listing fallow in
+ * the head-move fixture's `disabledServers`, hid the cost instead of removing it.
+ */
+describe("a default-off fallow adds no per-file root resolution (#4956 F1)", () => {
+	type RegistryProbe = {
+		clientRegistry: {
+			resolveServerRoot: (
+				server: { id: string },
+				filePath: string,
+			) => Promise<string | undefined>;
+		};
+	};
+	type Service = InstanceType<
+		typeof import("../../../clients/lsp/index.js").LSPService
+	>;
+
+	async function watch() {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { getServerById } = await import("../../../clients/lsp/server.js");
+		const service = new LSPService();
+		const resolved: string[] = [];
+		const registry = (service as unknown as RegistryProbe).clientRegistry;
+		const original = registry.resolveServerRoot.bind(registry);
+		registry.resolveServerRoot = (server, filePath) => {
+			resolved.push(server.id);
+			return original(server, filePath);
+		};
+		const row = getServerById("fallow")!;
+		const rootWalks: string[] = [];
+		const originalRoot = row.root.bind(row);
+		vi.spyOn(row, "root").mockImplementation((filePath: string) => {
+			rootWalks.push(filePath);
+			return originalRoot(filePath);
+		});
+		return { service, resolved, rootWalks };
+	}
+
+	async function runReaders(service: Service) {
+		await service.getWarmClientForFile(TS_FILE);
+		await service.notifyExternalFileChange(TS_FILE, 2);
+		await service.executeReadOnlyCommandOnLiveClient(TS_FILE, "noop");
+		await service.getCapabilitySnapshots(TS_FILE);
+		await service.resyncGitChangedFiles([TS_FILE]);
+		// The touch path: announceToSiblings and the outside-root decision.
+		await service.touchFile(TS_FILE, "export const a = 1;\n", {
+			diagnostics: "none",
+		});
+		await service.getDiagnostics(TS_FILE);
+	}
+
+	it("no reader resolves a fallow root while the service holds no fallow client", async () => {
+		const { service, resolved, rootWalks } = await watch();
+		await runReaders(service);
+		// Positive control: the readers ran and resolved the other servers.
+		expect(resolved).toContain("typescript");
+		expect(resolved).not.toContain("fallow");
+		expect(rootWalks).toEqual([]);
+		await service.shutdown();
+	});
+
+	it("the readers walk fallow again once the service holds its client", async () => {
+		const { service, resolved } = await watch();
+		const started = await service.getAuxiliaryClientsForFile(
+			TS_FILE,
+			new Set(["fallow"]),
+		);
+		expect(started.map((entry) => entry.info.id)).toEqual(["fallow"]);
+		resolved.length = 0;
+		const warm = await service.getWarmClientForFile(TS_FILE);
+		expect(warm?.info.id).toBe("fallow");
+		expect(resolved).toContain("fallow");
+		await service.shutdown();
+	});
+
+	it("the workspace sweep does not count it as a second server", async () => {
+		const { groupFilesByPrimaryServer } =
+			await import("../../../clients/lsp/grouping.js");
+		const { _setServersForFileForTests, getServersForFileWithConfig } =
+			await import("../../../clients/lsp/config.js");
+		const both = getServersForFileWithConfig(TS_FILE).filter(
+			(s) => s.id === "typescript" || s.id === "fallow",
+		);
+		expect(both.map((s) => s.id).sort()).toEqual(["fallow", "typescript"]);
+		// Only these two are candidates: fallow is the one that could split a group.
+		_setServersForFileForTests(() => both);
+		try {
+			expect(groupFilesByPrimaryServer([TS_FILE])).toEqual([
+				{ files: [TS_FILE], multiServer: false },
+			]);
+		} finally {
+			_setServersForFileForTests(undefined);
+		}
+	});
+});

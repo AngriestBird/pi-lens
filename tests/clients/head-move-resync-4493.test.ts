@@ -221,7 +221,6 @@ async function makeRepo(
 				"opengrep",
 				"ast-grep",
 				"typos",
-				"fallow",
 			],
 		}),
 	);
