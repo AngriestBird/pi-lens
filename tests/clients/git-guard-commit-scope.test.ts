@@ -133,15 +133,31 @@ describe("#4941: the commit gate's blocker state is read per working tree", () =
 		}
 	});
 
-	it("keeps a repository-less verdict a blocker for every tree", () => {
-		// RECURRENCE GUARDED: #4941's fail-closed side: a verdict that names no
-		// file (`updateGitGuardStatus(true, …)`) belongs to no tree to exclude.
+	it("scopes a verdict that names its file, and keeps one that names none a blocker for every tree", () => {
+		// RECURRENCE GUARDED: #4941: the latest write's own verdict
+		// (`updateGitGuardStatus(true, …)`) is counted beside the records. One
+		// that names its file belongs to that file's tree; one that names none
+		// (a fail-closed default for a caller that cannot say) belongs to no
+		// tree to exclude, whichever directory the command targets.
 		const env = setupTestEnvironment("pi-lens-4941-verdict-");
 		try {
+			const repoA = repo(env.tmpDir, "a");
 			const repoB = repo(env.tmpDir, "b");
-			const runtime = new RuntimeCoordinator();
-			runtime.updateGitGuardStatus(true, "a verdict with no file");
-			expect(verdictOf(runtime, repoB, COMMIT).block).toBe(true);
+			const named = new RuntimeCoordinator();
+			named.updateGitGuardStatus(
+				true,
+				"verdict in A",
+				path.join(repoA, "src", "a.ts"),
+			);
+			expect(verdictOf(named, repoA, COMMIT).block).toBe(true);
+			expect(verdictOf(named, repoB, COMMIT)).toEqual({ block: false });
+			const unnamed = new RuntimeCoordinator();
+			unnamed.updateGitGuardStatus(true, "a verdict with no file");
+			expect(verdictOf(unnamed, repoB, COMMIT).block).toBe(true);
+			expect(
+				verdictOf(unnamed, repoA, commit(`git -C ${repoB} commit -m wip`))
+					.block,
+			).toBe(true);
 		} finally {
 			env.cleanup();
 		}
@@ -203,6 +219,10 @@ describe("#4941: the commit gate's blocker state is read per working tree", () =
 			expect(verdictOf(runtime, repoB, COMMIT)).toEqual({ block: false });
 			runtime.markGitGuardCacheUnknown("cache_write_failed");
 			expect(verdictOf(runtime, repoB, COMMIT).block).toBe(true);
+			expect(
+				verdictOf(runtime, repoA, commit(`git -C ${repoB} commit -m wip`))
+					.block,
+			).toBe(true);
 		} finally {
 			env.cleanup();
 		}
@@ -284,6 +304,7 @@ describe("#4941: resolveCommitScope reads only forms it can place in a tree", ()
 				`export GIT_DIR=${repoB}/.git; git commit -m wip`,
 				`GIT_DIR=${repoB}/.git git commit -m wip`,
 				`git --git-dir=${repoB}/.git commit -m wip`,
+				`git --git-dir ${repoB}/.git commit -m wip`,
 				`git --work-tree=${repoB} commit -m wip`,
 				`git -c core.worktree=${repoB} commit -m wip`,
 				`git -C${repoB} commit -m wip`,
@@ -303,6 +324,10 @@ describe("#4941: resolveCommitScope reads only forms it can place in a tree", ()
 				expect(scopeOf(command, repoA), command).toBeUndefined();
 			}
 			expect(scopeOf("git commit -m wip", notARepo)).toBeUndefined();
+			// One target in a tree and one not: the scope cannot name both.
+			expect(
+				scopeOf(`git -C ${notARepo} commit -m wip; git commit -m wip`, repoA),
+			).toBeUndefined();
 			expect(
 				resolveCommitScope("write", { command: "git commit" }, repoA),
 			).toBeUndefined();
