@@ -315,4 +315,37 @@ describe("#4942: an edit is licensed only by a read in the editing session", () 
 			await primary.dispose();
 		},
 	);
+
+	it(
+		"credits a trailing-whitespace-autopatched edit to the secondary that made it",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
+		async () => {
+			// RECURRENCE GUARDED: #4942's second synthetic-read writer. The
+			// trailing-whitespace pass records the same verified read as the
+			// indentation pass; recorded on the coordinator's guard it would credit
+			// the primary and leave the editing subagent refused. Its mutation
+			// survived the indentation test alone.
+			const { proj, shared } = project("autopatch-ws");
+			const { primary, secondary } = await pair(
+				proj,
+				[endTurn("idle")],
+				[
+					step(
+						fauxToolCall("edit", {
+							path: shared,
+							edits: [{ oldText: "\treturn 1;   ", newText: "\treturn 2;" }],
+						}),
+						"editing with trailing whitespace",
+					),
+					endTurn("edited"),
+				],
+			);
+			await secondary.prompt("edit it");
+			expect(editResult(secondary)).not.toContain(EDIT_WITHOUT_READ);
+			expect(fs.readFileSync(shared, "utf8")).toContain("return 2;");
+			expect(secondary.errors).toEqual([]);
+			await secondary.dispose();
+			await primary.dispose();
+		},
+	);
 });
