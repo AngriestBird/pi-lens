@@ -621,7 +621,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :47, :57, :73, :117, :152, :192, :215, :243, :282, :310
 	"clients/git-guard.ts": {
 		silent: 3,
-		identities: "20ed3070a07a59a4",
+		identities: "019c17dcf7d22fe6",
 		reason: PRE_RULE,
 	}, // :69, :908, :1432
 	"clients/git-tracked-ignore.ts": {

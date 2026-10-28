@@ -397,6 +397,27 @@ export interface InlineBlockerRecord {
 }
 
 /**
+ * What {@link RuntimeCoordinator.updateGitGuardStatus} last counted for the
+ * commit gate (#4941): the unsuppressed blocker records with their files, the
+ * latest write's own verdict (its file, when known), and the first non-blank
+ * line of that write's output.
+ */
+interface GitGuardMemo {
+	readonly entries: ReadonlyArray<{
+		readonly filePath: string;
+		readonly summary: string;
+	}>;
+	readonly verdict: { readonly filePath: string | undefined } | undefined;
+	readonly firstLine: string | undefined;
+}
+
+const EMPTY_GIT_GUARD_MEMO: GitGuardMemo = {
+	entries: [],
+	verdict: undefined,
+	firstLine: undefined,
+};
+
+/**
  * #3218 criterion 2: the render cap for the turn-end "Resolved this turn"
  * lines. One line per retired FILE (never per finding); a session that
  * retires more than this in one turn says "… and N more".
@@ -658,9 +679,22 @@ export class RuntimeCoordinator {
 	// skip its per-build O(project) walk+stat sweep when only pi-observed edits
 	// occurred. Keyed identically to _fileSeq (normalizeMapKey + path.resolve).
 	private readonly _fileLastProjectSeq = new Map<string, number>();
-	private _gitGuardHasBlockers = false;
-	private _gitGuardSummary = "";
-	private _gitGuardCacheUnknownReason: string | undefined;
+	/**
+	 * The commit gate's memo of the last {@link updateGitGuardStatus}: the
+	 * unsuppressed blocker records it counted, each with its file, so the gate
+	 * can answer for one repository's tree (#4941) and the turn-end readers
+	 * for all of them.
+	 */
+	private _gitGuardMemo: GitGuardMemo = EMPTY_GIT_GUARD_MEMO;
+	/**
+	 * Per project (the `cwd` whose stored record the reason is about), the
+	 * reason that record cannot be confirmed (#4941 r2 F1). One record per
+	 * repository: a failure about B must not replace, and a write about B must
+	 * not clear, the uncertainty about A.
+	 */
+	private readonly _gitGuardCacheUnknown = new PathKeyedMap<string>(
+		normalizeMapKey,
+	);
 	/**
 	 * #4733 r2 F12: per file, a dispatch that never answered
 	 * (`pipeline_crash`, `pipeline_error`). It is about that file, not the
@@ -816,9 +850,8 @@ export class RuntimeCoordinator {
 		this._turnStartProjectSeq = 0;
 		this._fileSeq.clear();
 		this._fileLastProjectSeq.clear();
-		this._gitGuardHasBlockers = false;
-		this._gitGuardSummary = "";
-		this._gitGuardCacheUnknownReason = undefined;
+		this._gitGuardMemo = EMPTY_GIT_GUARD_MEMO;
+		this._gitGuardCacheUnknown.clear();
 		this._gitGuardUnansweredDispatches.clear();
 		this._readGuard = null;
 		this._foreignReadGuards.clear();
@@ -894,7 +927,16 @@ export class RuntimeCoordinator {
 		return changed;
 	}
 
-	updateGitGuardStatus(hasBlockers: boolean, output: string): void {
+	/**
+	 * `blockerFile` is the file `hasBlockers` speaks for (the write's own); a
+	 * verdict with no file is a repository-less blocker, which every tree's
+	 * commit gate counts (#4941).
+	 */
+	updateGitGuardStatus(
+		hasBlockers: boolean,
+		output: string,
+		blockerFile?: string,
+	): void {
 		// The status is an aggregate over the current per-file map. A clean B
 		// result must not erase an unresolved A result; the pipeline records/clears
 		// the edited file immediately before this method runs.
@@ -904,46 +946,81 @@ export class RuntimeCoordinator {
 		// diagnostics at every turn end, so dropping it there would be silencing
 		// rather than filtering (AGENTS.md shape 10); it just stops counting for
 		// the gate the agent was shown nothing for.
-		const blocking = this.getInlineBlockersSnapshot().filter(
-			(entry) => !entry.policySuppressed,
-		);
-		this._gitGuardHasBlockers = hasBlockers || blocking.length > 0;
-		if (!this._gitGuardHasBlockers) {
-			this._gitGuardSummary = "";
-			return;
+		this._gitGuardMemo = {
+			entries: this.getInlineBlockersSnapshot()
+				.filter((entry) => !entry.policySuppressed)
+				.map((entry) => ({
+					filePath: entry.filePath,
+					summary: entry.summary.trim(),
+				})),
+			verdict: hasBlockers ? { filePath: blockerFile } : undefined,
+			firstLine: output
+				.split("\n")
+				.map((line) => line.trim())
+				.find((line) => line.length > 0),
+		};
+	}
+
+	/**
+	 * The commit gate's status over the blockers `inScope` admits (every one
+	 * when omitted): whether any counts, and the first one's summary. #4941:
+	 * the gate asks for the tree being committed, so a blocker in another
+	 * repository neither refuses the commit nor names its file.
+	 */
+	gitGuardStatus(inScope?: (filePath: string) => boolean): {
+		hasBlockers: boolean;
+		summary: string;
+	} {
+		const { entries, verdict, firstLine } = this._gitGuardMemo;
+		const counted = inScope
+			? entries.filter((entry) => inScope(entry.filePath))
+			: entries;
+		const verdictCounts =
+			verdict !== undefined &&
+			(!inScope || verdict.filePath === undefined || inScope(verdict.filePath));
+		if (!verdictCounts && counted.length === 0) {
+			return { hasBlockers: false, summary: "" };
 		}
-		const firstLine = output
-			.split("\n")
-			.map((line) => line.trim())
-			.find((line) => line.length > 0);
-		const summaries = blocking
-			.map((entry) => entry.summary.trim())
-			.filter(Boolean);
-		this._gitGuardSummary = (
-			summaries[0] ??
-			firstLine ??
-			"Unresolved blockers detected"
-		).slice(0, 160);
+		return {
+			hasBlockers: true,
+			summary: (
+				counted.map((entry) => entry.summary).find(Boolean) ??
+				firstLine ??
+				"Unresolved blockers detected"
+			).slice(0, 160),
+		};
 	}
 
 	get gitGuardHasBlockers(): boolean {
-		return this._gitGuardHasBlockers;
+		return this.gitGuardStatus().hasBlockers;
 	}
 
 	get gitGuardSummary(): string {
-		return this._gitGuardSummary;
+		return this.gitGuardStatus().summary;
 	}
 
-	markGitGuardCacheUnknown(reason: string): void {
-		this._gitGuardCacheUnknownReason = reason;
+	/** `cwd` is the project whose stored record the reason is about (#4941). */
+	markGitGuardCacheUnknown(reason: string, cwd: string): void {
+		this._gitGuardCacheUnknown.set(cwd, reason);
 	}
 
-	clearGitGuardCacheUnknown(): void {
-		this._gitGuardCacheUnknownReason = undefined;
+	/** A write or retirement of `cwd`'s record answers that project's reason only. */
+	clearGitGuardCacheUnknown(cwd: string): void {
+		this._gitGuardCacheUnknown.delete(cwd);
 	}
 
-	get gitGuardCacheUnknownReason(): string | undefined {
-		return this._gitGuardCacheUnknownReason;
+	/**
+	 * The first latched reason about a project `inScope` accepts, or the first
+	 * of all when `inScope` is absent (a command the gate cannot place in a
+	 * tree is judged by every project's reason).
+	 */
+	gitGuardCacheUnknownFor(
+		inScope?: (cwd: string) => boolean,
+	): string | undefined {
+		for (const [cwd, reason] of this._gitGuardCacheUnknown) {
+			if (!inScope || inScope(cwd)) return reason;
+		}
+		return undefined;
 	}
 
 	markGitGuardDispatchUnanswered(filePath: string, reason: string): void {

@@ -854,6 +854,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			ctx.cwd ?? runtime.projectRoot,
 			ctx.host ?? "pi",
 			deps.sessionId,
+			{ toolName, input: event.input },
 		);
 		if (guard.block) {
 			return {

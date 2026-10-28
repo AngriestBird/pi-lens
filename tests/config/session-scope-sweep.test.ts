@@ -173,9 +173,8 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 		"kept: a live concurrent session's turn key outlives the primary's replacement; its own shutdown removes it (forgetTurnSession, #3613)",
 	_foreignTurns:
 		"kept: a count that only orders concurrent sessions' turn keys, which stay distinct across a reset (#3613)",
-	_gitGuardCacheUnknownReason: "reset",
-	_gitGuardHasBlockers: "reset",
-	_gitGuardSummary: "reset",
+	_gitGuardCacheUnknown: "reset",
+	_gitGuardMemo: "reset",
 	_gitGuardUnansweredDispatches: "reset",
 	_hasStableSessionId: "reset",
 	_inlineBlockerWriteOrder: "reset",

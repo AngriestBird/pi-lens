@@ -53,6 +53,7 @@ const DECLARED_FLAGS = [
 	"lens-guard",
 	"lens-checkout-guard",
 	"no-opengrep",
+	"no-ast-grep",
 	"no-read-guard",
 	"no-lens-context",
 	"lens-retain-injections",

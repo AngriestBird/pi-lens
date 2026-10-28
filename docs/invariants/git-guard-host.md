@@ -47,6 +47,32 @@
   own id. Only a write by the coordinator's session latches
   `session_mismatch`; a concurrent session's write leaves another
   session's record and the latch alone.
+- The commit gate is keyed by the repository being committed (#4941), not by
+  session. A commit/push is judged by the unresolved blockers whose files lie
+  in the git checkout it targets (`resolveGitCheckout`, the seam the review
+  graph and the analysis root use) or in a checkout nested inside it, whoever
+  wrote them; a linked worktree of the committed repository is a checkout of
+  its own, never the parent's. This covers every reader the gate has: the
+  inline-blocker latch memo, the stale-suppression scan, the dispatches that
+  never answered, and the record-failure latch, which holds one reason per
+  project (a failure or a write about repository B never replaces or clears
+  repository A's). A sub-agent committing in repository B is not refused for a
+  blocker in repository A; one committing where the blocker is still is. The
+  target comes from `resolveCommitScope` and fails closed: only plain `git`
+  segments (spelled `git` or a system path such as `/usr/bin/git`; global
+  option `-C <existing, unexpanded directory>` only) beside a short list of
+  neutral commands (`echo`, `tail`, ...) are placed in a tree, and only in a
+  process whose environment sets none of `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_COMMON_DIR`. The gate never resolves PATH, so a bare `git` is trusted
+  whatever executable the shell finds under that name. `cd`, an assignment,
+  `--git-dir`, `--work-tree`, `-c`, a wrapper or any other path named `git`, a
+  `~` operand, a substitution that runs git, any other command in the chain,
+  or a directory outside a checkout leaves the command unscoped, and an unscoped command, a verdict that names no
+  file, and a caller that passes no command are judged by every blocker. The
+  persisted `turn-end-findings` record stays the committing session's
+  project's (`cwd`): for `git -C <other repo> commit` it is not read for the
+  targeted repository, so that record's blocker can be missed (a gap that
+  predates #4941).
 - The shared-checkout guard refuses unsafe worktree mutation when another live
   session and uncommitted work are both proven. It never auto-stashes.
 - `mcp/server.ts` talks to pi-lens through `clients/lens-engine.ts`. A mirrored
