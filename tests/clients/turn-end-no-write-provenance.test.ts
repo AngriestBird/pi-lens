@@ -229,6 +229,30 @@ describe.each([false, true])(
 			});
 		});
 
+		it("keeps a changed-since-checked neighbour line current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-pending-changed-${guard}`,
+				incident: "The changed-outside-pi line names a neighbour, not an edit",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					recordDeliveredCascadeNeighbor(
+						neighbor,
+						[neighborError(neighbor)],
+						1,
+						Date.now() - 60_000,
+					);
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(silentRun(primary));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("changed since checked");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		it("keeps a late auxiliary finding current", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-aux-${guard}`,
