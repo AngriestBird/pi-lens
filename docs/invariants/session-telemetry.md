@@ -27,8 +27,16 @@
   write-order turn and change window only for its own session, and per-turn
   warnings are partitioned by the session that recorded them. Every
   producer and reader passes that id (`tool_result`, a partial apply's
-  pipeline, `turn_end`). A concurrent secondary still shares the read guard
-  and the turn-end worklist (the open half of #3613). State `turn_end` parks
+  pipeline, `turn_end`). The read guard is the turn's session's too (#4942,
+  the half of #3613 this paragraph used to leave open):
+  `RuntimeCoordinator.readGuardFor(sessionId)` answers with the coordinator's
+  own guard for a turn with no session id of its own, and with a guard of its
+  own, built on first use and dropped at its shutdown, for a concurrent
+  secondary. It keys that guard by the opaque owner the inline blockers use
+  (#4921, `recordSession`), so an edit is judged by the reads and writes of
+  the session that edits. A read or write reported through the mutation or
+  read bridge names no session and is the coordinator's. A concurrent
+  secondary still shares the turn-end worklist. State `turn_end` parks
   in a scope cell for a later turn lives on the activation's own scope
   (`TurnEndDeps.sessionScope`, passed by `index.ts`), never on
   `runtime.sessionScope`, which is the primary's during a secondary's turn

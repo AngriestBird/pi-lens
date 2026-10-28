@@ -225,4 +225,32 @@ describe("#4942: an edit is licensed only by a read in the editing session", () 
 			await primary.dispose();
 		},
 	);
+
+	it(
+		"refuses the primary's edit of a file only the secondary wrote by bash",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
+		async () => {
+			// RECURRENCE GUARDED: #4942's authorship half. A recognized bash write
+			// credits its session with authorship (the license to edit what it
+			// wrote), stamped through the coordinator's guard, so the subagent's
+			// `printf > file` licensed the primary's blind edit.
+			const { proj, shared } = project("bash-author");
+			const { primary, secondary } = await pair(proj, editTurn(shared), [
+				step(
+					fauxToolCall("bash", {
+						command: `printf '%s\\n' 'export function shared() {' '  return 1;' '}' > src/shared.ts`,
+					}),
+					"writing by bash",
+				),
+				endTurn("written"),
+			]);
+			await secondary.prompt("write it by bash");
+			expect(fs.readFileSync(shared, "utf8")).toContain("  return 1;");
+			await primary.prompt("edit it");
+			expect(editResult(primary)).toContain(EDIT_WITHOUT_READ);
+			expect(fs.readFileSync(shared, "utf8")).toContain("return 1;");
+			await secondary.dispose();
+			await primary.dispose();
+		},
+	);
 });

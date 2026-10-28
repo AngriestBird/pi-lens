@@ -3066,8 +3066,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// #3521: `/tree` moves the conversation inside this activation. Keep only
 	// the reads whose tool result is on the new branch. A concurrent secondary
 	// shares the module-level runtime, so its tree moves never touch the
-	// primary's guard; the other direction is an accepted residual (#3521 F2):
-	// a primary /tree clears a live secondary's reads, costing it one re-read.
+	// primary's guard, and the primary's never touch a secondary's (#4942: each
+	// session has its own read guard, which closes #3521 F2's residual).
 	// `session_before_tree` can still be cancelled by a later handler, so
 	// nothing happens there.
 	(pi as any).on(
