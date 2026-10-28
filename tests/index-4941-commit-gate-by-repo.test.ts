@@ -13,14 +13,13 @@
  * scripted at the provider boundary. The second session starts while the
  * first is live, so `session_start` classifies it a concurrent secondary
  * (#4704). The primary raises its blocker by its own write; nothing is seeded.
- * Each project is a real git repository, the identity the gate resolves.
+ * Each project is a git checkout by the marker the gate resolves (`.git/HEAD`).
  *
  * Lane: ubuntu Unit tests.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { execFileSync } from "./support/git-fixture-env.js";
 import {
 	BLOCKING_FILE,
 	CLEAN_FILE,
@@ -41,12 +40,14 @@ const fixture = piSessionFixture();
 /** Two real pi sessions; the other two-session files budget 60 s. */
 const TWO_SESSION_TIMEOUT_MS = 60_000;
 
-/** A git repository holding one clean source file. */
+/** A git checkout holding one clean source file. */
 function repo(name: string): string {
 	const dir = path.join(fixture.root, name, "proj");
 	fs.mkdirSync(path.join(dir, "src"), { recursive: true });
 	fs.writeFileSync(path.join(dir, "src", "seed.ts"), CLEAN_FILE);
-	execFileSync("git", ["init", "-q"], { cwd: dir, encoding: "utf8" });
+	// The marker `resolveGitCheckout` reads; the gate spawns no git.
+	fs.mkdirSync(path.join(dir, ".git"));
+	fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
 	return dir;
 }
 

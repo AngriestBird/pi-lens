@@ -9,8 +9,8 @@
  * record or an unanswered dispatch in repository A (census C3, tier 2:
  * `tests/index-4941-commit-gate-by-repo.test.ts`). These cases pin each reader
  * and, in `resolveCommitScope`, the one question that decides which tree a
- * command targets, with a real `RuntimeCoordinator` and real git
- * repositories. A form the scope does not read must judge EVERY blocker
+ * command targets, with a real `RuntimeCoordinator` and git checkouts.
+ * A form the scope does not read must judge EVERY blocker
  * (AGENTS.md: gates fail closed), so most rows below are refusals to scope.
  */
 import { createHash } from "node:crypto";
@@ -23,14 +23,13 @@ import {
 	resolveCommitScope,
 } from "../../clients/git-guard.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { execFileSync } from "../support/git-fixture-env.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
-function git(cwd: string, args: string[]): void {
-	execFileSync("git", args, { cwd, encoding: "utf8" });
-}
-
-/** A git repository (real path) holding `src/<name>.ts` for each name. */
+/**
+ * A git checkout (real path) holding `src/<name>.ts` for each name. Only the
+ * `.git/HEAD` marker `resolveGitCheckout` reads is written: the gate reads
+ * files and spawns nothing, so neither does the fixture.
+ */
 function repo(root: string, name: string, files: string[] = ["a"]): string {
 	const dir = path.join(fs.realpathSync.native(root), name);
 	fs.mkdirSync(path.join(dir, "src"), { recursive: true });
@@ -40,8 +39,21 @@ function repo(root: string, name: string, files: string[] = ["a"]): string {
 			"export const x = 1;\n",
 		);
 	}
-	git(dir, ["init", "-q"]);
+	fs.mkdirSync(path.join(dir, ".git"));
+	fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
 	return dir;
+}
+
+/** A linked worktree of `main`, laid out as `git worktree add` leaves it. */
+function linkedWorktree(main: string, at: string): string {
+	const admin = path.join(main, ".git", "worktrees", path.basename(at));
+	fs.mkdirSync(admin, { recursive: true });
+	fs.writeFileSync(path.join(admin, "HEAD"), "ref: refs/heads/linked\n");
+	fs.writeFileSync(path.join(admin, "commondir"), "../..\n");
+	fs.mkdirSync(path.join(at, "src"), { recursive: true });
+	fs.writeFileSync(path.join(at, "src", "a.ts"), "export const x = 1;\n");
+	fs.writeFileSync(path.join(at, ".git"), `gitdir: ${admin}\n`);
+	return at;
 }
 
 const COMMIT = { toolName: "bash", input: { command: "git commit -m wip" } };
@@ -343,18 +355,10 @@ describe("#4941: resolveCommitScope reads only forms it can place in a tree", ()
 		const env = setupTestEnvironment("pi-lens-4941-scope-worktree-");
 		try {
 			const main = repo(env.tmpDir, "main");
-			git(main, ["add", "-A"]);
-			git(main, [
-				"-c",
-				"user.name=t",
-				"-c",
-				"user.email=t@t.local",
-				"commit",
-				"-qm",
-				"base",
-			]);
-			const linked = path.join(main, ".claude", "worktrees", "w1");
-			git(main, ["worktree", "add", "-q", linked, "-b", "w1"]);
+			const linked = linkedWorktree(
+				main,
+				path.join(main, ".claude", "worktrees", "w1"),
+			);
 			const inMain = path.join(main, "src", "a.ts");
 			const inLinked = path.join(linked, "src", "a.ts");
 			const fromLinked = scopeOf("git commit -m wip", linked);

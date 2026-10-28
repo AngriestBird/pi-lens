@@ -1029,7 +1029,7 @@ export interface CommitScope {
  * not listed leaves the command unscoped, so a form nobody planned for is
  * judged by every blocker (AGENTS.md: gates fail closed).
  */
-const SCOPE_NEUTRAL_COMMANDS = new Set([
+const SCOPE_NEUTRAL_COMMANDS: readonly string[] = [
 	"echo",
 	"printf",
 	"tail",
@@ -1038,7 +1038,7 @@ const SCOPE_NEUTRAL_COMMANDS = new Set([
 	"grep",
 	"wc",
 	"true",
-]);
+];
 
 /**
  * The trees a bash `git commit`/`git push` command targets, or `undefined`
@@ -1064,23 +1064,23 @@ export function resolveCommitScope(
 	const roots: string[] = [];
 	for (const segment of decodeShellWords(canonical)) {
 		const words = segment.words;
-		if (words.length === 0) continue;
-		if (!isGitExecutable(words[0].text)) {
-			if (!SCOPE_NEUTRAL_COMMANDS.has(words[0].text)) return undefined;
+		const head = words[0]?.text;
+		if (head === undefined) continue;
+		if (!isGitExecutable(head)) {
+			if (!SCOPE_NEUTRAL_COMMANDS.includes(head)) return undefined;
 			continue;
 		}
 		const tokens = words.map((word) => word.text);
 		if (!matchGitVerbAtCommandPosition(tokens, COMMIT_PUSH_MATCHER)) continue;
 		const verbAt = gitVerbIndex(tokens);
 		if (verbAt === undefined) return undefined;
-		let directory = cwd;
 		for (let i = 1; i < verbAt; i += 2) {
 			const value = words[i + 1];
 			if (tokens[i] !== "-C" || value === undefined || value.hidden) {
 				return undefined;
 			}
-			directory = path.resolve(directory, value.text);
 		}
+		const directory = resolveGitTargetDirectory(tokens, cwd);
 		if (!nodeFs.statSync(directory, { throwIfNoEntry: false })?.isDirectory()) {
 			return undefined;
 		}
@@ -2463,12 +2463,12 @@ export function evaluateGitGuard(
 			reason: failure instanceof Error ? failure.message : String(failure),
 		});
 	}
-	const status = runtime.gitGuardStatus(inScope);
-	if (status.hasBlockers) {
+	const held = runtime.gitGuardStatus(inScope);
+	if (held.hasBlockers) {
 		logDecision(cwd, "blocked", "runtime_blockers", {
 			projectSeq: runtime.projectSeq,
 		});
-		const detail = status.summary ? `\n${status.summary}` : "";
+		const detail = held.summary ? `\n${held.summary}` : "";
 		return {
 			block: true,
 			reason: `🔴 COMMIT BLOCKED (--lens-guard): unresolved blockers must be fixed before commit/push.${detail}\n${inspectLine}`,
