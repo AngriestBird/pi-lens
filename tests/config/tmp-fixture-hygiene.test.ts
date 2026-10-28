@@ -2045,17 +2045,24 @@ describe("tmp-fixture-hygiene", () => {
 		it(
 			"names the test file behind a raw mkdtemp prefix",
 			() => {
-				// F3/F5: `tests/index-wiring.test.ts` creates its roots from a
-				// `pi-lens-wiring-${reason}-` TEMPLATE, so neither a literal
-				// `setupTestEnvironment("…")` scan nor a literal-only mkdtemp scan could
-				// attribute `pi-lens-wiring-resume-…`. The index reads the static head.
-				expect(ownerForTmpEntry("pi-lens-wiring-resume-iCpHXp")).toBe(WIRING);
-				expect(ownersForTmpEntry("pi-lens-wiring-resume-iCpHXp")).toContain(
+				// F3/F5: `tests/index-wiring.test.ts` creates its roots with raw
+				// `mkdtempSync(path.join(os.tmpdir(), "pi-lens-wiring-…-"))` prefixes,
+				// so a literal `setupTestEnvironment("…")` scan could not attribute
+				// `pi-lens-wiring-fresh-file-…`. The index reads the static head. (#4913
+				// moved the case whose bare `pi-lens-wiring-` prefix this used to
+				// borrow to tier 2, so the entries named here are two prefixes the
+				// file still spells.)
+				expect(ownerForTmpEntry("pi-lens-wiring-fresh-file-iCpHXp")).toBe(
+					WIRING,
+				);
+				expect(ownersForTmpEntry("pi-lens-wiring-fresh-file-iCpHXp")).toContain(
 					WIRING,
 				);
 				// The raw-literal class in the same file, and an unrelated one
 				// elsewhere, so the needle is not a single-fixture special case.
-				expect(ownerForTmpEntry("pi-lens-wiring-new-AbCdEf")).toBe(WIRING);
+				expect(
+					ownerForTmpEntry("pi-lens-wiring-session-start-fallback-AbCdEf"),
+				).toBe(WIRING);
 				expect(ownerForTmpEntry("pi-lens-crash-surface-AbCdEf")).toBe(WIRING);
 				// A prefix no tests/ file spells still has no owner: the census must
 				// keep saying so rather than inventing one.
@@ -2082,12 +2089,12 @@ describe("tmp-fixture-hygiene", () => {
 				// index-wiring, which this manifest says never ran here.
 				expect(
 					tmpHygieneForeignRunEntries(
-						["pi-lens-wiring-resume-iCpHXp"],
+						["pi-lens-wiring-fresh-file-iCpHXp"],
 						ownersForTmpEntry,
 						manifest([OWN], "foreign"),
 						NO_CREATORS,
 					),
-				).toEqual(["pi-lens-wiring-resume-iCpHXp"]);
+				).toEqual(["pi-lens-wiring-fresh-file-iCpHXp"]);
 			},
 			TREE_WALK_TIMEOUT_MS,
 		);
@@ -2098,8 +2105,8 @@ describe("tmp-fixture-hygiene", () => {
 				// #4354: the #4347 jscpd leak. Its prefix owner (jscpd-client) never ran
 				// in the fork, so the unanimous-owner filter above excused it, yet the
 				// creators record named a file that DID run: a leak this run made.
-				const leaked = "pi-lens-wiring-resume-iCpHXp";
-				const sibling = "pi-lens-wiring-new-AbCdEf";
+				const leaked = "pi-lens-wiring-fresh-file-iCpHXp";
+				const sibling = "pi-lens-wiring-session-start-fallback-AbCdEf";
 				const record = path.join(
 					TMP_HYGIENE_HOME,
 					`tmp-hygiene-creators-foreign-4354-${process.pid}.log`,
@@ -2139,7 +2146,7 @@ describe("tmp-fixture-hygiene", () => {
 				// red (F4), and a manifest that cannot be read must never silence one.
 				expect(
 					tmpHygieneForeignRunEntries(
-						["pi-lens-wiring-resume-iCpHXp"],
+						["pi-lens-wiring-fresh-file-iCpHXp"],
 						ownersForTmpEntry,
 						manifest([OWN, WIRING], "own"),
 						NO_CREATORS,
@@ -2147,7 +2154,7 @@ describe("tmp-fixture-hygiene", () => {
 				).toEqual([]);
 				expect(
 					tmpHygieneForeignRunEntries(
-						["pi-lens-wiring-resume-iCpHXp"],
+						["pi-lens-wiring-fresh-file-iCpHXp"],
 						ownersForTmpEntry,
 						new Set<string>(),
 						NO_CREATORS,

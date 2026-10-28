@@ -357,6 +357,7 @@ entry's screen, or its first sentence when it has none.
 70. **Joined single flight answers for edits after it started:** Screen: for a join, list the writers that can store the row between the join and the next scan, and show the finding survives each.
 71. **One signal wired consumer by consumer:** Screen: for a new detector, notifier or staleness marker, list every consumer that holds state derived from the same content, and show each one receives the change or record why not.
 72. **Process-global last-write-wins session field:** a field that holds one session's value for the whole process answers for whichever session wrote last, so a second live session overwrites what another one read.
+87. **Factory-time read of a host value set later:** pi applies an extension flag's command-line value after every factory has run, so a flag read while the factory runs answers the registered default. Screen: does any flag read run while the factory runs, and does the host test apply the value after the factory, as pi does?
 
 </important>
 

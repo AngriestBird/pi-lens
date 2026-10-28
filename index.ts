@@ -1219,9 +1219,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			loadPiLensProjectConfig(runtime.projectRoot).raw,
 			noToolFlag(),
 		);
-	const disabledToolNames = LENS_TOOL_NAMES.filter(
-		(name) => !isToolEnabled(name),
-	);
+	// Read at use, never at load: `--no-tool <name>` reaches `pi.getFlag` only
+	// after every factory has run (#4913).
+	const disabledToolNames = (): string[] =>
+		LENS_TOOL_NAMES.filter((name) => !isToolEnabled(name));
 	const formatDisabledToolNames = (names: readonly string[]): string => {
 		const shown = names.slice(0, 8);
 		const omitted = names.length - shown.length;
@@ -1229,7 +1230,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		return `${shown.join(", ")}${suffix} (${names.length} total)`;
 	};
 
-	let lensEnabled = !getLensFlag("no-lens");
+	// #4913: pi applies command-line flag values AFTER every factory has run, so
+	// a factory-time read of `no-lens` answers the registered default. The
+	// `session_start` handler sets this from the flag once per activation; the
+	// session's own `/lens-toggle` wins from then on.
+	let lensEnabled = true;
 
 	// Bridges: refresh the flag getter on every factory activation so the
 	// live getLensFlag closure is always used (same pattern as _turnSummaryEmitCtx).
@@ -1345,8 +1350,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:
 	// env override → CLI flag → global config, all resolved inside getLensFlag
-	// from the registry's PI_LENS_NO_CONTEXT_INJECTION env binding (#166).
-	let contextInjectionEnabled = !getLensFlag("no-lens-context");
+	// from the registry's PI_LENS_NO_CONTEXT_INJECTION env binding (#166). Set
+	// from the flag in `session_start`, like `lensEnabled` (#4913).
+	let contextInjectionEnabled = true;
 	// #4743: opt-in retained injections. The ledger belongs to this activation,
 	// and pi re-runs this factory for every new, resumed, forked or switched
 	// session and for /reload, so each of those starts with an empty ledger.
@@ -2163,6 +2169,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		},
 		filteredLazyCatalog,
 		{
+			isEnabled: isToolEnabled,
 			onActivated: (names, ctx) => {
 				observeSituationalToolActivation(names);
 				// #3612: the calling session's scope owns its activations (#4723 r4).
@@ -2175,7 +2182,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					recordDegradationOnce({
 						kind: "tool-disabled",
 						subject: name,
-						reason: `disabled by tools.${name}.enabled`,
+						reason: `disabled by tools.${name}.enabled or --no-tool`,
 					});
 				}
 			},
@@ -2193,14 +2200,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 		},
 	);
 
-	// #1327: opt-in compact one-line tool rendering. Read once at load (like
-	// the other session-scoped flags above) rather than per-render, so the
-	// flag-off path registers the ORIGINAL tool definitions untouched —
-	// byte-identical to pre-#1327 behavior (no renderCall/renderResult added
-	// or altered). Only tools that already define `renderResult` (every
-	// substantive pi-lens tool — see tools/render-compact.ts) are wrapped;
-	// the rest pass through wrapToolsForCompactLine unchanged.
-	const compactToolLineEnabled = getLensFlag("lens-compact-tool-line") === true;
+	// #1327: opt-in compact one-line tool rendering. The flag-off path registers
+	// the ORIGINAL tool definitions untouched — byte-identical to pre-#1327
+	// behavior (no renderCall/renderResult added or altered). pi applies the
+	// flag's command-line value after this factory ran (#4913), so the factory
+	// registers the originals and `session_start` registers the wrapped copies
+	// of `loadedLensTools` over them when the flag is on. Only tools that
+	// already define `renderResult` (every substantive pi-lens tool — see
+	// tools/render-compact.ts) are wrapped; the rest pass through
+	// wrapToolsForCompactLine unchanged.
+	const loadedLensTools: Array<Record<string, unknown>> = [];
 	const toolsToRegister = [
 		...alwaysActiveTools,
 		activateToolsTool,
@@ -2209,9 +2218,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		(tool) =>
 			tool.name === "pi_lens_activate_tools" || isToolEnabled(tool.name),
 	);
-	for (const tool of compactToolLineEnabled
-		? wrapToolsForCompactLine(toolsToRegister as any)
-		: toolsToRegister) {
+	for (const tool of toolsToRegister) {
 		try {
 			const normalized = normalizeToolDefinition(tool) as Record<
 				string,
@@ -2266,6 +2273,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					);
 			}
 			pi.registerTool(normalized as any);
+			loadedLensTools.push(normalized);
 		} catch {
 			// another extension already registered a tool with this name
 		}
@@ -2385,20 +2393,34 @@ function activateExtension(hostPi: ExtensionAPI) {
 				piWithActiveTools.getActiveTools(),
 				lazyNames,
 				lazy ? getRememberedLazyTools(scope) : lazyNames,
+				// #4913: `--no-tool <name>` arrives after registration, so the
+				// tools it names are registered and dropped here.
+				new Set(disabledToolNames()),
 			);
 			if (!plan.changed) return;
 			piWithActiveTools.setActiveTools(plan.desired);
-			recordToolSetMutation({
-				addedCount: plan.addedCount,
-				removedCount: plan.removedCount,
-				reason:
-					trigger === "model_select"
-						? "model_switch"
-						: isFreshSessionStart(reason)
-							? "fresh_session_lazy_deactivation"
-							: "session_rebuild_restore",
-				deferralApplies: supportsDeferredTools(model),
-			});
+			// #4913: a policy removal (config or `--no-tool`) has its own row; the
+			// lazy posture's row counts only what the posture itself added or removed.
+			const lazyRemoved = plan.removedCount - plan.policyDisabledCount;
+			if (plan.policyDisabledCount > 0)
+				recordToolSetMutation({
+					addedCount: 0,
+					removedCount: plan.policyDisabledCount,
+					reason: "policy_disabled_tool",
+					deferralApplies: supportsDeferredTools(model),
+				});
+			if (plan.addedCount > 0 || lazyRemoved > 0)
+				recordToolSetMutation({
+					addedCount: plan.addedCount,
+					removedCount: lazyRemoved,
+					reason:
+						trigger === "model_select"
+							? "model_switch"
+							: isFreshSessionStart(reason)
+								? "fresh_session_lazy_deactivation"
+								: "session_rebuild_restore",
+					deferralApplies: supportsDeferredTools(model),
+				});
 		} catch (toolSetErr) {
 			dbg(
 				`dynamic tool set restore failed (older pi host lacking getActiveTools/setActiveTools, or a genuine host error): ${toolSetErr}`,
@@ -2479,34 +2501,51 @@ function activateExtension(hostPi: ExtensionAPI) {
 					return;
 				}
 				const sessionStartMonotonicAt = performance.now();
-				warmDispatchAtSessionStart();
-				void warmLspService()
-					.then(() =>
+				// #4913: the first point at which pi has applied the command-line
+				// flag values, and BEFORE any warm-up below, so a session started
+				// with `--no-lens` warms nothing. Once per activation (the duplicate
+				// start above returned), so a `/lens-toggle` or `/lens-context-toggle`
+				// after this line keeps winning for the rest of the session. The
+				// warm-ups load lazily on first use, so a toggle back on loses
+				// nothing but the head start.
+				lensEnabled = !getLensFlag("no-lens");
+				contextInjectionEnabled = !getLensFlag("no-lens-context");
+				if (lensEnabled) {
+					warmDispatchAtSessionStart();
+					void warmLspService()
+						.then(() =>
+							logExtension({
+								subsystem: "lsp",
+								level: "debug",
+								message: "LSP warm resolved",
+							}),
+						)
+						.catch((err) =>
+							logExtension({
+								subsystem: "lsp",
+								level: "warn",
+								message: `LSP warm failed: ${err}`,
+							}),
+						);
+					void warmFormatters().catch((err) =>
 						logExtension({
-							subsystem: "lsp",
-							level: "debug",
-							message: "LSP warm resolved",
-						}),
-					)
-					.catch((err) =>
-						logExtension({
-							subsystem: "lsp",
+							subsystem: "format",
 							level: "warn",
-							message: `LSP warm failed: ${err}`,
+							message: `formatter warm failed: ${err}`,
 						}),
 					);
-				void warmFormatters().catch((err) =>
-					logExtension({
-						subsystem: "format",
-						level: "warn",
-						message: `formatter warm failed: ${err}`,
-					}),
-				);
+				}
 				rememberOwnEventCtx(ctx);
 				refreshCtxDerivedPlumbing();
 				const sessionStartFiredAt = Date.now();
 				try {
 					dbg("session_start fired");
+					// The wrapped tool definitions register here for the same reason
+					// (see `loadedLensTools`).
+					if (getLensFlag("lens-compact-tool-line") === true) {
+						for (const tool of wrapToolsForCompactLine(loadedLensTools as any))
+							pi.registerTool(tool as any);
+					}
 					// #1775: one bounded build-identity line per session start —
 					// commit/entryMtime/version — so dogfood forensics ("does this
 					// session include PR #N?") reads it off the log instead of
@@ -2517,9 +2556,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 					const buildIdentity = getBuildIdentity(import.meta.url);
 					if (buildIdentity) dbg(formatBuildIdentity(buildIdentity));
 					const sessionReason = sessionStartReason;
-					if (disabledToolNames.length > 0) {
+					const disabledTools = disabledToolNames();
+					if (disabledTools.length > 0) {
 						dbg(
-							`session_start: disabled tools = ${formatDisabledToolNames(disabledToolNames)}`,
+							`session_start: disabled tools = ${formatDisabledToolNames(disabledTools)}`,
 						);
 					}
 
@@ -2861,7 +2901,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						projectConfig: loadPiLensProjectConfig(runtime.projectRoot),
 						// #2967: the session-start orientation renders from the set the
 						// registration predicate actually loaded, never a constant.
-						disabledToolNames,
+						disabledToolNames: disabledTools,
 						// #2129: this call site is only reached for "primary"/
 						// "sequential-replacement" — a declined start returned above.
 						sessionStartClassification: sessionStartDecision.classification,

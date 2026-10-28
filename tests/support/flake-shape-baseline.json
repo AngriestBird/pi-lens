@@ -304,6 +304,7 @@
 		"support/fake-lsp-server.test.ts": 1,
 		"support/fault-injection.test.ts": 5,
 		"support/fault-injection.ts": 3,
+		"support/marker-lsp-project.ts": 1,
 		"support/real-pi-harness.ts": 2,
 		"support/tests-tree-write-guard.test.ts": 2,
 		"tools/lens-diagnostics.test.ts": 1,

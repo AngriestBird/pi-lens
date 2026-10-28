@@ -757,6 +757,10 @@ export const wallClockBudgetInclude = [
 	// #4732: the same real-checkout recovery, for a tool that is not bash,
 	// through a real pi session; the git children ride in the serialized lane.
 	"tests/index-4732-opaque-any-tool-witness.test.ts",
+	// #4913: the witness reads a real language-server child process (a marker
+	// file the spawned server writes) over a bounded wall-clock window, through
+	// the helper in tests/support/marker-lsp-project.ts (flake-shape admission).
+	"tests/index-4913-no-lens-spawn.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",

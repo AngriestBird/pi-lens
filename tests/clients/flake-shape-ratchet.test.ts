@@ -507,6 +507,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"fault injection must model real timer and child teardown timing; fake timers cannot reproduce the boundary",
 	},
+	// 2026-10-27 (#4913): a spawn by the loaded extension copy, or its absence
+	// over a bounded window, is joinable only by polling the file the real
+	// child writes.
+	"raw-timer-wait:support/marker-lsp-project.ts": {
+		detector: "raw-timer-wait",
+		reason:
+			"the marker server is a real child the extension spawns on its own schedule, so a spawn or its absence over a bounded window is joinable only by polling the file it writes",
+	},
 	"raw-timer-wait:support/real-pi-harness.ts": {
 		detector: "raw-timer-wait",
 		reason:

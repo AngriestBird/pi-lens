@@ -58,10 +58,10 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 
 	it("keeps every numbered defect shape exactly once", () => {
 		const numbers = shapeNumbers(catalogText());
-		expect(numbers).toHaveLength(86);
-		expect(new Set(numbers).size).toBe(86);
+		expect(numbers).toHaveLength(87);
+		expect(new Set(numbers).size).toBe(87);
 		expect(numbers.sort((a, b) => a - b)).toEqual(
-			Array.from({ length: 86 }, (_, index) => index + 1),
+			Array.from({ length: 87 }, (_, index) => index + 1),
 		);
 	});
 
@@ -70,7 +70,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		const counterfeit = catalogText()
 			.replace(/^1\. \*\*.*$/m, "")
 			.concat("\n<!--\n1. **Counterfeit shape:** hidden comment\n-->\n");
-		expect(shapeNumbers(counterfeit)).toHaveLength(85);
+		expect(shapeNumbers(counterfeit)).toHaveLength(86);
 		expect(shapeNumbers(counterfeit)).not.toContain(1);
 	});
 
@@ -171,7 +171,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 	// split both loaded AGENTS.md alone; after it AGENTS.md carries one screen
 	// line per shape and the entries, with their enforcers and censuses, live in
 	// `docs/defect-shapes.md` and `docs/invariants/*.md`. A bot still told to
-	// review "the section of AGENTS.md" enforces 86 screens and none of the 738
+	// review "the section of AGENTS.md" enforces 87 screens and none of the 738
 	// lines behind them (review 4883 F1).
 	it("keeps every reviewer bot loading the catalog and every invariant file", () => {
 		const required = [

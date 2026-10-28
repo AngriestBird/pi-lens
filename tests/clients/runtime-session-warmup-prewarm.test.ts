@@ -17,7 +17,7 @@
  *     `handleSessionStart` at all (the #473 guard in index.ts) and
  *     therefore never schedule a warmup of their own;
  *   - subagent light-mode sessions skip the pre-warm (#449);
- *   - the no-lsp flag skips the pre-warm.
+ *   - the no-lsp and no-lens flags skip the pre-warm.
  */
 
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
@@ -337,32 +337,45 @@ describe("quick-mode warmup LSP pre-warm (#947)", () => {
 		).toBe(false);
 	});
 
-	it("skips the pre-warm when the no-lsp flag is set", async () => {
-		const env = setupTestEnvironment("pi-lens-warmup-prewarm-nolsp-");
-		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
-		try {
-			const cwd = makeWarmableProject(env);
-			await handleSessionStart(
-				makeDeps(cwd, { getFlag: (name: string) => name === "no-lsp" }),
-			);
+	// #4913 F1 recurrence: the quick-mode warmup gated on `no-lsp` only, so a
+	// session started with `--no-lens` still spawned the dominant-language
+	// server two seconds after session start.
+	it.each(["no-lsp", "no-lens"])(
+		"skips the pre-warm when the %s flag is set",
+		async (flag) => {
+			const env = setupTestEnvironment("pi-lens-warmup-prewarm-noflag-");
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const cwd = makeWarmableProject(env);
+				const dbgLog: string[] = [];
+				await handleSessionStart(
+					makeDeps(cwd, {
+						getFlag: (name: string) => name === flag,
+						dbg: (msg: string) => dbgLog.push(msg),
+					}),
+				);
 
-			await vi.waitFor(
-				() => {
-					expect(logLatencySpy).toHaveBeenCalledWith(
-						expect.objectContaining({ phase: "warmup_total" }),
-					);
-				},
-				{ timeout: 10_000 },
-			);
-			expect(
-				touchFileSpy.mock.calls.some(
-					([, , opts]) =>
-						(opts as { source?: string })?.source === "startup-warm-dominant",
-				),
-			).toBe(false);
-		} finally {
-			await waitForProjectSnapshotPersistsForTests();
-			env.cleanup();
-		}
-	});
+				await vi.waitFor(
+					() => {
+						expect(logLatencySpy).toHaveBeenCalledWith(
+							expect.objectContaining({ phase: "warmup_total" }),
+						);
+					},
+					{ timeout: 10_000 },
+				);
+				expect(
+					touchFileSpy.mock.calls.some(
+						([, , opts]) =>
+							(opts as { source?: string })?.source === "startup-warm-dominant",
+					),
+				).toBe(false);
+				expect(dbgLog).toContainEqual(
+					expect.stringContaining(`warmup: skipping LSP pre-warm (${flag})`),
+				);
+			} finally {
+				await waitForProjectSnapshotPersistsForTests();
+				env.cleanup();
+			}
+		},
+	);
 });

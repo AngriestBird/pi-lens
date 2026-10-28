@@ -87,6 +87,7 @@ const CONSUMERS = [
 	"tests/config/spawn-chokepoint-sweep.test.ts",
 	"tests/config/tree-census-timeout.test.ts",
 	"tests/support/eviction-programs.ts",
+	"tests/support/factory-flag-read-scan.ts",
 	"tests/support/silent-catch-scan.ts",
 	"tests/support/worker-message-scan.ts",
 ];
