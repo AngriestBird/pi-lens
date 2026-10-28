@@ -846,6 +846,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			cacheManager,
 			ctx.cwd ?? runtime.projectRoot,
 			ctx.host ?? "pi",
+			deps.sessionId,
 		);
 		if (guard.block) {
 			return {

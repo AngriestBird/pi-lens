@@ -3951,4 +3951,85 @@ describe("#4921: a turn end's own partition is its turn session's", () => {
 			env.cleanup();
 		}
 	});
+
+	it("drops the subagent's own section when a confirmed-clean check retires its blocker", () => {
+		// RECURRENCE GUARDED: #4921 at the lens_diagnostics retire. Resynced as
+		// the coordinator, the retire left the subagent's section of the
+		// retired file standing, so its commit stayed refused until its turn end.
+		const env = setupTestEnvironment("pi-lens-git-guard-4921-retire-");
+		try {
+			const { theirs } = twoPartitionRecord(env.tmpDir);
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const summary = productionSummary(theirs, ["subagent blocker"]);
+			runtime.recordInlineBlockers(
+				theirs,
+				summary,
+				undefined,
+				["tsc"],
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				SUBAGENT,
+			);
+			runtime.updateGitGuardStatus(true, summary);
+			syncGitGuardRecord(
+				runtime,
+				cache,
+				env.tmpDir,
+				theirs,
+				"session",
+				false,
+				SUBAGENT,
+			);
+			expect(owners(storedData(cache, env.tmpDir))).toEqual([SUBAGENT]);
+			expect(
+				retireInlineBlockerAndResyncGuard({
+					runtime,
+					cacheManager: cache,
+					cwd: env.tmpDir,
+					filePath: theirs,
+					coveredSources: ["tsc"],
+					lensGuardEnabled: true,
+				}),
+			).toBe(true);
+			expect(storedData(cache, env.tmpDir)).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("lets the subagent judge a record only it owns at its own commit", () => {
+		// RECURRENCE GUARDED: #4921 at the commit gate. Compared with the
+		// coordinator's id, the subagent's own record read `session_mismatch`
+		// and refused its commit although the record's only file was deleted.
+		const env = setupTestEnvironment("pi-lens-git-guard-4921-gate-");
+		try {
+			const { theirs } = twoPartitionRecord(env.tmpDir);
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			cache.writeCache(
+				"turn-end-findings",
+				record({
+					content: "blocker",
+					hasBlockers: true,
+					affectedFiles: [theirs],
+					sessionId: SUBAGENT,
+					fileSeqByPath: { [theirs.replace(/\\/g, "/")]: 0 },
+				}),
+				env.tmpDir,
+			);
+			fs.unlinkSync(theirs);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
+				"session_mismatch",
+			);
+			expect(
+				evaluateGitGuard(runtime, cache, env.tmpDir, "pi", SUBAGENT).block,
+			).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
 });

@@ -1727,7 +1727,8 @@ function shownLatchFile(filePath: string, cwd: string): string {
 function unconfirmedRecordRemedy(
 	stored: StoredValue | undefined,
 	inspection: CacheInspection,
-	runtime: RuntimeCoordinator,
+	/** #4921: the session attempting the commit. */
+	me: string,
 	cwd: string,
 ): string | undefined {
 	if (stored === undefined) return undefined;
@@ -1740,7 +1741,7 @@ function unconfirmedRecordRemedy(
 	if (
 		record &&
 		inspection === "fresh" &&
-		record.sessionId === runtime.telemetrySessionId &&
+		record.sessionId === me &&
 		record.carriedBlockers === undefined
 	) {
 		// #4733 r1 F5: a write re-checks this session's own files, and clears no
@@ -1855,6 +1856,9 @@ export function retireInlineBlockerAndResyncGuard(args: {
 	coveredSources: readonly string[];
 	lensGuardEnabled: boolean;
 }): boolean {
+	// #4921: the retired record's section sits in its owner's partition, so
+	// the resync speaks as that owner, whichever session ran the check.
+	const owner = args.runtime.inlineBlockerOwner(args.filePath);
 	const retired = args.runtime.retireInlineBlockerOnConfirmedClean(
 		args.filePath,
 		args.writeIndex,
@@ -1868,6 +1872,9 @@ export function retireInlineBlockerAndResyncGuard(args: {
 			args.cacheManager,
 			args.cwd,
 			args.filePath,
+			undefined,
+			undefined,
+			owner,
 		);
 	}
 	return true;
@@ -2296,7 +2303,13 @@ export function evaluateGitGuard(
 	cacheManager: CacheManager,
 	cwd: string,
 	host: LensToolHost = "pi",
+	/**
+	 * #4921: the session attempting the commit (`ToolCallDeps.sessionId`);
+	 * omitted, the coordinator's. A record only it owns is its own to judge.
+	 */
+	sessionId?: string,
 ): GuardDecision {
+	const me = sessionId ?? runtime.telemetrySessionId;
 	// #2535 F3: a known tool with no mapping on this host resolves to
 	// undefined — rephrase rather than naming a dead tool. `lens_diagnostics`
 	// is pinned available on both hosts, so the fallback is defensive only.
@@ -2356,7 +2369,7 @@ export function evaluateGitGuard(
 	const stored =
 		inspection === "missing" ? undefined : storedRecord(cacheManager, cwd);
 	const recordRemedy = () =>
-		unconfirmedRecordRemedy(stored, inspection, runtime, cwd) ?? RECHECK_REMEDY;
+		unconfirmedRecordRemedy(stored, inspection, me, cwd) ?? RECHECK_REMEDY;
 	const latched = runtime.gitGuardCacheUnknownReason;
 	if (latched) return unknown(cwd, latched, {}, recordRemedy());
 	// #4733 r2 F12: a dispatch that never answered refuses until that file's own
@@ -2407,10 +2420,7 @@ export function evaluateGitGuard(
 	}
 	// #4738: the record speaks for every session that owns a section of it, so
 	// this session judges it alone only when it is the only owner.
-	if (
-		record.sessionId !== runtime.telemetrySessionId ||
-		record.carriedBlockers !== undefined
-	) {
+	if (record.sessionId !== me || record.carriedBlockers !== undefined) {
 		return unknown(cwd, "session_mismatch", {}, recordRemedy());
 	}
 	if (record.projectSeqEnd !== runtime.projectSeq) {

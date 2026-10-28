@@ -963,6 +963,15 @@ export class RuntimeCoordinator {
 	}
 
 	/**
+	 * #4921: the turn session that owns the file's inline-blocker record, or
+	 * undefined when the file has none.
+	 */
+	inlineBlockerOwner(filePath: string): string | undefined {
+		const entry = this._pendingInlineBlockers.get(filePath);
+		return entry ? (entry.session ?? this._telemetrySessionId) : undefined;
+	}
+
+	/**
 	 * #4921: whether `sessionId`'s turn is this coordinator's own session, the
 	 * rule {@link beginTurn} applies: a turn with no session id of its own is
 	 * the coordinator's. A concurrent in-process secondary's is not.
