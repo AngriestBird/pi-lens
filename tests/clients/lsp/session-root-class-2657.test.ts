@@ -56,7 +56,10 @@ import {
 	createPathIdentityFixture,
 	type PathIdentityFixture,
 	pinFixtureHome,
+	plantOtherWorktree,
+	plantUnrelatedRepo,
 	setupTestEnvironment,
+	writeLinkedWorktree,
 } from "../test-utils.js";
 
 let env: { tmpDir: string; cleanup: () => void };
@@ -111,30 +114,6 @@ function registryFor(cwd: string): ClientRegistry {
 		undefined,
 		cwd,
 	);
-}
-
-/**
- * A checkout with one linked worktree, written as git writes it: `<repo>/.git`
- * is a directory (the shared commondir), `<worktree>/.git` is a file holding
- * `gitdir: <repo>/.git/worktrees/<name>`, that gitdir's `commondir` points
- * back at the shared `.git`, and each gitdir holds a `HEAD`. `resolveGitCheckout`/`resolveLinkedWorktreeOwner`
- * read exactly these files, so no `git` child is needed to classify the file.
- */
-function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
-	const repo = path.join(root, "repo");
-	const worktree = path.join(root, "repo-wt");
-	const gitDir = path.join(repo, ".git");
-	const linkedGitDir = path.join(gitDir, "worktrees", "repo-wt");
-	fs.mkdirSync(linkedGitDir, { recursive: true });
-	fs.mkdirSync(worktree, { recursive: true });
-	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
-	fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${linkedGitDir}\n`);
-	fs.writeFileSync(path.join(linkedGitDir, "commondir"), "../..\n");
-	// git writes a HEAD in both gitdirs, and a `.git` directory without one is
-	// not a repository to `resolveGitCheckout` (#4508).
-	fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
-	fs.writeFileSync(path.join(linkedGitDir, "HEAD"), "ref: refs/heads/wt\n");
-	return { repo, worktree };
 }
 
 beforeEach(() => {
@@ -510,6 +489,79 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 			[fx.aliasRoot, fx.repo].sort(),
 		);
 		expect(isSessionRootRegistered(ext)).toBe(false);
+	});
+
+	it("row 18 a file link into another worktree of the checkout reads linked-worktree and registers the session root's identity", async (ctx) => {
+		// The other-worktree member of the #4689 fixture family. Recurrence it
+		// prevents: the link is spelled under the session root but owned by a
+		// linked worktree, so a class or registration decided from the spelling
+		// reads `session` and registers a root that never holds the worktree's
+		// file. The identity reads `linked-worktree`; no ancestor of the link's
+		// spelling is inside the worktree, so the registration falls back to the
+		// session root's identity (item 7). Beside the temp root for #4560.
+		const base = path.join(
+			env.tmpDir,
+			"..",
+			`capture-4689-other-worktree-${process.pid}`,
+		);
+		try {
+			const fx = createPathIdentityFixture(base);
+			const wt = plantOtherWorktree(base);
+			if (fx.skipReason || wt.skipReason)
+				return ctx.skip(fx.skipReason ?? wt.skipReason);
+			runtime.projectRoot = fx.repo;
+			await initLSPConfig(fx.repo);
+
+			expect(resolveAnalysisRoot(wt.worktreeLink, fx.repo)).toBe(
+				"linked-worktree",
+			);
+			expect(resolveSessionConfigRoot(wt.worktreeLink, fx.repo)).toEqual({
+				register: fx.repo,
+				mode: "linked-worktree",
+			});
+			// The control: the worktree's own spelling registers the worktree.
+			expect(resolveSessionConfigRoot(wt.worktreeFile, fx.repo)).toEqual({
+				register: wt.worktree,
+				mode: "linked-worktree",
+			});
+			await readCall(wt.worktreeLink, fx.repo, 4694);
+			expect(getSessionRootsForTelemetry(200)).toEqual([fx.repo]);
+		} finally {
+			fs.rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	it("row 19 a file link into an unrelated repository reads adopted and registers nothing", async (ctx) => {
+		// The unrelated-repository member of the #4689 fixture family. Recurrence
+		// it prevents: a link spelled under the session root whose identity is a
+		// foreign project was read as the session's own file, so the session
+		// registered a root for it and the foreign project skipped every
+		// adopted-root rule (#2657 shape 3). `base` has no `pi-lens-` prefix, so
+		// the foreign project reads `adopted` and not the pi-owned `none` (#4560).
+		const base = path.join(
+			env.tmpDir,
+			"..",
+			`capture-4689-unrelated-${process.pid}`,
+		);
+		try {
+			const fx = createPathIdentityFixture(base);
+			const other = plantUnrelatedRepo(base);
+			if (fx.skipReason || other.skipReason)
+				return ctx.skip(fx.skipReason ?? other.skipReason);
+			runtime.projectRoot = fx.repo;
+			await initLSPConfig(fx.repo);
+
+			expect(resolveAnalysisRoot(other.unrelatedLink, fx.repo)).toBe("adopted");
+			expect(resolveSessionConfigRoot(other.unrelatedLink, fx.repo)).toEqual({
+				register: undefined,
+				mode: "adopted",
+			});
+			await readCall(other.unrelatedLink, fx.repo, 4695);
+			expect(getSessionRootsForTelemetry(200)).toEqual([fx.repo]);
+			expect(isSessionRootRegistered(other.unrelatedRepo)).toBe(false);
+		} finally {
+			fs.rmSync(base, { recursive: true, force: true });
+		}
 	});
 
 	it("row 16 a linked worktree registers its nested config owner", async () => {

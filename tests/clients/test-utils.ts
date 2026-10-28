@@ -409,8 +409,9 @@ export interface PathIdentityFixture {
  * of the root crosses the analysis-root class, and an alias root spells every
  * in-root file differently from its identity. `baseDir` should be a
  * `setupTestEnvironment` root so the shared hygiene owner removes it. The
- * other-worktree and unrelated-repository members of the #4689 family join
- * with the slices that consume them.
+ * other-worktree and unrelated-repository members are opt-in plants
+ * ({@link plantOtherWorktree}, {@link plantUnrelatedRepo}), kept out of this
+ * function for the reason {@link plantPackageLink} gives.
  */
 export function createPathIdentityFixture(
 	baseDir: string,
@@ -516,6 +517,134 @@ export function plantPackageLink(repo: string): PackageLinkFixture {
 			"file",
 		);
 		fs.symlinkSync(path.join("..", "pkg-b", "lib"), fixture.dirLink, "dir");
+	} catch (err) {
+		fixture.skipReason = `cannot create symlinks here: ${
+			err instanceof Error ? err.message : String(err)
+		}`;
+	}
+	return fixture;
+}
+
+/**
+ * A checkout with one linked worktree, written as git writes it: `<repo>/.git`
+ * is a directory (the shared commondir), `<worktree>/.git` is a file holding
+ * `gitdir: <repo>/.git/worktrees/<name>`, that gitdir's `commondir` points
+ * back at the shared `.git`, and each gitdir holds a `HEAD`.
+ * `resolveGitCheckout`/`resolveLinkedWorktreeOwner` read exactly these files,
+ * so no `git` child is needed to classify the file. The layout is
+ * `<root>/repo` and `<root>/repo-wt`.
+ */
+export function writeLinkedWorktree(root: string): {
+	repo: string;
+	worktree: string;
+} {
+	const repo = path.join(root, "repo");
+	const worktree = path.join(root, "repo-wt");
+	const gitDir = path.join(repo, ".git");
+	const linkedGitDir = path.join(gitDir, "worktrees", "repo-wt");
+	fs.mkdirSync(linkedGitDir, { recursive: true });
+	fs.mkdirSync(worktree, { recursive: true });
+	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
+	fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${linkedGitDir}\n`);
+	fs.writeFileSync(path.join(linkedGitDir, "commondir"), "../..\n");
+	// git writes a HEAD in both gitdirs, and a `.git` directory without one is
+	// not a repository to `resolveGitCheckout` (#4508).
+	fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+	fs.writeFileSync(path.join(linkedGitDir, "HEAD"), "ref: refs/heads/wt\n");
+	return { repo, worktree };
+}
+
+/** The other-worktree member {@link plantOtherWorktree} adds to a fixture. */
+export interface OtherWorktreeFixture {
+	/** `repo-wt`, a linked worktree of the fixture's `repo` checkout. */
+	worktree: string;
+	/** `repo-wt/src/wt.ts`, a regular file in that worktree. */
+	worktreeFile: string;
+	/** `repo/src/wt-link.ts` -> `../../repo-wt/src/wt.ts`: spelled in the session root, owned by the other worktree. */
+	worktreeLink: string;
+	/** Set when this host cannot create symlinks; the cell must skip visibly. */
+	skipReason?: string;
+}
+
+/**
+ * The #4689 item 10 other-worktree member: a file link from the session's
+ * checkout into a LINKED WORKTREE of it. Its spelling sits under the session
+ * root, its identity under the worktree root, so a class decided from the
+ * spelling reads `session` where the identity reads `linked-worktree`
+ * (shape 1, divergent path keys, across the analysis-root class). `baseDir`
+ * is the one {@link createPathIdentityFixture} was given: `repo` is its
+ * checkout. Opt-in because it turns `repo` into a git checkout, which the
+ * cells that count the repo's files do not expect.
+ */
+export function plantOtherWorktree(baseDir: string): OtherWorktreeFixture {
+	const { repo, worktree } = writeLinkedWorktree(baseDir);
+	const worktreeFile = path.join(worktree, "src", "wt.ts");
+	fs.mkdirSync(path.dirname(worktreeFile), { recursive: true });
+	fs.writeFileSync(worktreeFile, "export const wt = 1;\n");
+	const fixture: OtherWorktreeFixture = {
+		worktree,
+		worktreeFile,
+		worktreeLink: path.join(repo, "src", "wt-link.ts"),
+	};
+	try {
+		fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+		fs.symlinkSync(
+			path.join("..", "..", "repo-wt", "src", "wt.ts"),
+			fixture.worktreeLink,
+			"file",
+		);
+	} catch (err) {
+		fixture.skipReason = `cannot create symlinks here: ${
+			err instanceof Error ? err.message : String(err)
+		}`;
+	}
+	return fixture;
+}
+
+/** The unrelated-repository member {@link plantUnrelatedRepo} adds to a fixture. */
+export interface UnrelatedRepoFixture {
+	/** `unrelated`, a git checkout sharing no history or worktree with `repo`. */
+	unrelatedRepo: string;
+	/** `unrelated/src/other.ts`, a regular file in that repository. */
+	unrelatedFile: string;
+	/** `repo/src/other-link.ts` -> `../../unrelated/src/other.ts`: spelled in the session root, owned by another project. */
+	unrelatedLink: string;
+	/** Set when this host cannot create symlinks; the cell must skip visibly. */
+	skipReason?: string;
+}
+
+/**
+ * The #4689 item 10 unrelated-repository member: a file link from the
+ * session's checkout into a DIFFERENT repository. Its identity is a foreign
+ * project, so a class decided from the spelling would treat the foreign file
+ * as the session's own (shape 1, across the analysis-root class). Whether the
+ * foreign project reads `adopted` or `none` is the host's temp-root rule
+ * (#4560): give `baseDir` a name without the `pi-lens-` prefix for `adopted`.
+ */
+export function plantUnrelatedRepo(baseDir: string): UnrelatedRepoFixture {
+	const unrelatedRepo = path.join(baseDir, "unrelated");
+	const unrelatedFile = path.join(unrelatedRepo, "src", "other.ts");
+	fs.mkdirSync(path.dirname(unrelatedFile), { recursive: true });
+	fs.mkdirSync(path.join(unrelatedRepo, ".git"), { recursive: true });
+	fs.writeFileSync(
+		path.join(unrelatedRepo, ".git", "HEAD"),
+		"ref: refs/heads/main\n",
+	);
+	fs.writeFileSync(path.join(unrelatedRepo, "package.json"), "{}\n");
+	fs.writeFileSync(unrelatedFile, "export const other = 1;\n");
+	const repo = path.join(baseDir, "repo");
+	const fixture: UnrelatedRepoFixture = {
+		unrelatedRepo,
+		unrelatedFile,
+		unrelatedLink: path.join(repo, "src", "other-link.ts"),
+	};
+	try {
+		fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+		fs.symlinkSync(
+			path.join("..", "..", "unrelated", "src", "other.ts"),
+			fixture.unrelatedLink,
+			"file",
+		);
 	} catch (err) {
 		fixture.skipReason = `cannot create symlinks here: ${
 			err instanceof Error ? err.message : String(err)
