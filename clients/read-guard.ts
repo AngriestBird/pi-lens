@@ -2355,6 +2355,16 @@ export class ReadGuard {
 		return result;
 	}
 
+	/**
+	 * #4942 review F8: drop this guard's own {@link FileTime} bucket, which
+	 * lives in a process-global map keyed by session id and outlives the
+	 * guard object. Called when the owning session is forgotten. Unlike
+	 * {@link retainBranch} it leaves the shared branch epoch alone.
+	 */
+	releaseFileTime(): void {
+		this.fileTime.clear();
+	}
+
 	/** The epoch a deferred writer captures before it awaits (#3521). */
 	get currentBranchEpoch(): number {
 		return this.scope.branchEpoch();

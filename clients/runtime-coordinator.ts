@@ -2716,6 +2716,7 @@ export class RuntimeCoordinator {
 		const turnSession = this.turnSession(sessionId);
 		if (turnSession === this._telemetrySessionId) return;
 		this._foreignTurnKeys.delete(turnSession);
+		this._foreignReadGuards.get(turnSession)?.releaseFileTime();
 		this._foreignReadGuards.delete(turnSession);
 		this._actionableWarningsThisTurn.clear(turnSession);
 		this._codeQualityWarningsThisTurn.clear(turnSession);
