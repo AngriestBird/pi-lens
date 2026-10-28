@@ -145,9 +145,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :347, :360, :1169, :1340, :2061, :2272
 	"clients/advisory-provenance.ts": {
 		silent: 4,
-		identities: "4be1802a08b42400",
+		identities: "65dea09e16f181d6",
 		reason: PRE_RULE,
-	}, // :49, :70, :186, :384
+	}, // :54, :75, :197, :395
 	"clients/agent-nudge.ts": {
 		silent: 3,
 		identities: "3009ae881ca29582",
