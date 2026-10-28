@@ -453,7 +453,7 @@ Do not pair `bumpFileSeq` and change-log writes at a new call site. The mutation
 bridge and opaque-write recovery feed this seam for non-native producers. A
 write is stamped with its turn's session (`deps.sessionId`, else the
 coordinator's), in the change log, the pipeline's log rows and the collect-later
-answer it defers (#4943); `telemetrySessionId` is for coordinator-owned records.
+answer it defers; `telemetrySessionId` is for coordinator-owned records.
 
 Tier-4 mutation attribution is only for third-party tool names. Names in
 `clients/tool-config.ts`'s `PI_LENS_TOOL_NAMES` projection are never learned or
