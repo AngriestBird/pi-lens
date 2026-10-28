@@ -809,7 +809,7 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 		"export function run(): void {\n\tdebugger;\n}\nexport const a = 1;\n";
 	const TS_EDITED = TS_SRC.replace("a = 1", "a = 2");
 	const TS_FIXED = "export function run(): void {}\nexport const a = 1;\n";
-	const SCOPED = { lsp: { enabled: false }, astGrep: { enabled: false } };
+	const SCOPED = { lsp: { enabled: false } };
 
 	// Recurrence: since #4482 the ast-grep runner drops a blocker on a line the
 	// edit did not change, so an edit elsewhere emptied the observation and the
@@ -1066,7 +1066,7 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
  * run's range.
  */
 describe("#4484 witness, round 3: position, verdict and owed lines", () => {
-	const SCOPED = { lsp: { enabled: false }, astGrep: { enabled: false } };
+	const SCOPED = { lsp: { enabled: false } };
 	const AG_PRE = [
 		'export const CLIENT_VERSION = "1.0.50";',
 		"export const plain = CLIENT_VERSION;",
@@ -1242,7 +1242,7 @@ describe("#4484 witness, round 3: position, verdict and owed lines", () => {
 });
 
 describe("#4484 witness, round 4: no alignment fails closed", () => {
-	const SCOPED = { lsp: { enabled: false }, astGrep: { enabled: false } };
+	const SCOPED = { lsp: { enabled: false } };
 	const AG_PRE = [
 		'export const CLIENT_VERSION = "1.0.50";',
 		"export const plain = CLIENT_VERSION;",
@@ -1355,7 +1355,7 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 });
 
 describe("#4484 witness, round 5: a fallback holds only what its evidence names", () => {
-	const SCOPED = { lsp: { enabled: false }, astGrep: { enabled: false } };
+	const SCOPED = { lsp: { enabled: false } };
 	const AG_PRE = [
 		'export const CLIENT_VERSION = "1.0.50";',
 		"export const plain = CLIENT_VERSION;",
@@ -1757,7 +1757,7 @@ describe("#4484 witness, round 8: a covered skip counts only when its lane answe
 				"p39",
 				"scripts/p39.sh",
 				SH_FIXED,
-				{ astGrep: { enabled: false } },
+				{},
 				{ "no-lsp": true },
 			);
 			expect(await s.write(SH.replace("echo one", "echo zero"))).toContain(
@@ -1792,7 +1792,7 @@ describe("#4484 witness, round 8: a covered skip counts only when its lane answe
 });
 
 describe("#4509 witness: a recorded blocker is judged by a run of its own runner", () => {
-	const SCOPED = { lsp: { enabled: false }, astGrep: { enabled: false } };
+	const SCOPED = { lsp: { enabled: false } };
 	const AG_PRE = [
 		'export const CLIENT_VERSION = "1.0.50";',
 		"export const plain = CLIENT_VERSION;",

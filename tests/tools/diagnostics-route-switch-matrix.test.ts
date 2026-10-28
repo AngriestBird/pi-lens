@@ -135,6 +135,8 @@ interface Column {
 	id: ColumnId;
 	/** `~/.pi-lens/config.json`, through PI_LENS_CONFIG_PATH. */
 	globalConfig: Record<string, unknown>;
+	/** A CLI flag the factory registers; set after `extension(...)`, as pi applies it. */
+	flag: boolean;
 	/**
 	 * The language server: a working fake, off in lsp.json, or a missing
 	 * binary. `disabledFallback` is a TypeScript file whose primary is off in
@@ -153,14 +155,17 @@ const column = (
 	id: ColumnId,
 	primary: Column["primary"],
 	aux: boolean,
-	switches: Partial<Pick<Column, "globalConfig">> = {},
+	switches: Partial<Pick<Column, "globalConfig" | "flag">> = {},
 ): Column => ({
 	id,
 	globalConfig: switches.globalConfig ?? {},
+	flag: switches.flag ?? false,
 	primary,
 	aux,
-	opengrepOff: !aux || switches.globalConfig !== undefined,
-	opengrepSwitchedOff: switches.globalConfig !== undefined,
+	opengrepOff:
+		!aux || switches.globalConfig !== undefined || switches.flag === true,
+	opengrepSwitchedOff:
+		switches.globalConfig !== undefined || switches.flag === true,
 });
 
 /**
@@ -177,9 +182,7 @@ const COLUMNS: readonly Column[] = [
 	column("present, no aux", "fake", false),
 	column("disabled, no aux", "disabled", false),
 	column("missing, no aux", "missing", false),
-	column("--no-opengrep", "fake", true, {
-		globalConfig: { opengrep: { enabled: false } },
-	}),
+	column("--no-opengrep", "fake", true, { flag: true }),
 	column("opengrep.enabled=false", "fake", true, {
 		globalConfig: { opengrep: { enabled: false } },
 	}),
@@ -686,6 +689,9 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 			await import("../../clients/actionable-warnings.js");
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
+		// The CLI spelling: pi applies the value after the factory, and only
+		// because the factory registered `no-opengrep` (review F2).
+		if (column.flag) pi.setFlag("no-opengrep", true);
 		// The host's own trust decision, which session_start latches: the
 		// command overrides are project config (#4248).
 		const ctx = makeCtx({
