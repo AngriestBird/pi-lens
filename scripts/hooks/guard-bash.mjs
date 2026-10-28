@@ -298,24 +298,6 @@ export const RULE_MESSAGES = {
 const WORD_BREAK = /[\s;&|<>]/;
 
 /**
- * Reserved words after which the next word is still at a command position:
- * they start or continue a command list, or negate or time the pipeline that
- * follows (#4060). `time` also takes `-p` and `--` before that word.
- */
-const LIST_OPENERS = new Set([
-	"if",
-	"then",
-	"else",
-	"elif",
-	"while",
-	"until",
-	"do",
-	"{",
-	"!",
-	"time",
-]);
-
-/**
  * Reserved words whose grammar {@link lexRegions} does not model (`for ((…)) do
  * case`, `coproc NAME case` and `function f case` all open a clause at a word
  * that is not at a command position). A `case` before the next separator fails
@@ -543,7 +525,7 @@ function consumeHeredocBody(text, start, heredoc, out) {
  * because a `case` clause's pattern `)` is not the body's closing paren and
  * only a `case` at a command position opens a clause. The positions are
  * admitted, not guessed: the body start, a separator, `(`, a `case` pattern's
- * `)`, a reserved word that starts a list ({@link LIST_OPENERS}). A word read
+ * `)`, a reserved word that starts a list ({@link COMMAND_KEYWORDS}). A word read
  * at a command position that is not one of those is the command name, and
  * everything after it is an argument. A `case` word where the walk does not
  * know (the headers in {@link UNMODELLED_HEADS}, `((`, `$((`, `case(`) is left
@@ -582,7 +564,7 @@ function lexRegions(text, start, closer, out) {
 	/**
 	 * Where the next word sits in a `$( … )` body (#4060). `start`: a command
 	 * position, where a reserved word is one (`case`, `esac`, the openers in
-	 * {@link LIST_OPENERS}). `args`: a command name was read, so every later
+	 * {@link COMMAND_KEYWORDS}). `args`: a command name was read, so every later
 	 * word is an argument and a keyword-shaped one is plain text (`: do`,
 	 * `echo case`). `cond`: inside `[[ … ]]`, where `case` is a plain word and
 	 * a `(` opens no command. Any word that is not a recognised opener ends
@@ -663,12 +645,7 @@ function lexRegions(text, start, closer, out) {
 		if (closer === ")") {
 			const open = cases.length - 1;
 			const frame = cases[open];
-			if (
-				ch === ";" ||
-				ch === "|" ||
-				ch === "\n" ||
-				(ch === "&" && isLiveSeparator(text, i))
-			) {
+			if (ch === ";" || ch === "|" || ch === "\n" || ch === "&") {
 				if (holdDepth === null || parenDepth <= holdDepth) {
 					holdDepth = null;
 					if (mode !== "cond") startCommand();
@@ -695,8 +672,10 @@ function lexRegions(text, start, closer, out) {
 				} else if (mode === "cond") {
 					if (word === "]]") mode = "args";
 				} else if (mode === "start") {
-					if (
-						LIST_OPENERS.has(word) ||
+					if (UNMODELLED_HEADS.has(word)) holdDepth = parenDepth;
+					else if (
+						COMMAND_KEYWORDS.has(word) ||
+						word === "time" ||
 						((word === "-p" || word === "--") &&
 							(prevOpener === "time" || prevOpener === "-p"))
 					)
@@ -712,7 +691,6 @@ function lexRegions(text, start, closer, out) {
 						cases.pop();
 						mode = "args";
 					} else if (word === "[[") mode = "cond";
-					else if (UNMODELLED_HEADS.has(word)) holdDepth = parenDepth;
 					else mode = "args";
 				}
 			}
@@ -2969,7 +2947,9 @@ const RUNNER_PREFIX_WORDS = new Set(["command", "exec", "env", "sudo", "time"]);
  * Reserved words and operators after which bash runs the NEXT word as a
  * command (#3787, each probed in bash 5.3: the side effect happened). Not
  * `case`/`esac`/`fi`/`done`/`in`/`select`: they run nothing at that word, and
- * a `case` arm is split off by its `)`.
+ * a `case` arm is split off by its `)`. {@link lexRegions} reads the same set
+ * (plus `time`, minus `coproc`) for the words after which a `case` still sits
+ * at a command position (#4060).
  */
 const COMMAND_KEYWORDS = new Set([
 	"{",
