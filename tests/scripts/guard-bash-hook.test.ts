@@ -3097,7 +3097,7 @@ describe("scripts/hooks/guard-bash.mjs -- case patterns and ANSI-C quotes (#4060
 // one `TMP_ROOT` literal re-pointed at a fixture root that is a symlink, which
 // is the macOS shape on any host, and imported in process like `findDeny`'s
 // other callers here (a spawned copy would be a new real-process-spawn hit).
-describe("scripts/hooks/guard-bash.mjs -- tmpCheckout where the tmp root is a symlink (#4060 r2)", () => {
+describe("scripts/hooks/guard-bash.mjs -- tmpCheckout and tmpWrite where the tmp root is a symlink (#4060 r2, r3)", () => {
 	let root: string;
 	let mod: typeof import("../../scripts/hooks/guard-bash.mjs");
 
@@ -3141,6 +3141,36 @@ describe("scripts/hooks/guard-bash.mjs -- tmpCheckout where the tmp root is a sy
 		["a missing mktemp directory", "mktemp -d @R@/tmp/gone/x.XXXXXX"],
 	])("denies %s below the symlinked root", (_name, template) => {
 		expect(verdict(template.replaceAll("@R@", root))).toBe("tmpCheckout");
+	});
+
+	// #4060 round 3 (PR #4935 verify F7): `tmpWrite` asked the same root
+	// question with the literal spelling only, so a redirect, `mkdir`, `touch`
+	// or `cp` target below a symlinked /tmp lost its master denial (master kept
+	// the lexical `/tmp/new` for a missing leaf; `physicalPath` now returns
+	// `/private/tmp/new`).
+	it.each([
+		["a redirect to a missing leaf", "echo x > @R@/tmp/new.txt"],
+		["an append two levels down", "echo x >> @R@/tmp/a/b.txt"],
+		["a mkdir", "mkdir @R@/tmp/new"],
+		["a touch", "touch @R@/tmp/new"],
+		["a cp target", "cp a @R@/tmp/new.txt"],
+	])("denies %s below the symlinked root as tmpWrite", (_name, template) => {
+		expect(verdict(template.replaceAll("@R@", root))).toBe("tmpWrite");
+	});
+
+	// The harness's own `/tmp/claude-<uid>` stays exempt by either spelling.
+	it.each([
+		[
+			"a redirect into the harness directory",
+			"echo x > @R@/tmp/claude-@U@/new",
+		],
+		["a mkdir in the harness directory", "mkdir @R@/tmp/claude-@U@/sub"],
+		["a redirect outside the symlinked root", "echo x > @R@/elsewhere/new"],
+	])("allows %s", (_name, template) => {
+		const uid = String(process.getuid?.() ?? 0);
+		expect(
+			verdict(template.replaceAll("@R@", root).replaceAll("@U@", uid)),
+		).toBeNull();
 	});
 
 	it.each([
@@ -3249,6 +3279,39 @@ describe("scripts/hooks/guard-bash.mjs -- case clauses open only at a command po
 			expect(hookVerdict(command).stderr).toBe(`${RULE_MESSAGES.stash}\n`);
 		},
 	);
+
+	// #4060 round 3 (PR #4935 verify F6): a `#` comment between the clauses is
+	// skipped, never read as a pattern word. Round 2's word branch ran before
+	// the comment branch, so `esac` after a comment arrived at a `pattern`
+	// frame and the `)` after it closed a pattern instead of the substitution:
+	// `stash` fell inside the substitution and the command was ALLOWED while
+	// bash 5.3.9 runs `git stash` (round 1 and master denied the first two).
+	it.each([
+		"git $(case x in\n# note\nesac) stash",
+		"git $(case x in x) : ;;\n# note\nesac) stash",
+		"git $(case x in x) : ;; # note\n esac) stash",
+		"git $(case x in # note\nesac) stash",
+		"git $(case x in\n# note\nx) : ;; esac) stash",
+		"git $(case x in x) : ;;\n# a\n# b\nesac) stash",
+	])("a comment inside a case body is skipped: %s", (command) => {
+		expect(hookVerdict(command).stderr).toBe(`${RULE_MESSAGES.stash}\n`);
+	});
+
+	// `#` that does not start a comment keeps its old reading: inside a word
+	// (`a#b`) and as `$#`.
+	it.each([
+		"git $(: a#b case x in x) stash",
+		"git $(echo $# ; case x in x) : ;; esac) stash",
+		"git $(case x in a#b) : ;; esac) stash",
+	])("a `#` that is not a comment starts no comment: %s", (command) => {
+		expect(hookVerdict(command).stderr).toBe(`${RULE_MESSAGES.stash}\n`);
+	});
+
+	it("allows a commented case clause whose body is harmless", () => {
+		expect(
+			hookVerdict("git $(case x in\n# note\nx) : ;; esac) status").status,
+		).toBe(0);
+	});
 
 	// `case` in a position the lexer does not model fails CLOSED: the hook
 	// cannot tell whether bash opens a clause there, so it cannot tell where the

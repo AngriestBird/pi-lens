@@ -46,7 +46,7 @@
  *     `export` segment's redirect, abbreviated long options (`--target=`),
  *     `${TMPDIR:-/tmp}`, an unset `$TMPDIR` (bash expands it to empty) and
  *     other unresolvable expansions, the `mktemp` FILE form, `ln -s`,
- *     `tar -C /tmp`, `/var/tmp`, `/dev/shm`, and macOS's `/private/tmp`.
+ *     `tar -C /tmp`, `/var/tmp`, and `/dev/shm`.
  *   - a git HOOK BYPASS on `git commit`/`push`/`merge`/`rebase` (#3778, the
  *     #3703 class): `--no-verify`, `-n` (commit only -- on `push` it is
  *     `--dry-run`), `-c core.hooksPath=…`, a `git config core.hooksPath`
@@ -654,6 +654,7 @@ function lexRegions(text, start, closer, out) {
 				}
 			} else if (
 				atWordStart &&
+				ch !== "#" &&
 				!/[\s;&|()<>]/.test(ch) &&
 				!(ch === "\\" && text[i + 1] === "\n")
 			) {
@@ -1377,11 +1378,12 @@ function isUnderTmpRoot(absoluteDir, root = TMP_ROOT) {
 }
 
 /**
- * {@link isUnderTmpRoot} for the `tmpCheckout` destinations, by either
- * spelling of the root. {@link physicalPath} puts a path where the kernel does,
+ * {@link isUnderTmpRoot} for the `tmpCheckout` destinations and the `tmpWrite`
+ * targets, by either spelling of the root. {@link physicalPath} puts a path where the kernel does,
  * so where `/tmp` is a symlink (macOS: `/tmp` -> `private/tmp`) a missing leaf
  * `/tmp/new` resolves to `/private/tmp/new`, which the literal root misses;
- * master kept the lexical `/tmp/new` there and denied it (#4060 r2, F3).
+ * master kept the lexical `/tmp/new` there and denied it (#4060 r2 F3,
+ * r3 F7). This also reads macOS's `/private/tmp/x` as `/tmp`.
  *
  * @param {string} absoluteDir
  * @returns {boolean}
@@ -2478,8 +2480,12 @@ function isTmpWriteTarget(word, cwd, env) {
 	);
 	const { path } = resolveShellPath(word, cwd, { ...unsetIsEmpty, ...env });
 	return (
-		isUnderTmpRoot(path) &&
-		!(HARNESS_TMP_DIR !== undefined && isUnderTmpRoot(path, HARNESS_TMP_DIR))
+		isUnderTmpCheckoutRoot(path) &&
+		!(
+			HARNESS_TMP_DIR !== undefined &&
+			(isUnderTmpRoot(path, HARNESS_TMP_DIR) ||
+				isUnderTmpRoot(path, physicalPath(HARNESS_TMP_DIR, HARNESS_TMP_DIR)))
+		)
 	);
 }
 
