@@ -7,7 +7,12 @@ import {
 } from "./cache-manager.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
-import { isOutsideProjectRoot, toProjectRelativePath } from "./path-utils.js";
+import {
+	isOutsideProjectRoot,
+	pathsEqual,
+	toProjectRelativePath,
+} from "./path-utils.js";
+import { resolveGitCheckout } from "./review-graph/git-identity.js";
 import { decodeShellWords, type DecodedShellWord } from "./bash-file-access.js";
 import {
 	incrementDegradationCount,
@@ -1005,6 +1010,93 @@ export function isGitCommitOrPushAttempt(
 	return detectGuardedGitVerb(toolName, input, COMMIT_PUSH_MATCHER);
 }
 
+/**
+ * The working trees one commit/push command writes to (#4941): what the gate
+ * judges, instead of every blocker the process holds. `contains` answers
+ * whether a path (a blocker's file, or the directory a latch is about) lies
+ * in one of them. A tree is a git checkout, found by the one seam the review
+ * graph and the analysis root use (`resolveGitCheckout`); a linked worktree is
+ * a tree of its own.
+ */
+export interface CommitScope {
+	contains(target: string): boolean;
+}
+
+/**
+ * Commands that cannot move a later `git`'s directory or environment: the
+ * only words besides `git` itself a scoped command may contain. `cd`,
+ * `pushd`, `export`, an assignment, a function, a wrapper or anything else
+ * not listed leaves the command unscoped, so a form nobody planned for is
+ * judged by every blocker (AGENTS.md: gates fail closed).
+ */
+const SCOPE_NEUTRAL_COMMANDS = new Set([
+	"echo",
+	"printf",
+	"tail",
+	"head",
+	"cat",
+	"grep",
+	"wc",
+	"true",
+]);
+
+/**
+ * The trees a bash `git commit`/`git push` command targets, or `undefined`
+ * when it is not a form this reads, in which case the gate judges every
+ * blocker. Admitted: segments that are a plain `git` (no assignment,
+ * wrapper or substitution that runs git) or a {@link SCOPE_NEUTRAL_COMMANDS}
+ * word, with at least one commit/push segment whose only global options are
+ * `-C <readable existing directory>` and whose directory is inside a git
+ * checkout.
+ */
+export function resolveCommitScope(
+	toolName: string,
+	input: unknown,
+	cwd: string,
+): CommitScope | undefined {
+	if (toolName !== "bash") return undefined;
+	const command = getShellCommand(input);
+	if (!command) return undefined;
+	const canonical = canonicalizeGuardCommand(command);
+	if (containsGuardedSubstitution(canonical, 0, COMMIT_PUSH_MATCHER)) {
+		return undefined;
+	}
+	const roots: string[] = [];
+	for (const segment of decodeShellWords(canonical)) {
+		const words = segment.words;
+		if (words.length === 0) continue;
+		if (!isGitExecutable(words[0].text)) {
+			if (!SCOPE_NEUTRAL_COMMANDS.has(words[0].text)) return undefined;
+			continue;
+		}
+		const tokens = words.map((word) => word.text);
+		if (!matchGitVerbAtCommandPosition(tokens, COMMIT_PUSH_MATCHER)) continue;
+		const verbAt = gitVerbIndex(tokens);
+		if (verbAt === undefined) return undefined;
+		let directory = cwd;
+		for (let i = 1; i < verbAt; i += 2) {
+			const value = words[i + 1];
+			if (tokens[i] !== "-C" || value === undefined || value.hidden) {
+				return undefined;
+			}
+			directory = path.resolve(directory, value.text);
+		}
+		if (!nodeFs.statSync(directory, { throwIfNoEntry: false })?.isDirectory()) {
+			return undefined;
+		}
+		const checkout = resolveGitCheckout(directory);
+		if (!checkout) return undefined;
+		roots.push(checkout.root);
+	}
+	if (roots.length === 0) return undefined;
+	return {
+		contains: (target) => {
+			const root = resolveGitCheckout(target)?.root;
+			return root !== undefined && roots.some((tree) => pathsEqual(tree, root));
+		},
+	};
+}
+
 function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
 	if (!value || typeof value !== "object") return false;
 	const record = value as Partial<TurnEndFindingsCache>;
@@ -1601,8 +1693,9 @@ type RecordLatchReason =
 function markCacheUnknown(
 	runtime: RuntimeCoordinator,
 	reason: RecordLatchReason,
+	cwd: string,
 ): void {
-	runtime.markGitGuardCacheUnknown(reason);
+	runtime.markGitGuardCacheUnknown(reason, cwd);
 }
 
 /**
@@ -1671,7 +1764,7 @@ export function writeGitGuardRecord(
 		runtime.clearGitGuardCacheUnknown();
 		return true;
 	} catch {
-		markCacheUnknown(runtime, "cache_write_failed");
+		markCacheUnknown(runtime, "cache_write_failed", cwd);
 		return false;
 	}
 }
@@ -2042,13 +2135,13 @@ export function syncGitGuardRecord(
 			});
 			return;
 		}
-		markCacheUnknown(runtime, "session_mismatch");
+		markCacheUnknown(runtime, "session_mismatch", cwd);
 		return;
 	}
 	if (!existing && entries.length === 0) {
 		const inspection = cacheManager.inspectCache("turn-end-findings", cwd);
 		if (inspection !== "missing") {
-			markCacheUnknown(runtime, `cache_${inspection}`);
+			markCacheUnknown(runtime, `cache_${inspection}`, cwd);
 			return;
 		}
 	}
@@ -2060,7 +2153,7 @@ export function syncGitGuardRecord(
 		resolveGuardPath(entry.filePath, cwd),
 	);
 	if (existing?.blockerContent && !blockerSections) {
-		markCacheUnknown(runtime, "blocking_provenance_untrusted");
+		markCacheUnknown(runtime, "blocking_provenance_untrusted", cwd);
 		return;
 	}
 	// This session's own new evidence replaces its own partition and leads the
@@ -2301,9 +2394,11 @@ export function clearGitGuardTestFailure(
  */
 function firstExpiredSuppressionVerdict(
 	runtime: RuntimeCoordinator,
+	inScope: ((filePath: string) => boolean) | undefined,
 ): { filePath: string; tier: string } | undefined {
 	for (const entry of runtime.getInlineBlockersSnapshot?.() ?? []) {
 		if (!entry.policySuppressed) continue;
+		if (inScope && !inScope(entry.filePath)) continue;
 		if (entry.recordedHash === undefined) {
 			return { filePath: entry.filePath, tier: "no_baseline" };
 		}
@@ -2324,8 +2419,20 @@ export function evaluateGitGuard(
 	 * omitted, the coordinator's. A record only it owns is its own to judge.
 	 */
 	sessionId?: string,
+	/**
+	 * #4941: the command being gated. A commit/push in one repository is
+	 * judged by that tree's blockers, whoever wrote them; omitted, or a form
+	 * {@link resolveCommitScope} does not read, every blocker counts.
+	 */
+	invocation?: { toolName: string; input: unknown },
 ): GuardDecision {
 	const me = sessionId ?? runtime.telemetrySessionId;
+	const scope = invocation
+		? resolveCommitScope(invocation.toolName, invocation.input, cwd)
+		: undefined;
+	const inScope = scope
+		? (target: string) => scope.contains(resolveGuardPath(target, cwd))
+		: undefined;
 	// #2535 F3: a known tool with no mapping on this host resolves to
 	// undefined — rephrase rather than naming a dead tool. `lens_diagnostics`
 	// is pinned available on both hosts, so the fallback is defensive only.
@@ -2356,13 +2463,12 @@ export function evaluateGitGuard(
 			reason: failure instanceof Error ? failure.message : String(failure),
 		});
 	}
-	if (runtime.gitGuardHasBlockers) {
+	const status = runtime.gitGuardStatus(inScope);
+	if (status.hasBlockers) {
 		logDecision(cwd, "blocked", "runtime_blockers", {
 			projectSeq: runtime.projectSeq,
 		});
-		const detail = runtime.gitGuardSummary
-			? `\n${runtime.gitGuardSummary}`
-			: "";
+		const detail = status.summary ? `\n${status.summary}` : "";
 		return {
 			block: true,
 			reason: `🔴 COMMIT BLOCKED (--lens-guard): unresolved blockers must be fixed before commit/push.${detail}\n${inspectLine}`,
@@ -2372,7 +2478,7 @@ export function evaluateGitGuard(
 	// pass, and a pass can only speak for the bytes it read. A verdict whose file
 	// has moved since is no answer at all, so it must not be the reason this
 	// commit is allowed.
-	const expired = firstExpiredSuppressionVerdict(runtime);
+	const expired = firstExpiredSuppressionVerdict(runtime, inScope);
 	if (expired) {
 		return unknown(cwd, "inline_policy_stale", {
 			file: expired.filePath,
@@ -2386,8 +2492,14 @@ export function evaluateGitGuard(
 		inspection === "missing" ? undefined : storedRecord(cacheManager, cwd);
 	const recordRemedy = () =>
 		unconfirmedRecordRemedy(stored, inspection, me, cwd) ?? RECHECK_REMEDY;
+	// #4941: a reason latched about another tree's stored record is not this
+	// commit's; one that names no project (or any form scoping does not read)
+	// still refuses.
 	const latched = runtime.gitGuardCacheUnknownReason;
-	if (latched) return unknown(cwd, latched, {}, recordRemedy());
+	const latchedCwd = runtime.gitGuardCacheUnknownCwd;
+	if (latched && (!inScope || !latchedCwd || inScope(latchedCwd))) {
+		return unknown(cwd, latched, {}, recordRemedy());
+	}
 	// #4733 r2 F12: a dispatch that never answered refuses until that file's own
 	// dispatch returns, whatever happened to the record since. #4733 r3 F16: a
 	// latch whose file is gone has no dispatch left to answer it, so it is
@@ -2395,8 +2507,9 @@ export function evaluateGitGuard(
 	// so bytes back at that path are gated again.
 	const unanswered = runtime.gitGuardUnansweredDispatches.find(
 		(entry) =>
+			(!inScope || inScope(entry.filePath)) &&
 			currentFileFingerprint(resolveGuardPath(entry.filePath, cwd)) !==
-			"missing",
+				"missing",
 	);
 	if (unanswered) {
 		const shown = shownLatchFile(unanswered.filePath, cwd);

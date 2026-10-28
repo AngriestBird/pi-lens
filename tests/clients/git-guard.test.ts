@@ -363,14 +363,12 @@ describe("git-guard", () => {
 	});
 
 	it("blocks runtime blockers and preserves their details", () => {
-		const runtime = {
-			gitGuardHasBlockers: true,
-			gitGuardSummary: "blocker in src/app.ts:12",
-		};
+		const runtime = new RuntimeCoordinator();
+		runtime.updateGitGuardStatus(true, "blocker in src/app.ts:12");
 		const env = setupTestEnvironment("pi-lens-git-guard-runtime-");
 		try {
 			const result = evaluateGitGuard(
-				runtime as any,
+				runtime,
 				new CacheManager(false),
 				env.tmpDir,
 			);
