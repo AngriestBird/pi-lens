@@ -1,4 +1,5 @@
 import { execFileSync } from "../support/git-fixture-env.js";
+import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1235,64 +1236,72 @@ describe("review graph: ignore-gated node creation (#694)", () => {
 		_resetUntrackedIgnoredCacheForTests();
 	});
 
-	it("never materializes an untracked-AND-gitignored import target as a file node, but keeps a tracked one matching the same pattern", async () => {
-		const env = setupTestEnvironment("pi-lens-review-graph-ignore-gate-");
-		try {
-			initGitRepo(env.tmpDir);
-			// vendor.js is committed BEFORE the `*.js` ignore pattern exists — the
-			// real-world shape of "vendored source that predates/survives a later
-			// broad ignore rule." Git's own semantic: once tracked, a file is never
-			// "ignored" even when a later pattern matches it.
-			const vendorPath = createTempFile(
-				env.tmpDir,
-				"src/vendor.js",
-				"exports.vendor = 1;\n",
-			);
-			execFileSync("git", ["add", "src/vendor.js"], { cwd: env.tmpDir });
-			execFileSync("git", ["commit", "-q", "-m", "vendor"], {
-				cwd: env.tmpDir,
-			});
+	// Six synchronous git spawns plus the build: follow the lane's timeout scale
+	// (3 on the Windows unit leg) instead of the 5 s default (#4910).
+	it(
+		"never materializes an untracked-AND-gitignored import target as a file node, but keeps a tracked one matching the same pattern",
+		async () => {
+			const env = setupTestEnvironment("pi-lens-review-graph-ignore-gate-");
+			try {
+				initGitRepo(env.tmpDir);
+				// vendor.js is committed BEFORE the `*.js` ignore pattern exists — the
+				// real-world shape of "vendored source that predates/survives a later
+				// broad ignore rule." Git's own semantic: once tracked, a file is never
+				// "ignored" even when a later pattern matches it.
+				const vendorPath = createTempFile(
+					env.tmpDir,
+					"src/vendor.js",
+					"exports.vendor = 1;\n",
+				);
+				execFileSync("git", ["add", "src/vendor.js"], { cwd: env.tmpDir });
+				execFileSync("git", ["commit", "-q", "-m", "vendor"], {
+					cwd: env.tmpDir,
+				});
 
-			// Broad `*.js` pattern (mirrors pi-lens's own root .gitignore) — matches
-			// BOTH gen.js (untracked build artifact, no .ts twin) and vendor.js.
-			createTempFile(env.tmpDir, ".gitignore", "*.js\n");
-			const genPath = createTempFile(
-				env.tmpDir,
-				"src/gen.js",
-				"exports.gen = 1;\n",
-			);
-			const aPath = createTempFile(
-				env.tmpDir,
-				"src/a.ts",
-				"import './gen.js';\nimport './vendor.js';\n",
-			);
-			// Commit .gitignore and a.ts — deliberately NOT gen.js, so it stays
-			// untracked (and therefore actually ignored by git).
-			execFileSync("git", ["add", ".gitignore", "src/a.ts"], {
-				cwd: env.tmpDir,
-			});
-			execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: env.tmpDir });
+				// Broad `*.js` pattern (mirrors pi-lens's own root .gitignore) — matches
+				// BOTH gen.js (untracked build artifact, no .ts twin) and vendor.js.
+				createTempFile(env.tmpDir, ".gitignore", "*.js\n");
+				const genPath = createTempFile(
+					env.tmpDir,
+					"src/gen.js",
+					"exports.gen = 1;\n",
+				);
+				const aPath = createTempFile(
+					env.tmpDir,
+					"src/a.ts",
+					"import './gen.js';\nimport './vendor.js';\n",
+				);
+				// Commit .gitignore and a.ts — deliberately NOT gen.js, so it stays
+				// untracked (and therefore actually ignored by git).
+				execFileSync("git", ["add", ".gitignore", "src/a.ts"], {
+					cwd: env.tmpDir,
+				});
+				execFileSync("git", ["commit", "-q", "-m", "init"], {
+					cwd: env.tmpDir,
+				});
 
-			const facts = new FactStore();
-			const graph = await buildOrUpdateGraph(env.tmpDir, [aPath], facts);
+				const facts = new FactStore();
+				const graph = await buildOrUpdateGraph(env.tmpDir, [aPath], facts);
 
-			const genId = `file:${normalizeMapKey(genPath)}`;
-			const vendorId = `file:${normalizeMapKey(vendorPath)}`;
-			expect(graph.nodes.has(genId)).toBe(false);
-			expect(graph.nodes.has(vendorId)).toBe(true);
+				const genId = `file:${normalizeMapKey(genPath)}`;
+				const vendorId = `file:${normalizeMapKey(vendorPath)}`;
+				expect(graph.nodes.has(genId)).toBe(false);
+				expect(graph.nodes.has(vendorId)).toBe(true);
 
-			const aId = `file:${normalizeMapKey(aPath)}`;
-			expect(
-				graph.edges.some(
-					(e) => e.from === aId && e.to === vendorId && e.kind === "imports",
-				),
-			).toBe(true);
-			// The filtered-out ignored target must not leave a dangling edge either.
-			expect(graph.edges.some((e) => e.to === genId)).toBe(false);
-		} finally {
-			env.cleanup();
-		}
-	});
+				const aId = `file:${normalizeMapKey(aPath)}`;
+				expect(
+					graph.edges.some(
+						(e) => e.from === aId && e.to === vendorId && e.kind === "imports",
+					),
+				).toBe(true);
+				// The filtered-out ignored target must not leave a dangling edge either.
+				expect(graph.edges.some((e) => e.to === genId)).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		},
+		scaledTestTimeout(30_000),
+	);
 
 	it("degrades to unfiltered (no git binary reachable in the repo) without throwing", async () => {
 		// Not a git repo at all: collectUntrackedIgnoredIds' spawn fails/returns
