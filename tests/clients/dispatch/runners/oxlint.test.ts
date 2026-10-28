@@ -582,6 +582,12 @@ describe("oxlint runner", () => {
 							? "parser_error"
 							: undefined),
 				);
+				// #4130: a faulted run's one diagnostic is the fault, never a blocker.
+				if (outcome.failureKind !== undefined) {
+					expect(
+						outcome.diagnostics.map((d) => [d.runnerFault, d.semantic]),
+					).toEqual([[true, "warning"]]);
+				}
 				const degradationKinds = logLatency.mock.calls
 					.map(
 						([entry]) =>

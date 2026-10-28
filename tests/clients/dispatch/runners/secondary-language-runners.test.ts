@@ -404,7 +404,7 @@ describe("secondary language fallback runners", () => {
 		}
 	});
 
-	it("surfaces a blocking diagnostic when gleam exits non-zero without structured output", async () => {
+	it("surfaces a runner-fault warning, never a blocker, when gleam exits non-zero without structured output (#4130)", async () => {
 		const env = setupTestEnvironment("pi-lens-gleam-runner-");
 		try {
 			const filePath = path.join(env.tmpDir, "src", "app.gleam");
@@ -427,9 +427,61 @@ describe("secondary language fallback runners", () => {
 			);
 
 			expect(result.status).toBe("failed");
-			expect(result.semantic).toBe("blocking");
+			expect(result.failureKind).toBe("unconfirmed_output");
+			expect(result.semantic).toBe("warning");
 			expect(result.diagnostics[0]?.message).toContain("gleam check failed");
+			expect(result.diagnostics[0]).toMatchObject({
+				runnerFault: true,
+				semantic: "warning",
+			});
 		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4130, through the commit gate's absorb path: a settled collect-later
+	// gleam fault never enters the blocker map (#3814). The runtime chain loads
+	// inside the case because the mocked spawn module is not initialized when
+	// static imports run.
+	it("keeps a gleam runner fault out of the blocker map when it settles as a collect-later answer (#4130)", async () => {
+		const env = setupTestEnvironment("pi-lens-gleam-fault-blocker-");
+		const pendingStore =
+			await import("../../../../clients/dispatch/pending-runner-findings.js");
+		try {
+			const filePath = path.join(env.tmpDir, "src", "app.gleam");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "pub fn main() { Nil }\n");
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: "gleam check failed unexpectedly",
+			});
+			const runner = (
+				await import("../../../../clients/dispatch/runners/gleam-check.js")
+			).default;
+			const result = await runner.run(
+				createCtx("gleam", filePath, env.tmpDir) as never,
+			);
+			const { absorbSettledRunnerBlockers } =
+				await import("../../../../clients/deferred-runner-blockers.js");
+			const { RuntimeCoordinator } =
+				await import("../../../../clients/runtime-coordinator.js");
+			const runtime = new RuntimeCoordinator();
+			pendingStore.deferRunnerFindings({
+				filePath,
+				cwd: env.tmpDir,
+				projectRoot: env.tmpDir,
+				runnerId: "gleam-check",
+				markedAtMs: Date.now() + 60_000,
+				promise: Promise.resolve(result),
+			});
+			await pendingStore.settlePendingRunnerFindingsForTests();
+
+			expect(absorbSettledRunnerBlockers(runtime, env.tmpDir).recorded).toBe(0);
+			expect(runtime.getInlineBlockerDiagnostics(filePath) ?? []).toEqual([]);
+		} finally {
+			pendingStore.resetPendingRunnerFindings();
 			env.cleanup();
 		}
 	});
