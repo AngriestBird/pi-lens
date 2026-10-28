@@ -589,6 +589,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real bash decides which generated spelling runs git commit or git push; a stubbed shell decodes no word",
 	},
+	// 2026-10-27 (#4930): the child's own environment and a real git's write to
+	// .git/index are the observations; the lock lives ~40 ms, so the witness
+	// reads the index a stat-dirty `git status` would rewrite.
+	"real-process-spawn:clients/git-optional-locks-4930.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a real git decides whether a stat-dirty index is rewritten and a real child reads its environment; a stub sees neither",
+	},
 	"real-process-spawn:clients/git-tracked-ignore.test.ts": {
 		detector: "real-process-spawn",
 		reason:

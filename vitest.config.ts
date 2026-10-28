@@ -590,6 +590,9 @@ export const wallClockBudgetInclude = [
 	// admission); one spawn per row, about 11 s serial. No wall-clock assertion: the file pins its
 	// exact row count, which bounds the cost.
 	"tests/clients/git-guard-decoded-word.test.ts",
+	// #4930: real git and a real child are the observers of the index write and
+	// the inherited environment (flake-shape admission).
+	"tests/clients/git-optional-locks-4930.test.ts",
 	"tests/clients/git-tracked-ignore.test.ts",
 	// #4493: real git repositories and fake-LSP children driven through the
 	// tool_call/tool_result seams (flake-shape admission); the fake-server

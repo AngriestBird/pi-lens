@@ -107,6 +107,7 @@ describe("Windows resolution honors the CALLER's env, not just ambient process.e
 			configurable: true,
 		});
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 	});
 
 	it("safeSpawnAsync resolves the command from options.env.PATH, not ambient process.env.PATH", async () => {
@@ -190,6 +191,46 @@ describe("Windows resolution honors the CALLER's env, not just ambient process.e
 		expect(spawnArgs.join(" ")).toContain(managedTool);
 		expect(spawnOptions.env?.PATHEXT).toBe(".CMD");
 	});
+
+	// #4930: the win32 branch composes the environment case-insensitively, so the
+	// default must beat an ambient spelling of another case and still lose to a
+	// caller override of any case.
+	const OPTIONAL_LOCKS_BIN = "C:\\__pi_lens_optional_locks__\\bin";
+	it.each([
+		[
+			"an ambient lowercase spelling",
+			{ PATH: OPTIONAL_LOCKS_BIN, PATHEXT: ".EXE" },
+			"0",
+		],
+		[
+			"a caller override in another case",
+			{
+				PATH: OPTIONAL_LOCKS_BIN,
+				PATHEXT: ".EXE",
+				Git_Optional_Locks: "1",
+			},
+			"1",
+		],
+	])(
+		"sync safeSpawn hands git exactly one GIT_OPTIONAL_LOCKS (%s)",
+		(_label, callerEnv, expected) => {
+			markFilesAsPresent(
+				path.win32.join(OPTIONAL_LOCKS_BIN, "widget-tool.exe"),
+			);
+			spawnSyncMock.mockClear();
+			vi.stubEnv("git_optional_locks", "1");
+			safeSpawn("widget-tool", [], { cwd: "C:\\workspace", env: callerEnv });
+			const call = spawnSyncMock.mock.calls.find((candidate) =>
+				String(candidate[0]).endsWith("widget-tool.exe"),
+			);
+			const env = call?.[2].env ?? {};
+			const spellings = Object.keys(env).filter(
+				(key) => key.toLowerCase() === "git_optional_locks",
+			);
+			expect(spellings).toHaveLength(1);
+			expect(env[spellings[0] as string]).toBe(expected);
+		},
+	);
 
 	// #1201: a cwd this module cannot CANONICALIZE is not the same thing as a
 	// bad cwd. `D:work` is drive-relative, and Node never surfaces the `=D:`
