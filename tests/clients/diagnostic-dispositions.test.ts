@@ -1126,8 +1126,15 @@ describe("applyWeakDispositions (#755 — instant cache-only filter)", () => {
  * line-hash collision (32 bits; edits are covered in read-guard.test.ts), and the
  * stored rows (the store property below). Tool and rule are drawn without
  * "|": the parts are joined with it, so tool "|" with message "" and tool ""
- * with message "|" share one id. That is a defect on master, reported in the
- * PR body and not fixed here.
+ * with message "|" share one id. Reachable producers of "|" in a rule, tool or
+ * code: a user or project ast-grep rule `id:`, parsed without validation
+ * (clients/ast-grep-rule-manager.ts:139), read as `rule` at
+ * clients/dispatch/runners/ast-grep-napi.ts:900 and :1337; an LSP server's
+ * `<source>:<code>` rule (clients/dispatch/utils/lsp-diagnostics.ts:57); and
+ * the rule, code and source parts of the `cq:` and `aw:` ids
+ * (clients/code-quality-warnings.ts:118, clients/actionable-warnings.ts:263).
+ * That is a defect on master, reported in the PR body and not fixed here: a
+ * fix re-keys every stored mark (shape 57).
  */
 describe("anchor properties (#4928)", () => {
 	const NON_WS = "abcdeXYZ019_(){};=.,'+-*/<>!&:[]".split("");

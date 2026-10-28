@@ -627,6 +627,9 @@ describe("workspace id under an injected platform (#3255)", () => {
  * Properties: every spelling of a directory gets one id, on every platform
  * and from all three derivations; two directories get two ids, except that
  * win32 and darwin fold case, where they get two only if they differ beyond case.
+ * The second directory is a case variant of the first (optionally one segment
+ * longer) or an unrelated one. Drawn independently, it never folds equal to the
+ * first, so the case-fold arm would never run and the relation would be dead.
  *
  * numRuns 300, seed 492805.
  *
@@ -646,6 +649,32 @@ describe("workspace id property (#4928)", () => {
 		"darwin",
 		"win32",
 	);
+	const swapCase = (ch: string): string =>
+		ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase();
+	// A pair of directories: the second is a case variant of the first (each
+	// segment swapped or kept, optionally one segment longer) or unrelated.
+	const pairArb = segmentsArb.chain((segments) =>
+		fc.tuple(
+			fc.constant(segments),
+			fc.oneof(
+				fc
+					.tuple(
+						fc.array(fc.boolean(), {
+							minLength: segments.length,
+							maxLength: segments.length,
+						}),
+						fc.option(segmentArb, { nil: undefined }),
+					)
+					.map(([flips, extra]) => [
+						...segments.map((segment, i) =>
+							flips[i] ? [...segment].map(swapCase).join("") : segment,
+						),
+						...(extra === undefined ? [] : [extra]),
+					]),
+				segmentsArb,
+			),
+		),
+	);
 
 	it("gives every spelling of a directory one id and two directories two", () => {
 		const idsOf = (cwd: string, platform: NodeJS.Platform): string[] => [
@@ -656,12 +685,11 @@ describe("workspace id property (#4928)", () => {
 		fc.assert(
 			fc.property(
 				platformArb,
-				segmentsArb,
-				segmentsArb,
+				pairArb,
 				segmentArb,
 				fc.nat(),
 				fc.constantFrom("", "/", "//", "/."),
-				(platform, segments, otherSegments, detour, at, tail) => {
+				(platform, [segments, otherSegments], detour, at, tail) => {
 					const plain = `/${segments.join("/")}`;
 					const detoured = segments.slice();
 					detoured.splice(at % (segments.length + 1), 0, detour, "..");
