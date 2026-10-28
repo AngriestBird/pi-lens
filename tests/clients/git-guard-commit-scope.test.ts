@@ -18,6 +18,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { getRecentLoggedPhases } from "../../clients/latency-logger.js";
 import {
 	evaluateGitGuard,
 	resolveCommitScope,
@@ -99,9 +100,20 @@ describe("#4941: the commit gate's blocker state is read per working tree", () =
 			const inA = verdictOf(runtime, repoA, COMMIT);
 			expect(inA.block).toBe(true);
 			expect(inA.reason).toContain("blocker in A");
+			// The decision row says whether the refusal was this tree's own.
+			expect(getRecentLoggedPhases(1)[0]?.metadata).toMatchObject({
+				decision: "blocked",
+				reasonCategory: "runtime_blockers",
+				scoped: true,
+			});
 			expect(verdictOf(runtime, repoB, COMMIT)).toEqual({ block: false });
 			// A form the scope does not read is judged by every blocker.
 			expect(verdictOf(runtime, repoB, undefined).block).toBe(true);
+			expect(getRecentLoggedPhases(1)[0]?.metadata).toMatchObject({
+				decision: "blocked",
+				reasonCategory: "runtime_blockers",
+				scoped: false,
+			});
 		} finally {
 			env.cleanup();
 		}

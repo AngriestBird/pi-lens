@@ -2467,6 +2467,9 @@ export function evaluateGitGuard(
 	if (held.hasBlockers) {
 		logDecision(cwd, "blocked", "runtime_blockers", {
 			projectSeq: runtime.projectSeq,
+			// #4941: whether the refusal is this tree's blockers or, for a command
+			// the scope does not read, every blocker the process holds.
+			scoped: scope !== undefined,
 		});
 		const detail = held.summary ? `\n${held.summary}` : "";
 		return {
