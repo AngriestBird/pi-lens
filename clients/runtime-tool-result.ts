@@ -1461,6 +1461,7 @@ function publishInlineVerdict(args: {
 		runtime.updateGitGuardStatus(
 			inlineVerdictApplied && result.hasBlockers,
 			result.output,
+			filePath,
 		);
 		if (getFlag("lens-guard")) {
 			// #4733 r1 F2: a clean verdict over the whole file, applied, with no
