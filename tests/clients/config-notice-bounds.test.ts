@@ -282,12 +282,25 @@ describe("F2: a suppression notice never reads as an ignored config", () => {
 				message.includes(legacyFile) &&
 				message.includes("further config notices were suppressed"),
 		);
-		// One summary per bounded list the file ends: the legacy moves and, since
-		// #4946 pushed the global-only refusals past their own bound, that list.
-		expect(suppression.length, JSON.stringify(notices)).toBeGreaterThanOrEqual(
-			1,
+		// One summary per bounded list the file ends: the legacy moves close with
+		// theirs right after the last move notice, and the refused global-only
+		// settings (#4946 pushed that list past its own bound) with theirs after
+		// that list. Exactly two, told apart by position.
+		expect(suppression, JSON.stringify(notices)).toHaveLength(2);
+		const lastMove = notices.reduce(
+			(last, message, index) =>
+				message.startsWith("deprecated ") && message.includes(legacyFile)
+					? index
+					: last,
+			-1,
 		);
-		expect(suppression.length, JSON.stringify(notices)).toBeLessThanOrEqual(2);
+		expect(notices.indexOf(suppression[0] as string), "legacy summary").toBe(
+			lastMove + 1,
+		);
+		expect(
+			notices.indexOf(suppression[1] as string),
+			"refusal summary",
+		).toBeGreaterThan(lastMove + 1);
 		for (const summary of suppression) {
 			expect(summary).not.toContain("ignoring invalid");
 			expect(summary).not.toContain("invalid");
