@@ -336,6 +336,25 @@ export function configDisabledAuxiliaryLspServerIds(
 	);
 }
 
+/**
+ * #4956 F2: the opt-in auxiliary ids the operator turned on. The aggregate
+ * `clientScope: "all"` door never starts them (`aggregateServersForFile`), so
+ * an explicit all-server check must name them as not run instead of letting its
+ * "No auxiliary findings." line read as their clean answer. Empty while no
+ * opt-in is enabled: a report for an operator who never asked is unchanged.
+ */
+export function enabledOptInAuxiliaryLspServerIds(
+	getFlag: GetFlag,
+): ReadonlySet<string> {
+	return new Set(
+		AUXILIARY_LSP_PROFILES.flatMap((p) =>
+			!p.enabledByDefault && isEnabledByConfiguration(p, getFlag)
+				? [p.serverId]
+				: [],
+		),
+	);
+}
+
 function isEnabledByConfiguration(
 	profile: AuxiliaryLspProfile,
 	getFlag: GetFlag,

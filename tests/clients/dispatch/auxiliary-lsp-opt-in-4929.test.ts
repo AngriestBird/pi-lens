@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	AUXILIARY_LSP_PROFILES,
 	configDisabledAuxiliaryLspServerIds,
+	enabledOptInAuxiliaryLspServerIds,
 	enabledAuxiliaryLspServerIds,
 	findAuxiliaryProfileForSource,
 	isOptInAuxiliaryServerId,
@@ -128,6 +129,21 @@ describe("the opt-in gate admits exactly `true` from the profile's own flag", ()
 				flag === "lens-fallow" ? "yes" : undefined,
 			),
 		]).toEqual([]);
+	});
+
+	it("names the enabled opt-in profiles only, for the diagnostics report (#4956 F2)", () => {
+		// Recurrence: an enabled opt-in server the all-server door never starts was
+		// claimed as covered; the report names it from this set.
+		expect([...enabledOptInAuxiliaryLspServerIds(() => undefined)]).toEqual([]);
+		expect([
+			...enabledOptInAuxiliaryLspServerIds((flag) =>
+				flag === "lens-fallow" ? true : undefined,
+			),
+		]).toEqual(["fallow"]);
+		// Every flag true: the kill switches are on, and still only the opt-in lists.
+		expect([...enabledOptInAuxiliaryLspServerIds(() => true)]).toEqual([
+			"fallow",
+		]);
 	});
 
 	it("leaves every default-on profile untouched by the new gate", () => {

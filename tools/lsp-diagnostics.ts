@@ -46,6 +46,8 @@ import {
 import {
 	applyAuxiliarySuppressions,
 	configDisabledAuxiliaryLspServerIds,
+	enabledOptInAuxiliaryLspServerIds,
+	isOptInAuxiliaryServerId,
 	retagAuxiliaryDiagnostics,
 } from "../clients/dispatch/auxiliary-lsp.js";
 import {
@@ -161,6 +163,7 @@ type BatchOptions = {
 	// left without it would be the very defect this fixes, one call site over.
 	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void;
 	// #4323: auxiliaries the operator's configuration turns off; never acquired.
+	// #4956: and an enabled opt-in one, which the all-server door never starts.
 	excludeServerIds?: ReadonlySet<string>;
 };
 
@@ -569,8 +572,16 @@ export function createLspDiagnosticsTool(
 					: undefined;
 			const serverScope: "primary" | "all" =
 				typedParams.serverScope === "primary" ? "primary" : "all";
+			// #4956 F2: the servers this check leaves unstarted: an auxiliary the
+			// operator switched off, and an opt-in one they turned on (the all-server
+			// door never starts it), so the report names both as not run.
 			const excludeServerIds = getFlag
-				? configDisabledAuxiliaryLspServerIds((name) => getFlag(name, cwd))
+				? new Set([
+						...configDisabledAuxiliaryLspServerIds((name) =>
+							getFlag(name, cwd),
+						),
+						...enabledOptInAuxiliaryLspServerIds((name) => getFlag(name, cwd)),
+					])
 				: undefined;
 
 			const lspService = getService();
@@ -1294,6 +1305,9 @@ function coveredSourcesForCheck(
 		if (auxiliary && serverScope === "primary") continue;
 		if (unconfirmed.has(server.id)) continue;
 		if (excludeServerIds?.has(server.id)) continue;
+		// #4956 F2: the all-server door never starts an opt-in auxiliary, whether
+		// or not the operator enabled it, so this check never consulted it.
+		if (isOptInAuxiliaryServerId(server.id)) continue;
 		// The dispatch runner tags the primary language server's findings `lsp`;
 		// auxiliaries keep their own tool id.
 		covered.add(auxiliary ? server.id : "lsp");
@@ -2102,16 +2116,27 @@ async function runFileDiagnostics(
 	// #4323 (#4391 F8): an auxiliary the operator turned off never ran, so a bare
 	// "No auxiliary findings." would read like a scanner result. Name it. A
 	// primary-only check never asks an auxiliary, so it keeps the plain line.
-	const switchedOffServerIds =
+	const notRunServerIds =
 		serverScope === "all" && excludeServerIds && excludeServerIds.size > 0
 			? getServersForFileWithConfig(absPath).flatMap((server) =>
 					excludeServerIds.has(server.id) ? [server.id] : [],
 				)
 			: [];
-	const noAuxiliaryLine =
-		switchedOffServerIds.length > 0
-			? `No auxiliary findings. Switched off, not run: ${switchedOffServerIds.join(", ")}.`
-			: "No auxiliary findings.";
+	// #4956 F2: an enabled opt-in server is not "switched off"; the all-server
+	// door simply does not start it (its findings arrive with edits).
+	const switchedOffServerIds = notRunServerIds.filter(
+		(id) => !isOptInAuxiliaryServerId(id),
+	);
+	const optInNotRunServerIds = notRunServerIds.filter(isOptInAuxiliaryServerId);
+	const noAuxiliaryLine = [
+		"No auxiliary findings.",
+		...(switchedOffServerIds.length > 0
+			? [`Switched off, not run: ${switchedOffServerIds.join(", ")}.`]
+			: []),
+		...(optInNotRunServerIds.length > 0
+			? [`Opt-in, not run by this check: ${optInNotRunServerIds.join(", ")}.`]
+			: []),
+	].join(" ");
 
 	let text: string;
 	if (total === 0) {
