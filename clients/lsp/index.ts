@@ -7299,11 +7299,20 @@ export class LSPService {
 			// #4323: an excluded server's last answer is not this read's answer.
 			// Drop its rows from what this caller sees; the shared store keeps
 			// them for callers that did not exclude it.
+			// #4956 r6: and only a candidate's rows. The live path below rewrites the
+			// store from `spawned`, so a row of a server this read does not name (an
+			// opt-in fallow the per-edit door stored, switched off since) is no part
+			// of its answer. A row naming no server stays, as `dropExcludedServers`
+			// documents.
 			const stored = this.lastKnownDiagnostics.get(normalizedPath);
+			const notCandidates = new Set(excludeServerIds);
+			for (const d of stored ?? []) {
+				if (d.serverId && !candidateServerIds.includes(d.serverId))
+					notCandidates.add(d.serverId);
+			}
 			const stale =
 				stored &&
-				dropExcludedServers({ diagnostics: stored }, excludeServerIds)
-					.diagnostics;
+				dropExcludedServers({ diagnostics: stored }, notCandidates).diagnostics;
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
 			// #4322: with nothing acquired, every primary that resolved a root went
 			// unanswered, so an empty answer here is not a clean one.

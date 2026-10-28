@@ -529,6 +529,59 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		expect(unnamed?.unconfirmedServerIds ?? []).toEqual([]);
 	});
 
+	/**
+	 * #4956 r6. Recurrence: `getDiagnostics` answered a read that acquired no
+	 * client with the file's stored rows minus `excludeServerIds` only, so a
+	 * fallow row the named per-edit door stored came back from a read that never
+	 * names fallow (the same read with a live client overwrites the store from
+	 * its own clients and never returns it). Turning fallow off puts nothing in
+	 * `excludeServerIds`, so the stale finding outlived the switch. The fallback
+	 * admits only rows of this read's candidates; a default-on scanner's stale
+	 * row (the positive control) still comes back.
+	 */
+	it("a read that acquires no client returns the stored rows of its candidates only", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("typos", "auxiliary"),
+			makeServer("fallow", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (args: { serverId: string }) =>
+			makeClient(args.serverId, 0, [
+				makeDiagnostic(`${args.serverId} finding`),
+			]),
+		);
+		const pending = service.touchFile(`${ROOT}/a.ts`, "content", {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			source: "lsp_sync",
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["typos", "fallow"],
+		});
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 20);
+		const touched = (await pending) as { confirmation?: string } | undefined;
+		expect(touched?.confirmation).toBe("confirmed");
+		// Precondition: the named per-edit door stored the fallow row.
+		expect(
+			service
+				.getLastKnownDiagnostics(`${ROOT}/a.ts`)
+				?.map((d) => d.message)
+				.sort(),
+		).toEqual(["fallow finding", "typescript finding", "typos finding"]);
+
+		// Every server is now down: the read acquires nothing and serves the store.
+		(
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state.clients.clear();
+		createLSPClient.mockRejectedValue(new Error("server down"));
+		const read = await service.getDiagnostics(`${ROOT}/a.ts`, "document");
+		expect(read.map((d) => d.message).sort()).toEqual([
+			"typescript finding",
+			"typos finding",
+		]);
+	});
+
 	// #4760 / #4769 review F2: the root-policy door. A scanner declined because
 	// its root is `$HOME` never spawned, so the touch that skipped it must read
 	// `"partial"` and name it, never `"confirmed"`: the #1459 false-clean shape
