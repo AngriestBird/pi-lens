@@ -3820,3 +3820,85 @@ describe("#4750: another session's text no file owns expires by its own write st
 		}
 	});
 });
+
+describe("#4921: a turn end's own partition is its turn session's", () => {
+	// A concurrent in-process subagent shares the primary's coordinator, so
+	// `runtime.telemetrySessionId` is the primary's during the subagent's turn.
+	const SUBAGENT = "subagent-session";
+
+	function twoPartitionRecord(dir: string): { mine: string; theirs: string } {
+		const [mine, theirs] = ["primary.ts", "subagent.ts"].map((name) =>
+			path.join(dir, name),
+		);
+		for (const file of [mine, theirs]) fs.writeFileSync(file, "x;\n");
+		return { mine, theirs };
+	}
+
+	it("carries the primary's section, not the subagent's own, into the subagent's turn-end rewrite", () => {
+		// RECURRENCE GUARDED: #4921. Read with the coordinator's id, the
+		// subagent's composer carried its own section and replaced the
+		// primary's with its own blockers.
+		const env = setupTestEnvironment("pi-lens-git-guard-4921-carry-");
+		try {
+			const { mine, theirs } = twoPartitionRecord(env.tmpDir);
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					...foreignRecord([mine], "session-A"),
+					carriedBlockers: [
+						{
+							sessionId: SUBAGENT,
+							blockerContent: composerSections([theirs]),
+							blockingFiles: [theirs],
+						},
+					],
+				}),
+			);
+			const { carried } = readTurnEndGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				SUBAGENT,
+			);
+			expect(carried.map((partition) => partition.sessionId)).toEqual([
+				"session-A",
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("retires the subagent's own section, not the primary's, at the subagent's settled turn end", () => {
+		// RECURRENCE GUARDED: #4921. Settled with the coordinator's id, the
+		// subagent's turn end dropped the primary's section and kept its own.
+		const env = setupTestEnvironment("pi-lens-git-guard-4921-settle-");
+		try {
+			const { mine, theirs } = twoPartitionRecord(env.tmpDir);
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					...foreignRecord([mine], "session-A"),
+					carriedBlockers: [
+						{
+							sessionId: SUBAGENT,
+							blockerContent: composerSections([theirs]),
+							blockingFiles: [theirs],
+						},
+					],
+				}),
+			);
+			retireSettledGitGuardRecord(runtime, cache, env.tmpDir, SUBAGENT);
+			expect(owners(storedData(cache, env.tmpDir))).toEqual(["session-A"]);
+		} finally {
+			env.cleanup();
+		}
+	});
+});

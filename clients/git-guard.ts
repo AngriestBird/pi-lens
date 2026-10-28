@@ -1319,11 +1319,15 @@ function pastFreshnessWindow(
  * it through the freshness window, so a day-old record was invisible to it and
  * its write replaced the record whole), the partitions to carry, and what the
  * write leaves out, for `logCarriedDrops` once it has written.
+ *
+ * #4921: `sessionId` is the composing turn's session, the one whose own
+ * partition the write replaces; omitted, the coordinator's.
  */
 export function readTurnEndGuardRecord(
 	cacheManager: CacheManager,
 	runtime: RuntimeCoordinator,
 	cwd: string,
+	sessionId?: string,
 ): {
 	stored: Partial<TurnEndFindingsCache> | undefined;
 	carried: BlockerPartition[];
@@ -1332,19 +1336,23 @@ export function readTurnEndGuardRecord(
 	const stored = storedRecord(cacheManager, cwd)?.fields;
 	// The composer writes on every path that reads, so a stamp this read gave
 	// a released partition reaches the record with that write.
-	const { carried, dropped } = carriedTurnEndBlockers(stored, runtime, cwd);
+	const { carried, dropped } = carriedTurnEndBlockers(
+		stored,
+		cwd,
+		sessionId ?? runtime.telemetrySessionId,
+	);
 	return { stored, carried, dropped };
 }
 
 function carriedTurnEndBlockers(
 	stored: StoredRecord | undefined,
-	runtime: RuntimeCoordinator,
 	cwd: string,
+	/** The session whose own partition is not carried. */
+	me: string,
 ): { carried: BlockerPartition[]; dropped: CarriedDrops; stamped: boolean } {
 	const dropped: CarriedDrops = { gone: false, noFile: false };
 	if (!isTurnEndFindingsCache(stored))
 		return { carried: [], dropped, stamped: false };
-	const me = runtime.telemetrySessionId;
 	const now = Date.now();
 	const carried: BlockerPartition[] = [];
 	// A released partition carried whole gets its first stamp here.
@@ -1460,17 +1468,22 @@ function logRecordRetired(
  * re-checks the files it names). The latch that described the record goes
  * with it; a dispatch latch stays (`RecordLatchReason`).
  *
+ * #4921: `sessionId` is the settling turn's session, whose own partition
+ * leaves; omitted, the coordinator's.
+ *
  * @returns true when the record was retired.
  */
 export function retireSettledGitGuardRecord(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
 	cwd: string,
+	sessionId?: string,
 ): boolean {
 	const stored = storedRecord(cacheManager, cwd)?.fields;
 	if (!stored) return false;
+	const me = sessionId ?? runtime.telemetrySessionId;
 	const own =
-		stored.sessionId === runtime.telemetrySessionId &&
+		stored.sessionId === me &&
 		stored.testFailures !== true &&
 		stored.carriedBlockers === undefined;
 	const basis = own
@@ -1486,7 +1499,7 @@ export function retireSettledGitGuardRecord(
 		logRecordRetired(cwd, "turn_end", basis);
 		return true;
 	}
-	return retireOwnPartition(runtime, cacheManager, cwd, stored);
+	return retireOwnPartition(runtime, cacheManager, cwd, stored, me);
 }
 
 /**
@@ -1503,9 +1516,9 @@ function retireOwnPartition(
 	cacheManager: CacheManager,
 	cwd: string,
 	stored: StoredRecord,
+	me: string,
 ): boolean {
 	if (!isTurnEndFindingsCache(stored)) return false;
-	const me = runtime.telemetrySessionId;
 	// A record this session owns whole: the rule above decided it.
 	if (stored.sessionId === me && stored.carriedBlockers === undefined)
 		return false;
@@ -1516,7 +1529,7 @@ function retireOwnPartition(
 		carried: kept,
 		dropped,
 		stamped,
-	} = carriedTurnEndBlockers(stored, runtime, cwd);
+	} = carriedTurnEndBlockers(stored, cwd, me);
 	if (!ownDropped && !dropped.gone && !dropped.noFile) {
 		// #4762 r3: nothing dropped, so the partitions kept are the stored ones
 		// in their order. A released one just got its first stamp, and only a
@@ -1892,9 +1905,15 @@ export function resyncGitGuardAfterInlinePolicy(args: {
 	runtime: RuntimeCoordinator;
 	/** Files whose EVERY inline blocker the turn-end policy suppressed. */
 	suppressedFilePaths: readonly string[];
+	/**
+	 * #4921: the turn session whose policy pass this is: only its records were
+	 * judged, so only theirs take a verdict.
+	 */
+	sessionId: string | undefined;
 }): void {
 	const changed = args.runtime.applyInlineBlockerPolicyVerdicts(
 		args.suppressedFilePaths,
+		{ sessionId: args.sessionId },
 	);
 	// Nothing left the gate's view of the map and nothing rejoined it. This is
 	// what keeps the recompute off every ordinary turn end: `updateGitGuardStatus`
@@ -1915,6 +1934,11 @@ export function resyncGitGuardAfterInlinePolicy(args: {
  * no verdict (failed, unanswered, in flight, edit-scoped) observes nothing
  * (AGENTS.md shape 10), and this session's map, which carries its own blockers
  * through such runs, holds nothing of another session's.
+ *
+ * #4921: `sessionId` is the writing turn's session (omitted: the
+ * coordinator's). Its partition is built from its own inline-blocker records
+ * only and carries its id; a concurrent in-process session's records are its
+ * own partition's, written by its own writes.
  */
 export function syncGitGuardRecord(
 	runtime: RuntimeCoordinator,
@@ -1923,15 +1947,16 @@ export function syncGitGuardRecord(
 	editedFilePath?: string,
 	analysisRootMode: AnalysisRootMode = "session",
 	editedCleanVerdict = false,
+	sessionId?: string,
 ): void {
 	if (!canWriteAnalysisRoot(analysisRootMode)) return;
 	// #3248: a record the turn-end policy fully suppressed is not a blocker the
 	// commit gate may persist — the agent was shown nothing for it. The entry
 	// stays in the map so the next turn re-derives the verdict from current
 	// bytes; it just stops speaking for the gate.
-	const entries = (runtime.getInlineBlockersSnapshot?.() ?? []).filter(
-		(entry) => !entry.policySuppressed,
-	);
+	const entries = (
+		runtime.getInlineBlockersSnapshot?.({ sessionId }) ?? []
+	).filter((entry) => !entry.policySuppressed);
 	// #4725: the record is read whatever its age (`storedRecord`). Read through
 	// the freshness window, a stale record latched `cache_stale` here on every
 	// write, and no later session could clear it.
@@ -1949,7 +1974,7 @@ export function syncGitGuardRecord(
 	const editedKey = editedFilePath
 		? guardPathKey(editedFilePath, cwd)
 		: undefined;
-	const me = runtime.telemetrySessionId;
+	const me = sessionId ?? runtime.telemetrySessionId;
 	const blockerSections = existing?.blockerContent
 		? blockingProvenance(
 				existing.blockerContent,

@@ -159,6 +159,8 @@ export function recordDeferredRunnerBlockers(
 		blocking,
 		{
 			recordedAtMs: pending.markedAtMs,
+			// #4921: a new record belongs to the deferring dispatch's session.
+			sessionId: pending.sessionId,
 			...(bytes
 				? {
 						contentBaseline: {

@@ -393,7 +393,11 @@ without it `DrainDefer` sees every generation's. `debounceEntryCapture`
 (#3759 row 16); `stateWBranchFence`, a rejected alternative that fences the
 writers at branch level. `parkSessionKey` (#4112 round 2), `parkResetClear`,
 `parkFence` (`isCurrentSession`). `turnEndScoped` is the shipped #3613 R2
-shape: a `turn_end` drains only its own scope's work.
+shape: a `turn_end` drains only its own scope's work. `blockerStore` (#4921)
+lets a tool_result also leave an inline-blocker record (work kind `blocker`),
+which a `turn_end` re-serves rather than drains; `blockerScoped` is the shipped
+#4921 shape: a `turn_end` delivers only its own session's blocker records
+(`InlineBlockerRecord.session`, `getInlineBlockersSnapshot({ sessionId })`).
 
 ### #3705's rows, by column
 
@@ -433,6 +437,12 @@ it is an `expect: violated` witness, not a new finding.
 entry carries its producing activation, and a `turn_end` drains only its own.
 The coordinator scope remains the owner of shared cascade settlement and late
 auxiliary stores, so secondary cleanup does not discard primary work.
+`Pre4921BlockerUnscoped` adds the inline-blocker map under `turnEndScoped`
+alone, master before #4921: a subagent's `turn_end` delivers the primary's
+blocker. `Fix4921BlockerScoped` adds `blockerScoped` and passes. Both run at
+`SecondaryTurnEnd`'s bound: the blocker kind added to `SecondaryTurnEndScoped`
+(with `/new` and `/reload`) passed 6.4M distinct states unfinished in 4 min,
+against 398,844 without it, so that config keeps its three kinds.
 
 ### Overlap with `formal/turn-end-delivery-holds`
 
@@ -609,6 +619,8 @@ counterexample.
 | `MutParkNoFence` | the hold settle without `isCurrentSession`: a turn that began before `/reload` parks into the successor's map | `violated ParkedStaysInScope` | 128 |
 | `SecondaryTurnEnd` | #3613 R2 and #3758, open on master: a subagent's `turn_end` drains the primary's worklist, cascade runs and runner findings, and the primary's takes the subagent's | `violated SecondaryIsolation` | 24 |
 | `SecondaryTurnEndScoped` | the proposed fix, NOT shipped: a `turn_end` drains its own scope's work, across `/new` and `/reload` | pass | 398844 |
+| `Pre4921BlockerUnscoped` | #4921, master before the fix: the worklist, cascade and runner records are scoped, the inline-blocker map is not; a subagent's `turn_end` delivers the primary's blocker | `violated SecondaryIsolation` | 60 |
+| `Fix4921BlockerScoped` | #4921, shipped: a `turn_end` delivers only its own session's inline-blocker records | pass | 6642 |
 
 ## Pre-fix and Mut configs and their issues
 
@@ -674,6 +686,7 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `Mut4112ParkNoResetClear` | #4112 | design alternative: `resetForSession` without `_cutAdvisoryItems.clear()` (shipped with #4112, ee50e47b6) | The primary parks; `/reload` (the stable id and so the key survive); the successor shows the item. |
 | `MutParkNoFence` | #4161, #4168 | design alternative: `settle` without `isCurrentSession` (since 9c8a6f530, owner-fenced by dac19f046) | A turn begins in session 1; `/reload`; its settle parks into session 2's map under the same key; session 2 shows it. |
 | `SecondaryTurnEnd` | #3613 R2, #3758 | master, open: `handleTurnEnd` takes the process runtime for every activation (`onTurnEnd`, `index.ts`) | The primary's tool_result leaves a worklist record; a subagent starts; its `turn_end` drains it. |
+| `Pre4921BlockerUnscoped` | #4921 | pre-#4921 (a6c5c380d): `InlineBlockerRecord` carried no owner and `handleTurnEnd` read `getInlineBlockersSnapshot()` whole | The primary's tool_result records a blocker; a subagent starts; its `turn_end` delivers it. |
 
 Since #3613's turn half, `Current` holds `SecondaryIsolation` and violates
 `NoCrossSessionState` (257 states): F4, the read-guard half of #3613, still

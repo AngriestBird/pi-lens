@@ -174,6 +174,11 @@
 (*                       scope is the one the turn captured at entry       *)
 (*   "turnEndScoped"     #3613 R2: a shipped shape in which turn_end drains *)
 (*                       only its own scope's work                         *)
+(*   "blockerStore"      #4921: tool_results also leave inline-blocker     *)
+(*                       records (work kind `blocker`); off, none are made *)
+(*                       (the /new and /reload configs stay their size)    *)
+(*   "blockerScoped"     #4921: a turn_end delivers only its own session's *)
+(*                       inline-blocker records                            *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -1618,14 +1623,20 @@ RegLand(t) ==
 (*       worklist (`ranges`, `addModifiedRange`), the turn summary          *)
 (*       (`summary`, `runtime.turnSummary`), the git-guard latch            *)
 (*       (`gitguard`, `updateGitGuardStatus`, `markGitGuardCacheUnknown`),  *)
-(*       and the stores a turn_end composer drains (`cascade`, `runner`).   *)
+(*       the stores a turn_end composer drains (`cascade`, `runner`), and   *)
+(*       the inline-blocker map it re-serves (`blocker`; #4921: its record  *)
+(*       names a secondary's session, `InlineBlockerRecord.session`).       *)
 (*   dq  the deferral queue (`deferMutation`): one file, so one merged      *)
 (*       record; its epoch is the `Math.max` of its pairs'.                 *)
 (*   pk  the cut-advisory park map (`parkCutAdvisoryItems`).                *)
 (***************************************************************************)
 
 StateKinds == {"ranges", "summary", "gitguard"}
+\* `blocker`: an inline-blocker record (`recordInlineBlockers`), produced only
+\* under "blockerStore". A turn_end re-serves it rather than draining it; its
+\* take below is the delivery, which is what the isolation clause constrains.
 WorkKinds  == {"ranges", "cascade", "runner"}
+                \cup (IF Has("blockerStore") THEN {"blocker"} ELSE {})
 
 M4Kinds(x) == IF x \in {"stateW", "debounce"} THEN StateKinds ELSE {"-"}
 
@@ -1798,8 +1809,8 @@ ParkTake ==
 
 \* A live scope's tool_result leaves a work record in the coordinator's stores
 \* (the turn-state worklist owned by the coordinator's session id, cascade runs,
-\* pending runner findings), in the hook, with no await. A concurrent
-\* subagent's tool results reach the same coordinator.
+\* pending runner findings, the inline-blocker map), in the hook, with no
+\* await. A concurrent subagent's tool results reach the same coordinator.
 TurnWork ==
     /\ "TurnWork" \in Transitions /\ primary # 0 /\ pend.k = "none"
     /\ \E s \in Tickets, k \in WorkKinds :
@@ -1816,15 +1827,19 @@ TurnWork ==
 \* coordinator's session id owns, consumes the cascade runs and drains the
 \* pending runner findings. The shipped "turnEndScoped" rule keys each
 \* durable work record by its producing activation; shared cascade lifecycle
-\* remains settled through the coordinator scope.
+\* remains settled through the coordinator scope. Before "blockerScoped"
+\* (#4921) the inline-blocker map stayed outside that rule: every turn_end
+\* delivered every session's blockers.
 TurnEnd ==
     /\ primary # 0 /\ pend.k = "none"
     /\ \E s \in Tickets :
           /\ st[s] = "live"
           /\ \/ (s = primary /\ "TurnEnd" \in Transitions)
              \/ (role[s] = "secondary" /\ "SecTurnEnd" \in Transitions)
-          /\ LET take == {r \in co[last] : r.k \in WorkKinds
-                                           /\ (Has("turnEndScoped") => r.o = s)}
+          /\ LET scoped(r) == Has("turnEndScoped")
+                                /\ (r.k # "blocker" \/ Has("blockerScoped"))
+                 take == {r \in co[last] : r.k \in WorkKinds
+                                           /\ (scoped(r) => r.o = s)}
              IN
              /\ take # {}
              /\ consumed' = consumed \cup
