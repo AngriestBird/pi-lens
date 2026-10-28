@@ -314,6 +314,13 @@ describe("a default-off fallow adds no per-file root resolution (#4956 F1)", () 
 			diagnostics: "none",
 		});
 		await service.getDiagnostics(TS_FILE);
+		// The unheld-document filter (the head-move and full-sweep touches) is
+		// private and reached only with live documents, so it is called directly.
+		await (
+			service as unknown as {
+				serverIdsNotHoldingDocument(file: string): Promise<Set<string>>;
+			}
+		).serverIdsNotHoldingDocument(TS_FILE);
 	}
 
 	it("no reader resolves a fallow root while the service holds no fallow client", async () => {
@@ -322,6 +329,16 @@ describe("a default-off fallow adds no per-file root resolution (#4956 F1)", () 
 		// Positive control: the readers ran and resolved the other servers.
 		expect(resolved).toContain("typescript");
 		expect(resolved).not.toContain("fallow");
+		expect(rootWalks).toEqual([]);
+		await service.shutdown();
+	});
+
+	it("the outside-root decision does not walk fallow for a file outside every session root", async () => {
+		const { registerSessionRoot } =
+			await import("../../../clients/lsp/session-roots.js");
+		registerSessionRoot("/proj");
+		const { service, rootWalks } = await watch();
+		await service.getDiagnostics("/elsewhere/src/a.ts");
 		expect(rootWalks).toEqual([]);
 		await service.shutdown();
 	});
