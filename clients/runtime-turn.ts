@@ -6108,11 +6108,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// #3813: judge every hold against what the cap keeps, before the
 		// message is final: the marker names how many parts were held.
 		const joined = findingParts.join("\n\n");
-		const keptChars = turnEndKeptChars(joined);
 		const holdPlan = planDeliveryHolds({
 			holds: deliveryHolds,
 			parts: composedParts,
-			keptChars,
+			keptChars: turnEndKeptChars(joined),
 			separatorLength: "\n\n".length,
 		});
 		const settleHolds = (suppressed: boolean): void => {
@@ -6271,39 +6270,40 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// and the files its sections cite join the record's own affected list.
 		// Its input only: `affectedFiles` and `blockingFiles` stay what the commit
 		// gate reads.
-		// #4954 F1: only a part the delivered message carries, whole or in its
-		// kept prefix, binds the stamp. A part the cap cut is not in the text the
-		// model reads, so a change to its file leaves that text current.
-		const deliveredCitedFiles: string[] = [];
-		let partStart = 0;
-		for (const part of composedParts) {
-			if (partStart < keptChars) {
-				deliveredCitedFiles.push(...(provenanceCitations.get(part.raw) ?? []));
-			}
-			partStart += part.text.length + "\n\n".length;
-		}
+		// #4954 F1, F5: only a part the hold plan counts delivered binds the
+		// stamp. A part the cap cut, whole or part-way, is not the text the model
+		// reads, so a change to its file leaves that text current.
+		const deliveredCitedFiles = holdPlan.reachedParts.flatMap(
+			(part) => provenanceCitations.get(part.raw) ?? [],
+		);
+		// #4954 F6: a file only the text names is `cited`, so deleting it labels
+		// the message historical and never drops it; the first role a path gets
+		// wins, so a file the turn wrote and also cites stays `affected`.
 		const stampProvenance = (
 			affectedFiles: readonly string[],
 			affectedTruncated = false,
 		) => {
-			const byKey = new Map<string, string>();
+			const byKey = new Map<
+				string,
+				{ path: string; role: "affected" | "cited" }
+			>();
+			const add = (file: string, role: "affected" | "cited"): void => {
+				const resolved = resolveRunnerPath(cwd, file);
+				const key = advisoryPathKey(resolved, cwd);
+				if (!byKey.has(key)) byKey.set(key, { path: resolved, role });
+			};
+			for (const file of affectedFiles) add(file, "affected");
 			for (const file of [
-				...affectedFiles,
 				...resolvedBlockerFileList.map((entry) => entry.filePath),
 				...deliveredCitedFiles,
-			]) {
-				const resolved = resolveRunnerPath(cwd, file);
-				byKey.set(advisoryPathKey(resolved, cwd), resolved);
-			}
+			])
+				add(file, "cited");
 			const stamped = [...byKey.values()].slice(0, MAX_ADVISORY_AFFECTED_FILES);
 			return snapshotAdvisoryProvenance({
 				cwd,
 				runtime,
 				generation: 0,
-				files: stamped.map((file) => ({
-					path: file,
-					role: "affected" as const,
-				})),
+				files: stamped,
 				truncated: affectedTruncated || byKey.size > stamped.length,
 			});
 		};

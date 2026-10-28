@@ -7,7 +7,12 @@ import { resolveRunnerPath } from "./dispatch/runner-context.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { hashFileBytes } from "./content-stamp.js";
 
-export type AdvisoryFileRole = "source" | "test" | "affected";
+/**
+ * Why a file is in the stamp. `cited` is a file the content only names (a
+ * no-write turn's citations, #4617): a change to it supersedes the content,
+ * but its deletion never discards it (`allFilesDeleted`, #4954 F6).
+ */
+export type AdvisoryFileRole = "source" | "test" | "affected" | "cited";
 
 interface AdvisoryFileProvenance {
 	path: string;
@@ -143,7 +148,8 @@ function isWellFormed(value: unknown): value is AdvisoryProvenance {
 				typeof file.path === "string" &&
 				(file.role === "source" ||
 					file.role === "test" ||
-					file.role === "affected") &&
+					file.role === "affected" ||
+					file.role === "cited") &&
 				isFiniteNumber(file.mtimeMs) &&
 				isFiniteNumber(file.size) &&
 				isCapturedHash(file.sha256),
@@ -175,11 +181,16 @@ export function validateAdvisoryProvenance(
 		if (provenance.revision.sessionId !== runtime.telemetrySessionId)
 			reasons.push("session-mismatch");
 	}
+	// Only a file the content is about can discard it by being deleted; a
+	// cited file can only supersede it.
+	let subjectFiles = 0;
 	let deletedFiles = 0;
 	const changedPaths = new Set<string>();
 	for (const captured of provenance.files) {
 		const resolved = path.resolve(cwd, captured.path);
 		const reasonsBefore = reasons.length;
+		const subject = captured.role !== "cited";
+		if (subject) subjectFiles += 1;
 		let stat: fs.Stats;
 		try {
 			stat = fs.statSync(resolved);
@@ -187,7 +198,7 @@ export function validateAdvisoryProvenance(
 			const code = (error as NodeJS.ErrnoException).code ?? "unknown";
 			if (code === "ENOENT") {
 				if (captured.sha256 !== "missing") {
-					deletedFiles += 1;
+					if (subject) deletedFiles += 1;
 					reasons.push(`missing:${advisoryPathKey(resolved, cwd)}`);
 					changedPaths.add(advisoryPathKey(resolved, cwd));
 				}
@@ -222,7 +233,7 @@ export function validateAdvisoryProvenance(
 		if (reasons.length > reasonsBefore)
 			changedPaths.add(advisoryPathKey(resolved, cwd));
 	}
-	const allFilesDeleted = deletedFiles === provenance.files.length;
+	const allFilesDeleted = subjectFiles > 0 && deletedFiles === subjectFiles;
 	if (unknown)
 		return {
 			status: "unknown",

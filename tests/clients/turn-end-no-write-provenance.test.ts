@@ -24,6 +24,9 @@ const readCachedDiagnosticsForServers = vi.hoisted(() => vi.fn());
 // changed since capture". A bash-only turn is about 85% of a session.
 const HISTORICAL = "Historical finding";
 const UNKNOWN_STAMP = "generation unknown";
+// Cascade lines that, with the section's own header lines, end the kept
+// prefix on the next part's tier label (the 20-line cap).
+const CUT_AFTER_LABEL_LINES = 18;
 
 beforeEach(async () => {
 	await installLspServiceDouble({
@@ -449,6 +452,178 @@ describe.each([false, true])(
 					expect(view.text).not.toContain("Cascade could not compute");
 					expect(view.text).not.toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 F5): the stamp re-derived reach as "the part starts
+		// inside the kept prefix", so an advisory cut after its tier label bound
+		// the runs its cut bullet names, and a change to one of them labelled a
+		// message that never showed it historical. The hold plan holds that part.
+		it("ignores the files of an advisory the cap cut part-way", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-part-cut-${guard}`,
+				incident: "A part cut after its label bound the files it would name",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					const runs = Array.from({ length: 5 }, (_, i) =>
+						h.write(`src/r${i}.ts`, `export const r${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [neighborError(neighbor)],
+								},
+							],
+							formatted: Array.from(
+								{ length: CUT_AFTER_LABEL_LINES },
+								(_, i) => `Cascade error line ${i}`,
+							).join("\n"),
+						},
+						neighborCount: 1,
+						diagnosticCount: 1,
+					});
+					for (const run of runs)
+						h.runtime.appendCascadeRun(indeterminateRun(run));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runs[0] as string, "export const r0 = 2;\n");
+						},
+					});
+					expect(view.text).toContain("ℹ️ Advisory — no action required");
+					expect(view.text).not.toContain("Cascade could not compute");
+					expect(view.text).not.toContain("r0.ts");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 F6, CodeRabbit thread): a stamp of cited files only
+		// dropped the whole message once they were deleted (`allFilesDeleted`),
+		// where master delivered it labelled historical. A cited file is
+		// evidence for the text, not the text's subject: it never discards it.
+		it("keeps a section labelled historical when its only cited file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-cited-deleted-${guard}`,
+				incident: "Deleting a cited primary dropped the whole turn-end message",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [],
+								},
+							],
+							formatted: "No language server answered for a.ts",
+							unansweredPrimaries: {
+								notes: [
+									{
+										serverIds: ["pyrefly"],
+										line: "No language server answered for a.ts",
+									},
+								],
+								formattedWithoutNotes: "",
+							},
+						},
+						neighborCount: 1,
+						diagnosticCount: 0,
+					});
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.unlinkSync(primary);
+						},
+					});
+					expect(view.text).toContain("No language server answered");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("keeps a resolution labelled historical when its file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-resolved-deleted-${guard}`,
+				incident: "A resolution's file, not written this turn, was deleted",
+				issue: "#4617",
+				async run(h) {
+					const file = h.write("src/value.ts", "export const value = 1;\n");
+					h.runtime.beginTurn();
+					h.blocker("src/value.ts", "L1: type mismatch");
+					h.runtime.retireInlineBlockerOnConfirmedClean(
+						file,
+						h.runtime.nextWriteOrderToken(),
+						["lsp"],
+					);
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.unlinkSync(file);
+						},
+					});
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The drop rule the cited role leaves standing: once every file the
+		// turn wrote is gone, its findings have no file left to fix, even while
+		// a cited file survives.
+		it("drops a write turn's message once every edited file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-edited-deleted-${guard}`,
+				incident: "A write turn's only edited file was deleted",
+				issue: "#4617",
+				async run(h) {
+					const edited = h.edit("src/e.ts", "export const e = 1;\n");
+					const cited = h.write("src/c.ts", "export const c = 1;\n");
+					h.blocker("src/e.ts", "L1: type mismatch");
+					h.runtime.appendCascadeRun(indeterminateRun(cited));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.unlinkSync(edited);
+						},
+					});
+					expect(view.text).toBe("");
 				},
 			});
 		});
