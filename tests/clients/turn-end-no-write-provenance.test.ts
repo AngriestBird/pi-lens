@@ -518,6 +518,45 @@ describe.each([false, true])(
 			});
 		});
 
+		it("ignores a primary the unconfirmed line counts but does not name", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-unnamed-primary-${guard}`,
+				incident: "A primary behind (+N more) bound the delivered line",
+				issue: "#4617",
+				async run(h) {
+					const neighbor = h.write("src/n.ts", "export const n = 1;\n");
+					const primaries = Array.from({ length: 5 }, (_, i) =>
+						h.write(`src/p${i}.ts`, `export const p${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					for (const primary of primaries) {
+						h.runtime.appendCascadeRun({
+							filePath: primary,
+							result: undefined,
+							neighborCount: 1,
+							diagnosticCount: 0,
+							unconfirmed: {
+								count: 1,
+								servers: [{ serverId: "ts", waitMs: 500, paths: [neighbor] }],
+							},
+						});
+					}
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(
+								primaries[4] as string,
+								"export const p4 = 2;\n",
+							);
+						},
+					});
+					expect(view.text).toContain("(+2 more)");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		it("labels a coverage advisory historical when a file it names changed", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-named-run-${guard}`,
