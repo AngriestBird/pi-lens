@@ -5,9 +5,10 @@
 - `safeSpawnAsync` is the subprocess seam. It carries ambient abort behavior,
   process-tree cleanup, output caps, typed failure kinds, and bounded timeouts.
   Installs pass `ignoreAmbientSignal: true` and remain trust-gated.
-  The seam defaults `GIT_OPTIONAL_LOCKS=0`, so no child takes git's optional
-  index lock that a timeout or host exit could orphan (#4930). A caller `env`
-  override wins. The cost: git never writes back its refreshed stat cache, so
+  The seam defaults `GIT_OPTIONAL_LOCKS=0`, so unless a caller `env` override
+  sets it, no child takes git's optional index lock that a timeout or host exit
+  could orphan (#4930). The cost of the default: git does not write back its
+  refreshed stat cache, so
   on a stat-dirty checkout each status read re-hashes the dirty set until the
   user's own git command refreshes the index.
   It is also the lookup chokepoint. Under pi trust other than
