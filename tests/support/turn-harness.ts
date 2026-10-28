@@ -233,8 +233,18 @@ interface TurnHarness {
 	 */
 	blocker(relative: string, summary: string, sources?: readonly string[]): void;
 
-	/** Run one turn end and return what the agent sees. */
-	turnEnd(): Promise<TurnEndView>;
+	/**
+	 * Run one turn end and return what the agent sees. `flags` are the pi
+	 * flags the turn runs with (default: all off), e.g. `{ "lens-guard": true }`.
+	 */
+	turnEnd(options?: {
+		flags?: Readonly<Record<string, boolean>>;
+		/**
+		 * Runs after the turn end composed and persisted its record, before the
+		 * agent's next context reads it: the window a later change lands in.
+		 */
+		beforeDelivery?: () => void;
+	}): Promise<TurnEndView>;
 
 	/**
 	 * Snapshot advisory provenance over a file set, then ask whether it still
@@ -365,10 +375,10 @@ function createTurnHarness(options: TurnHarnessOptions = {}): {
 				sources,
 			);
 		},
-		async turnEnd() {
+		async turnEnd(options) {
 			await handleTurnEnd({
 				ctxCwd: env.tmpDir,
-				getFlag: () => false,
+				getFlag: (name: string) => options?.flags?.[name] ?? false,
 				dbg: () => {},
 				runtime,
 				cacheManager,
@@ -381,6 +391,7 @@ function createTurnHarness(options: TurnHarnessOptions = {}): {
 				// biome-ignore lint/suspicious/noExplicitAny: the dep surface is a
 				// dozen client interfaces; scenarios state only what they exercise.
 			} as any);
+			options?.beforeDelivery?.();
 			// `runtime` is passed exactly as `index.ts` and the MCP Stop hook pass
 			// it, so provenance validation (and the historical framing a
 			// superseded record earns) runs the same way it does in production.

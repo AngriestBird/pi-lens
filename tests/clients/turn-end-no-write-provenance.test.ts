@@ -1,30 +1,926 @@
-import { describe, expect, it } from "vitest";
+// flake-shape: service-double — the late-auxiliary cell: a real auxiliary client is an external child process, so the LSP service seam answers its cached publication (#4617)
+import * as fs from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	recordDeliveredCascadeNeighbor,
+	resetCascadePendingNeighbors,
+	resetCascadeUnansweredPrimariesDelivered,
+} from "../../clients/cascade-format.js";
+import { MAX_ADVISORY_AFFECTED_FILES } from "../../clients/advisory-provenance.js";
+import type { CascadeRun } from "../../clients/cascade-types.js";
+import type { Diagnostic } from "../../clients/dispatch/types.js";
+import {
+	markPendingAuxiliaryCoverage,
+	resetPendingAuxiliaryCoverage,
+} from "../../clients/lsp/pending-aux-coverage.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { runTurnScenario } from "../support/turn-harness.js";
 
-// #4617: a confirmed-clean check can resolve findings without a classified write.
-describe("turn-end no-write provenance (#4617)", () => {
-	it("keeps a confirmed-clean resolution current on a no-write turn", async () => {
-		await runTurnScenario({
-			id: "no-write-provenance",
-			incident:
-				"Live turn-end findings received the historical-provenance preamble",
-			issue: "#4617",
-			async run(h) {
-				const file = h.write("src/value.ts", "export const value = 1;\n");
-				h.runtime.beginTurn();
-				h.blocker("src/value.ts", "L1: type mismatch");
-				expect(
+const readCachedDiagnosticsForServers = vi.hoisted(() => vi.fn());
+
+// Recurrence (#4617): the turn-end advisory of a turn that wrote no file
+// carried no provenance stamp the gate could read, so findings captured in
+// the current turn reached the model labelled "Historical finding; workspace
+// changed since capture". A bash-only turn is about 85% of a session.
+const HISTORICAL = "Historical finding";
+const UNKNOWN_STAMP = "generation unknown";
+// Cascade lines that, with the section's own header lines, end the kept
+// prefix on the next part's tier label (the 20-line cap).
+const CUT_AFTER_LABEL_LINES = 18;
+
+beforeEach(async () => {
+	await installLspServiceDouble({
+		readCachedDiagnosticsForServers,
+		observeLateAuxiliaryAnswer: async () => undefined,
+	});
+	readCachedDiagnosticsForServers.mockReset();
+});
+
+afterEach(() => {
+	resetCascadePendingNeighbors();
+	resetCascadeUnansweredPrimariesDelivered();
+	resetPendingAuxiliaryCoverage();
+});
+
+function neighborError(filePath: string): Diagnostic {
+	return {
+		id: "lsp:cascade:1",
+		message: "type mismatch",
+		filePath,
+		line: 1,
+		column: 1,
+		severity: "error",
+		semantic: "blocking",
+		tool: "lsp",
+		rule: "cascade:test",
+	};
+}
+
+/** A cascade run no section renders: the trigger that lets a bash-only turn
+ *  reach the composer without citing any file itself. */
+function silentRun(filePath: string): CascadeRun {
+	return {
+		filePath,
+		result: undefined,
+		neighborCount: 0,
+		diagnosticCount: 0,
+		skipReason: "clean",
+	};
+}
+
+function indeterminateRun(filePath: string): CascadeRun {
+	return {
+		filePath,
+		result: undefined,
+		neighborCount: 0,
+		diagnosticCount: 0,
+		skipReason: "indeterminate",
+		indeterminate: {
+			reason: "graph_degraded",
+			detail: "review graph unavailable",
+		},
+	};
+}
+
+describe.each([false, true])(
+	"bash-only turn provenance, --lens-guard %s (#4617)",
+	(guard) => {
+		const flags = { "lens-guard": guard };
+
+		it("keeps a confirmed-clean resolution current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-clean-${guard}`,
+				incident:
+					"Live turn-end findings received the historical-provenance preamble",
+				issue: "#4617",
+				async run(h) {
+					const file = h.write("src/value.ts", "export const value = 1;\n");
+					h.runtime.beginTurn();
+					h.blocker("src/value.ts", "L1: type mismatch");
+					expect(
+						h.runtime.retireInlineBlockerOnConfirmedClean(
+							file,
+							h.runtime.nextWriteOrderToken(),
+							["lsp"],
+						),
+					).toBe(true);
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("keeps a cascade coverage advisory current (indeterminate run)", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-indeterminate-${guard}`,
+				incident: "A coverage advisory cites no edited file",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(indeterminateRun(primary));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("keeps an unconfirmed-neighbour advisory current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-unconfirmed-${guard}`,
+				incident: "A coverage advisory cites no edited file",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: undefined,
+						neighborCount: 1,
+						diagnosticCount: 0,
+						unconfirmed: {
+							count: 1,
+							servers: [{ serverId: "ts", waitMs: 500, paths: [neighbor] }],
+						},
+					});
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("no answer arrived");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("keeps an unanswered-primary line beside a clean neighbour current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-unanswered-${guard}`,
+				incident: "A cascade section with no neighbour error to cite",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [],
+								},
+							],
+							formatted: "No language server answered for a.ts",
+							unansweredPrimaries: {
+								notes: [
+									{
+										serverIds: ["pyrefly"],
+										line: "No language server answered for a.ts",
+									},
+								],
+								formattedWithoutNotes: "",
+							},
+						},
+						neighborCount: 1,
+						diagnosticCount: 0,
+					});
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("No language server answered");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("keeps a pending-neighbour line current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-pending-${guard}`,
+				incident:
+					"The pending-error lines name a neighbour, not an edited file",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					recordDeliveredCascadeNeighbor(
+						neighbor,
+						[neighborError(neighbor)],
+						1,
+						Date.now() + 60_000,
+					);
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(silentRun(primary));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("error(s) unresolved");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("keeps a changed-since-checked neighbour line current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-pending-changed-${guard}`,
+				incident: "The changed-outside-pi line names a neighbour, not an edit",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					recordDeliveredCascadeNeighbor(
+						neighbor,
+						[neighborError(neighbor)],
+						1,
+						Date.now() - 60_000,
+					);
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(silentRun(primary));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("changed since checked");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("keeps a late auxiliary finding current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-aux-${guard}`,
+				incident: "A late auxiliary part cites a file the turn did not edit",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const auxFile = h.write("src/aux.ts", "export const aux = 1;\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(auxFile, past, past);
+					markPendingAuxiliaryCoverage(
+						auxFile,
+						["opengrep"],
+						Date.now() - 2000,
+					);
+					readCachedDiagnosticsForServers.mockImplementation(
+						async () =>
+							new Map([
+								[
+									"opengrep",
+									{
+										diags: [
+											{
+												range: {
+													start: { line: 0, character: 0 },
+													end: { line: 0, character: 10 },
+												},
+												severity: 2,
+												code: "rule-x",
+												source: "opengrep",
+												message: "late scanner finding",
+											},
+										],
+										publishedAt: Date.now(),
+									},
+								],
+							]),
+					);
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(silentRun(primary));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("late scanner finding");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Negative cells: the fix must not drop the label. A stamp taken at this
+		// turn end still flips to historical once the workspace moves on, or
+		// once the session that took it is over.
+		it("labels a resolution historical when its file changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-older-file-${guard}`,
+				incident: "A stamped advisory from an older turn must stay labelled",
+				issue: "#4617",
+				async run(h) {
+					const file = h.write("src/value.ts", "export const value = 1;\n");
+					h.runtime.beginTurn();
+					h.blocker("src/value.ts", "L1: type mismatch");
 					h.runtime.retireInlineBlockerOnConfirmedClean(
 						file,
 						h.runtime.nextWriteOrderToken(),
 						["lsp"],
-					),
-				).toBe(true);
-				const view = await h.turnEnd();
-				expect(view.text).toContain("confirmed clean");
-				expect(view.text).not.toContain("Historical finding");
-				expect(view.text).not.toContain("generation unknown");
-			},
+					);
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(file, "export const value = 'changed';\n");
+						},
+					});
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
 		});
-	});
-});
+
+		it("labels a coverage advisory historical when its cited file changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-older-cited-${guard}`,
+				incident: "A stamped advisory from an older turn must stay labelled",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(indeterminateRun(primary));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(primary, "export const a = 2;\n");
+						},
+					});
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Fail closed on a stamp that cannot name every file the advisory cites
+		// (`truncated-provenance`): a partial stamp must not read as current.
+		it("labels a write turn historical when its edited and cited files exceed the stamp cap", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-over-cap-${guard}`,
+				incident: "A stamp over the first files of a larger citation set",
+				issue: "#4617",
+				async run(h) {
+					for (let i = 0; i < MAX_ADVISORY_AFFECTED_FILES; i += 1) {
+						h.edit(`src/e${i}.ts`, `export const e${i} = 1;\n`);
+					}
+					const extra = h.write("src/extra.ts", "export const extra = 1;\n");
+					h.runtime.appendCascadeRun(indeterminateRun(extra));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 r5, CodeRabbit thread): a truncated stamp omits a
+		// cited file, so "every stamped file is deleted" no longer means every
+		// file the text names is gone. Dropping the message there discarded text
+		// whose omitted, still-existing file master delivered labelled historical.
+		it("keeps a truncated stamp's message labelled historical when every stamped file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-over-cap-deleted-${guard}`,
+				incident:
+					"Deleting every stamped file dropped a message citing an omitted one",
+				issue: "#4617",
+				async run(h) {
+					const edited = Array.from(
+						{ length: MAX_ADVISORY_AFFECTED_FILES },
+						(_, i) => h.edit(`src/e${i}.ts`, `export const e${i} = 1;\n`),
+					);
+					const extra = h.write("src/extra.ts", "export const extra = 1;\n");
+					h.runtime.appendCascadeRun(indeterminateRun(extra));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							for (const file of edited) fs.unlinkSync(file);
+						},
+					});
+					expect(fs.existsSync(extra)).toBe(true);
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 F3): a path cited by two sources counted twice against
+		// the cap, so a stamp of exactly MAX unique files read as truncated and a
+		// current message went out labelled historical.
+		it("counts a file cited and edited once against the stamp cap", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-dedupe-${guard}`,
+				incident: "The same path from two sources crossed the stamp cap",
+				issue: "#4617",
+				async run(h) {
+					const edited = Array.from(
+						{ length: MAX_ADVISORY_AFFECTED_FILES },
+						(_, i) => h.edit(`src/e${i}.ts`, `export const e${i} = 1;\n`),
+					);
+					h.runtime.appendCascadeRun(indeterminateRun(edited[0] as string));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 F1, Sourcery thread): the stamp was built from the
+		// parts the composer produced, so the file of a part the 20-line cap cut
+		// still bound the delivered text, and a change to a file the model never
+		// saw labelled live findings historical.
+		it("ignores the file of an advisory the cap cut out of the message", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-cut-part-${guard}`,
+				incident: "A cut advisory's file bound the delivered section",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					const cut = h.write("src/cut.ts", "export const cut = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [neighborError(neighbor)],
+								},
+							],
+							formatted: Array.from(
+								{ length: 22 },
+								(_, i) => `Cascade error line ${i}`,
+							).join("\n"),
+						},
+						neighborCount: 1,
+						diagnosticCount: 1,
+					});
+					h.runtime.appendCascadeRun(indeterminateRun(cut));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(cut, "export const cut = 2;\n");
+						},
+					});
+					expect(view.text).toContain("Cascade error line 0");
+					expect(view.text).not.toContain("Cascade could not compute");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 F5): the stamp re-derived reach as "the part starts
+		// inside the kept prefix", so an advisory cut after its tier label bound
+		// the runs its cut bullet names, and a change to one of them labelled a
+		// message that never showed it historical. The hold plan holds that part.
+		it("ignores the files of an advisory the cap cut part-way", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-part-cut-${guard}`,
+				incident: "A part cut after its label bound the files it would name",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					const runs = Array.from({ length: 5 }, (_, i) =>
+						h.write(`src/r${i}.ts`, `export const r${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [neighborError(neighbor)],
+								},
+							],
+							formatted: Array.from(
+								{ length: CUT_AFTER_LABEL_LINES },
+								(_, i) => `Cascade error line ${i}`,
+							).join("\n"),
+						},
+						neighborCount: 1,
+						diagnosticCount: 1,
+					});
+					for (const run of runs)
+						h.runtime.appendCascadeRun(indeterminateRun(run));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runs[0] as string, "export const r0 = 2;\n");
+						},
+					});
+					expect(view.text).toContain("ℹ️ Advisory — no action required");
+					expect(view.text).not.toContain("Cascade could not compute");
+					expect(view.text).not.toContain("r0.ts");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The other arm of the reach rule (#4954 F5): a leading section too long
+		// for the cap reaches the model from its head, so it binds its files. A
+		// "whole parts only" stamp would read it current after its file changed.
+		it("binds the files of a leading section the cap cut part-way", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-leading-cut-${guard}`,
+				incident: "An oversized leading section must keep binding its file",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [neighborError(neighbor)],
+								},
+							],
+							formatted: Array.from(
+								{ length: 22 },
+								(_, i) => `Cascade error line ${i}`,
+							).join("\n"),
+						},
+						neighborCount: 1,
+						diagnosticCount: 1,
+					});
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(primary, "export const a = 2;\n");
+						},
+					});
+					expect(view.text).toContain("Cascade error line 0");
+					expect(view.text).not.toContain("Cascade error line 21");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4954 F6, CodeRabbit thread): a stamp of cited files only
+		// dropped the whole message once they were deleted (`allFilesDeleted`),
+		// where master delivered it labelled historical. A cited file is
+		// evidence for the text, not the text's subject: it never discards it.
+		it("keeps a section labelled historical when its only cited file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-cited-deleted-${guard}`,
+				incident: "Deleting a cited primary dropped the whole turn-end message",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbor = h.write("src/b.ts", "export const b = 1;\n");
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: {
+							filePath: primary,
+							impact: {
+								filePath: primary,
+								changedSymbols: [],
+								directImporters: [neighbor],
+								directCallers: [],
+								neighborFiles: [neighbor],
+								riskFlags: [],
+							},
+							neighbors: [
+								{
+									filePath: neighbor,
+									reason: "imports",
+									lspTouched: false,
+									diagnostics: [],
+								},
+							],
+							formatted: "No language server answered for a.ts",
+							unansweredPrimaries: {
+								notes: [
+									{
+										serverIds: ["pyrefly"],
+										line: "No language server answered for a.ts",
+									},
+								],
+								formattedWithoutNotes: "",
+							},
+						},
+						neighborCount: 1,
+						diagnosticCount: 0,
+					});
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.unlinkSync(primary);
+						},
+					});
+					expect(view.text).toContain("No language server answered");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("keeps a resolution labelled historical when its file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-resolved-deleted-${guard}`,
+				incident: "A resolution's file, not written this turn, was deleted",
+				issue: "#4617",
+				async run(h) {
+					const file = h.write("src/value.ts", "export const value = 1;\n");
+					h.runtime.beginTurn();
+					h.blocker("src/value.ts", "L1: type mismatch");
+					h.runtime.retireInlineBlockerOnConfirmedClean(
+						file,
+						h.runtime.nextWriteOrderToken(),
+						["lsp"],
+					);
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.unlinkSync(file);
+						},
+					});
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The drop rule that stays: once every stamped file is gone, the findings
+		// have no file left to fix. The edited file is cited too, and stays
+		// edited, so the stamp is not cited-only.
+		it("drops a write turn's message once every stamped file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-edited-deleted-${guard}`,
+				incident: "A write turn's edited and cited files were all deleted",
+				issue: "#4617",
+				async run(h) {
+					const edited = h.edit("src/e.ts", "export const e = 1;\n");
+					const cited = h.write("src/c.ts", "export const c = 1;\n");
+					h.blocker("src/e.ts", "L1: type mismatch");
+					h.runtime.appendCascadeRun(indeterminateRun(edited));
+					h.runtime.appendCascadeRun(indeterminateRun(cited));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.unlinkSync(edited);
+							fs.unlinkSync(cited);
+						},
+					});
+					expect(view.text).toBe("");
+				},
+			});
+		});
+
+		// Recurrence (#4954 F8): the r3 drop rule counted only edited files, so a
+		// turn that edited one file and resolved another dropped its message once
+		// the edited file was deleted, while the resolved file the text names
+		// still existed. Master delivered it labelled historical.
+		it("keeps a write turn's resolution labelled historical when only its edited file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-deleted-${guard}`,
+				incident: "Deleting the edited file dropped a live resolution line",
+				issue: "#4617",
+				async run(h) {
+					const resolved = h.write("src/v.ts", "export const v = 1;\n");
+					h.runtime.beginTurn();
+					const edited = h.edit("src/e.ts", "export const e = 1;\n");
+					h.blocker("src/v.ts", "L1: type mismatch");
+					h.runtime.retireInlineBlockerOnConfirmedClean(
+						resolved,
+						h.runtime.nextWriteOrderToken(),
+						["lsp"],
+					);
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.unlinkSync(edited);
+						},
+					});
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Same recurrence, the display bound: an advisory shows five files per
+		// reason and "(+N more)" for the rest, so a file it does not name is not
+		// one it speaks for.
+		it("ignores a run the coverage advisory counts but does not name", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-unnamed-run-${guard}`,
+				incident: "A run behind (+N more) bound the delivered advisory",
+				issue: "#4617",
+				async run(h) {
+					const runs = Array.from({ length: 7 }, (_, i) =>
+						h.write(`src/r${i}.ts`, `export const r${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					for (const run of runs)
+						h.runtime.appendCascadeRun(indeterminateRun(run));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runs[6] as string, "export const r6 = 2;\n");
+						},
+					});
+					expect(view.text).toContain("(+2 more)");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("ignores a neighbour the unconfirmed line counts but does not name", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-unnamed-neighbor-${guard}`,
+				incident: "A neighbour behind (+N more) bound the delivered line",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const neighbors = Array.from({ length: 7 }, (_, i) =>
+						h.write(`src/n${i}.ts`, `export const n${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun({
+						filePath: primary,
+						result: undefined,
+						neighborCount: neighbors.length,
+						diagnosticCount: 0,
+						unconfirmed: {
+							count: neighbors.length,
+							servers: [{ serverId: "ts", waitMs: 500, paths: neighbors }],
+						},
+					});
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(
+								neighbors[6] as string,
+								"export const n6 = 2;\n",
+							);
+						},
+					});
+					expect(view.text).toContain("(+2 more)");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("ignores a primary the unconfirmed line counts but does not name", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-unnamed-primary-${guard}`,
+				incident: "A primary behind (+N more) bound the delivered line",
+				issue: "#4617",
+				async run(h) {
+					const neighbor = h.write("src/n.ts", "export const n = 1;\n");
+					const primaries = Array.from({ length: 5 }, (_, i) =>
+						h.write(`src/p${i}.ts`, `export const p${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					for (const primary of primaries) {
+						h.runtime.appendCascadeRun({
+							filePath: primary,
+							result: undefined,
+							neighborCount: 1,
+							diagnosticCount: 0,
+							unconfirmed: {
+								count: 1,
+								servers: [{ serverId: "ts", waitMs: 500, paths: [neighbor] }],
+							},
+						});
+					}
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(
+								primaries[4] as string,
+								"export const p4 = 2;\n",
+							);
+						},
+					});
+					expect(view.text).toContain("(+2 more)");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("labels a coverage advisory historical when a file it names changed", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-named-run-${guard}`,
+				incident: "A named run's file changed after the turn end",
+				issue: "#4617",
+				async run(h) {
+					const runs = Array.from({ length: 7 }, (_, i) =>
+						h.write(`src/r${i}.ts`, `export const r${i} = 1;\n`),
+					);
+					h.runtime.beginTurn();
+					for (const run of runs)
+						h.runtime.appendCascadeRun(indeterminateRun(run));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runs[0] as string, "export const r0 = 2;\n");
+						},
+					});
+					expect(view.text).toContain("(+2 more)");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The turn's own edited-file list is capped before the stamp sees it, so
+		// the stamp must carry that loss forward (`affectedFilesTruncated`).
+		it("labels a write turn historical when its edited files exceed the stamp cap", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-edited-over-cap-${guard}`,
+				incident: "A stamp over the first files of a larger edit set",
+				issue: "#4617",
+				async run(h) {
+					for (let i = 0; i <= MAX_ADVISORY_AFFECTED_FILES; i += 1) {
+						h.edit(`src/e${i}.ts`, `export const e${i} = 1;\n`);
+					}
+					h.blocker("src/e0.ts", "L1: type mismatch");
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("type mismatch");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("labels a resolution historical when the stamping session is over", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-older-session-${guard}`,
+				incident: "A stamped advisory from an older session must stay labelled",
+				issue: "#4617",
+				async run(h) {
+					const file = h.write("src/value.ts", "export const value = 1;\n");
+					h.runtime.beginTurn();
+					h.blocker("src/value.ts", "L1: type mismatch");
+					h.runtime.retireInlineBlockerOnConfirmedClean(
+						file,
+						h.runtime.nextWriteOrderToken(),
+						["lsp"],
+					);
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							h.runtime.setTelemetryIdentity({ sessionId: "a-later-session" });
+						},
+					});
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+	},
+);
