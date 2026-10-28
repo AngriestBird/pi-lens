@@ -279,7 +279,7 @@ export interface BlockerFreshnessOptions {
 	 * the coordinator's). Another session's are swept at its own turn end,
 	 * against its own cwd.
 	 */
-	sessionId?: string;
+	sessionId?: string | undefined;
 	/** Forward-import resolution override; defaults to tree-sitter extraction. */
 	resolveForwardImports?: ForwardImportResolver;
 	/**

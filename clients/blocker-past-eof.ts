@@ -98,7 +98,7 @@ export interface BlockerPastEofOptions {
 	 * #4921: the turn session whose records this sweep covers (omitted: the
 	 * coordinator's). Another session's are swept at its own turn end.
 	 */
-	sessionId?: string;
+	sessionId?: string | undefined;
 }
 
 /**
