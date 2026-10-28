@@ -2593,7 +2593,16 @@ export async function readSymbol(
 			metadata: { symbol: symbolName, error: message },
 		});
 		log(false);
-		return { found: false, path: absPath, name: symbolName, error: message };
+		// #4949: this early return follows the extraction caveat; keep it.
+		return {
+			found: false,
+			path: absPath,
+			name: symbolName,
+			error: message,
+			...(extractionWarnings?.length
+				? { warnings: [...extractionWarnings] }
+				: {}),
+		};
 	}
 	const callbackWarnings = [...(extractionWarnings ?? [])];
 	const callback = allCallbacks.find(
