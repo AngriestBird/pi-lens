@@ -40,7 +40,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	classifySegment,
@@ -3095,12 +3095,13 @@ describe("scripts/hooks/guard-bash.mjs -- case patterns and ANSI-C quotes (#4060
 // comparison misses. Master kept the lexical `/tmp/new` and denied it; head
 // allowed it, and no lane runs this suite on macOS. The hook is copied with its
 // one `TMP_ROOT` literal re-pointed at a fixture root that is a symlink, which
-// is the macOS shape on any host, and run as a child like the real hook.
+// is the macOS shape on any host, and imported in process like `findDeny`'s
+// other callers here (a spawned copy would be a new real-process-spawn hit).
 describe("scripts/hooks/guard-bash.mjs -- tmpCheckout where the tmp root is a symlink (#4060 r2)", () => {
 	let root: string;
-	let copy: string;
+	let mod: typeof import("../../scripts/hooks/guard-bash.mjs");
 
-	beforeAll(() => {
+	beforeAll(async () => {
 		root = realpathSync(
 			mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-macroot-")),
 		);
@@ -3113,7 +3114,7 @@ describe("scripts/hooks/guard-bash.mjs -- tmpCheckout where the tmp root is a sy
 		// Guards the re-point itself: a renamed constant would make every row
 		// below test the real /tmp instead of the fixture.
 		expect(source.split(literal)).toHaveLength(2);
-		copy = join(root, "guard-bash-macroot.mjs");
+		const copy = join(root, "guard-bash-macroot.mjs");
 		writeFileSync(
 			copy,
 			source.replace(
@@ -3121,25 +3122,15 @@ describe("scripts/hooks/guard-bash.mjs -- tmpCheckout where the tmp root is a sy
 				`const TMP_ROOT = ${JSON.stringify(join(root, "tmp"))};`,
 			),
 		);
+		mod = (await import(pathToFileURL(copy).href)) as typeof mod;
 	});
 
 	afterAll(() => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	function verdict(command: string) {
-		return spawnSync(process.execPath, [copy], {
-			input: JSON.stringify({
-				session_id: "test",
-				cwd: PAYLOAD_CWD,
-				permission_mode: "default",
-				hook_event_name: "PreToolUse",
-				tool_name: "Bash",
-				tool_input: { command },
-			}),
-			encoding: "utf8",
-			env: BASE_ENV,
-		});
+	function verdict(command: string): string | null {
+		return mod.findDeny(command, PAYLOAD_CWD);
 	}
 
 	it.each([
@@ -3149,9 +3140,7 @@ describe("scripts/hooks/guard-bash.mjs -- tmpCheckout where the tmp root is a sy
 		["an existing mktemp directory", "mktemp -d @R@/tmp/x.XXXXXX"],
 		["a missing mktemp directory", "mktemp -d @R@/tmp/gone/x.XXXXXX"],
 	])("denies %s below the symlinked root", (_name, template) => {
-		const result = verdict(template.replaceAll("@R@", root));
-		expect(result.stderr).toBe(`${RULE_MESSAGES.tmpCheckout}\n`);
-		expect(result.status).toBe(2);
+		expect(verdict(template.replaceAll("@R@", root))).toBe("tmpCheckout");
 	});
 
 	it.each([
@@ -3161,9 +3150,7 @@ describe("scripts/hooks/guard-bash.mjs -- tmpCheckout where the tmp root is a sy
 			"git worktree add @R@/private/other/new",
 		],
 	])("allows %s", (_name, template) => {
-		const result = verdict(template.replaceAll("@R@", root));
-		expect(result.stderr).toBe("");
-		expect(result.status).toBe(0);
+		expect(verdict(template.replaceAll("@R@", root))).toBeNull();
 	});
 });
 
