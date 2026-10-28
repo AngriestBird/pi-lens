@@ -285,6 +285,35 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		expect(result?.diagnostics.map((d) => d.message)).toEqual(["ts finding"]);
 	});
 
+	// Recurrence (#4947 r2 verify N1): the receipt dropped a switched-off
+	// server's rows but kept its id in the incumbent's coverage gap, so the
+	// sweep reported "ast-grep did not answer" for a scanner it never asked, and
+	// never cached the file. The #584 baseline (opengrep) is the same shape.
+	it("drops a switched-off auxiliary from the incumbent's coverage gap and keeps the others (#4944)", async () => {
+		const file = path.join(tmp, "a.ts");
+		fs.writeFileSync(file, "const x = 1;\n");
+		tryWarmAttachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: {
+				diagnostics: [],
+				confirmation: "partial",
+				unconfirmedServerIds: ["ast-grep", "opengrep", "typos"],
+			},
+		});
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const gap = async (excludeServerIds?: ReadonlySet<string>) =>
+			(
+				await new LSPService().runWorkspaceDiagnostics(tmp, {
+					files: [file],
+					...(excludeServerIds && { excludeServerIds }),
+				})
+			)[0]?.unconfirmedServerIds;
+
+		// The control: with nothing switched off only the #584 baseline goes.
+		expect(await gap()).toEqual(["ast-grep", "typos"]);
+		expect(await gap(new Set(["ast-grep"]))).toEqual(["typos"]);
+	});
+
 	// Recurrence (#4944 review F3): removing the caller's ids from the sweep's
 	// scope key survived every test, so an entry swept with ast-grep on could be
 	// replayed to a sweep with it switched off. The entry is seeded under the key

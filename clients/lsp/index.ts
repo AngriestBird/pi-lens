@@ -37,7 +37,7 @@ import {
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
 import {
 	applyAuxiliarySuppressions,
-	dropExcludedServerRows,
+	dropExcludedServers,
 } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { emitBounded } from "../bounded-telemetry.js";
@@ -7246,7 +7246,10 @@ export class LSPService {
 			// Drop its rows from what this caller sees; the shared store keeps
 			// them for callers that did not exclude it.
 			const stored = this.lastKnownDiagnostics.get(normalizedPath);
-			const stale = stored && dropExcludedServerRows(stored, excludeServerIds);
+			const stale =
+				stored &&
+				dropExcludedServers({ diagnostics: stored }, excludeServerIds)
+					.diagnostics;
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
 			// #4322: with nothing acquired, every primary that resolved a root went
 			// unanswered, so an empty answer here is not a clean one.
@@ -9405,15 +9408,13 @@ export class LSPService {
 				// carry no binding, and the IPC client already rejects an inconclusive
 				// answer, so `available` implies confirmed) — wrap it as `{ diags }`;
 				// the incumbent branch already returns the wrapper.
-				// #4944: the incumbent answers every auxiliary; drop the ones this
-				// sweep's exclusion set (the scope key below claims) leaves out.
-				const attachedDiagnostics = attached?.available
-					? dropExcludedServerRows(
-							attached.response.diagnostics,
-							sweepExcludedServerIds,
-						)
-					: [];
-				const touchResult = attached?.available
+				// #4944: the incumbent answers every auxiliary; drop the rows and the
+				// coverage-gap names of the ones this sweep's exclusion set (the
+				// scope key below claims) leaves out, and read the answer from here.
+				const answer = attached?.available
+					? dropExcludedServers(attached.response, sweepExcludedServerIds)
+					: undefined;
+				const touchResult = answer
 					? {
 							// #4645: the incumbent's membership answer, applied on receipt
 							// through the owner's rule. This sweep records its rows into
@@ -9423,25 +9424,22 @@ export class LSPService {
 							// environment rule still runs at render, against the install
 							// state of that render.
 							diags:
-								attached.response.projectIdentity === undefined
-									? attachedDiagnostics
-									: await demoteInferredProjectDiagnostics(
-											attachedDiagnostics,
-											{
-												filePath,
-												cwd,
-												identityCache: new Map([
-													[filePath, attached.response.projectIdentity],
-												]),
-											},
-										),
+								answer.projectIdentity === undefined
+									? answer.diagnostics
+									: await demoteInferredProjectDiagnostics(answer.diagnostics, {
+											filePath,
+											cwd,
+											identityCache: new Map([
+												[filePath, answer.projectIdentity],
+											]),
+										}),
 							// #1470: the incumbent's coverage gap crosses the socket as an
 							// explicit DTO field, so carry it onto the wrapper the sweep
 							// reads. Dropping it here would let a partially covered
 							// incumbent answer be persisted as a confirmed sweep result —
 							// the same false clean this change closes on the local route.
-							...(attached.response.unconfirmedServerIds !== undefined && {
-								unconfirmedServerIds: attached.response.unconfirmedServerIds,
+							...(answer.unconfirmedServerIds !== undefined && {
+								unconfirmedServerIds: answer.unconfirmedServerIds,
 							}),
 						}
 					: await withDeadline(

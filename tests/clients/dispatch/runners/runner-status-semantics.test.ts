@@ -1254,6 +1254,44 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
+	// Recurrence (#4947 r2 verify N1): the receipt dropped a switched-off
+	// server's rows but kept its id, so a clean file came back skipped and the
+	// dispatcher printed "ast-grep silent — diagnostics are incomplete" for a
+	// scanner this session had switched off.
+	it("drops a switched-off auxiliary from the incumbent's coverage gap and keeps the others (#4944)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-warm-switched-off-gap-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const a = 1;\n");
+			warmAttach.diagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [],
+					confirmation: "partial",
+					unconfirmedServerIds: ["ast-grep", "typos"],
+				},
+			});
+			const gap = async (switches: readonly string[]) =>
+				(
+					await runner.run({
+						...ctx(filePath, env.tmpDir),
+						pi: {
+							getFlag: (name: string) =>
+								name === "lens-lsp" || switches.includes(name),
+						},
+					} as never)
+				).unconfirmedServerIds;
+
+			// The control: with the switch unset the incumbent's gap is reported.
+			expect(await gap([])).toEqual(["ast-grep", "typos"]);
+			expect(await gap(["no-ast-grep"])).toEqual(["typos"]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("lsp runner drops ast-grep auxiliary findings on test files, but keeps opengrep's (#687)", async () => {
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;

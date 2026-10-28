@@ -46,7 +46,7 @@ import {
 import {
 	applyAuxiliarySuppressions,
 	configDisabledAuxiliaryLspServerIds,
-	dropExcludedServerRows,
+	dropExcludedServers,
 	retagAuxiliaryDiagnostics,
 } from "../clients/dispatch/auxiliary-lsp.js";
 import {
@@ -897,15 +897,15 @@ async function collectDiagnosticsForFile(
 				"sweep",
 			);
 			if (attached?.available) {
+				// #4944: the incumbent answers every auxiliary; a switched-off one's
+				// rows and coverage-gap name are not this check's answer.
+				const answer = dropExcludedServers(attached.response, excludeServerIds);
 				const scopedDiagnostics =
 					serverScope === "primary"
-						? attached.response.diagnostics.filter(
+						? answer.diagnostics.filter(
 								(item) => item.serverId === primaryServerId(absPath),
 							)
-						: dropExcludedServerRows(
-								attached.response.diagnostics,
-								excludeServerIds,
-							);
+						: answer.diagnostics;
 				const filtered = applyAuxiliarySuppressions(
 					scopedDiagnostics,
 					content,
@@ -936,7 +936,7 @@ async function collectDiagnosticsForFile(
 					// #1470: the incumbent's narrowed verdict, carried as an explicit DTO
 					// field across the socket. An older incumbent omits it → empty → the
 					// pre-#1470 handling, unchanged.
-					unconfirmedServerIds: attached.response.unconfirmedServerIds ?? [],
+					unconfirmedServerIds: answer.unconfirmedServerIds ?? [],
 					diagnosticsUnsupportedServerIds: [],
 					content,
 					...(attached.response.projectIdentity !== undefined && {
