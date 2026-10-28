@@ -2025,7 +2025,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			const targetPath = path.isAbsolute(rawTarget)
 				? rawTarget
 				: path.resolve(ctx.cwd ?? runtime.projectRoot, rawTarget);
-			runtime.readGuard.addExemption(targetPath);
+			runtime.readGuardFor(getStableSessionId(ctx)).addExemption(targetPath);
 			notifyUi(
 				ctx,
 				`Read guard override armed for next edit: ${targetPath}`,
@@ -2070,25 +2070,29 @@ function activateExtension(hostPi: ExtensionAPI) {
 			() => runtime.projectRoot,
 			// Read-substitute tie-in (#245): a returned symbol body is a genuine read
 			// of that range, so record it as read-guard coverage for the symbol.
-			(filePath, symbol, toolCallId) =>
-				runtime.readGuard.recordSymbolRead(
-					filePath,
-					symbol,
-					runtime.turnIndex,
-					runtime.peekWriteIndex(),
-					sanitizeCorrelationId(toolCallId),
-				),
+			(filePath, symbol, toolCallId, ctx) =>
+				runtime
+					.readGuardFor(getStableSessionId(ctx))
+					.recordSymbolRead(
+						filePath,
+						symbol,
+						runtime.turnIndex,
+						runtime.peekWriteIndex(),
+						sanitizeCorrelationId(toolCallId),
+					),
 		),
 		createReadEnclosingTool(
 			() => runtime.projectRoot,
-			(filePath, symbol, toolCallId) =>
-				runtime.readGuard.recordSymbolRead(
-					filePath,
-					symbol,
-					runtime.turnIndex,
-					runtime.peekWriteIndex(),
-					sanitizeCorrelationId(toolCallId),
-				),
+			(filePath, symbol, toolCallId, ctx) =>
+				runtime
+					.readGuardFor(getStableSessionId(ctx))
+					.recordSymbolRead(
+						filePath,
+						symbol,
+						runtime.turnIndex,
+						runtime.peekWriteIndex(),
+						sanitizeCorrelationId(toolCallId),
+					),
 		),
 	];
 
@@ -2108,6 +2112,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			runtime,
 			cacheManager,
 			readGuard: runtime.readGuard,
+			readGuardFor: (sessionId) => runtime.readGuardFor(sessionId),
 			dbg,
 		}),
 		createLensDiagnosticMarkTool(
@@ -3062,8 +3067,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// #3521: `/tree` moves the conversation inside this activation. Keep only
 	// the reads whose tool result is on the new branch. A concurrent secondary
 	// shares the module-level runtime, so its tree moves never touch the
-	// primary's guard; the other direction is an accepted residual (#3521 F2):
-	// a primary /tree clears a live secondary's reads, costing it one re-read.
+	// primary's guard, and the primary's never touch a secondary's (#4942: each
+	// session has its own read guard, which closes #3521 F2's residual).
 	// `session_before_tree` can still be cancelled by a later handler, so
 	// nothing happens there.
 	(pi as any).on(
@@ -3215,7 +3220,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 					ruffClient: resident?.ruffClient,
 					metricsClient: resident?.metricsClient,
 					resetLSPService,
-					readGuard: runtime.readGuard,
+					// #4942: the read guard of the session whose tool result this is.
+					readGuard: runtime.readGuardFor(getStableSessionId(ctx)),
 					agentBehaviorRecord: (toolName, filePath) =>
 						(
 							resident?.agentBehaviorClient ?? getAgentBehaviorClient()
@@ -3279,8 +3285,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// the host or blocked by a later extension after pi-lens captured it (pi
 	// then emits no tool_result), releases its capture here, before the next
 	// tool_call of the run can count it.
-	pi.on("tool_execution_end", (event) => {
-		handleToolExecutionEnd(event, runtime.readGuard);
+	pi.on("tool_execution_end", (event, ctx) => {
+		handleToolExecutionEnd(
+			event,
+			runtime.readGuardFor(getStableSessionId(ctx)),
+		);
 	});
 
 	/** #1123 item 2 / #1332: one `memory_sample` latency record. `idleGapMs` is
@@ -3504,12 +3513,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 		lineage: LineageHandle,
 	): Promise<void> {
 		const cwd = ctx.cwd ?? runtime.projectRoot;
+		// #4942: the files THIS settling session read or wrote are the ones to
+		// sweep; the coordinator's guard holds only the primary's. The replay
+		// below still stamps the coordinator's guard (the mutation bridge
+		// carries no session id), which only ever tightens it: settled-sweep
+		// drift never creates an authorship (#4210).
+		const settleGuard = runtime.readGuardFor(getStableSessionId(ctx));
 		try {
 			const result = await runObservedSettledSweep({
 				turnIndex: runtime.turnIndex,
 				getTrackedPaths: () =>
 					collectTrackedPaths({
-						readGuard: runtime.readGuard,
+						readGuard: settleGuard,
 						cwd,
 						limit: OBSERVED_TRACKED_MAX_FILES,
 					}),
@@ -3523,7 +3538,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						lineage,
 					}),
 				getStoredLineHashes: (candidate) =>
-					storedLineHashesFor(runtime.readGuard, candidate),
+					storedLineHashesFor(settleGuard, candidate),
 				// Merge of #2449 into #2450: #2449 wrote this gate as the
 				// hand-spelled `isPathIgnoredByProject` + `isExternalOrVendorFile`
 				// pair, which is the duplication #2450's review round 2 (F4)
@@ -3581,7 +3596,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// gets its baseline from the read-guard's stored per-line hashes
 				// rather than a read (#2449 review round 2, F3).
 				getStoredLineHashes: (candidate) =>
-					storedLineHashesFor(runtime.readGuard, candidate),
+					storedLineHashesFor(
+						runtime.readGuardFor(getStableSessionId(ctx)),
+						candidate,
+					),
 				signal,
 			});
 		} catch (refreshErr) {
@@ -3603,6 +3621,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// "primary" and runs as before.
 		const emission = classifyOwnedSessionEmission(ctx, currentSessionId);
 		if (emission === "concurrent-secondary") {
+			// #4942: the backstop for read captures a dead run left (see the top of
+			// `handleAgentEnd`) is per session now. The coordinator's settle no
+			// longer reaches a secondary's guard, and this arm returns before
+			// `handleAgentEnd`, so the secondary releases its own here.
+			runtime.readGuardFor(currentSessionId).dropProvisionalReads();
 			dbg(
 				`deferred_mutation_drain: concurrent secondary session detected — skipping (sessionId=${currentSessionId})`,
 			);

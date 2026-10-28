@@ -686,11 +686,13 @@ describe("#3521 /tree keeps only the reads on the new branch", () => {
 		expect(await c.editLine("post_a", a, 2, "Y", false)).toBe("ALLOW");
 	});
 
-	it("wipes a live concurrent secondary's read on a primary /tree (accepted residual, #3521 F2)", async () => {
-		// Pinned so a later fix flips it deliberately: the read guard is the
-		// module-level runtime's, shared with an in-process subagent, and the
-		// primary's retainBranch drops every id its own branch lacks. The cost
-		// is one re-read in the subagent, never an allow.
+	it("keeps a live concurrent secondary's read across a primary /tree (#3521 F2, closed by #4942)", async () => {
+		// RECURRENCE GUARDED: #3521 F2's residual, pinned until #4942 flipped it.
+		// The read guard was the module-level runtime's, shared with an
+		// in-process subagent, so the primary's retainBranch dropped every id its
+		// own branch lacked, the subagent's read included (one needless re-read).
+		// The subagent now owns a guard of its own (`readGuardFor`), which the
+		// primary's /tree never touches.
 		const primary = conversation(
 			await startRuntime(SessionManager.inMemory(cwd)),
 		);
@@ -710,8 +712,8 @@ describe("#3521 /tree keeps only the reads on the new branch", () => {
 
 		await primary.S().navigateTree(p1);
 
-		expect(await secondary.editLine("sub_edit_post", f, 3, "Y", false)).toEqual(
-			ZERO_READ,
+		expect(await secondary.editLine("sub_edit_post", f, 3, "Y", false)).toBe(
+			"ALLOW",
 		);
 	});
 
@@ -1986,19 +1988,19 @@ describe("#3612 a queued agent advisory follows /reload", () => {
 					.not.toContain("lost edit in a.rs");
 				// A secondary never looks for a slot.
 				expect.soft(missedSubjects()).toEqual([]);
-				// Accepted residual #3613 (S4, TLC `MutSecondaryReadShared`),
-				// pinned so S4 flips it: a secondary's edits are judged by the
-				// primary's read guard, so the primary's read of a.conf allows the
-				// subagent's edit, and the primary's own authorship policy decides
-				// its written file (carried on /reload and, since #3603, on a
-				// /fork whose branch shows the write). These read ZERO_READ before
-				// #3855 only because the subagent's own start wrongly took the
-				// primary slot and reset the guard.
+				// #4942 (closes the #3613 S4 residual this once pinned, TLC
+				// `MutSecondaryReadShared`): a secondary's edits are judged by the
+				// secondary's own read guard. The subagent read neither file, so
+				// the primary's read of a.conf and its authorship of the written
+				// file license nothing here. (These were ALLOW while the guard was
+				// shared.)
 				const s = conversation(subagent);
 				expect
 					.soft(await s.editLine("sub_written", written, 2, "Y", false))
-					.toBe("ALLOW");
-				expect.soft(await s.editLine("sub_a", a, 2, "Y", false)).toBe("ALLOW");
+					.toEqual(ZERO_READ);
+				expect
+					.soft(await s.editLine("sub_a", a, 2, "Y", false))
+					.toEqual(ZERO_READ);
 			});
 		}
 

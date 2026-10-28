@@ -283,12 +283,13 @@ LegacyFence(s) == IF s = "RG" THEN "session" ELSE TargetFence(s)
 TargetSec(s) ==
     CASE s \in {"RG", "TC", "LZ"} -> "own" [] OTHER -> "shared"
 
-\* Merged master: S2 gave the lazy-tool memory a cell per scope (#3653), and
-\* #3613 the turn state: `beginTurn` takes the turn's session id and the
-\* per-turn records are partitioned by it (`clients/runtime-coordinator.ts`).
-\* A subagent's handlers still reach the module-level runtime's read guard
-\* (#3607, F4, the rest of #3613).
-MergedSec(s) == IF s \in {"LZ", "TC"} THEN "own" ELSE "shared"
+\* Merged master: S2 gave the lazy-tool memory a cell per scope (#3653), #3613
+\* the turn state (`beginTurn` takes the turn's session id and the per-turn
+\* records are partitioned by it, `clients/runtime-coordinator.ts`), and #4942
+\* the read guard (`RuntimeCoordinator.readGuardFor`, F4, the rest of #3613):
+\* a subagent's handlers reach a read guard of its own. Merged master is now
+\* the design's `TargetSec`; the name stays for the configs that pin it.
+MergedSec(s) == IF s \in {"LZ", "TC", "RG"} THEN "own" ELSE "shared"
 
 \* Merged master before #3613: the turn counter and per-turn maps were the
 \* module-level runtime's too (N2).

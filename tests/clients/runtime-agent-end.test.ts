@@ -142,6 +142,68 @@ describe("runtime-agent-end deferred formatting", () => {
 		}
 	});
 
+	it("releases only its own session's open captures at agent_end (#4942)", async () => {
+		// RECURRENCE GUARDED: #4942. One guard for every session of the process
+		// let a subagent's agent_end drop the primary's in-flight read capture
+		// (the primary's next edit then lost its licence mid-run), and the
+		// primary's drop the subagent's.
+		const env = setupTestEnvironment("pi-lens-agent-end-own-captures-");
+		try {
+			const own = createTempFile(env.tmpDir, "own.ts", "export const a = 1;\n");
+			const sub = createTempFile(env.tmpDir, "sub.ts", "export const b = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setSessionLifecycle({ sessionId: "primary-session" });
+			const read = (path: string, toolCallId: string, sessionId?: string) =>
+				runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						event: { toolName: "read", toolCallId, input: { path } },
+						ctx: { cwd: env.tmpDir },
+						lensEnabled: true,
+						getFlag: (name: string) =>
+							name === "no-lsp" || name === "no-complexity",
+						dbg: () => {},
+						runtime,
+						cacheManager: new CacheManager(false),
+						ensureLSPConfigInitialized: async () => {},
+						updateLspStatus: () => {},
+						resetLSPService: () => {},
+						sessionId,
+					} as never),
+				);
+			await read(own, "own-read", "primary-session");
+			await read(sub, "sub-read", "subagent-session");
+			const open = () => ({
+				own: runtime.readGuardFor("primary-session").getReadHistory(own).length,
+				sub: runtime.readGuardFor("subagent-session").getReadHistory(sub)
+					.length,
+			});
+			expect(open()).toEqual({ own: 1, sub: 1 });
+
+			const end = (currentSessionId?: string) =>
+				handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: () => {},
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					getFormatService: () => ({ recordRead: () => {} }) as never,
+					currentSessionId,
+				});
+			await end("subagent-session");
+			const afterSubEnd = open();
+			await end("primary-session");
+
+			expect({ afterSubEnd, afterBothEnd: open() }).toEqual({
+				afterSubEnd: { own: 1, sub: 0 },
+				afterBothEnd: { own: 0, sub: 0 },
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	afterEach(cleanupAgentEndTemps);
 	afterAll(cleanupAgentEndTemps);
 
@@ -3388,7 +3450,11 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 				runtime,
 				...args.secondSettle,
 			});
-			return runtime.readGuard.checkEdit(filePath, [1, 1]).action;
+			// #4942: the verdict is the claiming session's own guard, the one the
+			// drain credits (`currentSessionId`, the coordinator's when omitted).
+			return runtime
+				.readGuardFor(args.secondSettle?.currentSessionId)
+				.checkEdit(filePath, [1, 1]).action;
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
@@ -3498,6 +3564,31 @@ describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)
 					},
 					moved,
 					secondSettle: autofixClients,
+				}),
+			).toBe(verdict);
+		});
+
+		it(`drains a secondary's stale-orphan autofix ${where} as ${verdict}`, async () => {
+			expect(
+				await acrossSettles({
+					onX: async (runtime, filePath, _base, cwd) => {
+						withBiomeProject(cwd);
+						runtime.deferMutation(
+							filePath,
+							cwd,
+							"edit",
+							cwd,
+							"autofix",
+							"secondary",
+						);
+					},
+					moved,
+					// #4942: the claiming session's settle credits its own guard.
+					secondSettle: {
+						...autofixClients,
+						currentSessionId: "primary",
+						staleAfterMs: -1,
+					},
 				}),
 			).toBe(verdict);
 		});

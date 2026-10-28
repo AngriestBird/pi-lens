@@ -192,6 +192,7 @@ function retireAstGrepApplyTargets(
 	event: { input?: unknown },
 	runtime: ToolCallDeps["runtime"],
 	ctx: { cwd?: string },
+	sessionId: string | undefined,
 ): void {
 	const input = (event.input ?? {}) as Record<string, unknown>;
 	if (toolName !== "ast_grep_replace" || input.apply !== true) return;
@@ -205,16 +206,15 @@ function retireAstGrepApplyTargets(
 			runtime.projectRoot,
 		)?.path;
 		if (!resolved) continue;
-		runtime.readGuard?.retireChangedAuthorship?.(resolved);
+		runtime.readGuardFor(sessionId).retireChangedAuthorship?.(resolved);
 		checked.push(resolved);
 	}
 	// A folder target resolves but authors nothing, so it licenses no file: the
 	// files the apply rewrites inside it are unlicensed and end their
 	// authorship. Omitted `paths` (the project default) returns above.
-	runtime.readGuard?.noteCheckedPaths?.(
-		resolveToolCallCorrelationId(event),
-		checked,
-	);
+	runtime
+		.readGuardFor(sessionId)
+		.noteCheckedPaths?.(resolveToolCallCorrelationId(event), checked);
 }
 
 type ReadToolInput = {
@@ -694,7 +694,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				commandInput.command,
 				runtime.projectRoot || process.cwd(),
 			))
-				runtime.readGuard?.retireChangedAuthorship?.(target);
+				runtime.readGuardFor(deps.sessionId).retireChangedAuthorship?.(target);
 	}
 	// #4504: the record and the take resolve their root through one owner, so a
 	// session whose cwd is not the coordinator's project root (a concurrent
@@ -816,10 +816,12 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			// here.
 			const observedCallId = resolveToolCallCorrelationId(event);
 			const retire = (target: string) => {
-				runtime.readGuard?.retireChangedAuthorship?.(target);
+				runtime.readGuardFor(deps.sessionId).retireChangedAuthorship?.(target);
 			};
 			retire(observedPath);
-			runtime.readGuard?.noteCheckedPaths?.(observedCallId, [observedPath]);
+			runtime
+				.readGuardFor(deps.sessionId)
+				.noteCheckedPaths?.(observedCallId, [observedPath]);
 			await armObservedMutation({
 				toolCallId: observedCallId,
 				toolName,
@@ -831,14 +833,16 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				isLiveTurn: (key) => runtime.isLiveTurnKey(key),
 				onUniverse: (paths) => {
 					paths.forEach(retire);
-					runtime.readGuard?.noteCheckedPaths?.(observedCallId, paths);
+					runtime
+						.readGuardFor(deps.sessionId)
+						.noteCheckedPaths?.(observedCallId, paths);
 				},
 				signal: ctx.signal,
 				dbg,
 			});
 		}
 	}
-	retireAstGrepApplyTargets(toolName, event, runtime, ctx);
+	retireAstGrepApplyTargets(toolName, event, runtime, ctx, deps.sessionId);
 
 	if (
 		getFlag("lens-guard") &&
@@ -1281,7 +1285,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				expandedByTs: enclosingSymbol !== undefined,
 			},
 		});
-		runtime.readGuard.recordRead(
+		runtime.readGuardFor(deps.sessionId).recordRead(
 			{
 				filePath,
 				requestedOffset: requestedReadOffset,
@@ -1397,12 +1401,14 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		filePath &&
 		!getFlag("no-read-guard")
 	) {
-		runtime.readGuard.noteCreatedFile(
-			filePath,
-			runtime.turnIndex,
-			runtime.peekWriteIndex(),
-			resolveReadEvidenceCorrelationId(event),
-		);
+		runtime
+			.readGuardFor(deps.sessionId)
+			.noteCreatedFile(
+				filePath,
+				runtime.turnIndex,
+				runtime.peekWriteIndex(),
+				resolveReadEvidenceCorrelationId(event),
+			);
 	}
 
 	// --- Indentation mismatch correction ---
@@ -1534,13 +1540,13 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				// reflects real content at the matched span. Register a
 				// synthetic read covering it so the read-guard downstream
 				// doesn't fire a zero_read block after the verification.
-				if (matchNormalizedContent !== undefined && runtime.readGuard) {
+				if (matchNormalizedContent !== undefined) {
 					const range = findUniqueMatchLineRange(
 						matchNormalizedContent,
 						patch.oldText,
 					);
 					if (range) {
-						runtime.readGuard.recordRead({
+						runtime.readGuardFor(deps.sessionId).recordRead({
 							filePath,
 							requestedOffset: range.startLine,
 							requestedLimit: range.endLine - range.startLine + 1,
@@ -1651,10 +1657,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				// reflects real content at this span. Register a synthetic read
 				// for the matched range so a zero_read block downstream isn't
 				// thrown after the autopatch already verified the content.
-				if (matchNormalizedContent !== undefined && runtime.readGuard) {
+				if (matchNormalizedContent !== undefined) {
 					const range = matchedRange;
 					if (range) {
-						runtime.readGuard.recordRead({
+						runtime.readGuardFor(deps.sessionId).recordRead({
 							filePath,
 							requestedOffset: range.startLine,
 							requestedLimit: range.endLine - range.startLine + 1,
@@ -1671,7 +1677,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		}
 	}
 	if (isEditOnly && filePath && !getFlag("no-read-guard")) {
-		const readGuard = runtime.readGuard;
+		const readGuard = runtime.readGuardFor(deps.sessionId);
 		const isExistingFile =
 			typeof readGuard?.isNewFile !== "function" ||
 			!readGuard.isNewFile(filePath);
@@ -1740,7 +1746,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 									ruffClient,
 									metricsClient,
 									resetLSPService,
-									readGuard: runtime.readGuard,
+									readGuard: runtime.readGuardFor(deps.sessionId),
 									sessionId: deps.sessionId,
 									_ownWriteStamp: partialStamp,
 									agentBehaviorRecord: (toolName, analyzedPath) =>
@@ -1854,7 +1860,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				);
 				if (relocated) {
 					const [toStart, toEnd] = verdict.relocation.to;
-					runtime.readGuard?.recordRead({
+					runtime.readGuardFor(deps.sessionId).recordRead({
 						filePath,
 						requestedOffset: toStart,
 						requestedLimit: toEnd - toStart + 1,
