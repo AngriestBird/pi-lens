@@ -129,6 +129,7 @@ import {
 	makeSessionStartEvent,
 } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 
 const GOLDEN_DIR = path.join(
 	import.meta.dirname,
@@ -266,7 +267,8 @@ async function witnessTurn(
 	spawnRouter.state.helmLintStdout = HELM_LINT_OUTPUT;
 	if (deleteValues) fs.rmSync(values);
 
-	const pi = createPiMock({ "no-lsp": true });
+	setGlobalConfig({ lsp: { enabled: false } });
+	const pi = createPiMock();
 	extension(pi.asExtensionAPI());
 	await pi.emit(
 		"session_start",
@@ -323,6 +325,8 @@ function assertGolden(name: string, actual: string): void {
 	}
 	expect(`${actual}\n`).toBe(fs.readFileSync(golden, "utf-8"));
 }
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("#3190 witness: a retracted deleted-path blocker through pi", () => {
 	it("matches the golden across the retracted and unretracted cells", async () => {

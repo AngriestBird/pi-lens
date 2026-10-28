@@ -320,6 +320,7 @@ import {
 	makeSessionStartEvent,
 } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import { installLspServiceDouble } from "./support/lsp-service-seam.js";
 import { readNdjsonRows } from "./support/ndjson-rows.js";
 
@@ -388,10 +389,14 @@ async function openSession(
 	name: string,
 	file: string,
 	fixed: string,
-	flags: Record<string, unknown> = {},
+	config: Record<string, unknown> = {},
+	afterFactory: Record<string, boolean | string> = {},
 ) {
-	const pi = createPiMock({ "lens-guard": true, ...flags });
+	setGlobalConfig({ guard: { enabled: true }, ...config });
+	const pi = createPiMock();
 	extension(pi.asExtensionAPI());
+	for (const [flag, value] of Object.entries(afterFactory))
+		pi.setFlag(flag, value);
 	const ctx = () => makeCtx({ cwd: tmpDir });
 	await pi.emit(
 		"session_start",
@@ -573,6 +578,8 @@ async function degradationRows(
 	});
 }
 
+const setGlobalConfig = useGlobalConfig();
+
 describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () => {
 	it("keeps an LSP error that write 2 left in place blocking on every surface (cell A)", async () => {
 		boundary.lsp.enabled = true;
@@ -683,7 +690,7 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 	it("re-delivers the error under --no-delta, before and after the fix (cell K)", async () => {
 		boundary.lsp.enabled = true;
 		const s = await openSession("k", "src/cell-k.ts", V_FIXED, {
-			"no-delta": true,
+			delta: { enabled: false },
 		});
 		await s.write(V1);
 		const w2 = await s.write(V2_OTHER_LINE);
@@ -719,7 +726,7 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 		it("keeps a helm blocker that write 2 left in place, and after a line shift (cells F and H)", async () => {
 			chart();
 			const s = await openSession("f", "chart/templates/deploy-f.yaml", T2, {
-				"no-lsp": true,
+				lsp: { enabled: false },
 			});
 			const e4 = lint(
 				"deploy-f.yaml:4: nil pointer evaluating interface {}.image",
@@ -752,7 +759,7 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 		it("keeps the later helm blocker when fixing the earlier one renumbers it (cell R)", async () => {
 			chart();
 			const s = await openSession("r", "chart/templates/deploy-r.yaml", T2, {
-				"no-lsp": true,
+				lsp: { enabled: false },
 			});
 			s.helmNext(
 				lint(
@@ -802,7 +809,7 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 		"export function run(): void {\n\tdebugger;\n}\nexport const a = 1;\n";
 	const TS_EDITED = TS_SRC.replace("a = 1", "a = 2");
 	const TS_FIXED = "export function run(): void {}\nexport const a = 1;\n";
-	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const SCOPED = { lsp: { enabled: false } };
 
 	// Recurrence: since #4482 the ast-grep runner drops a blocker on a line the
 	// edit did not change, so an edit elsewhere emptied the observation and the
@@ -1059,7 +1066,7 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
  * run's range.
  */
 describe("#4484 witness, round 3: position, verdict and owed lines", () => {
-	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const SCOPED = { lsp: { enabled: false } };
 	const AG_PRE = [
 		'export const CLIENT_VERSION = "1.0.50";',
 		"export const plain = CLIENT_VERSION;",
@@ -1235,7 +1242,7 @@ describe("#4484 witness, round 3: position, verdict and owed lines", () => {
 });
 
 describe("#4484 witness, round 4: no alignment fails closed", () => {
-	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const SCOPED = { lsp: { enabled: false } };
 	const AG_PRE = [
 		'export const CLIENT_VERSION = "1.0.50";',
 		"export const plain = CLIENT_VERSION;",
@@ -1348,7 +1355,7 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 });
 
 describe("#4484 witness, round 5: a fallback holds only what its evidence names", () => {
-	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const SCOPED = { lsp: { enabled: false } };
 	const AG_PRE = [
 		'export const CLIENT_VERSION = "1.0.50";',
 		"export const plain = CLIENT_VERSION;",
@@ -1746,10 +1753,13 @@ describe("#4484 witness, round 8: a covered skip counts only when its lane answe
 		process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`;
 		try {
 			boundary.lsp.enabled = true;
-			const s = await openSession("p39", "scripts/p39.sh", SH_FIXED, {
-				"no-lsp": true,
-				"no-ast-grep": true,
-			});
+			const s = await openSession(
+				"p39",
+				"scripts/p39.sh",
+				SH_FIXED,
+				{},
+				{ "no-lsp": true },
+			);
 			expect(await s.write(SH.replace("echo one", "echo zero"))).toContain(
 				"🔴 STOP",
 			);
@@ -1782,7 +1792,7 @@ describe("#4484 witness, round 8: a covered skip counts only when its lane answe
 });
 
 describe("#4509 witness: a recorded blocker is judged by a run of its own runner", () => {
-	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const SCOPED = { lsp: { enabled: false } };
 	const AG_PRE = [
 		'export const CLIENT_VERSION = "1.0.50";',
 		"export const plain = CLIENT_VERSION;",

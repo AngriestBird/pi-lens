@@ -67,7 +67,10 @@ import {
 } from "../clients/degradation-ledger.js";
 import extension from "../index.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("#3576: the post-drain ledger refresh stays in the drain's session", () => {
 	let tmp: string;
@@ -89,7 +92,8 @@ describe("#3576: the post-drain ledger refresh stays in the drain's session", ()
 
 	async function settle(replaceSession: boolean): Promise<void> {
 		drain.replaceSession = replaceSession;
-		const pi = createPiMock({ "no-lsp": true });
+		setGlobalConfig({ lsp: { enabled: false } });
+		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		const ctx = makeCtx({ cwd: tmp, sessionId: "s-3576-refresh" });
 		await pi.emit("session_start", { reason: "startup" }, ctx);

@@ -182,6 +182,7 @@ import {
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import { installLspServiceDouble } from "./support/lsp-service-seam.js";
 import { readNdjsonRows } from "./support/ndjson-rows.js";
 
@@ -257,18 +258,19 @@ async function rows(
 
 /**
  * One host session over one file that exists before the session starts.
- * `flags` are the host flags.
+ * `config` is the global config over the lens-guard default.
  */
 async function openSession(
 	name: string,
 	file: string,
 	before: string,
-	flags: Record<string, unknown> = {},
+	config: Record<string, unknown> = {},
 ) {
 	const target = path.join(tmpDir, file);
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	fs.writeFileSync(target, before);
-	const pi = createPiMock({ "lens-guard": true, ...flags });
+	setGlobalConfig({ guard: { enabled: true }, ...config });
+	const pi = createPiMock();
 	extension(pi.asExtensionAPI());
 	// #4733 r5: every event carries this session's id. A shutdown with no id
 	// left the first cell holding the primary registration, so every later cell
@@ -395,6 +397,8 @@ async function openSession(
 }
 
 const OLD_ERROR = "#!/bin/sh\nBAD_SH\necho a\n";
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("#4483 witness: a linter blocks on the delta at a file's first write", () => {
 	it("does not stop on a linter error the file had before its first edit (acceptance 1)", async () => {
@@ -590,7 +594,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 
 	it("captures nothing with --no-delta, where every finding is reported anyway", async () => {
 		const s = await openSession("no-delta", "scripts/no-delta.sh", OLD_ERROR, {
-			"no-delta": true,
+			delta: { enabled: false },
 		});
 		const out = await s.edit("echo a", "echo b");
 		expect(out).toContain("🔴 STOP — 1 issue(s) must be fixed:");

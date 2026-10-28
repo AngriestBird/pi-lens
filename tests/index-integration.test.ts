@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import {
 	drainResidentJscpdScans,
 	removeTempDirSync,
@@ -47,13 +48,9 @@ const r6Mocks = vi.hoisted(() => ({
 const INTEGRATION_TIMEOUT_MS = 45_000;
 
 type IntegrationHook = (event: unknown, ctx: unknown) => unknown;
-function createMockPi(overrides: Record<string, boolean> = {}) {
-	const mock = createPiMock({
-		"lens-lsp": true,
-		"no-lsp": false,
-		"lens-guard": false,
-		...overrides,
-	});
+function createMockPi(config: Record<string, unknown> = {}) {
+	if (Object.keys(config).length > 0) setGlobalConfig(config);
+	const mock = createPiMock();
 	return {
 		mock,
 		pi: mock.asExtensionAPI(),
@@ -242,6 +239,8 @@ const forceCollect = resolveForcedCollector();
 afterEach(() => {
 	forceCollect();
 });
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("index.ts integration", () => {
 	let tmpDir: string;
@@ -1316,11 +1315,7 @@ describe("index.ts integration", () => {
 			const telemetry =
 				await import("../clients/path-attribution-telemetry.js");
 			const { default: registerExtension } = await import("../index.js");
-			const primary = createPiMock({
-				"lens-lsp": true,
-				"no-lsp": false,
-				"lens-guard": false,
-			});
+			const primary = createPiMock();
 			registerExtension(primary.asExtensionAPI());
 			await primary.emit(
 				"session_start",
@@ -1332,11 +1327,7 @@ describe("index.ts integration", () => {
 			lspServer._markDirectLspCommandUnavailableForTests(
 				"secondary-must-not-reset",
 			);
-			const secondary = createPiMock({
-				"lens-lsp": true,
-				"no-lsp": false,
-				"lens-guard": false,
-			});
+			const secondary = createPiMock();
 			registerExtension(secondary.asExtensionAPI());
 			await secondary.emit(
 				"session_start",
@@ -1885,7 +1876,7 @@ describe("index.ts integration", () => {
 				beforeReset: resetLSPService,
 			});
 			const { default: registerExtension } = await import("../index.js");
-			const { pi, handlers } = createMockPi({ "no-lsp": false });
+			const { pi, handlers } = createMockPi();
 			registerExtension(pi as any);
 
 			const turnEnd = handlers.turn_end?.[0];
@@ -2241,7 +2232,7 @@ describe("index.ts integration", () => {
 			});
 
 			const { default: registerExtension } = await import("../index.js");
-			const { pi, handlers } = createMockPi({ "no-lsp": true });
+			const { pi, handlers } = createMockPi({ lsp: { enabled: false } });
 			registerExtension(pi as any);
 
 			const toolCall = handlers.tool_call?.[0];
@@ -2353,7 +2344,7 @@ describe("index.ts integration", () => {
 			});
 
 			const { default: registerExtension } = await import("../index.js");
-			const { pi, handlers } = createMockPi({ "no-lsp": true });
+			const { pi, handlers } = createMockPi({ lsp: { enabled: false } });
 			registerExtension(pi as any);
 
 			const toolCall = handlers.tool_call?.[0];
@@ -2469,7 +2460,7 @@ describe("index.ts integration", () => {
 			});
 
 			const { default: registerExtension } = await import("../index.js");
-			const { pi, handlers } = createMockPi({ "no-lsp": true });
+			const { pi, handlers } = createMockPi({ lsp: { enabled: false } });
 			registerExtension(pi as any);
 
 			const toolCall = handlers.tool_call?.[0];
@@ -2600,7 +2591,7 @@ describe("index.ts integration", () => {
 			// The seam install goes after the doMocks above: it evaluates the graph.
 			await installLspServiceDouble({ touchFile: touchFileMock });
 			const { default: registerExtension } = await import("../index.js");
-			const { pi, handlers } = createMockPi({ "no-lsp": false });
+			const { pi, handlers } = createMockPi();
 			registerExtension(pi as any);
 
 			const toolCall = handlers.tool_call?.[0];
@@ -2710,7 +2701,7 @@ describe("index.ts integration", () => {
 			// The seam install goes after the doMocks above: it evaluates the graph.
 			await installLspServiceDouble({ touchFile: touchFileMock });
 			const { default: registerExtension } = await import("../index.js");
-			const { pi, handlers } = createMockPi({ "no-lsp": false });
+			const { pi, handlers } = createMockPi();
 			registerExtension(pi as any);
 
 			const toolCall = handlers.tool_call?.[0];
@@ -2815,7 +2806,7 @@ describe("index.ts integration", () => {
 			// The seam install goes after the doMocks above: it evaluates the graph.
 			await installLspServiceDouble({ touchFile: touchFileMock });
 			const { default: registerExtension } = await import("../index.js");
-			const { pi, handlers } = createMockPi({ "no-lsp": false });
+			const { pi, handlers } = createMockPi();
 			registerExtension(pi as any);
 
 			const toolCall = handlers.tool_call?.[0];
@@ -3541,7 +3532,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 			const { default: registerExtension } = await import("../index.js");
 			const { pi, handlers, sentMessages } = createMockPi({
-				"lens-turn-summary": true,
+				turnSummary: { enabled: true },
 			});
 			registerExtension(pi as any);
 
@@ -3598,7 +3589,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 			const { default: registerExtension } = await import("../index.js");
 			const { pi, handlers, sentMessages } = createMockPi({
-				"lens-turn-summary": true,
+				turnSummary: { enabled: true },
 			});
 			registerExtension(pi as any);
 
@@ -3631,7 +3622,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 			const { default: registerExtension } = await import("../index.js");
 			const { pi, handlers, sentMessages } = createMockPi({
-				"lens-turn-summary": true,
+				turnSummary: { enabled: true },
 			});
 			registerExtension(pi as any);
 
@@ -3695,7 +3686,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			fs.writeFileSync(filePath, "export const x = 1;\n");
 
 			const { default: registerExtension } = await import("../index.js");
-			const { pi, handlers } = createMockPi({ "lens-turn-summary": true });
+			const { pi, handlers } = createMockPi({ turnSummary: { enabled: true } });
 			// Simulate an older host lacking both APIs entirely — registerExtension
 			// feature-detects registerMessageRenderer at setup time, and the
 			// quiet-window task feature-detects sendMessage at emit time.
@@ -3723,7 +3714,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 			const { default: registerExtension } = await import("../index.js");
 			const { pi, handlers, sentMessages } = createMockPi({
-				"lens-turn-summary": true,
+				turnSummary: { enabled: true },
 			});
 			registerExtension(pi as any);
 

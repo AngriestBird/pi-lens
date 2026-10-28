@@ -223,7 +223,13 @@ export interface PiMock {
 	}): void;
 
 	// ── test helpers ─────────────────────────────────────────────────────────
-	/** Pre-set a flag value (read back via getFlag); call before `extension(pi)`. */
+	/**
+	 * Set a flag value (read back via getFlag) once the factory has registered
+	 * the flag. A value set before registration is refused (#4913 part D): pi
+	 * applies command-line flag values after every factory, so no pre-set path
+	 * exists. A flag a test is ABOUT goes to tier 2 (`pi-session.ts`); a quiet
+	 * flag goes to the global config (`PI_LENS_CONFIG_PATH`, `useGlobalConfig`).
+	 */
 	setFlag(name: string, value: boolean | string): void;
 	getHandlers(event: string): Hook[];
 	/** First handler for an event, or throw if none registered. */
@@ -271,18 +277,14 @@ export interface PiMockOptions {
 	supportsActiveTools?: boolean;
 }
 
-export function createPiMock(
-	initialFlags: Record<string, boolean | string> = {},
-	options: PiMockOptions = {},
-): PiMock {
+export function createPiMock(options: PiMockOptions = {}): PiMock {
 	const supportsActiveTools = options.supportsActiveTools ?? true;
 	const flags = new Map<string, RecordedFlag>();
 	const commands = new Map<string, RecordedCommand>();
 	const tools = new Map<string, unknown>();
 	const handlers = new Map<string, Hook[]>();
-	const flagValues = new Map<string, boolean | string>(
-		Object.entries(initialFlags),
-	);
+	// No flag value exists before the factory registers its flag (#4913 part D).
+	const flagValues = new Map<string, boolean | string>();
 	const messageRenderers = new Map<string, unknown>();
 	const sentMessages: CapturedMessage[] = [];
 	const activeTools = new Set<string>();
@@ -353,6 +355,13 @@ export function createPiMock(
 		},
 
 		setFlag(name, value) {
+			// Refuses the pre-set path (#4913 part D): a value set before the factory
+			// registers its flag is read by no factory-time reader in real pi.
+			if (!flags.has(name)) {
+				throw new Error(
+					`setFlag(${name}): the factory has not registered this flag yet; set it after the factory runs (pi applies flag values after every factory)`,
+				);
+			}
 			flagValues.set(name, value);
 		},
 		getHandlers(event) {

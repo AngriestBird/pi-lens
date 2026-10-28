@@ -83,6 +83,7 @@ import {
 	makeSessionStartEvent,
 } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 
 const SESSION_ID = "pi-3814-deferred-gate-session";
 const RUNNER_ID = "slow-runner";
@@ -280,8 +281,8 @@ const answersClean = async (): Promise<RunnerResult> => ({
 });
 
 async function startSession(guard = true) {
+	setGlobalConfig({ guard: { enabled: guard } });
 	const pi = createPiMock();
-	pi.setFlag("lens-guard", guard);
 	extension(pi.asExtensionAPI());
 	await pi.emit(
 		"session_start",
@@ -334,6 +335,8 @@ function editAfterScan(content: string): void {
 	const later = new Date(Date.now() + 2_000);
 	fs.utimesSync(filePath, later, later);
 }
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("#3814: deferred blocking findings gate the commit", () => {
 	for (const shape of ["succeeded", "failed"] as const) {

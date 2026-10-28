@@ -27,6 +27,7 @@ import {
 	makeSessionStartEvent,
 } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 
 const SESSION_ID = "pi-3290-actionable-warnings-witness-session";
 const GOLDEN = path.join(
@@ -144,6 +145,8 @@ async function endTurn(pi: ReturnType<typeof createPiMock>): Promise<string> {
 	);
 }
 
+const setGlobalConfig = useGlobalConfig();
+
 describe("#3290 witness: actionable warnings through pi", () => {
 	it("matches the golden across disposition and delivered-location cells", async () => {
 		const partial = path.join(tmpDir, "src", "partial.ts");
@@ -222,8 +225,8 @@ describe("#3290 witness: actionable warnings through pi", () => {
 			},
 		);
 
+		setGlobalConfig({ actionableWarnings: { enabled: true } });
 		const pi = createPiMock();
-		pi.setFlag("lens-actionable-warnings", true);
 		extension(pi.asExtensionAPI());
 		await pi.emit(
 			"session_start",

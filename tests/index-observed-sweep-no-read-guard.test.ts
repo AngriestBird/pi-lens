@@ -130,7 +130,10 @@ import { readChangesSince } from "../clients/project-changes.js";
 import { ReadGuard } from "../clients/read-guard.js";
 import { makeLspServiceDouble } from "./support/lsp-service-double.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("#2465 round 2: the observed-mutation settled sweep runs under --no-read-guard", () => {
 	let tmp: string;
@@ -157,7 +160,8 @@ describe("#2465 round 2: the observed-mutation settled sweep runs under --no-rea
 		// regardless of which instance index.ts's closure holds.
 		const recordWrittenSpy = vi.spyOn(ReadGuard.prototype, "recordWritten");
 
-		const pi = createPiMock({ "no-read-guard": true, "no-lsp": true });
+		setGlobalConfig({ readGuard: { enabled: false }, lsp: { enabled: false } });
+		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		const ctx = makeCtx({ cwd: tmp, sessionId: "s-2465-sweep" });
 		await pi.emit("session_start", { reason: "startup" }, ctx);
@@ -305,7 +309,8 @@ describe("#4535 slice 3: the settled sweep publishes what it finds", () => {
 				published.push(change);
 			}),
 		);
-		const pi = createPiMock({ "no-read-guard": true, "no-lsp": true });
+		setGlobalConfig({ readGuard: { enabled: false }, lsp: { enabled: false } });
+		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		const ctx = makeCtx({ cwd: tmp, sessionId: "s-4535-sweep" });
 		await pi.emit("session_start", { reason: "startup" }, ctx);

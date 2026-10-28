@@ -73,6 +73,7 @@ import {
 } from "../clients/word-index.js";
 import extension from "../index.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
 const DOCS = [
@@ -88,6 +89,8 @@ const DOCS = [
 function memoStillHeld(index: WordIndex, wire: unknown): boolean {
 	return serializeWordIndex(index) === wire;
 }
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("#4124: agent_settled releases the word index memo for its own session", () => {
 	let tmp: string;
@@ -116,7 +119,8 @@ describe("#4124: agent_settled releases the word index memo for its own session"
 	}> = [];
 
 	async function start(sessionId: string) {
-		const pi = createPiMock({ "no-lsp": true });
+		setGlobalConfig({ lsp: { enabled: false } });
+		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		const ctx = makeCtx({ cwd: tmp, sessionId });
 		await pi.emit("session_start", { reason: "startup" }, ctx);

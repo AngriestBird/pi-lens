@@ -86,7 +86,7 @@ const turnCtx = {
 
 async function fireTurnEnd() {
 	const { default: registerExtension } = await import("../index.js");
-	const mock = createPiMock({ "lens-lsp": true });
+	const mock = createPiMock();
 	registerExtension(mock.asExtensionAPI() as never);
 	const turnEnd = mock.getHandlers("turn_end")[0];
 	expect(turnEnd).toBeTypeOf("function");
@@ -154,7 +154,7 @@ describe(
 			// resetModules is per-test, so re-import once and drive two turns against
 			// the SAME module instance to exercise the cross-turn high-water.
 			const { default: registerExtension } = await import("../index.js");
-			const mock = createPiMock({ "lens-lsp": true });
+			const mock = createPiMock();
 			registerExtension(mock.asExtensionAPI() as never);
 			const turnEnd = mock.getHandlers("turn_end")[0];
 
@@ -201,7 +201,7 @@ describe(
 
 		it("(c) #1723: logs a block below the session's prior worst, not only new maxima", async () => {
 			const { default: registerExtension } = await import("../index.js");
-			const mock = createPiMock({ "lens-lsp": true });
+			const mock = createPiMock();
 			registerExtension(mock.asExtensionAPI() as never);
 			const turnEnd = mock.getHandlers("turn_end")[0];
 
@@ -349,7 +349,7 @@ describe(
 		// can see it.
 		it("(f) #1723 S3: session_start clears a leaked in-flight phase via the real handler", async () => {
 			const { default: registerExtension } = await import("../index.js");
-			const mock = createPiMock({ "lens-lsp": true });
+			const mock = createPiMock();
 			registerExtension(mock.asExtensionAPI() as never);
 
 			// Seed a live bracket BEFORE firing session_start — simulates a phase
