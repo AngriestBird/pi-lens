@@ -555,9 +555,11 @@ function lexRegions(text, start, closer, out) {
 	 * Open `case` clauses inside a `$( … )` body, innermost last (#4060). A
 	 * pattern's `)` ends the pattern, not the body, so the states are:
 	 * `subject` (`case` seen at a command position, up to its `in`),
-	 * `patternFirst` (after `in` or `;;`/`;&`/`;;&`: the first word is `esac`
-	 * or a pattern), `pattern` (up to the pattern's `)`) and `body` (up to
-	 * `;;`, or `esac` at a command position, which pops it).
+	 * `patternFirst` (after `in` or `;;`/`;&`/`;;&`: the first word is `esac`,
+	 * which pops the frame, or a pattern), `pattern` (up to the pattern's `)`)
+	 * and `body` (up to `;;`). The last clause may end with `esac` and no
+	 * `;;`; its `body` frame is left behind, inert, because only a pattern
+	 * state changes where a `)` goes.
 	 * @type {Array<"subject"|"patternFirst"|"pattern"|"body">}
 	 */
 	const cases = [];
@@ -687,9 +689,6 @@ function lexRegions(text, start, closer, out) {
 							cases.push("subject");
 							mode = "args";
 						} else out.push(UNSCANNABLE_CASE);
-					} else if (word === "esac" && frame === "body") {
-						cases.pop();
-						mode = "args";
 					} else if (word === "[[") mode = "cond";
 					else mode = "args";
 				}

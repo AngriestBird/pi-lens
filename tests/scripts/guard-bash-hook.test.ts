@@ -3241,6 +3241,7 @@ describe("scripts/hooks/guard-bash.mjs -- case clauses open only at a command po
 		"git $(case x in(x) : ;; esac) stash",
 		"git $([[ ( case ) ]] ; case x in x) : ;; esac) stash",
 		"git $([[ a && case ]] ; case x in x) : ;; esac) stash",
+		"git $([[ ( case == in ) ]]) stash",
 		"git $(:; \\\ncase x in x) : ;; esac) stash",
 		"git $(case x in a|esac) : ;; esac) stash",
 		"git $(case x in esac) stash",
@@ -3275,6 +3276,7 @@ describe("scripts/hooks/guard-bash.mjs -- case clauses open only at a command po
 		"git $(for i do case x in x) : ;; esac; break; done) stash",
 		"git $(select i do case x in x) : ;; esac; break; done) stash",
 		"git $((case x in x) : ;; esac)) stash",
+		"git $(: && ((case == x)) ; : in) stash",
 		"git $(((case x in x) : ;; esac) )) stash",
 		"git $(case(x) in x) : ;; esac) stash",
 	])("an unmodelled grammar position fails closed: %s", (command) => {
