@@ -131,21 +131,34 @@ type ColumnId =
 	| "--no-opengrep"
 	| "opengrep.enabled=false"
 	| "--no-ast-grep"
-	| "astGrep.enabled=false";
+	| "astGrep.enabled=false"
+	| "--no-typos"
+	| "typos.enabled=false"
+	| "--no-zizmor"
+	| "zizmor.enabled=false";
 
 /** The auxiliary servers an operator switch turns off, and the flag naming each. */
-type SwitchedServer = "opengrep" | "ast-grep";
-const SWITCH_FLAG: Record<SwitchedServer, "no-opengrep" | "no-ast-grep"> = {
+type SwitchedServer = "opengrep" | "ast-grep" | "typos" | "zizmor";
+const SWITCH_FLAG = {
 	opengrep: "no-opengrep",
 	"ast-grep": "no-ast-grep",
-};
+	typos: "no-typos",
+	zizmor: "no-zizmor",
+} as const satisfies Record<SwitchedServer, string>;
+/** The global-config section whose `enabled=false` is the same switch (#4946 for typos and zizmor). */
+const SWITCH_SECTION = {
+	opengrep: "opengrep",
+	"ast-grep": "astGrep",
+	typos: "typos",
+	zizmor: "zizmor",
+} as const satisfies Record<SwitchedServer, string>;
 
 interface Column {
 	id: ColumnId;
 	/** `~/.pi-lens/config.json`, through PI_LENS_CONFIG_PATH. */
 	globalConfig: Record<string, unknown>;
 	/** A CLI flag the factory registers; set after `extension(...)`, as pi applies it. */
-	flag: "no-opengrep" | "no-ast-grep" | undefined;
+	flag: (typeof SWITCH_FLAG)[SwitchedServer] | undefined;
 	/**
 	 * The language server: a working fake, off in lsp.json, or a missing
 	 * binary. `disabledFallback` is a TypeScript file whose primary is off in
@@ -153,7 +166,12 @@ interface Column {
 	 * (#4403 round 4, N1).
 	 */
 	primary: "fake" | "disabled" | "disabledFallback" | "missing";
-	/** typos, Opengrep and ast-grep running; false turns all off in `lsp.disabledServers`. */
+	/**
+	 * typos, Opengrep and ast-grep running; false turns all off in
+	 * `lsp.disabledServers`. zizmor is off in `lsp.disabledServers` in every
+	 * column (it attaches to workflow files, which the fixture is not), so its
+	 * columns prove the switch's reach, not a server start.
+	 */
 	aux: boolean;
 	/** A server is off, by `aux` or by its own switch. */
 	off: ReadonlySet<SwitchedServer>;
@@ -170,7 +188,7 @@ const column = (
 	id,
 	globalConfig: switches.viaConfig
 		? {
-				[switches.switchedOff === "ast-grep" ? "astGrep" : "opengrep"]: {
+				[SWITCH_SECTION[switches.switchedOff ?? "opengrep"]]: {
 					enabled: false,
 				},
 			}
@@ -186,7 +204,7 @@ const column = (
 			? switches.switchedOff
 				? [switches.switchedOff]
 				: []
-			: ["opengrep", "ast-grep"],
+			: ["opengrep", "ast-grep", "typos"],
 	),
 	switchedOff: switches.switchedOff,
 });
@@ -215,14 +233,24 @@ const COLUMNS: readonly Column[] = [
 		switchedOff: "ast-grep",
 		viaConfig: true,
 	}),
+	column("--no-typos", "fake", true, { switchedOff: "typos" }),
+	column("typos.enabled=false", "fake", true, {
+		switchedOff: "typos",
+		viaConfig: true,
+	}),
+	column("--no-zizmor", "fake", true, { switchedOff: "zizmor" }),
+	column("zizmor.enabled=false", "fake", true, {
+		switchedOff: "zizmor",
+		viaConfig: true,
+	}),
 ];
 
 /**
  * A cell that cannot exist, with the reason. The MCP server has no CLI flags:
- * it resolves `no-opengrep` and `no-ast-grep` from config only
- * (`createMcpHost`), so its switch is the `opengrep.enabled=false` or
- * `astGrep.enabled=false` column. A case below reds if either flag ever gains
- * an environment spelling the MCP host could read.
+ * it resolves `no-opengrep`, `no-ast-grep`, `no-typos` and `no-zizmor` from
+ * config only (`createMcpHost`), so its switch is the matching
+ * `<section>.enabled=false` column. A case below reds if any of them ever
+ * gains an environment spelling the MCP host could read.
  */
 const NOT_APPLICABLE: ReadonlyArray<{
 	route: RouteId;
@@ -238,6 +266,16 @@ const NOT_APPLICABLE: ReadonlyArray<{
 		route: "MCP pilens_diagnostics",
 		column: "--no-ast-grep",
 		why: "the MCP host has no CLI flags; it reads no-ast-grep from config only",
+	},
+	{
+		route: "MCP pilens_diagnostics",
+		column: "--no-typos",
+		why: "the MCP host has no CLI flags; it reads no-typos from config only",
+	},
+	{
+		route: "MCP pilens_diagnostics",
+		column: "--no-zizmor",
+		why: "the MCP host has no CLI flags; it reads no-zizmor from config only",
 	},
 ];
 
@@ -279,7 +317,7 @@ function selectedServers(column: Column): string[] {
 		...(column.primary === "fake" ? ["json"] : []),
 		...(column.off.has("opengrep") ? [] : ["opengrep"]),
 		...(column.off.has("ast-grep") ? [] : ["ast-grep"]),
-		...(column.aux ? ["typos"] : []),
+		...(column.off.has("typos") ? [] : ["typos"]),
 	].sort();
 }
 
@@ -353,7 +391,13 @@ function fileLine(column: Column): string {
 function fileSecondLine(column: Column, file: string, route: RouteId): string {
 	if (column.primary === "missing" && !column.aux)
 		return `LSP unavailable for <ws>/${file}: no LSP client is currently ready; ready=0/1. candidates=json. No diagnostics were collected.`;
-	return column.switchedOff && ROUTE_SCOPE[route] === "all"
+	// The single-file renderer names only a switched-off server that applies to
+	// the file (`getServersForFileWithConfig`). zizmor audits workflow files
+	// only (`isZizmorAuditTarget`), so a JSON fixture shows no line for it; the
+	// `mode=full` sweep line below names it whatever the file (#4946).
+	return column.switchedOff &&
+		column.switchedOff !== "zizmor" &&
+		ROUTE_SCOPE[route] === "all"
 		? `No auxiliary findings. Switched off, not run: ${column.switchedOff}.`
 		: "No auxiliary findings.";
 }
@@ -735,7 +779,8 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 		extension(pi.asExtensionAPI());
 		// The CLI spelling: pi applies the value after the factory, and only
 		// because the factory registered the flag (review F2; #4944 for
-		// `no-ast-grep`, which the registry did not register).
+		// `no-ast-grep`, #4946 for `no-typos` and `no-zizmor`, which the registry
+		// did not register).
 		if (column.flag) pi.setFlag(column.flag, true);
 		// The host's own trust decision, which session_start latches: the
 		// command overrides are project config (#4248).
@@ -1604,11 +1649,13 @@ describe("diagnostics routes are derived from code (#4403)", () => {
 	);
 
 	it(
-		"keeps the MCP --no-opengrep and --no-ast-grep cells inapplicable only while the flags have no environment spelling",
+		"keeps the MCP --no-opengrep, --no-ast-grep, --no-typos and --no-zizmor cells inapplicable only while the flags have no environment spelling",
 		() => {
 			// createMcpHost resolves env, then config; a CLI-only flag cannot reach it.
 			expect(getLensFlagSpec("no-opengrep")?.env).toBeUndefined();
 			expect(getLensFlagSpec("no-ast-grep")?.env).toBeUndefined();
+			expect(getLensFlagSpec("no-typos")?.env).toBeUndefined();
+			expect(getLensFlagSpec("no-zizmor")?.env).toBeUndefined();
 		},
 		scaledTestTimeout(10_000),
 	);

@@ -19,6 +19,9 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--no-delta` | `delta.enabled` | `true` |
 | `--no-opengrep` | `opengrep.enabled` | `true` |
 | `--no-ast-grep` | `astGrep.enabled` | `true` |
+| `--no-zizmor` | `zizmor.enabled` | `true` |
+| `--no-typos` | `typos.enabled` | `true` |
+| `--lens-spotbugs` | `spotbugs.enabled` | `false` |
 | `--no-read-guard` | `readGuard.enabled` | `true` |
 | `--no-autoformat` | `format.enabled` | `true` |
 | `--no-autofix` | `autofix.enabled` | `true` |
@@ -158,12 +161,15 @@ Turn subsystems off globally instead of retyping flags every session:
   "tests": { "enabled": false },
   "opengrep": { "enabled": false },
   "astGrep": { "enabled": false },
+  "zizmor": { "enabled": false },
+  "typos": { "enabled": false },
+  "spotbugs": { "enabled": true },
   "readGuard": { "enabled": false },
   "guard": { "enabled": true }
 }
 ```
 
-`lens.enabled: false` starts every session with pi-lens off (the `--no-lens` equivalent); `/lens-toggle` still re-enables it for one session. `lsp.enabled: false` falls back to language-specific checkers such as pyright. `tests.enabled: false` skips the on-write test runner. `delta.enabled: false` reports every diagnostic rather than only ones introduced this turn. `opengrep.enabled: false` detaches the Opengrep security scanner. `astGrep.enabled: false` detaches the ast-grep auxiliary server. `readGuard.enabled: false` turns off the read-before-edit monitor. `guard.enabled: true` opts into the experimental commit/push blocker.
+`lens.enabled: false` starts every session with pi-lens off (the `--no-lens` equivalent); `/lens-toggle` still re-enables it for one session. `lsp.enabled: false` falls back to language-specific checkers such as pyright. `tests.enabled: false` skips the on-write test runner. `delta.enabled: false` reports every diagnostic rather than only ones introduced this turn. `opengrep.enabled: false` detaches the Opengrep security scanner. `astGrep.enabled: false` detaches the ast-grep auxiliary server. `zizmor.enabled: false` and `typos.enabled: false` detach the zizmor and typos auxiliary servers. `spotbugs.enabled: true` opts into SpotBugs on Java and Kotlin files (it also needs a Java build descriptor and a compiled `.class` directory). `readGuard.enabled: false` turns off the read-before-edit monitor. `guard.enabled: true` opts into the experimental commit/push blocker.
 
 The `tools.<name>.enabled` setting controls each model-facing tool. Valid names
 include `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`,
