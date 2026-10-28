@@ -2438,13 +2438,9 @@ export class RuntimeCoordinator {
 	 * #3218 criterion 2: a retirement no turn_end has delivered yet. The
 	 * read-only turn_end path uses it to fall through to the composer instead of
 	 * returning early, so a `lens_diagnostics` confirmation reaches the agent.
-	 * #4921: `of` limits it to one turn session's notes.
 	 */
-	hasResolvedBlockerFiles(of?: { sessionId: string | undefined }): boolean {
-		if (!of) return this._resolvedBlockerFilesThisTurn.size > 0;
-		for (const entry of this._resolvedBlockerFilesThisTurn.values())
-			if (this.ownedBy(entry, of.sessionId)) return true;
-		return false;
+	hasResolvedBlockerFiles(): boolean {
+		return this._resolvedBlockerFilesThisTurn.size > 0;
 	}
 
 	/**

@@ -1087,17 +1087,11 @@ describe("RuntimeCoordinator", () => {
 			// primary's turn end consumed the subagent's note.
 			const runtime = twoSessions();
 			expect(runtime.clearInlineBlockers(subagentFile, 2)).toBe(true);
-			expect(runtime.hasResolvedBlockerFiles({ sessionId: PRIMARY })).toBe(
-				false,
-			);
 			expect(
 				runtime.consumeResolvedBlockerFiles(() => false, {
 					sessionId: PRIMARY,
 				}).files,
 			).toEqual([]);
-			expect(runtime.hasResolvedBlockerFiles({ sessionId: SUBAGENT })).toBe(
-				true,
-			);
 			expect(
 				files(
 					runtime.consumeResolvedBlockerFiles(() => false, {

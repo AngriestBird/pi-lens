@@ -1353,10 +1353,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// #3218 criterion 2: a retirement nobody has reported (a
 		// `lens_diagnostics` confirmation lands on exactly this turn) falls
 		// through to the composer like a carried runner finding.
-		if (
-			pendingRunnerFindingsSize() === 0 &&
-			!runtime.hasResolvedBlockerFiles({ sessionId })
-		)
+		if (pendingRunnerFindingsSize() === 0 && !runtime.hasResolvedBlockerFiles())
 			return;
 	}
 

@@ -3901,4 +3901,54 @@ describe("#4921: a turn end's own partition is its turn session's", () => {
 			env.cleanup();
 		}
 	});
+
+	it("files a subagent write's sync under its own blockers only, leaving the primary's section the primary's", () => {
+		// RECURRENCE GUARDED: #4921 at the write seam. Built from every record
+		// in the shared map, the subagent's section also listed the primary's
+		// file, so after the primary fixed it the subagent's section still
+		// refused the commit over it until the subagent's turn ended.
+		const env = setupTestEnvironment("pi-lens-git-guard-4921-sync-");
+		try {
+			const { mine, theirs } = twoPartitionRecord(env.tmpDir);
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const mineSummary = productionSummary(mine, ["primary blocker"]);
+			runtime.recordInlineBlockers(mine, mineSummary);
+			runtime.updateGitGuardStatus(true, mineSummary);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, mine);
+			const theirsSummary = productionSummary(theirs, ["subagent blocker"]);
+			runtime.recordInlineBlockers(
+				theirs,
+				theirsSummary,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				SUBAGENT,
+			);
+			runtime.updateGitGuardStatus(true, theirsSummary);
+			syncGitGuardRecord(
+				runtime,
+				cache,
+				env.tmpDir,
+				theirs,
+				"session",
+				false,
+				SUBAGENT,
+			);
+			const data = storedData(cache, env.tmpDir);
+			const sectionOf = (id: string) =>
+				[
+					{ sessionId: data?.sessionId, blockingFiles: data?.blockingFiles },
+					...(data?.carriedBlockers ?? []),
+				].find((partition) => partition.sessionId === id)?.blockingFiles;
+			expect(sectionOf("session-A")).toEqual([mine]);
+			expect(sectionOf(SUBAGENT)).toEqual([theirs]);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
