@@ -42,6 +42,7 @@ import {
 	isSessionRootRegistered,
 	resetSessionRootsForTests,
 } from "../../../clients/lsp/session-roots.js";
+import { resolveGitCheckout } from "../../../clients/review-graph/git-identity.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { resetSessionScopedState } from "../../../clients/runtime-session.js";
 import { handleToolCall } from "../../../clients/runtime-tool-call.js";
@@ -491,14 +492,16 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 		expect(isSessionRootRegistered(ext)).toBe(false);
 	});
 
-	it("row 18 a file link into another worktree of the checkout reads linked-worktree and registers the session root's identity", async (ctx) => {
+	it("row 18 a file link into another worktree of the checkout reads linked-worktree and registers the worktree root", async (ctx) => {
 		// The other-worktree member of the #4689 fixture family. Recurrence it
 		// prevents: the link is spelled under the session root but owned by a
 		// linked worktree, so a class or registration decided from the spelling
 		// reads `session` and registers a root that never holds the worktree's
 		// file. The identity reads `linked-worktree`; no ancestor of the link's
 		// spelling is inside the worktree, so the registration falls back to the
-		// session root's identity (item 7). Beside the temp root for #4560.
+		// owning root the class resolved, the worktree root, which the #2052 gate
+		// needs to admit the file (#4957 review F1). Beside the temp root for
+		// #4560.
 		const base = path.join(
 			env.tmpDir,
 			"..",
@@ -516,7 +519,7 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 				"linked-worktree",
 			);
 			expect(resolveSessionConfigRoot(wt.worktreeLink, fx.repo)).toEqual({
-				register: fx.repo,
+				register: wt.worktree,
 				mode: "linked-worktree",
 			});
 			// The control: the worktree's own spelling registers the worktree.
@@ -524,8 +527,18 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 				register: wt.worktree,
 				mode: "linked-worktree",
 			});
+			// The delta across the call, not the total: `initLSPConfig` above
+			// already registered `fx.repo`, so a neutered production register
+			// leaves a total unchanged (#4957 review F3).
+			const before = new Set(getSessionRootsForTelemetry(200));
 			await readCall(wt.worktreeLink, fx.repo, 4694);
-			expect(getSessionRootsForTelemetry(200)).toEqual([fx.repo]);
+			expect(
+				getSessionRootsForTelemetry(200).filter((root) => !before.has(root)),
+			).toEqual([wt.worktree]);
+			// The #2052 gate admits the file the class resolved.
+			expect(
+				registryFor(fx.repo).fileIsOutsideRegisteredRoots(wt.worktreeFile),
+			).toBe(false);
 		} finally {
 			fs.rmSync(base, { recursive: true, force: true });
 		}
@@ -551,13 +564,19 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 			runtime.projectRoot = fx.repo;
 			await initLSPConfig(fx.repo);
 
+			// Two checkouts, so the cell reaches the same-checkout rule and not
+			// "the session has no checkout" (#4957 review F4).
+			expect(resolveGitCheckout(fx.repo)).not.toBeNull();
+			expect(resolveGitCheckout(other.unrelatedRepo)).not.toBeNull();
 			expect(resolveAnalysisRoot(other.unrelatedLink, fx.repo)).toBe("adopted");
 			expect(resolveSessionConfigRoot(other.unrelatedLink, fx.repo)).toEqual({
 				register: undefined,
 				mode: "adopted",
 			});
+			const before = [...getSessionRootsForTelemetry(200)];
 			await readCall(other.unrelatedLink, fx.repo, 4695);
-			expect(getSessionRootsForTelemetry(200)).toEqual([fx.repo]);
+			expect(getSessionRootsForTelemetry(200)).toEqual(before);
+			expect(before).toEqual([fx.repo]);
 			expect(isSessionRootRegistered(other.unrelatedRepo)).toBe(false);
 		} finally {
 			fs.rmSync(base, { recursive: true, force: true });

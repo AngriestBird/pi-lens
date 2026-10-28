@@ -4216,11 +4216,17 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// still reach the change log below, because they landed on disk.
 	const resultLive = writeSession.guardedWrite(filePath, () => true) === true;
 
+	// #4689 item 9: `deferMutation` refuses a root the session may not write
+	// (an adopted project) and queues nothing, so no queue claim (the phase
+	// row, the debug lines, `formatQueued`) is made for a root it refuses. One
+	// predicate serves both blocks.
+	const mayDefer = canWriteAnalysisRoot(analysisRootMode);
 	let autofixNewlyQueued = false;
 	if (
 		resultLive &&
 		!result.isError &&
 		bashAuthorshipConfirmed &&
+		mayDefer &&
 		autofixMode === "deferred" &&
 		nodeFs.existsSync(filePath)
 	) {
@@ -4245,10 +4251,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		resultLive &&
 		!result.isError &&
 		bashAuthorshipConfirmed &&
-		// #4689 item 9: `deferMutation` refuses a root the session may not write
-		// (an adopted project) and queues nothing, so the queued phase row, the
-		// debug line and `formatQueued` are claimed only for a root it accepts.
-		canWriteAnalysisRoot(analysisRootMode) &&
+		mayDefer &&
 		!getFlag("no-autoformat", filePath) &&
 		(autofixMode === "deferred" || !getFlag("immediate-format")) &&
 		nodeFs.existsSync(filePath)

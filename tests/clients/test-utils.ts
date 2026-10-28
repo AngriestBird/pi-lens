@@ -617,7 +617,8 @@ export interface UnrelatedRepoFixture {
  * The #4689 item 10 unrelated-repository member: a file link from the
  * session's checkout into a DIFFERENT repository. Its identity is a foreign
  * project, so a class decided from the spelling would treat the foreign file
- * as the session's own (shape 1, across the analysis-root class). Whether the
+ * as the session's own (shape 1, across the analysis-root class). The session
+ * repo gets a `.git` too, so the member compares two checkouts. Whether the
  * foreign project reads `adopted` or `none` is the host's temp-root rule
  * (#4560): give `baseDir` a name without the `pi-lens-` prefix for `adopted`.
  */
@@ -633,6 +634,11 @@ export function plantUnrelatedRepo(baseDir: string): UnrelatedRepoFixture {
 	fs.writeFileSync(path.join(unrelatedRepo, "package.json"), "{}\n");
 	fs.writeFileSync(unrelatedFile, "export const other = 1;\n");
 	const repo = path.join(baseDir, "repo");
+	// The session repo is a checkout too, so the cell compares two checkouts
+	// (`resolveLinkedWorktreeOwner` answers null) and not "no checkout". A
+	// `.git` directory without a HEAD is not a repository (#4508).
+	fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+	fs.writeFileSync(path.join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
 	const fixture: UnrelatedRepoFixture = {
 		unrelatedRepo,
 		unrelatedFile,

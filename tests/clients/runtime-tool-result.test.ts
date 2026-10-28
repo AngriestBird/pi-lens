@@ -5051,12 +5051,14 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			});
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = session;
+			const debugLines: string[] = [];
 			const run = async (filePath: string) => {
 				logLatency.mockClear();
+				debugLines.length = 0;
 				await handleToolResult({
 					event: { toolName: "edit", input: { path: filePath }, content: [] },
 					getFlag: () => false,
-					dbg: () => {},
+					dbg: (line: string) => debugLines.push(line),
 					runtime,
 					cacheManager: {
 						addModifiedRange: () => {},
@@ -5077,9 +5079,17 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			expect(resolveAnalysisRoot(adoptedFile, session)).toBe("adopted");
 			expect(await run(sessionFile)).toHaveLength(1);
 			expect(runtime.consumeDeferredFormatFiles()).toHaveLength(1);
+			// The control also claims both queue lines (debug record).
+			expect(
+				debugLines.filter((line) => line.includes("queued deferred")),
+			).toHaveLength(2);
 
 			expect(await run(adoptedFile)).toHaveLength(0);
 			expect(runtime.consumeDeferredFormatFiles()).toHaveLength(0);
+			// #4957 review F2: the autofix debug line claimed a refused entry too.
+			expect(
+				debugLines.filter((line) => line.includes("queued deferred")),
+			).toEqual([]);
 		} finally {
 			fs.rmSync(adopted, { recursive: true, force: true });
 			env.cleanup();
