@@ -6157,13 +6157,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// repeats would stop the count short of the cap, and the record that the
 		// cap retires would stay forever. A hold the cap
 		// cut is not in the message (it stays pending, nothing advanced), so only
-		// a part in the delivered content counts: one that appears whole, or the
-		// leading part, which the hold plan counts delivered even when the cap kept
-		// only a prefix of it (`leadsOversized`, delivery-holds.ts).
+		// a part the hold plan counts reached counts (`reachedParts`: whole, or
+		// the leading part the cap kept only a prefix of).
 		const countDrivenFileSet = deliveryHolds.some(
 			(hold) =>
 				hold.skipOnSuppressed === true &&
-				(content.includes(hold.part) || composedParts[0]?.raw === hold.part),
+				holdPlan.reachedParts.some((part) => part.raw === hold.part),
 		)
 			? files
 					.slice()
