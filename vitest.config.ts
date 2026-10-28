@@ -512,6 +512,10 @@ const lspSpawnHeavyInclude = [
 	// initialize handshake plus a pull round trip per case -- the same
 	// #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-root-fallback-3750.test.ts",
+	// #4532 gap 13: the production lsp_diagnostics handler and LSPService over
+	// a real stdio fake-server child in its closed-file cache profile; waits on
+	// a real handshake and a push round per call, like #4346's.
+	"tests/tools/lsp-diagnostics-unheld-import-4532.test.ts",
 	// #3827: drives `lsp_navigation rename` over a REAL `createLSPClient` on the
 	// fake server (a real initialize handshake per case), so the client's own
 	// first-send stamp reaches the capture; the same #1022/#2332 contention

@@ -23,6 +23,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
+import { makeClientNotifyDouble } from "../../support/lsp-client-notify-double.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -68,10 +69,7 @@ function makeFakeClient(root: string, serverId = "typescript") {
 			getRawCapabilityKeys: () => [],
 			serverId,
 			root,
-			notify: {
-				announceCreated: () => undefined,
-				open: vi.fn(async () => {}),
-			},
+			notify: makeClientNotifyDouble(),
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				waitCalls.push({ filePath, ms });
 				return undefined;
@@ -332,10 +330,7 @@ function makeControlledClient(
 			getOperationSupport: () => ({}),
 			serverId,
 			root,
-			notify: {
-				announceCreated: () => undefined,
-				open: vi.fn(async () => {}),
-			},
+			notify: makeClientNotifyDouble(),
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				const outcome = plan[Math.min(call, plan.length - 1)] ?? "warm";
 				call += 1;
