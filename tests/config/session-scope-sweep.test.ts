@@ -168,6 +168,7 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_fileLastProjectSeq: "reset",
 	_fileSeq: "reset",
 	_fixedThisTurn: "reset",
+	_foreignReadGuards: "reset",
 	_foreignTurnKeys:
 		"kept: a live concurrent session's turn key outlives the primary's replacement; its own shutdown removes it (forgetTurnSession, #3613)",
 	_foreignTurns:

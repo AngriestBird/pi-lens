@@ -188,11 +188,16 @@ type ReadRecord = {
 	endLine: number;
 };
 
+/** What a tool's `execute` receives of the host's context. */
+type ToolCtx = { cwd?: string };
+
 /** `toolCallId`: the host call that delivered the body (#3521 provenance). */
 type ReadRecorder = (
 	filePath: string,
 	symbol: ReadRecord,
 	toolCallId: string,
+	/** The calling session's ctx: the read is credited to its guard (#4942). */
+	ctx: ToolCtx,
 ) => void;
 
 function recordReadCoverage(
@@ -206,6 +211,7 @@ function recordReadCoverage(
 	},
 	phase: string,
 	toolCallId: string,
+	ctx: ToolCtx,
 ): boolean {
 	if (
 		!result.name ||
@@ -225,6 +231,7 @@ function recordReadCoverage(
 				endLine: result.endLine,
 			},
 			toolCallId,
+			ctx,
 		);
 		return true;
 	} catch (err) {
@@ -290,7 +297,7 @@ export function createReadSymbolTool(
 			params: { path: string; symbol: string; kind?: string },
 			_signal: AbortSignal | undefined,
 			_onUpdate: unknown,
-			ctx: { cwd?: string },
+			ctx: ToolCtx,
 		) {
 			const absFile = resolveFile(params.path, ctx.cwd);
 			const cwd = getProjectRoot() || ctx.cwd || ".";
@@ -341,6 +348,7 @@ export function createReadSymbolTool(
 				result,
 				"read_symbol_guard_error",
 				toolCallId,
+				ctx,
 			);
 			const ambiguityNote = result.ambiguous
 				? ` (${result.ambiguous.count} matches — returned the ${result.kind}; pass \`kind\` to disambiguate: ${result.ambiguous.kinds.join(", ")})`
@@ -447,7 +455,7 @@ export function createReadEnclosingTool(
 			},
 			_signal: AbortSignal | undefined,
 			_onUpdate: unknown,
-			ctx: { cwd?: string },
+			ctx: ToolCtx,
 		) {
 			const absFile = resolveFile(params.path, ctx.cwd);
 			const cwd = getProjectRoot() || ctx.cwd || ".";
@@ -509,6 +517,7 @@ export function createReadEnclosingTool(
 				result,
 				"read_enclosing_guard_error",
 				toolCallId,
+				ctx,
 			);
 			const range = result.partial
 				? `${result.startLine}-${result.endLine} (partial of ${result.enclosingStartLine}-${result.enclosingEndLine})`

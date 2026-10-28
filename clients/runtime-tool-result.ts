@@ -3988,13 +3988,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// stays, because the edit did land on disk.
 	const entryLive = writeSession.guardedWrite(filePath, () => true) === true;
 	if (!getFlag("no-read-guard") && bashAuthorshipConfirmed) {
-		const readGuard = (
-			runtime as {
-				readGuard?: {
-					recordWritten?: (writtenPath: string, opts: OwnWriteStamp) => void;
-				};
-			}
-		).readGuard;
+		// #4942: the session's own guard (`deps.readGuard`), the one the write's
+		// other stamps above use; the coordinator's is another session's.
+		const readGuard = deps.readGuard;
 		if (entryLive)
 			readGuard?.recordWritten?.(filePath, {
 				authorship:

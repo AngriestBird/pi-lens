@@ -829,7 +829,17 @@ export function createLspNavigationTool(
 	mutationDeps?: Pick<
 		LspMutationContext,
 		"runtime" | "cacheManager" | "readGuard" | "dbg"
-	>,
+	> & {
+		/**
+		 * #4942: the guard of the session that makes the call. `readGuard` is
+		 * the one captured at activation (the coordinator's), kept for hosts
+		 * with no session lookup; a concurrent secondary's write must not
+		 * credit it.
+		 */
+		readGuardFor?: (
+			sessionId: string | undefined,
+		) => LspMutationContext["readGuard"];
+	},
 ) {
 	return {
 		name: "lsp_navigation" as const,
@@ -1168,7 +1178,9 @@ export function createLspNavigationTool(
 					session,
 					readGuard: getFlag("no-read-guard", cwd)
 						? undefined
-						: mutationDeps?.readGuard,
+						: (mutationDeps?.readGuardFor?.(
+								ctx.sessionManager?.getSessionId?.(),
+							) ?? mutationDeps?.readGuard),
 					// #2450 review round 2 (F4)/round 3 (F2, F4): the SAME gate
 					// `registerMutationBridge` applies internally in `index.ts`, so
 					// this directly-threaded path and the bridge fallback

@@ -708,6 +708,13 @@ export class RuntimeCoordinator {
 	callGraph: FunctionCallGraph | null = null;
 	wordIndex: WordIndex | null = null;
 	private _readGuard: ReadGuard | null = null;
+	/**
+	 * #4942: the read guard of each concurrent in-process session, keyed by the
+	 * owner `recordSession` names (its session id, opaque here). Entries go at
+	 * the session's shutdown (`forgetTurnSession`) and with the coordinator's
+	 * own reset.
+	 */
+	private readonly _foreignReadGuards = new Map<string, ReadGuard>();
 	private readonly _pendingDeferredMutations =
 		new PathKeyedMap<DeferredMutationRecord>(normalizeMapKey);
 	/** tool_call → tool_result path-attribution correlation (#1642). */
@@ -847,6 +854,10 @@ export class RuntimeCoordinator {
 		this._gitGuardCacheUnknown.clear();
 		this._gitGuardUnansweredDispatches.clear();
 		this._readGuard = null;
+		// A dropped secondary's FileTime bucket stays: a read of its that is in
+		// flight across this reset keeps its tool_call stamp, which its
+		// tool_result needs to see a writer that moved the file (#4942 r7).
+		this._foreignReadGuards.clear();
 		this._pendingDeferredMutations.clear();
 		// #1642 F5: every sibling correlation/state map is cleared here. A
 		// per-session-numbered host reusing tool-call ids across sessions must
@@ -2708,6 +2719,8 @@ export class RuntimeCoordinator {
 		const turnSession = this.turnSession(sessionId);
 		if (turnSession === this._telemetrySessionId) return;
 		this._foreignTurnKeys.delete(turnSession);
+		this._foreignReadGuards.get(turnSession)?.releaseFileTime();
+		this._foreignReadGuards.delete(turnSession);
 		this._actionableWarningsThisTurn.clear(turnSession);
 		this._codeQualityWarningsThisTurn.clear(turnSession);
 	}
@@ -2755,6 +2768,24 @@ export class RuntimeCoordinator {
 			this._scope,
 		);
 		return this._readGuard;
+	}
+
+	/**
+	 * #4942: the read guard of `sessionId`'s turn, so an edit is judged by the
+	 * reads of the session that edits. The owner is the one `recordSession`
+	 * names for the inline blockers (#4921): a turn with no session id of its
+	 * own is the coordinator's, whose guard is {@link readGuard}; a concurrent
+	 * in-process secondary's is its own, built on first use.
+	 */
+	readGuardFor(sessionId: string | undefined): ReadGuard {
+		const owner = this.recordSession(sessionId).session;
+		if (owner === undefined) return this.readGuard;
+		let guard = this._foreignReadGuards.get(owner);
+		if (guard === undefined) {
+			guard = new ReadGuard(owner, {}, this._scope);
+			this._foreignReadGuards.set(owner, guard);
+		}
+		return guard;
 	}
 
 	/**

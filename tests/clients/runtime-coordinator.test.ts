@@ -11,6 +11,7 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import { createFileTime } from "../../clients/file-time.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 
 describe("RuntimeCoordinator", () => {
@@ -96,6 +97,111 @@ describe("RuntimeCoordinator", () => {
 			kept,
 			sub: rules(runtime.peekCodeQualityWarnings("subagent-session")),
 		}).toEqual({ kept: ["own"], sub: [] });
+	});
+
+	it("readGuardFor keys one guard per owner and answers the coordinator's own for its turns (#4942)", () => {
+		// RECURRENCE GUARDED: #4942. One guard for every session of the process
+		// let a subagent's read license the primary's edit. A turn with no
+		// session id of its own, or the coordinator's, is the coordinator's
+		// (`recordSession`'s rule, #4921); any other id is its own guard, the
+		// same object on every call.
+		const runtime = new RuntimeCoordinator();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
+		const sub = runtime.readGuardFor("subagent-session");
+
+		expect({
+			undefinedIsOwn: runtime.readGuardFor(undefined) === runtime.readGuard,
+			ownIdIsOwn: runtime.readGuardFor("primary-session") === runtime.readGuard,
+			subIsSeparate: sub !== runtime.readGuard,
+			subIsStable: runtime.readGuardFor("subagent-session") === sub,
+			twoSubsDiffer: runtime.readGuardFor("other-session") !== sub,
+		}).toEqual({
+			undefinedIsOwn: true,
+			ownIdIsOwn: true,
+			subIsSeparate: true,
+			subIsStable: true,
+			twoSubsDiffer: true,
+		});
+	});
+
+	it("readGuardFor ends a concurrent session's guard at its shutdown and the coordinator's reset (#4942)", () => {
+		// RECURRENCE GUARDED: #4942's resource axis. A guard per owner with no
+		// release is bounded along sessions-at-once and unbounded along
+		// sessions-over-time. A shutdown drops its own guard only, never the
+		// coordinator's; a reset drops the coordinator's and every owner's.
+		const runtime = new RuntimeCoordinator();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
+		const own = runtime.readGuard;
+		const subA = runtime.readGuardFor("sub-a");
+		const subB = runtime.readGuardFor("sub-b");
+
+		runtime.forgetTurnSession("sub-a");
+		runtime.forgetTurnSession(undefined);
+		runtime.forgetTurnSession("primary-session");
+		const afterShutdown = {
+			aRebuilt: runtime.readGuardFor("sub-a") !== subA,
+			bKept: runtime.readGuardFor("sub-b") === subB,
+			ownKept: runtime.readGuard === own,
+		};
+		runtime.resetForSession();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
+
+		expect({
+			afterShutdown,
+			bRebuiltByReset: runtime.readGuardFor("sub-b") !== subB,
+			ownRebuiltByReset: runtime.readGuard !== own,
+		}).toEqual({
+			afterShutdown: { aRebuilt: true, bKept: true, ownKept: true },
+			bRebuiltByReset: true,
+			ownRebuiltByReset: true,
+		});
+	});
+
+	it("forgetTurnSession releases the session's FileTime bucket and leaves the others (#4942 F8)", () => {
+		// RECURRENCE GUARDED: #4955 review F8 (AGENTS shape 46). A secondary's
+		// ReadGuard stamps files into the process-global FileTime map keyed by
+		// session id; deleting the guard object left one bucket per retired
+		// secondary session. The coordinator's own bucket and a live
+		// secondary's must survive.
+		const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-f8-"));
+		try {
+			const file = path.join(dir, "a.ts");
+			writeFileSync(file, "export const a = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.setSessionLifecycle({ sessionId: "primary-f8" });
+			runtime.readGuard.recordWritten(file);
+			runtime.readGuardFor("sub-f8-a").recordWritten(file);
+			const liveSecondary = runtime.readGuardFor("sub-f8-b");
+			liveSecondary.recordWritten(file);
+			// #4955 review F14: releasing the bucket must not move the shared
+			// branch epoch, so the coordinator's and the live secondary's stay put.
+			const epochsBefore = {
+				primary: runtime.readGuard.currentBranchEpoch,
+				liveSecondary: liveSecondary.currentBranchEpoch,
+			};
+
+			runtime.forgetTurnSession("sub-f8-a");
+
+			expect({
+				forgotten: createFileTime("sub-f8-a").get(file),
+				liveSecondary: createFileTime("sub-f8-b").get(file) !== undefined,
+				primary:
+					createFileTime(runtime.telemetrySessionId).get(file) !== undefined,
+				epochs: {
+					primary: runtime.readGuard.currentBranchEpoch,
+					liveSecondary: liveSecondary.currentBranchEpoch,
+				},
+			}).toEqual({
+				forgotten: undefined,
+				liveSecondary: true,
+				primary: true,
+				epochs: epochsBefore,
+			});
+			runtime.forgetTurnSession("sub-f8-b");
+			createFileTime(runtime.telemetrySessionId).clear();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("makes edit autofix deferral sticky after a write until beginTurn", () => {
