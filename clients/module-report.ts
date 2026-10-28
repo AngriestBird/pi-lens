@@ -54,6 +54,7 @@ import {
 	resolveTreeSitterLanguage,
 } from "./tree-sitter-shared.js";
 import {
+	type ExtractedSymbols,
 	type ImportRef,
 	symbolExtractionGrammar,
 	TreeSitterSymbolExtractor,
@@ -482,6 +483,9 @@ function diagnosticMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
+const SYNTAX_ERRORS_WARNING =
+	"Syntax errors in this file (tree-sitter recovered); the symbol list may be incomplete.";
+
 async function extractFile(
 	absPath: string,
 	languageId: string,
@@ -522,9 +526,15 @@ async function extractFile(
 				const warnings = extractor
 					? []
 					: [`Symbol extractor not available for ${languageId}`];
-				const result = extractor
+				const result: Pick<
+					ExtractedSymbols,
+					"symbols" | "imports" | "syntaxErrors"
+				> = extractor
 					? extractor.extract(tree, absPath, content)
 					: { symbols: [], imports: [] };
+				// #4949: a recovered parse drops declarations silently; say so, so a
+				// miss is not read as absence. Disclosure only; coverage unchanged.
+				if (result.syntaxErrors) warnings.push(SYNTAX_ERRORS_WARNING);
 				const owners = result.symbols
 					.filter((candidate) => !candidate.local)
 					.map((candidate) => ({

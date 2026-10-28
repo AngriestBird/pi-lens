@@ -120,4 +120,23 @@ describe("module_report + read_symbol over MCP (tiny project)", () => {
 		expect((res.result as { isError?: boolean }).isError).toBe(true);
 		expect(textOf(res)).toContain("foo");
 	}, 30_000);
+
+	// #4949: the pi tool appended extraction warnings on a miss but the MCP twin
+	// dropped them, so a recovered-parse miss read as absence over MCP.
+	it("pilens_read_symbol miss on a syntax-error file carries the warning (#4949)", async () => {
+		writeFileSync(
+			path.join(projectDir, "bad.py"),
+			"def good():\n    return 1\n\ndef broken(:\n    x = [1,\n\ndef after():\n    pass\n",
+		);
+		const miss = await harness.request(13, "tools/call", {
+			name: "pilens_read_symbol",
+			arguments: { file: path.join(projectDir, "bad.py"), symbol: "after" },
+		});
+		expect(textOf(miss)).toContain("Syntax errors in this file");
+		const hit = await harness.request(14, "tools/call", {
+			name: "pilens_read_symbol",
+			arguments: { file: path.join(projectDir, "bad.py"), symbol: "good" },
+		});
+		expect(textOf(hit)).not.toContain("Syntax errors");
+	}, 30_000);
 });

@@ -744,6 +744,12 @@ export interface ExtractedSymbols {
 		references: "complete" | "unavailable";
 		imports: "complete" | "unavailable";
 	};
+	/**
+	 * Tree-sitter recovered from syntax errors (`rootNode.hasError`), so the
+	 * lists above may be missing declarations the file really holds (#4949).
+	 * Optional: IR records written before this field still parse.
+	 */
+	syntaxErrors?: true;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: tree-sitter match type
@@ -901,6 +907,9 @@ export class TreeSitterSymbolExtractor {
 				references: this.refQuery ? "complete" : "unavailable",
 				imports: this.importQuery ? "complete" : "unavailable",
 			},
+			...(tree.rootNode.hasError === true
+				? { syntaxErrors: true as const }
+				: {}),
 		};
 	}
 
