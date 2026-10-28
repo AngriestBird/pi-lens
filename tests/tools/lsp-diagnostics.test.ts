@@ -152,6 +152,69 @@ describe("lsp_diagnostics tool", () => {
 		}
 	});
 
+	// Recurrence (#4944 review F2): the exclusion reached only the local touch, so
+	// a warm incumbent started without the flag still delivered its ast-grep rows
+	// to a batch that had switched ast-grep off.
+	it("drops a switched-off auxiliary's attached rows from a batch and keeps the others (#4944)", async () => {
+		mocked.warmAttached = true;
+		const row = (message: string, serverId: string) => ({
+			severity: 1,
+			message,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
+			source: serverId,
+			serverId,
+		});
+		mocked.attachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: {
+				diagnostics: [
+					row("from incumbent ts", "typescript"),
+					row("from incumbent ast-grep", "ast-grep"),
+				],
+			},
+		});
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-diag-attached-off-"),
+		);
+		const file = path.join(tmpDir, "attached.ts");
+		fs.writeFileSync(file, "const value = 1;\n");
+		try {
+			const run = async (getFlag?: (name: string) => boolean) =>
+				String(
+					(
+						(await createLspDiagnosticsTool(
+							undefined,
+							undefined,
+							undefined,
+							getFlag,
+						).execute(
+							"diag-attached-off",
+							{
+								paths: [file],
+								severity: "all",
+								waitMs: 321,
+								serverScope: "all",
+							},
+							new AbortController().signal,
+							null,
+							{ cwd: "." },
+						)) as any
+					).content[0]?.text,
+				);
+
+			// The control: with the switch unset the fixture does deliver the row.
+			expect(await run()).toContain("from incumbent ast-grep");
+			const off = await run((name) => name === "no-ast-grep");
+			expect(off).toContain("from incumbent ts");
+			expect(off).not.toContain("from incumbent ast-grep");
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
 	// #3405: the explicit query reads the file from disk, so the bytes it pushes
 	// ARE the file's saved state — it declares the touch a save. Recurrence it
 	// prevents: for a save-triggered server (Expert publishes only after a

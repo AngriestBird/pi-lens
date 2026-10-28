@@ -294,6 +294,27 @@ function isEnabledByConfiguration(
 	);
 }
 
+/**
+ * #4944: drop the rows a switched-off server produced. A warm-attached peer
+ * answers every auxiliary (`clientScope: "with-auxiliary"`) whatever this
+ * process's `excludeServerIds` says, so the rows are filtered on receipt. A row
+ * with no `serverId` is mapped through its `source`; a row neither names stays,
+ * because nothing says it came from an excluded server.
+ */
+export function dropExcludedServerRows<T extends LSPDiagnostic>(
+	diagnostics: readonly T[],
+	excludeServerIds: ReadonlySet<string> | undefined,
+): T[] {
+	if (excludeServerIds === undefined || excludeServerIds.size === 0)
+		return [...diagnostics];
+	return diagnostics.filter(
+		(d) =>
+			!excludeServerIds.has(
+				d.serverId ?? findAuxiliaryProfileForSource(d.source)?.serverId ?? "",
+			),
+	);
+}
+
 // #277 R7: `findAuxiliaryProfileForSource` is called once per diagnostic, and a
 // file's diagnostics are typically dominated by a handful of distinct `source`
 // strings (one per tool that fired). Memoizing by exact `source` turns an

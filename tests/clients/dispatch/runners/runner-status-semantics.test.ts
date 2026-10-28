@@ -1197,6 +1197,63 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
+	// Recurrence (#4944 review F2): the exclusion reached only the local touch, so
+	// a warm incumbent started without the flag still delivered its ast-grep
+	// rows to a session that had switched ast-grep off.
+	it("drops a switched-off auxiliary's warm-attached rows and keeps the others (#4944)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-warm-switched-off-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const a: string = 1;\n");
+			const range = {
+				start: { line: 0, character: 6 },
+				end: { line: 0, character: 7 },
+			};
+			warmAttach.diagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [
+						{
+							severity: 1,
+							message: "Type mismatch",
+							range,
+							source: "typescript",
+							serverId: "typescript",
+						},
+						{
+							severity: 1,
+							message: "warm ast-grep finding",
+							range,
+							source: "ast-grep",
+							serverId: "ast-grep",
+						},
+					],
+				},
+			});
+			const messages = async (switches: readonly string[]) =>
+				(
+					await runner.run({
+						...ctx(filePath, env.tmpDir),
+						pi: {
+							getFlag: (name: string) =>
+								name === "lens-lsp" || switches.includes(name),
+						},
+					} as never)
+				).diagnostics.map((d) => d.message);
+
+			// The control: with the switch unset the fixture does deliver the row.
+			expect(await messages([])).toEqual([
+				"Type mismatch",
+				"warm ast-grep finding",
+			]);
+			expect(await messages(["no-ast-grep"])).toEqual(["Type mismatch"]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("lsp runner drops ast-grep auxiliary findings on test files, but keeps opengrep's (#687)", async () => {
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;

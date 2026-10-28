@@ -46,6 +46,8 @@ import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
 import { demoteLanguageServerRows } from "../../lsp/inferred-project.js";
 import type { TsserverProjectIdentity } from "../../lsp/tsserver-sync.js";
 import {
+	configDisabledAuxiliaryLspServerIds,
+	dropExcludedServerRows,
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
 } from "../auxiliary-lsp.js";
@@ -249,7 +251,12 @@ const lspRunner: RunnerDefinition = {
 			// returns the wrapper.
 			const touched = attached?.available
 				? {
-						diags: attached.response.diagnostics,
+						// #4944: the incumbent answers every auxiliary; a switched-off
+						// one's rows are not this process's answer.
+						diags: dropExcludedServerRows(
+							attached.response.diagnostics,
+							configDisabledAuxiliaryLspServerIds((f) => ctx.pi.getFlag(f)),
+						),
 						...(attached.response.unconfirmedServerIds !== undefined && {
 							unconfirmedServerIds: attached.response.unconfirmedServerIds,
 						}),

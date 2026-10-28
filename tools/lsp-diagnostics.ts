@@ -46,6 +46,7 @@ import {
 import {
 	applyAuxiliarySuppressions,
 	configDisabledAuxiliaryLspServerIds,
+	dropExcludedServerRows,
 	retagAuxiliaryDiagnostics,
 } from "../clients/dispatch/auxiliary-lsp.js";
 import {
@@ -901,7 +902,10 @@ async function collectDiagnosticsForFile(
 						? attached.response.diagnostics.filter(
 								(item) => item.serverId === primaryServerId(absPath),
 							)
-						: attached.response.diagnostics;
+						: dropExcludedServerRows(
+								attached.response.diagnostics,
+								excludeServerIds,
+							);
 				const filtered = applyAuxiliarySuppressions(
 					scopedDiagnostics,
 					content,

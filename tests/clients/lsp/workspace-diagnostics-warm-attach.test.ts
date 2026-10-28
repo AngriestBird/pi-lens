@@ -249,4 +249,75 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		expect(createLSPClient).toHaveBeenCalledTimes(1);
 		expect(warmAttached).toBe(false);
 	});
+
+	// Recurrence (#4944 review F2): the sweep's exclusion reached only the local
+	// touch. A warm incumbent answers every auxiliary, so its ast-grep rows were
+	// recorded under a scope key that claimed ast-grep was excluded.
+	it("drops a switched-off auxiliary's warm-attached rows and keeps the others (#4944)", async () => {
+		const file = path.join(tmp, "a.ts");
+		fs.writeFileSync(file, "const x = 1;\n");
+		tryWarmAttachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: {
+				diagnostics: [
+					{
+						...diagnostic("ts finding"),
+						source: "typescript",
+						serverId: "typescript",
+					},
+					{
+						...diagnostic("ast-grep finding"),
+						source: "ast-grep",
+						serverId: "ast-grep",
+					},
+					// No serverId: mapped through its source.
+					{ ...diagnostic("ast-grep sourced finding"), source: "ast-grep" },
+				],
+			},
+		});
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const [result] = await new LSPService().runWorkspaceDiagnostics(tmp, {
+			files: [file],
+			excludeServerIds: new Set(["ast-grep"]),
+		});
+
+		expect(result?.diagnostics.map((d) => d.message)).toEqual(["ts finding"]);
+	});
+
+	// Recurrence (#4944 review F3): removing the caller's ids from the sweep's
+	// scope key survived every test, so a sweep with ast-grep on could replay its
+	// cached ast-grep rows to a sweep with it switched off.
+	it("does not replay a sweep's cached rows to a sweep with another exclusion set (#4944)", async () => {
+		fs.mkdirSync(path.join(tmp, ".pi-lens"));
+		const file = path.join(tmp, "a.ts");
+		fs.writeFileSync(file, "const x = 1;\n");
+		tryWarmAttachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: {
+				diagnostics: [
+					{
+						...diagnostic("ast-grep finding"),
+						source: "ast-grep",
+						serverId: "ast-grep",
+					},
+				],
+			},
+		});
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+
+		const [on] = await new LSPService().runWorkspaceDiagnostics(tmp, {
+			files: [file],
+		});
+		expect(on?.diagnostics.map((d) => d.message)).toEqual(["ast-grep finding"]);
+		expect(tryWarmAttachedDiagnostics).toHaveBeenCalledTimes(1);
+
+		const [off] = await new LSPService().runWorkspaceDiagnostics(tmp, {
+			files: [file],
+			excludeServerIds: new Set(["ast-grep"]),
+		});
+		// A cache hit would skip the incumbent and replay the first entry.
+		expect(tryWarmAttachedDiagnostics).toHaveBeenCalledTimes(2);
+		expect(off?.diagnostics).toEqual([]);
+	});
 });

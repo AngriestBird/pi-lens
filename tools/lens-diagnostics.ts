@@ -3060,6 +3060,17 @@ async function formatFullMode(
 		uncoveredScannerIds.length > 0
 			? `\n\n⚠ Auxiliary coverage incomplete: ${uncoveredScannerIds.join(", ")} did not answer for ${partiallyCoveredLspResults.length} file(s). Findings from answering servers are included; this is not a clean verdict for the named scanner lane(s).`
 			: "";
+	// #4944: an auxiliary the operator turned off was never asked, so it is in
+	// neither list above; say so, as `lsp_diagnostics` does ("Switched off, not
+	// run"), so a sweep with no ast-grep rows is not read as an ast-grep result.
+	// Code-unit order, for the same determinism as the lane names above.
+	const switchedOffServerIds = [...(options.excludeServerIds ?? [])].sort(
+		(a, b) => Number(a > b) - Number(a < b),
+	);
+	const switchedOffNote =
+		switchedOffServerIds.length > 0
+			? `\n\nSwitched off, not run: ${switchedOffServerIds.join(", ")}.`
+			: "";
 	// #646: primary-vs-auxiliary split of the raw LSP-sweep findings (before
 	// they're merged into the widget-state summaries below), mirroring
 	// `lsp_diagnostics`' "Primary findings"/"Auxiliary findings" separation —
@@ -3379,6 +3390,7 @@ async function formatFullMode(
 						note +
 						unconfirmedLspNote +
 						auxiliaryCoverageNote +
+						switchedOffNote +
 						lspPrimaryVsAuxiliaryNote +
 						partialNote +
 						coldNote +
@@ -3412,6 +3424,7 @@ async function formatFullMode(
 		cheapScanStatusNote ||
 		unconfirmedLspNote ||
 		auxiliaryCoverageNote ||
+		switchedOffNote ||
 		lspPrimaryVsAuxiliaryNote
 	) {
 		return {
@@ -3422,6 +3435,7 @@ async function formatFullMode(
 						result.content[0].text +
 						unconfirmedLspNote +
 						auxiliaryCoverageNote +
+						switchedOffNote +
 						lspPrimaryVsAuxiliaryNote +
 						partialNote +
 						coldNote +

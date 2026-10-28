@@ -35,7 +35,10 @@ import {
 	importTargetsToAnnounce,
 } from "./created-import-targets.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
-import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
+import {
+	applyAuxiliarySuppressions,
+	dropExcludedServerRows,
+} from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { emitBounded } from "../bounded-telemetry.js";
 import { logLatency, phaseFinished, phaseStarted } from "../latency-logger.js";
@@ -7243,12 +7246,7 @@ export class LSPService {
 			// Drop its rows from what this caller sees; the shared store keeps
 			// them for callers that did not exclude it.
 			const stored = this.lastKnownDiagnostics.get(normalizedPath);
-			const stale =
-				excludeServerIds !== undefined && excludeServerIds.size > 0
-					? stored?.filter(
-							(diagnostic) => !excludeServerIds.has(diagnostic.serverId ?? ""),
-						)
-					: stored;
+			const stale = stored && dropExcludedServerRows(stored, excludeServerIds);
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
 			// #4322: with nothing acquired, every primary that resolved a root went
 			// unanswered, so an empty answer here is not a clean one.
@@ -9407,6 +9405,14 @@ export class LSPService {
 				// carry no binding, and the IPC client already rejects an inconclusive
 				// answer, so `available` implies confirmed) — wrap it as `{ diags }`;
 				// the incumbent branch already returns the wrapper.
+				// #4944: the incumbent answers every auxiliary; drop the ones this
+				// sweep's exclusion set (the scope key below claims) leaves out.
+				const attachedDiagnostics = attached?.available
+					? dropExcludedServerRows(
+							attached.response.diagnostics,
+							sweepExcludedServerIds,
+						)
+					: [];
 				const touchResult = attached?.available
 					? {
 							// #4645: the incumbent's membership answer, applied on receipt
@@ -9418,9 +9424,9 @@ export class LSPService {
 							// state of that render.
 							diags:
 								attached.response.projectIdentity === undefined
-									? attached.response.diagnostics
+									? attachedDiagnostics
 									: await demoteInferredProjectDiagnostics(
-											attached.response.diagnostics,
+											attachedDiagnostics,
 											{
 												filePath,
 												cwd,
