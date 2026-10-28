@@ -14,8 +14,8 @@
  * and a string (a template's fixed parts included) is a `string` node, so
  * neither can hold a call or a `killSwitchFlag:` pair (a template's `${..}`
  * substitution is code and is scanned), and a comment that quotes
- * `getFlag("x")` is no read (AGENTS.md "Detectors match code, not
- * prose"; the self-test below plants both spellings). The flag name IS a string
+ * `getFlag("x")` is no read (engineering principles §2, detectors match
+ * code, not prose; AGENTS.md shape 69). The flag name IS a string
  * literal, so the only string the scan reads is the first argument of a call it
  * found as code.
  *
@@ -105,6 +105,10 @@ const FUNCTIONS = new Set([
 	"generator_function_declaration",
 ]);
 
+/** A call's first argument node. Nothing is visited: it indexes the argument list. */
+const firstArgument = (call: SgNode): SgNode | undefined =>
+	call.field("arguments")?.namedChildren()[0];
+
 /** The value of a string literal node, or undefined for anything else (template substitutions included). */
 function literalValue(node: SgNode): string | undefined {
 	const text = node.text();
@@ -117,7 +121,7 @@ function literalValue(node: SgNode): string | undefined {
 const unwrap = (node: SgNode): SgNode => {
 	let current = node;
 	while (TRANSPARENT.has(kindOf(current))) {
-		const inner = current.children().find((c) => c.isNamed());
+		const inner = current.namedChildren()[0];
 		if (!inner) break;
 		current = inner;
 	}
@@ -221,8 +225,7 @@ function parameterNames(fn: SgNode): Set<string> {
 	const names = new Set<string>();
 	const single = fn.field("parameter");
 	if (single) names.add(single.text());
-	for (const param of fn.field("parameters")?.children() ?? []) {
-		if (!param.isNamed()) continue;
+	for (const param of fn.field("parameters")?.namedChildren() ?? []) {
 		const pattern = param.field("pattern") ?? param;
 		if (kindOf(pattern) === "identifier") names.add(pattern.text());
 	}
@@ -256,10 +259,7 @@ export function scanFlagReads(
 			if (kindOf(node) !== "call_expression") continue;
 			const { name } = calleeName(node.field("function") as SgNode);
 			if (name !== "registerFlag") continue;
-			const first = node
-				.field("arguments")
-				?.children()
-				.find((c) => c.isNamed());
+			const first = firstArgument(node);
 			const value = first ? literalValue(first) : undefined;
 			if (value !== undefined) registered.add(value);
 		}
@@ -276,10 +276,7 @@ export function scanFlagReads(
 				if (kindOf(node) !== "call_expression") continue;
 				const { name } = calleeName(node.field("function") as SgNode);
 				if (!isReader(name)) continue;
-				const first = node
-					.field("arguments")
-					?.children()
-					.find((c) => c.isNamed());
+				const first = firstArgument(node);
 				const fn = enclosingFunction(node);
 				if (!first || !fn || kindOf(first) !== "identifier") continue;
 				if (!parameterNames(fn).has(first.text())) continue;
@@ -327,10 +324,7 @@ export function scanFlagReads(
 					refuse(file, text, node, `computed reader \`[${name}]\``);
 					continue;
 				}
-				const first = node
-					.field("arguments")
-					?.children()
-					.find((c) => c.isNamed());
+				const first = firstArgument(node);
 				if (!first) {
 					refuse(file, text, node, `${name}() with no flag name`);
 					continue;

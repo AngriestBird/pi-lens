@@ -9,6 +9,9 @@
  * (`resolvePiLensFlag`: host value, then global config, then the registry
  * default). Only the host is a stand-in, and it answers like pi does: a CLI
  * value exists only for a flag the extension registered (`getLensFlagSpec`).
+ * The JVM tool is the process boundary (`safeSpawnAsync`); tool installation is
+ * off under vitest (`PI_LENS_DISABLE_TOOL_INSTALL`), so the real availability
+ * checks and the real runner decide what reaches that boundary.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -23,21 +26,6 @@ vi.mock("../../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../../clients/safe-spawn.js")>()),
 	safeSpawnAsync,
 }));
-
-// SpotBugs and java resolve to stubs: a real run would download a JVM tool.
-vi.mock(
-	"../../../clients/dispatch/runners/utils/runner-helpers.js",
-	async (importOriginal) => ({
-		...(await importOriginal<
-			typeof import("../../../clients/dispatch/runners/utils/runner-helpers.js")
-		>()),
-		createAvailabilityChecker: () => ({
-			isAvailableAsync: async () => true,
-			getCommand: () => null,
-		}),
-		resolveAvailableOrInstall: async () => "spotbugs-stub",
-	}),
-);
 
 describe("lens-spotbugs reaches the SpotBugs runner (#4946)", () => {
 	let cwd: string;
@@ -64,6 +52,12 @@ describe("lens-spotbugs reaches the SpotBugs runner (#4946)", () => {
 		fs.writeFileSync(filePath, "class Foo {}\n");
 	});
 
+	/** The scans the runner asked the process boundary for: `spotbugs -textui ... <classes dir>`. */
+	const spotbugsScans = () =>
+		safeSpawnAsync.mock.calls.filter(([, args]) =>
+			(args as string[]).includes("-textui"),
+		);
+
 	const runnerIds = async (
 		hostValues: Record<string, boolean | undefined>,
 		config: Parameters<typeof resolvePiLensFlag>[2],
@@ -89,10 +83,10 @@ describe("lens-spotbugs reaches the SpotBugs runner (#4946)", () => {
 		expect(
 			await runnerIds({ "lens-spotbugs": true, "no-lsp": true }, {}),
 		).toContain("spotbugs");
-		const spotbugsCall = safeSpawnAsync.mock.calls.find(
-			([cmd]) => cmd === "spotbugs-stub",
+		expect(spotbugsScans()).toHaveLength(1);
+		expect(spotbugsScans()[0]?.[1]).toContain(
+			path.join(cwd, "target", "classes"),
 		);
-		expect(spotbugsCall?.[1]).toContain(path.join(cwd, "target", "classes"));
 	}, 30_000);
 
 	it("schedules the runner for spotbugs.enabled=true in the global config", async () => {
@@ -106,8 +100,6 @@ describe("lens-spotbugs reaches the SpotBugs runner (#4946)", () => {
 		expect(
 			await runnerIds({ "no-lsp": true }, { spotbugs: { enabled: false } }),
 		).not.toContain("spotbugs");
-		expect(
-			safeSpawnAsync.mock.calls.some(([cmd]) => cmd === "spotbugs-stub"),
-		).toBe(false);
+		expect(spotbugsScans()).toHaveLength(0);
 	}, 30_000);
 });

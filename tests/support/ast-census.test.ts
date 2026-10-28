@@ -82,12 +82,14 @@ const CONSUMERS = [
 	"tests/clients/socket-error-listener-sweep.test.ts",
 	"tests/config/bounded-container-guard.test.ts",
 	"tests/config/bounded-eviction-idiom-sweep.test.ts",
+	"tests/config/flag-read-registry-sweep.test.ts",
 	"tests/config/lsp-override-copy-census.test.ts",
 	"tests/config/runner-group-id-census.test.ts",
 	"tests/config/spawn-chokepoint-sweep.test.ts",
 	"tests/config/tree-census-timeout.test.ts",
 	"tests/support/eviction-programs.ts",
 	"tests/support/factory-flag-read-scan.ts",
+	"tests/support/flag-read-scan.ts",
 	"tests/support/silent-catch-scan.ts",
 	"tests/support/worker-message-scan.ts",
 ];
@@ -170,6 +172,27 @@ interface AccessorAdmission {
  * anything reds too.
  */
 const ADMITTED_ACCESSOR_SITES: readonly AccessorAdmission[] = [
+	{
+		file: "tests/support/flag-read-scan.ts",
+		text: 'call.field("arguments")?.namedChildren()[0];',
+		count: 1,
+		reason:
+			"#4946: `firstArgument` indexes ONE call's argument list; nothing is visited",
+	},
+	{
+		file: "tests/support/flag-read-scan.ts",
+		text: "const inner = current.namedChildren()[0];",
+		count: 1,
+		reason:
+			"#4946: `unwrap` steps through one parenthesized or asserted expression to its single child",
+	},
+	{
+		file: "tests/support/flag-read-scan.ts",
+		text: 'for (const param of fn.field("parameters")?.namedChildren() ?? []) {',
+		count: 1,
+		reason:
+			"#4946: `parameterNames` reads one function's parameter list; nothing is visited",
+	},
 	{
 		file: "tests/clients/socket-error-listener-sweep.test.ts",
 		text: 'const handler = node.field("arguments")?.namedChildren()[0];',
