@@ -854,8 +854,9 @@ export class RuntimeCoordinator {
 		this._gitGuardCacheUnknown.clear();
 		this._gitGuardUnansweredDispatches.clear();
 		this._readGuard = null;
-		for (const guard of this._foreignReadGuards.values())
-			guard.releaseFileTime();
+		// A dropped secondary's FileTime bucket stays: a read of its that is in
+		// flight across this reset keeps its tool_call stamp, which its
+		// tool_result needs to see a writer that moved the file (#4942 r7).
 		this._foreignReadGuards.clear();
 		this._pendingDeferredMutations.clear();
 		// #1642 F5: every sibling correlation/state map is cleared here. A

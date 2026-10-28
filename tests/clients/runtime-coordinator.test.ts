@@ -204,29 +204,6 @@ describe("RuntimeCoordinator", () => {
 		}
 	});
 
-	it("resetForSession releases a dropped secondary's FileTime bucket with its guard (#4942 F13)", () => {
-		// RECURRENCE GUARDED: #4955 review F13 (AGENTS shape 46). The primary's
-		// reset drops every secondary guard. Only forgetTurnSession released the
-		// guard's FileTime bucket, so a reset left it behind, and a guard built
-		// again for the same id read the stamps from before the reset.
-		const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-f13-"));
-		try {
-			const file = path.join(dir, "a.ts");
-			writeFileSync(file, "export const a = 1;\n");
-			const runtime = new RuntimeCoordinator();
-			runtime.setSessionLifecycle({ sessionId: "primary-f13" });
-			runtime.readGuardFor("sub-f13").recordWritten(file);
-			expect(createFileTime("sub-f13").get(file)).toBeDefined();
-
-			runtime.resetForSession();
-
-			expect(createFileTime("sub-f13").get(file)).toBeUndefined();
-		} finally {
-			createFileTime("sub-f13").clear();
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
 	it("makes edit autofix deferral sticky after a write until beginTurn", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = path.resolve("src/sticky.ts");
