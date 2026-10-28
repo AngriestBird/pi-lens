@@ -416,4 +416,59 @@ describe("Python docstrings fill Symbol.doc (#4948)", () => {
 		expect(doc?.length).toBe(120);
 		expect(doc?.endsWith("…")).toBe(true);
 	});
+
+	it("falls back to the # comment when the docstring is blank", async () => {
+		// Recurrence: #4951 F3. `if (text)` is what keeps a comment doc when the
+		// docstring summarizes to nothing; neutering it dropped the comment doc.
+		const syms = await extractPy(
+			'# Above comment.\ndef go():\n    \"\"\"   \"\"\"\n',
+		);
+		const go = syms.find((s) => s.name === "go");
+		expect(go?.doc).toBe("Above comment.");
+		expect(go?.docStartLine).toBeDefined();
+	});
+
+	it("reads concatenated and parenthesized docstrings", async () => {
+		// Recurrence: #4951 F5. Both are valid Python docstrings and were dropped.
+		const syms = await extractPy(
+			[
+				'def a():\n    "Part one. " "Part two."\n',
+				'def b():\n    ("Paren doc.")\n',
+				// One f-string part makes the concatenation an f-string: no doc.
+				'def c():\n    "Plain. " f"Fmt."\n',
+			].join("\n"),
+		);
+		expect(docOf(syms, "a")).toBe("Part one.");
+		expect(docOf(syms, "b")).toBe("Paren doc.");
+		expect(docOf(syms, "c")).toBeUndefined();
+	});
+
+	it("reads a docstring that follows a # comment inside the body", async () => {
+		// Recurrence: #4951 F4 / Sourcery thread 1: Python block comments are
+		// extras, not named children, so the docstring is still the first one.
+		const syms = await extractPy(
+			'def a():\n    # inner comment\n    \"\"\"Doc after comment.\"\"\"\n',
+		);
+		expect(docOf(syms, "a")).toBe("Doc after comment.");
+	});
+
+	it("does not read a bare string in another grammar's function_definition", async () => {
+		// Recurrence: #4951 F1. `function_definition` is PHP's node too; keying on
+		// node types alone gave a PHP function a docstring doc.
+		const env = setupTestEnvironment("pi-lens-4951-php-");
+		try {
+			const src = "<?php\nfunction f() {\n  'Php single quoted doc';\n}\n";
+			const fp = createTempFile(env.tmpDir, "a.php", src);
+			const tree = await client.parseFile(fp, "php");
+			const extractor = new TreeSitterSymbolExtractor("php", client);
+			await extractor.init();
+			const f = extractor
+				.extract(tree!, fp, src)
+				.symbols.find((s) => s.name === "f");
+			expect(f).toBeDefined();
+			expect(f?.doc).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
 });

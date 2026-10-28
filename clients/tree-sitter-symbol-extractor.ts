@@ -1086,22 +1086,39 @@ export class TreeSitterSymbolExtractor {
 		declNode: any,
 	): { text: string; startLine?: number } | undefined {
 		if (
-			declNode.type === "function_definition" ||
-			declNode.type === "class_definition"
+			this.languageId === "python" &&
+			(declNode.type === "function_definition" ||
+				declNode.type === "class_definition")
 		) {
 			// Only the FIRST statement of the body counts, as in Python itself; a
-			// string after other code is a no-op expression, not a docstring.
+			// string after other code is a no-op expression, not a docstring. The
+			// language gate matters: `function_definition` is also PHP's, C's and
+			// bash's node, and a bare PHP string is not documentation (#4951 F1).
 			const first = declNode.childForFieldName("body")?.namedChild(0);
-			const str =
-				first?.type === "expression_statement" && first.namedChildCount === 1
+			let expr =
+				first?.type === "expression_statement"
 					? first.namedChild(0)
 					: undefined;
-			if (str?.type === "string") {
-				// Plain, `r` and `u` strings only: `b`/`f` prefixes are not docstrings.
-				const m = /^[rRuU]?("""|'''|"|')([\s\S]*)\1$/.exec(String(str.text));
-				const text = m ? this.summarizeDocComment(m[2] ?? "") : undefined;
-				if (text) return { text };
-			}
+			if (expr?.type === "parenthesized_expression") expr = expr.namedChild(0);
+			// Adjacent literals (`"a" "b"`) concatenate into one docstring.
+			const parts =
+				expr?.type === "concatenated_string"
+					? expr.namedChildren
+					: expr
+						? [expr]
+						: [];
+			// Plain, `r` and `u` strings only: `b`/`f` prefixes are not docstrings.
+			const bodies = parts.map((part: any) =>
+				part.type === "string"
+					? /^[rRuU]?("""|'''|"|')([\s\S]*)\1$/.exec(String(part.text))?.[2]
+					: undefined,
+			);
+			const text =
+				bodies.length > 0 &&
+				bodies.every((x: string | undefined) => x !== undefined)
+					? this.summarizeDocComment(bodies.join(""))
+					: undefined;
+			if (text) return { text };
 		}
 		const isComment = (n: any): boolean =>
 			!!n && n.type === TreeSitterSymbolExtractor.COMMENT_NODE_KIND;
