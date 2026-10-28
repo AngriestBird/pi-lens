@@ -139,6 +139,7 @@ import { logExtension } from "../clients/extension-log.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import {
+	configDisabledAuxiliaryLspServerIds,
 	findAuxiliaryProfileForSource,
 	retagAuxiliaryDiagnostics,
 } from "../clients/dispatch/auxiliary-lsp.js";
@@ -197,6 +198,7 @@ type LSPServiceLike = ReturnType<typeof getLSPService> & {
 			onServerReady?: () => void;
 			nextWriteIndex?: () => number;
 			files?: string[];
+			excludeServerIds?: ReadonlySet<string>;
 		},
 	) => Promise<WorkspaceLspDiagnosticResult[]>;
 };
@@ -819,6 +821,14 @@ export function createLensDiagnosticsTool(
 							? params.analysisRoot
 							: undefined,
 					host: ctx.host ?? "pi",
+					// #4944: the sweep leaves an auxiliary the operator turned off
+					// (`--no-ast-grep`, `astGrep.enabled=false`) unstarted, as the
+					// `source=lsp` probe does.
+					...(getFlag && {
+						excludeServerIds: configDisabledAuxiliaryLspServerIds((name) =>
+							getFlag(name, cwd),
+						),
+					}),
 				});
 			}
 			return formatDeltaMode(cacheManager, cwd, severity, pathsScope);
@@ -2436,6 +2446,8 @@ async function formatFullMode(
 		onServerReady?: () => void;
 		pathsScope?: PathsScope;
 		nextWriteIndex?: () => number;
+		/** Auxiliary servers the operator's configuration turns off (#4944). */
+		excludeServerIds?: ReadonlySet<string>;
 		runtime?: import("../clients/runtime-coordinator.js").RuntimeCoordinator;
 		/**
 		 * #1107 phase 2 review: scan WITHOUT the generated/artifact NAME-
@@ -2531,6 +2543,7 @@ async function formatFullMode(
 			onServerReady: options.onServerReady,
 			nextWriteIndex: options.nextWriteIndex,
 			files: explicitFiles,
+			excludeServerIds: options.excludeServerIds,
 		}),
 		getProjectDiagnosticsSnapshotForFullMode(cwd, {
 			...options,

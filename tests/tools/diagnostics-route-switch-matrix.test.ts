@@ -129,14 +129,23 @@ type ColumnId =
 	| "disabled, no aux"
 	| "missing, no aux"
 	| "--no-opengrep"
-	| "opengrep.enabled=false";
+	| "opengrep.enabled=false"
+	| "--no-ast-grep"
+	| "astGrep.enabled=false";
+
+/** The auxiliary servers an operator switch turns off, and the flag naming each. */
+type SwitchedServer = "opengrep" | "ast-grep";
+const SWITCH_FLAG: Record<SwitchedServer, "no-opengrep" | "no-ast-grep"> = {
+	opengrep: "no-opengrep",
+	"ast-grep": "no-ast-grep",
+};
 
 interface Column {
 	id: ColumnId;
 	/** `~/.pi-lens/config.json`, through PI_LENS_CONFIG_PATH. */
 	globalConfig: Record<string, unknown>;
 	/** A CLI flag the factory registers; set after `extension(...)`, as pi applies it. */
-	flag: boolean;
+	flag: "no-opengrep" | "no-ast-grep" | undefined;
 	/**
 	 * The language server: a working fake, off in lsp.json, or a missing
 	 * binary. `disabledFallback` is a TypeScript file whose primary is off in
@@ -144,28 +153,42 @@ interface Column {
 	 * (#4403 round 4, N1).
 	 */
 	primary: "fake" | "disabled" | "disabledFallback" | "missing";
-	/** typos and Opengrep running; false turns both off in `lsp.disabledServers`. */
+	/** typos, Opengrep and ast-grep running; false turns all off in `lsp.disabledServers`. */
 	aux: boolean;
-	opengrepOff: boolean;
-	/** Opengrep is off through its own switch, which the file renderer names. */
-	opengrepSwitchedOff: boolean;
+	/** A server is off, by `aux` or by its own switch. */
+	off: ReadonlySet<SwitchedServer>;
+	/** The server this column's own switch turned off; the file renderer names it. */
+	switchedOff: SwitchedServer | undefined;
 }
 
 const column = (
 	id: ColumnId,
 	primary: Column["primary"],
 	aux: boolean,
-	switches: Partial<Pick<Column, "globalConfig" | "flag">> = {},
+	switches: { switchedOff?: SwitchedServer; viaConfig?: boolean } = {},
 ): Column => ({
 	id,
-	globalConfig: switches.globalConfig ?? {},
-	flag: switches.flag ?? false,
+	globalConfig: switches.viaConfig
+		? {
+				[switches.switchedOff === "ast-grep" ? "astGrep" : "opengrep"]: {
+					enabled: false,
+				},
+			}
+		: {},
+	flag:
+		switches.switchedOff && !switches.viaConfig
+			? SWITCH_FLAG[switches.switchedOff]
+			: undefined,
 	primary,
 	aux,
-	opengrepOff:
-		!aux || switches.globalConfig !== undefined || switches.flag === true,
-	opengrepSwitchedOff:
-		switches.globalConfig !== undefined || switches.flag === true,
+	off: new Set<SwitchedServer>(
+		aux
+			? switches.switchedOff
+				? [switches.switchedOff]
+				: []
+			: ["opengrep", "ast-grep"],
+	),
+	switchedOff: switches.switchedOff,
 });
 
 /**
@@ -182,17 +205,24 @@ const COLUMNS: readonly Column[] = [
 	column("present, no aux", "fake", false),
 	column("disabled, no aux", "disabled", false),
 	column("missing, no aux", "missing", false),
-	column("--no-opengrep", "fake", true, { flag: true }),
+	column("--no-opengrep", "fake", true, { switchedOff: "opengrep" }),
 	column("opengrep.enabled=false", "fake", true, {
-		globalConfig: { opengrep: { enabled: false } },
+		switchedOff: "opengrep",
+		viaConfig: true,
+	}),
+	column("--no-ast-grep", "fake", true, { switchedOff: "ast-grep" }),
+	column("astGrep.enabled=false", "fake", true, {
+		switchedOff: "ast-grep",
+		viaConfig: true,
 	}),
 ];
 
 /**
  * A cell that cannot exist, with the reason. The MCP server has no CLI flags:
- * it resolves `no-opengrep` from config only (`createMcpHost`), so its switch
- * is the `opengrep.enabled=false` column. A case below reds if the flag ever
- * gains an environment spelling the MCP host could read.
+ * it resolves `no-opengrep` and `no-ast-grep` from config only
+ * (`createMcpHost`), so its switch is the `opengrep.enabled=false` or
+ * `astGrep.enabled=false` column. A case below reds if either flag ever gains
+ * an environment spelling the MCP host could read.
  */
 const NOT_APPLICABLE: ReadonlyArray<{
 	route: RouteId;
@@ -203,6 +233,11 @@ const NOT_APPLICABLE: ReadonlyArray<{
 		route: "MCP pilens_diagnostics",
 		column: "--no-opengrep",
 		why: "the MCP host has no CLI flags; it reads no-opengrep from config only",
+	},
+	{
+		route: "MCP pilens_diagnostics",
+		column: "--no-ast-grep",
+		why: "the MCP host has no CLI flags; it reads no-ast-grep from config only",
 	},
 ];
 
@@ -242,7 +277,8 @@ function languageOf(column: Column): Language {
 function selectedServers(column: Column): string[] {
 	return [
 		...(column.primary === "fake" ? ["json"] : []),
-		...(column.opengrepOff ? [] : ["opengrep"]),
+		...(column.off.has("opengrep") ? [] : ["opengrep"]),
+		...(column.off.has("ast-grep") ? [] : ["ast-grep"]),
 		...(column.aux ? ["typos"] : []),
 	].sort();
 }
@@ -317,8 +353,8 @@ function fileLine(column: Column): string {
 function fileSecondLine(column: Column, file: string, route: RouteId): string {
 	if (column.primary === "missing" && !column.aux)
 		return `LSP unavailable for <ws>/${file}: no LSP client is currently ready; ready=0/1. candidates=json. No diagnostics were collected.`;
-	return column.opengrepSwitchedOff && ROUTE_SCOPE[route] === "all"
-		? "No auxiliary findings. Switched off, not run: opengrep."
+	return column.switchedOff && ROUTE_SCOPE[route] === "all"
+		? `No auxiliary findings. Switched off, not run: ${column.switchedOff}.`
 		: "No auxiliary findings.";
 }
 
@@ -618,16 +654,16 @@ function makeFixture(column: Column): Fixture {
 				},
 				typos: { command: shim("typos") },
 				opengrep: { command: shim("opengrep") },
+				"ast-grep": { command: shim("ast-grep") },
 			},
 			// `rust` is a disabled primary that can never root here (there is no
 			// `Cargo.toml`): no cell may name it (#4403 F7).
 			disabledServers: [
-				"ast-grep",
 				"zizmor",
 				"rust",
 				...(column.primary === "disabled" ? ["json"] : []),
 				...(column.primary === "disabledFallback" ? ["typescript"] : []),
-				...(column.aux ? [] : ["typos", "opengrep"]),
+				...(column.aux ? [] : ["typos", "opengrep", "ast-grep"]),
 			],
 			// A configured warm file that does not exist: session_start's
 			// dominant-language warm-up would otherwise start the JSON server in
@@ -690,8 +726,9 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		// The CLI spelling: pi applies the value after the factory, and only
-		// because the factory registered `no-opengrep` (review F2).
-		if (column.flag) pi.setFlag("no-opengrep", true);
+		// because the factory registered the flag (review F2; #4944 for
+		// `no-ast-grep`, which the registry did not register).
+		if (column.flag) pi.setFlag(column.flag, true);
 		// The host's own trust decision, which session_start latches: the
 		// command overrides are project config (#4248).
 		const ctx = makeCtx({
@@ -1559,10 +1596,11 @@ describe("diagnostics routes are derived from code (#4403)", () => {
 	);
 
 	it(
-		"keeps the MCP --no-opengrep cell inapplicable only while the flag has no environment spelling",
+		"keeps the MCP --no-opengrep and --no-ast-grep cells inapplicable only while the flags have no environment spelling",
 		() => {
 			// createMcpHost resolves env, then config; a CLI-only flag cannot reach it.
 			expect(getLensFlagSpec("no-opengrep")?.env).toBeUndefined();
+			expect(getLensFlagSpec("no-ast-grep")?.env).toBeUndefined();
 		},
 		scaledTestTimeout(10_000),
 	);

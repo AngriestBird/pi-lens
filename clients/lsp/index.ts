@@ -8932,6 +8932,12 @@ export class LSPService {
 			 * the walk does before calling in).
 			 */
 			files?: string[];
+			/**
+			 * Auxiliary servers the operator's configuration turns off
+			 * (`--no-ast-grep`, `astGrep.enabled=false`; #4944), left unstarted on
+			 * top of `WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`.
+			 */
+			excludeServerIds?: ReadonlySet<string>;
 		} = {},
 	): Promise<LSPWorkspaceDiagnosticResult[]> {
 		// #1618: hold the shared sweep gate for this call's ENTIRE lifetime —
@@ -8957,10 +8963,15 @@ export class LSPService {
 			onServerReady?: () => void;
 			nextWriteIndex?: () => number;
 			files?: string[];
+			excludeServerIds?: ReadonlySet<string>;
 		} = {},
 	): Promise<LSPWorkspaceDiagnosticResult[]> {
 		const startedAt = Date.now();
 		const root = path.resolve(cwd);
+		const sweepExcludedServerIds: ReadonlySet<string> = new Set([
+			...WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+			...(options.excludeServerIds ?? []),
+		]);
 		const { signal } = options;
 		// #1783: second heartbeat for the drift backstop. The per-file touch
 		// below already carries one, but a round that answers every file from
@@ -9007,7 +9018,7 @@ export class LSPService {
 		const workspaceDiagnosticsCacheCtx =
 			createWorkspaceDiagnosticsCacheContext(root);
 		const workspaceSweepScopeKey = buildScopeKey("all", [
-			...WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+			...sweepExcludedServerIds,
 		]);
 		const touchScopedOpenDependencies = async (
 			filePath: string,
@@ -9276,7 +9287,7 @@ export class LSPService {
 					(async () => {
 						const { clients } = await this.getClientsForFile(
 							filePath,
-							WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+							sweepExcludedServerIds,
 						);
 						for (const entry of clients) {
 							// #1714: this pass is the sweep's SECOND source of `didOpen`
@@ -9437,7 +9448,7 @@ export class LSPService {
 								// `opengrep-client.ts` CLI extractor (one project-wide scan,
 								// cached, read via extractors.ts) instead — see the
 								// `excludeServerIds` doc on `LSPTouchFileOptions`.
-								excludeServerIds: WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+								excludeServerIds: sweepExcludedServerIds,
 								// #645: lets a workspaceIndexing server (marksman) pay its
 								// full wait budget only once across this whole sweep.
 								sweepIndexGate,
