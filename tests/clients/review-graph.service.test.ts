@@ -1236,7 +1236,7 @@ describe("review graph: ignore-gated node creation (#694)", () => {
 		_resetUntrackedIgnoredCacheForTests();
 	});
 
-	// Six synchronous git spawns plus the build: follow the lane's timeout scale
+	// Seven synchronous git spawns plus the build: follow the lane's timeout scale
 	// (3 on the Windows unit leg) instead of the 5 s default (#4910).
 	it(
 		"never materializes an untracked-AND-gitignored import target as a file node, but keeps a tracked one matching the same pattern",
