@@ -398,6 +398,9 @@
     "turnEnd": {
       "x-stability": "stable"
     },
+    "fallow": {
+      "x-stability": "stable"
+    },
     "knip": {
       "type": "object",
       "additionalProperties": true,

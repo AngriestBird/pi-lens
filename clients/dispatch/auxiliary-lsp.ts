@@ -39,9 +39,17 @@ export interface AuxiliaryLspProfile {
 	tool: string;
 	/** Matches `LSPDiagnostic.source` the server emits (e.g. Opengrep → "Semgrep"). */
 	sourceMatch: RegExp;
-	/** Auxiliaries are default-on; this boolean flag turns one off. */
+	/** Default-on auxiliaries: this boolean flag turns one off. */
 	killSwitchFlag?: string;
 	enabledByDefault: boolean;
+	/**
+	 * Opt-in auxiliaries (`enabledByDefault: false`): the lens flag that turns
+	 * one ON. The gate fails closed (#4929): only a flag value that is exactly
+	 * `true` enables the server; an absent, unknown or malformed value, and a
+	 * profile that names no flag, mean off. Read per touch through `getFlag`,
+	 * never at factory time (shape 87).
+	 */
+	optInFlag?: string;
 	/** Whether findings may block in this workspace (e.g. the repo supplies its
 	 *  own curated rules). When false, even ERROR-severity findings stay advisory.
 	 *  Computed once per dispatch by the lsp runner. Absent ⇒ never blocks. */
@@ -237,7 +245,44 @@ export const AUXILIARY_LSP_PROFILES: readonly AuxiliaryLspProfile[] = [
 		// correctness. "style" is the closest taxonomy class.
 		defectClass: () => "style",
 	},
+	{
+		serverId: "fallow",
+		tool: "fallow",
+		// fallow-lsp tags its LSP diagnostics `source: "fallow"`.
+		sourceMatch: /fallow/i,
+		// #4929: opt-in. Off unless `--lens-fallow` / `fallow.enabled=true` is set;
+		// it overlaps knip, jscpd and madge, which keep running either way.
+		enabledByDefault: false,
+		optInFlag: "lens-fallow",
+		// Advisory in this cut: no `allowBlocking`, so even an ERROR-severity
+		// finding stays a warning. fallow publishes unused-code findings as LSP
+		// HINT (severity 4, the editor's greyed-out tag), which the generic
+		// conversion would render as no semantic at all.
+		semantic: () => "warning",
+		defectClass: (d) => {
+			const code = String(d.code ?? "");
+			if (code.startsWith("unused-")) return "unused-value";
+			if (
+				/^(security-|tainted-sink|dangerous-html|client-server-leak)/.test(code)
+			)
+				return "safety";
+			return undefined;
+		},
+	},
 ];
+
+/**
+ * #4929: whether this server id is an opt-in auxiliary (`enabledByDefault:
+ * false`). The LSP service's aggregate `clientScope: "all"` door reads it to
+ * leave such a server unstarted: that door takes its exclusions from the
+ * caller, and a caller with no flag access (or one that never asked) would
+ * otherwise start a scanner the operator never turned on.
+ */
+export function isOptInAuxiliaryServerId(serverId: string): boolean {
+	return AUXILIARY_LSP_PROFILES.some(
+		(p) => p.serverId === serverId && !p.enabledByDefault,
+	);
+}
 
 export type GetFlag = (flag: string) => boolean | string | undefined;
 
@@ -264,8 +309,13 @@ export function enabledAuxiliaryLspServerIds(getFlag: GetFlag): string[] {
 
 /**
  * #4323: the auxiliary server ids the operator's configuration turns off: a
- * profile that is off by default, or whose kill switch is set (`--no-opengrep`
- * or `opengrep.enabled=false` in the global config, resolved by `getFlag`).
+ * default-on profile whose kill switch is set (`--no-opengrep` or
+ * `opengrep.enabled=false` in the global config, resolved by `getFlag`).
+ *
+ * An opt-in profile (#4929) that is not enabled is not listed: nothing was
+ * switched off, naming a scanner the operator never asked for would change
+ * every diagnostics report, and the service's aggregate door leaves opt-in
+ * servers unstarted by its own filter (`aggregateServersForFile`).
  *
  * An explicit all-server check (`lens_diagnostics source=lsp`) passes these to
  * the LSP service as `excludeServerIds`, so it never starts a scanner the
@@ -279,7 +329,9 @@ export function configDisabledAuxiliaryLspServerIds(
 ): ReadonlySet<string> {
 	return new Set(
 		AUXILIARY_LSP_PROFILES.flatMap((p) =>
-			isEnabledByConfiguration(p, getFlag) ? [] : [p.serverId],
+			p.enabledByDefault && !isEnabledByConfiguration(p, getFlag)
+				? [p.serverId]
+				: [],
 		),
 	);
 }
@@ -288,10 +340,15 @@ function isEnabledByConfiguration(
 	profile: AuxiliaryLspProfile,
 	getFlag: GetFlag,
 ): boolean {
-	return (
-		profile.enabledByDefault &&
-		!(profile.killSwitchFlag && getFlag(profile.killSwitchFlag) === true)
-	);
+	// #4929: an opt-in profile admits exactly one value, `true`, from its own
+	// flag. Everything else (absent, a string, a number, a flag the registry
+	// does not know) is off; the kill switch is not consulted for it.
+	if (!profile.enabledByDefault) {
+		return (
+			profile.optInFlag !== undefined && getFlag(profile.optInFlag) === true
+		);
+	}
+	return !(profile.killSwitchFlag && getFlag(profile.killSwitchFlag) === true);
 }
 
 // #277 R7: `findAuxiliaryProfileForSource` is called once per diagnostic, and a

@@ -92,6 +92,7 @@ column is the effective behavior when nothing is set.
 | `--no-lazy-tools` | `tools.lazy` | global | `true`: the five situational tools start inactive on every model (`"auto"` only on a model that keeps mid-conversation system messages, `false` never) |
 | `--no-tool=<name>` | `tools.<name>.enabled` | project | every lens tool **on** |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | global | **off** (madge runs at session start, not per turn) |
+| `--lens-fallow` | `fallow.enabled` | global | **off** (fallow-lsp advisory auxiliary on JS/TS files; nothing installed or launched while off) |
 | `--no-knip` | `knip.enabled` | project | knip analyzer **on** |
 | `--no-jscpd` | `jscpd.enabled` | project | jscpd analyzer **on** |
 | `--no-madge` | `madge.enabled` | project | madge analyzer **on** |

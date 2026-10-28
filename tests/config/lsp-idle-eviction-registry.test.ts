@@ -86,6 +86,7 @@ const UNPROVEN_IDS = [
 	"ruby",
 	"swift",
 	"omnisharp",
+	"fallow",
 ] as const;
 
 export function idleEvictionRegistryIssues(

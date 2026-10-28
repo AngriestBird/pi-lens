@@ -376,6 +376,27 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the lsp_aux_wait_outcome and lsp_rules_refreshed rows are outside the getRecentLoggedPhases ring (LAST_PHASE_EXCLUDED) and test mode skips the file sink, so a passed-through logLatency spy is the only reader of the per-touch published counts and held-publish counter (#4763)",
 		},
+	// 2026-10-28 (#4929): the fallow opt-in cells drive the real registry, config
+	// selection, trust gate and LSPService acquisition; the launcher, the
+	// transport and the installer are the process and network boundaries.
+	"in-process-mock:clients/lsp/opt-in-auxiliary-4929.test.ts::clients/installer/index":
+		{
+			detector: "in-process-mock",
+			reason:
+				"tool installation and discovery are the host boundary; the stub records whether the opt-in server's install was reached and never downloads",
+		},
+	"in-process-mock:clients/lsp/opt-in-auxiliary-4929.test.ts::clients/lsp/client":
+		{
+			detector: "in-process-mock",
+			reason:
+				"createLSPClient is the JSON-RPC transport boundary; the acquisition, selection and trust gate around it are the real ones",
+		},
+	"in-process-mock:clients/lsp/opt-in-auxiliary-4929.test.ts::clients/lsp/launch":
+		{
+			detector: "in-process-mock",
+			reason:
+				"launchLSP is the child-process boundary and records which command and arguments the production spawn chose; the trust gate beside it in the same module is the real one",
+		},
 	// 2026-10-23 (#4785 F4): the touch's verdict over the real wait, publish
 	// handler and clear; only the client factory, which spawns the server, is
 	// replaced by a client over a real state.
@@ -1302,6 +1323,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "service-double",
 		reason:
 			"a language-server client is a spawned process; the registry's lease, capacity and idle paths are driven by its liveness and busy answers",
+	},
+	"service-double:clients/lsp/opt-in-auxiliary-4929.test.ts::LSPClientInfo": {
+		detector: "service-double",
+		reason:
+			"the transport double hands back a client that stands in for a running language server; which ids start, and whether an untrusted project may, is decided by the real acquisition",
 	},
 	// 2026-10-23 (#4785 F4): see the in-process-mock entry for this file.
 	"service-double:clients/lsp/touch-cleared-deferred-wait-4785.test.ts::LSPClientInfo":

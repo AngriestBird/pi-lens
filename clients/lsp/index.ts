@@ -35,7 +35,10 @@ import {
 	importTargetsToAnnounce,
 } from "./created-import-targets.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
-import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
+import {
+	applyAuxiliarySuppressions,
+	isOptInAuxiliaryServerId,
+} from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { emitBounded } from "../bounded-telemetry.js";
 import { logLatency, phaseFinished, phaseStarted } from "../latency-logger.js";
@@ -1020,6 +1023,20 @@ const WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE = (() => {
 const WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS: ReadonlySet<string> = new Set([
 	"opengrep",
 ]);
+
+/**
+ * #4929: the servers the aggregate `clientScope: "all"` door may start for a
+ * file. An opt-in auxiliary (off unless the operator turned it on) is never one
+ * of them: that door takes its exclusions from the caller, and a caller with no
+ * flag access, or one that never asked, would start a scanner the operator did
+ * not enable. The per-edit `with-auxiliary` door admits an opt-in server by its
+ * enabled id list instead (`getAuxiliaryClientsForFile`).
+ */
+function aggregateServersForFile(filePath: string): LSPServerInfo[] {
+	return getServersForFileWithConfig(filePath).flatMap((s) =>
+		isOptInAuxiliaryServerId(s.id) ? [] : [s],
+	);
+}
 
 // The notify write (didOpen/didChange) is normally instant, but it awaits a
 // JSON-RPC send that BACKPRESSURES when the server's stdin isn't being drained
@@ -3264,7 +3281,7 @@ export class LSPService {
 		 */
 		auxiliaryRoots?: Map<string, string>,
 	): Promise<{ clients: SpawnedServer[]; serverCountAttempted: number }> {
-		const allServers = getServersForFileWithConfig(filePath);
+		const allServers = aggregateServersForFile(filePath);
 		const servers =
 			excludeServerIds && excludeServerIds.size > 0
 				? allServers.filter((s) => !excludeServerIds.has(s.id))
@@ -7228,8 +7245,8 @@ export class LSPService {
 		const startedAt = Date.now();
 		// #4323: a server this read leaves unacquired is not a candidate for it,
 		// so the unavailable text never names one the operator switched off.
-		const candidateServerIds = getServersForFileWithConfig(filePath).flatMap(
-			(s) => (excludeServerIds?.has(s.id) ? [] : [s.id]),
+		const candidateServerIds = aggregateServersForFile(filePath).flatMap((s) =>
+			excludeServerIds?.has(s.id) ? [] : [s.id],
 		);
 		const resolvedPrimaryRoots = new Map<string, string>();
 		const { clients: spawned, serverCountAttempted } =
