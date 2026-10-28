@@ -10,7 +10,8 @@ import { hashFileBytes } from "./content-stamp.js";
 /**
  * Why a file is in the stamp. `cited` is a file the content only names (a
  * no-write turn's citations, #4617): a change to it supersedes the content,
- * but its deletion never discards it (`allFilesDeleted`, #4954 F6).
+ * and a stamp of cited files alone is never discarded by their deletion
+ * (`allFilesDeleted`, #4954 F6, F8).
  */
 export type AdvisoryFileRole = "source" | "test" | "affected" | "cited";
 
@@ -181,16 +182,15 @@ export function validateAdvisoryProvenance(
 		if (provenance.revision.sessionId !== runtime.telemetrySessionId)
 			reasons.push("session-mismatch");
 	}
-	// Only a file the content is about can discard it by being deleted; a
-	// cited file can only supersede it.
+	// The content goes only when every stamped file is gone, and never on
+	// cited files alone: a cited file supersedes it, it does not discard it.
 	let subjectFiles = 0;
 	let deletedFiles = 0;
 	const changedPaths = new Set<string>();
 	for (const captured of provenance.files) {
 		const resolved = path.resolve(cwd, captured.path);
 		const reasonsBefore = reasons.length;
-		const subject = captured.role !== "cited";
-		if (subject) subjectFiles += 1;
+		if (captured.role !== "cited") subjectFiles += 1;
 		let stat: fs.Stats;
 		try {
 			stat = fs.statSync(resolved);
@@ -198,7 +198,7 @@ export function validateAdvisoryProvenance(
 			const code = (error as NodeJS.ErrnoException).code ?? "unknown";
 			if (code === "ENOENT") {
 				if (captured.sha256 !== "missing") {
-					if (subject) deletedFiles += 1;
+					deletedFiles += 1;
 					reasons.push(`missing:${advisoryPathKey(resolved, cwd)}`);
 					changedPaths.add(advisoryPathKey(resolved, cwd));
 				}
@@ -233,7 +233,8 @@ export function validateAdvisoryProvenance(
 		if (reasons.length > reasonsBefore)
 			changedPaths.add(advisoryPathKey(resolved, cwd));
 	}
-	const allFilesDeleted = subjectFiles > 0 && deletedFiles === subjectFiles;
+	const allFilesDeleted =
+		subjectFiles > 0 && deletedFiles === provenance.files.length;
 	if (unknown)
 		return {
 			status: "unknown",

@@ -658,13 +658,13 @@ describe.each([false, true])(
 			});
 		});
 
-		// The drop rule the cited role leaves standing: once every file the
-		// turn wrote is gone, its findings have no file left to fix, even while
-		// a cited file survives. The edited file is cited too, and stays edited.
-		it("drops a write turn's message once every edited file is deleted", async () => {
+		// The drop rule that stays: once every stamped file is gone, the findings
+		// have no file left to fix. The edited file is cited too, and stays
+		// edited, so the stamp is not cited-only.
+		it("drops a write turn's message once every stamped file is deleted", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-edited-deleted-${guard}`,
-				incident: "A write turn's only edited file was deleted",
+				incident: "A write turn's edited and cited files were all deleted",
 				issue: "#4617",
 				async run(h) {
 					const edited = h.edit("src/e.ts", "export const e = 1;\n");
@@ -676,9 +676,42 @@ describe.each([false, true])(
 						flags,
 						beforeDelivery: () => {
 							fs.unlinkSync(edited);
+							fs.unlinkSync(cited);
 						},
 					});
 					expect(view.text).toBe("");
+				},
+			});
+		});
+
+		// Recurrence (#4954 F8): the r3 drop rule counted only edited files, so a
+		// turn that edited one file and resolved another dropped its message once
+		// the edited file was deleted, while the resolved file the text names
+		// still existed. Master delivered it labelled historical.
+		it("keeps a write turn's resolution labelled historical when only its edited file is deleted", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-deleted-${guard}`,
+				incident: "Deleting the edited file dropped a live resolution line",
+				issue: "#4617",
+				async run(h) {
+					const resolved = h.write("src/v.ts", "export const v = 1;\n");
+					h.runtime.beginTurn();
+					const edited = h.edit("src/e.ts", "export const e = 1;\n");
+					h.blocker("src/v.ts", "L1: type mismatch");
+					h.runtime.retireInlineBlockerOnConfirmedClean(
+						resolved,
+						h.runtime.nextWriteOrderToken(),
+						["lsp"],
+					);
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.unlinkSync(edited);
+						},
+					});
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
 			});
 		});
