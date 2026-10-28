@@ -1844,7 +1844,9 @@ TurnEnd ==
              /\ take # {}
              /\ consumed' = consumed \cup
                               {[k |-> r.k, o |-> r.o, by |-> s] : r \in take}
-             /\ co' = [co EXCEPT ![last] = @ \ take]
+             \* A blocker is re-served, not drained: its record stays in the
+             \* map until a write retires it, so a later turn end takes it again.
+             /\ co' = [co EXCEPT ![last] = @ \ {r \in take : r.k # "blocker"}]
     /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
                    pkOut>>
 
