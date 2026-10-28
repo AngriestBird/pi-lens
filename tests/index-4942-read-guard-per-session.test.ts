@@ -150,34 +150,33 @@ describe("#4942: an edit is licensed only by a read in the editing session", () 
 		},
 	);
 
-	it(
-		"refuses the primary's edit when the secondary read the symbol",
-		{ timeout: TWO_SESSION_TIMEOUT_MS },
-		async () => {
-			// RECURRENCE GUARDED: #4942 through the other read writer. `read_symbol`
-			// records its coverage from a tool with no `tool_call` of its own, so
-			// the owner had to come from the call's ctx.
-			const { proj, shared } = project("sym-read");
-			const { primary, secondary } = await pair(proj, editTurn(shared), [
-				step(
-					fauxToolCall("read_symbol", { path: shared, symbol: "shared" }),
-					"reading a symbol",
-				),
-				endTurn("read"),
-			]);
-			await secondary.prompt("read the symbol");
-			const symbol = toolResults(
-				secondary.requests.at(-1) ?? [],
-				"read_symbol",
-			);
-			expect(symbol[0]?.text ?? "").toContain("function shared");
-			await primary.prompt("edit it");
-			expect(editResult(primary)).toContain(EDIT_WITHOUT_READ);
-			expect(fs.readFileSync(shared, "utf8")).toContain(SHARED_BEFORE);
-			await secondary.dispose();
-			await primary.dispose();
-		},
-	);
+	for (const [tool, input] of [
+		["read_symbol", (shared: string) => ({ path: shared, symbol: "shared" })],
+		["read_enclosing", (shared: string) => ({ path: shared, line: 2 })],
+	] as const) {
+		it(
+			`refuses the primary's edit when the secondary read the file through ${tool}`,
+			{ timeout: TWO_SESSION_TIMEOUT_MS },
+			async () => {
+				// RECURRENCE GUARDED: #4942 through the other read writers.
+				// `${tool}` records its coverage from a tool with no tool_call of its
+				// own, so the owner had to come from the call's ctx.
+				const { proj, shared } = project(`sym-${tool}`);
+				const { primary, secondary } = await pair(proj, editTurn(shared), [
+					step(fauxToolCall(tool, input(shared)), "reading a symbol"),
+					endTurn("read"),
+				]);
+				await secondary.prompt("read the symbol");
+				const read = toolResults(secondary.requests.at(-1) ?? [], tool);
+				expect(read[0]?.text ?? "").toContain("function shared");
+				await primary.prompt("edit it");
+				expect(editResult(primary)).toContain(EDIT_WITHOUT_READ);
+				expect(fs.readFileSync(shared, "utf8")).toContain(SHARED_BEFORE);
+				await secondary.dispose();
+				await primary.dispose();
+			},
+		);
+	}
 
 	it(
 		"lets each session edit the file it read itself",
@@ -264,21 +263,22 @@ describe("#4942: an edit is licensed only by a read in the editing session", () 
 		async () => {
 			// RECURRENCE GUARDED: #4942's command writer. The one-time exemption
 			// is a license like a read: armed through the coordinator's guard it
-			// would let the subagent spend the primary user's override.
+			// let the primary spend the override the subagent's user armed (and
+			// the reverse).
 			const { proj, shared } = project("allow-edit");
 			const { primary, secondary } = await pair(
 				proj,
 				editTurn(shared),
 				editTurn(shared),
 			);
-			await primary.prompt(`/lens-allow-edit ${shared}`);
-			await secondary.prompt("edit it");
-			expect(editResult(secondary)).toContain(EDIT_WITHOUT_READ);
-			expect(fs.readFileSync(shared, "utf8")).toContain(SHARED_BEFORE);
+			await secondary.prompt(`/lens-allow-edit ${shared}`);
 			await primary.prompt("edit it");
-			expect(editResult(primary)).not.toContain(EDIT_WITHOUT_READ);
+			expect(editResult(primary)).toContain(EDIT_WITHOUT_READ);
+			expect(fs.readFileSync(shared, "utf8")).toContain(SHARED_BEFORE);
+			await secondary.prompt("edit it");
+			expect(editResult(secondary)).not.toContain(EDIT_WITHOUT_READ);
 			expect(fs.readFileSync(shared, "utf8")).toContain(SHARED_AFTER);
-			expect(primary.errors).toEqual([]);
+			expect(secondary.errors).toEqual([]);
 			await secondary.dispose();
 			await primary.dispose();
 		},
