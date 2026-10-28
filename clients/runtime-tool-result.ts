@@ -1210,6 +1210,8 @@ export function recordProjectChange(args: {
 	changedRange?: ProjectChangeRange;
 	dbg: (msg: string) => void;
 	analysisRootMode: AnalysisRootMode;
+	/** #4943: the writing session, which the change-log row names. */
+	sessionId?: string | undefined;
 }): void {
 	if (!canWriteAnalysisRoot(args.analysisRootMode)) return;
 	// One mutation seam (#2000 phase 1): bump + receipt + change-log live in
@@ -1220,6 +1222,7 @@ export function recordProjectChange(args: {
 		source: args.source,
 		cwd: args.cwd,
 		changedRange: args.changedRange,
+		sessionId: args.sessionId,
 		onAppendError: (err) =>
 			args.dbg(`project change log append failed for ${args.filePath}: ${err}`),
 	});
@@ -1371,6 +1374,8 @@ function publishInlineVerdict(args: {
 	getFlag: ToolResultDeps["getFlag"];
 	turnStateCwd: string;
 	analysisRootMode: AnalysisRootMode;
+	/** #4921: the write's turn session, which owns the blocker it records. */
+	sessionId: string | undefined;
 }): void {
 	const {
 		runtime,
@@ -1384,6 +1389,7 @@ function publishInlineVerdict(args: {
 		getFlag,
 		turnStateCwd,
 		analysisRootMode,
+		sessionId,
 	} = args;
 	// #3596: a replaced session's handler latches nothing in the live session.
 	const resultLive = writeSession.guardedWrite(filePath, () => true) === true;
@@ -1415,6 +1421,7 @@ function publishInlineVerdict(args: {
 					result.orderTurn ?? writeOrderTurn,
 					// #3503: the freshness baseline is the analysis read.
 					result.analysisReadAtMs,
+					sessionId,
 				),
 			) !== undefined;
 	} else {
@@ -1479,6 +1486,7 @@ function publishInlineVerdict(args: {
 				wholeFileClean || ownBlockerRetired ? filePath : undefined,
 				analysisRootMode,
 				wholeFileClean,
+				sessionId,
 			);
 		}
 	}
@@ -1615,7 +1623,9 @@ async function dispatchPipelineAnalysis(args: {
 			priorAnalysisAnchor: () => runtime.getAnalysisAnchor(filePath),
 			telemetry: {
 				model: runtime.telemetryModel,
-				sessionId: runtime.telemetrySessionId,
+				// #4943: the writing session, which the log rows and a collect-later
+				// answer (`PendingRunnerFindings.sessionId`) are keyed by.
+				sessionId: deps.sessionId ?? runtime.telemetrySessionId,
 				turnIndex: runtime.turnIndex,
 				writeIndex,
 				orderTurn: writeOrderTurn,
@@ -3167,7 +3177,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				}
 				logReadGuardEvent({
 					event: "read_pattern",
-					sessionId: runtime.telemetrySessionId,
+					sessionId: deps.sessionId ?? runtime.telemetrySessionId,
 					filePath: deliveredFilePath,
 					requestedOffset,
 					requestedLimit: requestedLimit ?? deliveredLimit,
@@ -3669,6 +3679,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							getFlag,
 							turnStateCwd: observedTurnStateCwd,
 							analysisRootMode: observedRootMode,
+							sessionId: deps.sessionId,
 						});
 					}
 				}
@@ -4142,6 +4153,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			sourceForMutation(mutation, event.details),
 		changedRange: singleRange(modifiedRanges),
 		dbg,
+		sessionId: deps.sessionId,
 	});
 
 	const turnStateMs = Date.now() - toolResultStart;
@@ -4210,11 +4222,17 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// still reach the change log below, because they landed on disk.
 	const resultLive = writeSession.guardedWrite(filePath, () => true) === true;
 
+	// #4689 item 9: `deferMutation` refuses a root the session may not write
+	// (an adopted project) and queues nothing, so no queue claim (the phase
+	// row, the debug lines, `formatQueued`) is made for a root it refuses. One
+	// predicate serves both blocks.
+	const mayDefer = canWriteAnalysisRoot(analysisRootMode);
 	let autofixNewlyQueued = false;
 	if (
 		resultLive &&
 		!result.isError &&
 		bashAuthorshipConfirmed &&
+		mayDefer &&
 		autofixMode === "deferred" &&
 		nodeFs.existsSync(filePath)
 	) {
@@ -4239,6 +4257,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		resultLive &&
 		!result.isError &&
 		bashAuthorshipConfirmed &&
+		mayDefer &&
 		!getFlag("no-autoformat", filePath) &&
 		(autofixMode === "deferred" || !getFlag("immediate-format")) &&
 		nodeFs.existsSync(filePath)
@@ -4321,6 +4340,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			filePath: resolvedChanged,
 			source: "autofix",
 			dbg,
+			sessionId: deps.sessionId,
 		});
 		if (!resultLive) continue;
 		// Workspace-edit paths come from fileURLToPath and are normally absolute,
@@ -4406,6 +4426,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		getFlag,
 		turnStateCwd,
 		analysisRootMode,
+		sessionId: deps.sessionId,
 	});
 
 	// #2050 AC3 / #2657: `linked-worktree` is a WRITABLE class

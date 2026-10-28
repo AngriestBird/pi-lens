@@ -183,7 +183,11 @@ function nextTurn(rig: Rig, turn: number): void {
  * lands in (fits / partially cut / fully cut) is arithmetic, not luck. The cap
  * keeps 1000 chars and 20 lines; lines are long so the char axis cuts first.
  */
-function fillerBlocker(rig: Rig, chars: number): string {
+/**
+ * `sessionId`: the turn session whose write recorded it (#4921: a turn end
+ * shows only its own session's blockers); omitted, the coordinator's.
+ */
+function fillerBlocker(rig: Rig, chars: number, sessionId?: string): string {
 	const file = touch(rig, "filler.ts");
 	const prefix = "Unresolved from this turn — filler.ts:\n";
 	const header = "🔴 STOP — filler blocker";
@@ -204,6 +208,11 @@ function fillerBlocker(rig: Rig, chars: number): string {
 		rig.runtime.nextWriteIndex(),
 		["eslint"],
 		[1],
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		sessionId,
 	);
 	return file;
 }
@@ -1364,7 +1373,9 @@ describe("#4161: a turn whose session was replaced drains nothing of its success
 	it("a secondary that drained the primary's cut run and then ended before settle restores it for the primary", async () => {
 		const rig = makeRig("pi-lens-4161-secondary-s1-");
 		try {
-			fillerBlocker(rig, 1000);
+			// The secondary's own blocker fills its message, so its part cuts the
+			// run (#4921: the primary's would not reach the secondary's turn end).
+			fillerBlocker(rig, 1000, "secondary-4161");
 			rig.runtime.appendCascadeRun(cascadeRun(rig, "primary-built"));
 			const secondary = beginScope({ role: "secondary" });
 			await handleTurnEnd({

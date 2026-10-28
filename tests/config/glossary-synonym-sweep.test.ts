@@ -746,7 +746,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/review-graph/workspace-modules.ts": 6,
 		"clients/ruff-client.ts": 1,
 		"clients/runtime-agent-end.ts": 7,
-		"clients/runtime-coordinator.ts": 3,
+		// 3 -> 4 (#4921): `getInlineBlockersSnapshot` keeps one turn session's
+		// records, an `Array.prototype.filter` call, not a delivery gate.
+		"clients/runtime-coordinator.ts": 4,
 		"clients/runtime-session.ts": 4,
 		// 3 -> 5 -> 3 (#4187): round 4's tool-call authorship retirement filtered
 		// the owned in-process mutation paths; round 5 folds two of its three
@@ -1489,7 +1491,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `InlineBlockerRecord` (param, path, count, write index).
 		// 23 -> 29 (#4213): the deferred lifecycle identity reads its queued
 		// record and returns its ownership fields.
-		"clients/runtime-coordinator.ts": 29,
+		// 29 -> 31 (#4921): `noteResolvedBlockerFile` carries the removed
+		// record's owning session onto its Resolved note.
+		"clients/runtime-coordinator.ts": 31,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
 		// 6 -> 8 (#3218): the resolved-blocker filter keys each current blocker

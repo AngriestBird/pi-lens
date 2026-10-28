@@ -1510,12 +1510,15 @@ async function callTool(
 			const suggestionSuffix = result.suggestions?.length
 				? ` Did you mean: ${result.suggestions.join(", ")}?`
 				: " Use pilens_module_report to list symbols.";
+			// #4949: extraction warnings (a recovered syntax error is one) ride the
+			// details JSON the wire text carries, as the pi tool's miss does.
 			return {
 				...toolText(
 					`Symbol "${symbol}" not found in ${path.basename(file)}.${suggestionSuffix}`,
 					{
 						found: false,
 						...(result.suggestions ? { suggestions: result.suggestions } : {}),
+						...(result.warnings ? { warnings: result.warnings } : {}),
 					},
 				),
 				isError: true,

@@ -3897,7 +3897,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// Fire-and-forget — persistence must never delay or break a turn.
 			// #3612: every session store rides this snapshot (the read-set for
 			// #1041, filtered to its branch on resume by #3521).
-			if (runtime.hasStableSessionId) {
+			// #4921: the coordinator's scope and id are its own session's, so only
+			// a turn of that session saves them. A concurrent in-process
+			// secondary's turn (#473) saved the primary's sidecar into the
+			// secondary's project dir; like the shutdown arm, it saves none.
+			if (
+				runtime.hasStableSessionId &&
+				runtime.isCoordinatorSession(getStableSessionId(ctx))
+			) {
 				persistScope(
 					ctx.cwd ?? process.cwd(),
 					runtime.telemetrySessionId,

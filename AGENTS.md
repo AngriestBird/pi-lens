@@ -443,11 +443,17 @@ The four primary host hooks are:
   by the lane's next successful run and offered only while that run still
   reports them (#3901); count-and-pointer advisories (actionable and
   code-quality warnings) are not held, their report is the pull record.
+  A turn end reads only the inline blockers its own session's writes
+  recorded; the commit gate reads every one
+  ([git-guard invariants](docs/invariants/git-guard-host.md), #4921).
 - Only the write/edit `tool_result` path may block the host; `session_start`, `turn_end`, `agent_end`, `agent_settled`, and read-only `tool_result` are bounded by the outer wall; new hook awaits register in `tests/config/hook-await-bounds.test.ts`.
 
 `RuntimeCoordinator.recordProjectMutation` is the one mutation bookkeeping seam.
 Do not pair `bumpFileSeq` and change-log writes at a new call site. The mutation
-bridge and opaque-write recovery feed this seam for non-native producers.
+bridge and opaque-write recovery feed this seam for non-native producers. A
+write is stamped with its turn's session (`deps.sessionId`, else the
+coordinator's), in the change log, the pipeline's log rows and the collect-later
+answer it defers; `telemetrySessionId` is for coordinator-owned records.
 
 Tier-4 mutation attribution is only for third-party tool names. Names in
 `clients/tool-config.ts`'s `PI_LENS_TOOL_NAMES` projection are never learned or
