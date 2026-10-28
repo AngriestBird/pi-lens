@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -245,9 +246,11 @@ const spotbugsRunner: RunnerDefinition = {
 		const cmd = await resolveAvailableOrInstall(spotbugs, "spotbugs", cwd);
 		if (!cmd) return { status: "skipped", diagnostics: [], semantic: "none" };
 
+		// One file per RUN: pid and millisecond are shared by two cold starts of
+		// one process, and a shared file lets one run read or delete the other's.
 		const tmpXml = path.join(
 			os.tmpdir(),
-			`pi-lens-spotbugs-${process.pid}-${Date.now()}.xml`,
+			`pi-lens-spotbugs-${process.pid}-${randomUUID()}.xml`,
 		);
 		const result = await safeSpawnAsync(
 			cmd,
