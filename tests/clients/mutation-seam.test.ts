@@ -357,4 +357,41 @@ describe("recordProjectMutation — the one mutation seam", () => {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	});
+
+	it("names the writing session in the change-log row, and the coordinator's when none is given (#4943)", () => {
+		// RECURRENCE GUARDED: #4943. An in-process subagent's edit was logged
+		// under the coordinator's (the primary's) session id, so the change log
+		// credited it to the wrong session.
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-mutation-seam-4943-"),
+		);
+		try {
+			const runtime = makeRuntime();
+			runtime.setSessionLifecycle({ sessionId: "primary-session" });
+			runtime.recordProjectMutation({
+				filePath: path.join(cwd, "src", "own.ts"),
+				source: "agent-edit",
+				cwd,
+			});
+			runtime.recordProjectMutation({
+				filePath: path.join(cwd, "src", "subagent.ts"),
+				source: "agent-edit",
+				cwd,
+				sessionId: "subagent-session",
+			});
+			const rows = fs
+				.readFileSync(getProjectChangeLogPath(cwd), "utf8")
+				.split("\n")
+				.filter((l) => l.trim())
+				.map((l) => JSON.parse(l) as { sessionId: string; filePath: string });
+			expect(
+				rows.map((row) => [path.basename(row.filePath), row.sessionId]),
+			).toEqual([
+				["own.ts", "primary-session"],
+				["subagent.ts", "subagent-session"],
+			]);
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
 });

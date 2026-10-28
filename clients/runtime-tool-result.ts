@@ -1210,6 +1210,8 @@ export function recordProjectChange(args: {
 	changedRange?: ProjectChangeRange;
 	dbg: (msg: string) => void;
 	analysisRootMode: AnalysisRootMode;
+	/** #4943: the writing session, which the change-log row names. */
+	sessionId?: string | undefined;
 }): void {
 	if (!canWriteAnalysisRoot(args.analysisRootMode)) return;
 	// One mutation seam (#2000 phase 1): bump + receipt + change-log live in
@@ -1220,6 +1222,7 @@ export function recordProjectChange(args: {
 		source: args.source,
 		cwd: args.cwd,
 		changedRange: args.changedRange,
+		sessionId: args.sessionId,
 		onAppendError: (err) =>
 			args.dbg(`project change log append failed for ${args.filePath}: ${err}`),
 	});
@@ -1620,7 +1623,9 @@ async function dispatchPipelineAnalysis(args: {
 			priorAnalysisAnchor: () => runtime.getAnalysisAnchor(filePath),
 			telemetry: {
 				model: runtime.telemetryModel,
-				sessionId: runtime.telemetrySessionId,
+				// #4943: the writing session, which the log rows and a collect-later
+				// answer (`PendingRunnerFindings.sessionId`) are keyed by.
+				sessionId: deps.sessionId ?? runtime.telemetrySessionId,
 				turnIndex: runtime.turnIndex,
 				writeIndex,
 				orderTurn: writeOrderTurn,
@@ -3172,7 +3177,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				}
 				logReadGuardEvent({
 					event: "read_pattern",
-					sessionId: runtime.telemetrySessionId,
+					sessionId: deps.sessionId ?? runtime.telemetrySessionId,
 					filePath: deliveredFilePath,
 					requestedOffset,
 					requestedLimit: requestedLimit ?? deliveredLimit,
@@ -4148,6 +4153,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			sourceForMutation(mutation, event.details),
 		changedRange: singleRange(modifiedRanges),
 		dbg,
+		sessionId: deps.sessionId,
 	});
 
 	const turnStateMs = Date.now() - toolResultStart;
@@ -4327,6 +4333,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			filePath: resolvedChanged,
 			source: "autofix",
 			dbg,
+			sessionId: deps.sessionId,
 		});
 		if (!resultLive) continue;
 		// Workspace-edit paths come from fileURLToPath and are normally absolute,
