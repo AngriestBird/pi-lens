@@ -2448,7 +2448,11 @@ function classifyMktemp(args, cwd, env, expansionEnv = env) {
  * The harness's own session directory, `/tmp/claude-<uid>`: the harness
  * creates and manages it, and the Bash tool's scratchpad lives there, so a
  * write into it is not agent-chosen /tmp scratch (#4348). `undefined` where
- * the platform has no uid (Windows has no `/tmp` either).
+ * the platform has no uid (Windows has no `/tmp` either). {@link
+ * isTmpWriteTarget} exempts it by NAME below the physical tmp root, never by
+ * where the entry resolves: a `claude-<uid>` symlink to the tmp root, to a
+ * directory above it or to a sibling would otherwise exempt everything there
+ * (#4060 r4).
  */
 const HARNESS_TMP_DIR =
 	typeof process.getuid === "function"
@@ -2483,7 +2487,10 @@ function isTmpWriteTarget(word, cwd, env) {
 		isUnderTmpCheckoutRoot(path) &&
 		!(
 			HARNESS_TMP_DIR !== undefined &&
-			isUnderTmpRoot(path, physicalPath(HARNESS_TMP_DIR, HARNESS_TMP_DIR))
+			isUnderTmpRoot(
+				path,
+				join(physicalPath(TMP_ROOT, TMP_ROOT), basename(HARNESS_TMP_DIR)),
+			)
 		)
 	);
 }

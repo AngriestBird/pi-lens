@@ -3097,36 +3097,72 @@ describe("scripts/hooks/guard-bash.mjs -- case patterns and ANSI-C quotes (#4060
 // one `TMP_ROOT` literal re-pointed at a fixture root that is a symlink, which
 // is the macOS shape on any host, and imported in process like `findDeny`'s
 // other callers here (a spawned copy would be a new real-process-spawn hit).
-describe("scripts/hooks/guard-bash.mjs -- tmpCheckout and tmpWrite where the tmp root is a symlink (#4060 r2, r3)", () => {
+describe("scripts/hooks/guard-bash.mjs -- tmpCheckout and tmpWrite where the tmp root is a symlink (#4060 r2, r3, r4)", () => {
+	type HookModule = typeof import("../../scripts/hooks/guard-bash.mjs");
 	let root: string;
-	let mod: typeof import("../../scripts/hooks/guard-bash.mjs");
+	let mod: HookModule;
+	// Roots whose `claude-<uid>` entry is itself a symlink (r4, PR #4935
+	// CodeRabbit GjnV): to the physical tmp root, above it, and to a sibling.
+	const harnessLinks = {
+		self: ".",
+		above: "..",
+		sibling: "sib",
+	} as const;
+	const linkedRoots = new Map<keyof typeof harnessLinks, string>();
+	const linkedMods = new Map<keyof typeof harnessLinks, HookModule>();
+	const roots: string[] = [];
 
-	beforeAll(async () => {
-		root = realpathSync(
+	// The hook is copied with its one `TMP_ROOT` literal re-pointed at
+	// `<dir>/tmp`, a symlink to `private/tmp`, and imported in process.
+	async function loadRooted(
+		linkTarget?: string,
+	): Promise<{ dir: string; hook: HookModule }> {
+		const dir = realpathSync(
 			mkdtempSync(join(tmpdir(), "pi-lens-guard-bash-macroot-")),
 		);
-		mkdirSync(join(root, "private", "tmp"), { recursive: true });
-		symlinkSync(join("private", "tmp"), join(root, "tmp"));
-		mkdirSync(join(root, "elsewhere"));
-		mkdirSync(join(root, "private", "other"), { recursive: true });
+		roots.push(dir);
+		mkdirSync(join(dir, "private", "tmp", "sib"), { recursive: true });
+		symlinkSync(join("private", "tmp"), join(dir, "tmp"));
+		if (linkTarget !== undefined && typeof process.getuid === "function")
+			symlinkSync(
+				linkTarget,
+				join(dir, "private", "tmp", `claude-${process.getuid()}`),
+			);
 		const source = readFileSync(HOOK, "utf8");
 		const literal = 'const TMP_ROOT = "/tmp";';
 		// Guards the re-point itself: a renamed constant would make every row
 		// below test the real /tmp instead of the fixture.
 		expect(source.split(literal)).toHaveLength(2);
-		const copy = join(root, "guard-bash-macroot.mjs");
+		const copy = join(dir, "guard-bash-macroot.mjs");
 		writeFileSync(
 			copy,
 			source.replace(
 				literal,
-				`const TMP_ROOT = ${JSON.stringify(join(root, "tmp"))};`,
+				`const TMP_ROOT = ${JSON.stringify(join(dir, "tmp"))};`,
 			),
 		);
-		mod = (await import(pathToFileURL(copy).href)) as typeof mod;
+		return {
+			dir,
+			hook: (await import(pathToFileURL(copy).href)) as HookModule,
+		};
+	}
+
+	beforeAll(async () => {
+		const main = await loadRooted();
+		root = main.dir;
+		mod = main.hook;
+		mkdirSync(join(root, "elsewhere"));
+		mkdirSync(join(root, "private", "other"), { recursive: true });
+		for (const [name, target] of Object.entries(harnessLinks)) {
+			const key = name as keyof typeof harnessLinks;
+			const linked = await loadRooted(target);
+			linkedRoots.set(key, linked.dir);
+			linkedMods.set(key, linked.hook);
+		}
 	});
 
 	afterAll(() => {
-		rmSync(root, { recursive: true, force: true });
+		for (const dir of roots) rmSync(dir, { recursive: true, force: true });
 	});
 
 	function verdict(command: string): string | null {
@@ -3158,20 +3194,52 @@ describe("scripts/hooks/guard-bash.mjs -- tmpCheckout and tmpWrite where the tmp
 		expect(verdict(template.replaceAll("@R@", root))).toBe("tmpWrite");
 	});
 
-	// The harness's own `/tmp/claude-<uid>` stays exempt by either spelling.
-	it.each([
+	// The harness's own `/tmp/claude-<uid>` stays exempt (there is no uid, and
+	// so no harness directory, on Windows).
+	it.skipIf(typeof process.getuid !== "function").each([
 		[
 			"a redirect into the harness directory",
 			"echo x > @R@/tmp/claude-@U@/new",
 		],
 		["a mkdir in the harness directory", "mkdir @R@/tmp/claude-@U@/sub"],
-		["a redirect outside the symlinked root", "echo x > @R@/elsewhere/new"],
 	])("allows %s", (_name, template) => {
-		const uid = String(process.getuid?.() ?? 0);
+		const uid = String(process.getuid?.());
 		expect(
 			verdict(template.replaceAll("@R@", root).replaceAll("@U@", uid)),
 		).toBeNull();
 	});
+
+	it("allows a redirect outside the symlinked root", () => {
+		expect(verdict(`echo x > ${root}/elsewhere/new`)).toBeNull();
+	});
+
+	// #4060 round 4 (PR #4935 CodeRabbit GjnV, a regression of round 3): the
+	// harness exemption must name the directory `claude-<uid>` directly below
+	// the PHYSICAL tmp root. When that entry is a symlink to the tmp root, to
+	// a directory above it, or to a sibling, exempting wherever it resolves
+	// let `echo x > /tmp/new` (or every write under the sibling) through,
+	// while master denied it.
+	it.skipIf(typeof process.getuid !== "function").each([
+		["the tmp root", "self", "echo x > @R@/tmp/new"],
+		["the tmp root, at a nested leaf", "self", "mkdir @R@/tmp/a/b"],
+		["a directory above the tmp root", "above", "echo x > @R@/tmp/new"],
+		["a sibling directory", "sibling", "echo x > @R@/tmp/sib/new"],
+		[
+			"a sibling directory, by the link",
+			"sibling",
+			"echo x > @R@/tmp/claude-@U@/new",
+		],
+	] as const)(
+		"denies a write when the harness directory is a symlink to %s",
+		(_name, key, template) => {
+			const dir = linkedRoots.get(key) as string;
+			const hook = linkedMods.get(key) as HookModule;
+			const command = template
+				.replaceAll("@R@", dir)
+				.replaceAll("@U@", String(process.getuid?.()));
+			expect(hook.findDeny(command, PAYLOAD_CWD)).toBe("tmpWrite");
+		},
+	);
 
 	it.each([
 		["a sibling of the symlinked root", "git worktree add @R@/elsewhere/new"],
