@@ -7,7 +7,13 @@ import { resolveRunnerPath } from "./dispatch/runner-context.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { hashFileBytes } from "./content-stamp.js";
 
-export type AdvisoryFileRole = "source" | "test" | "affected";
+/**
+ * Why a file is in the stamp. `cited` is a file the content only names (a
+ * no-write turn's citations, #4617): a change to it supersedes the content,
+ * and a stamp of cited files alone is never discarded by their deletion
+ * (`allFilesDeleted`, #4954 F6, F8).
+ */
+export type AdvisoryFileRole = "source" | "test" | "affected" | "cited";
 
 interface AdvisoryFileProvenance {
 	path: string;
@@ -143,7 +149,8 @@ function isWellFormed(value: unknown): value is AdvisoryProvenance {
 				typeof file.path === "string" &&
 				(file.role === "source" ||
 					file.role === "test" ||
-					file.role === "affected") &&
+					file.role === "affected" ||
+					file.role === "cited") &&
 				isFiniteNumber(file.mtimeMs) &&
 				isFiniteNumber(file.size) &&
 				isCapturedHash(file.sha256),
@@ -175,11 +182,15 @@ export function validateAdvisoryProvenance(
 		if (provenance.revision.sessionId !== runtime.telemetrySessionId)
 			reasons.push("session-mismatch");
 	}
+	// The content goes only when every stamped file is gone, and never on
+	// cited files alone: a cited file supersedes it, it does not discard it.
+	let subjectFiles = 0;
 	let deletedFiles = 0;
 	const changedPaths = new Set<string>();
 	for (const captured of provenance.files) {
 		const resolved = path.resolve(cwd, captured.path);
 		const reasonsBefore = reasons.length;
+		if (captured.role !== "cited") subjectFiles += 1;
 		let stat: fs.Stats;
 		try {
 			stat = fs.statSync(resolved);
@@ -222,7 +233,12 @@ export function validateAdvisoryProvenance(
 		if (reasons.length > reasonsBefore)
 			changedPaths.add(advisoryPathKey(resolved, cwd));
 	}
-	const allFilesDeleted = deletedFiles === provenance.files.length;
+	// A truncated stamp omits cited files, so "every stamped file is gone" does
+	// not mean every file the text names is.
+	const allFilesDeleted =
+		subjectFiles > 0 &&
+		provenance.truncated !== true &&
+		deletedFiles === provenance.files.length;
 	if (unknown)
 		return {
 			status: "unknown",

@@ -1338,7 +1338,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 27 -> 19 (#4689): the eight test-target `path.relative(cwd, …)`
 		// renderings go through `toRunnerDisplayPath`, which relates path
 		// identities.
-		"clients/runtime-turn.ts": 19,
+		// 19 -> 20 (#4954 r3): the turn-end stamp's entry type names its
+		// `path` field beside the role it carries.
+		"clients/runtime-turn.ts": 20,
 		"clients/rust-client.ts": 5,
 		// 26 -> 32 (#4530): the search-path scoping and lookup split PATH on
 		// `path.delimiter` and resolve each entry with `path` namespace calls.
