@@ -126,7 +126,7 @@ describe("createNdjsonLogger", () => {
 
 	it("real session_shutdown drains an in-flight writer before exit flushSync", async () => {
 		const { default: registerExtension } = await import("../../index.js");
-		const mock = createPiMock({ "lens-lsp": false });
+		const mock = createPiMock();
 		registerExtension(mock.asExtensionAPI());
 		let release!: () => void;
 		const held = new Promise<void>((resolve) => {
@@ -162,7 +162,7 @@ describe("createNdjsonLogger", () => {
 		const { default: registerExtension } = await import("../../index.js");
 		const { getDegradationSummary: summaryNow } =
 			await import("../../clients/degradation-ledger.js");
-		const mock = createPiMock({ "lens-lsp": false });
+		const mock = createPiMock();
 		registerExtension(mock.asExtensionAPI());
 		vi.spyOn(fs.promises, "appendFile").mockImplementation(
 			() => new Promise<never>(() => {}),

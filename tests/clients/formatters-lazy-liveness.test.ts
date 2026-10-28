@@ -3,7 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
+import { useGlobalConfig } from "../support/global-config.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("formatter session warm/first-use liveness (#1394)", () => {
 	afterEach(() => vi.resetModules());
@@ -76,7 +79,8 @@ describe("formatter session warm/first-use liveness (#1394)", () => {
 			getAliveServerIds: () => [],
 		});
 		const { default: registerExtension } = await import("../../index.js");
-		const pi = createPiMock({ "immediate-format": true, "no-lsp": true });
+		setGlobalConfig({ format: { mode: "immediate" }, lsp: { enabled: false } });
+		const pi = createPiMock();
 		registerExtension(pi.asExtensionAPI());
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-format-live-"));
 		const filePath = path.join(cwd, "live.ts");

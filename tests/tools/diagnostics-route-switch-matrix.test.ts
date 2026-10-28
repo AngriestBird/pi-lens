@@ -133,8 +133,6 @@ type ColumnId =
 
 interface Column {
 	id: ColumnId;
-	/** pi CLI flags. */
-	piFlags: Record<string, boolean>;
 	/** `~/.pi-lens/config.json`, through PI_LENS_CONFIG_PATH. */
 	globalConfig: Record<string, unknown>;
 	/**
@@ -155,19 +153,14 @@ const column = (
 	id: ColumnId,
 	primary: Column["primary"],
 	aux: boolean,
-	switches: Partial<Pick<Column, "piFlags" | "globalConfig">> = {},
+	switches: Partial<Pick<Column, "globalConfig">> = {},
 ): Column => ({
 	id,
-	piFlags: switches.piFlags ?? {},
 	globalConfig: switches.globalConfig ?? {},
 	primary,
 	aux,
-	opengrepOff:
-		!aux ||
-		switches.piFlags !== undefined ||
-		switches.globalConfig !== undefined,
-	opengrepSwitchedOff:
-		switches.piFlags !== undefined || switches.globalConfig !== undefined,
+	opengrepOff: !aux || switches.globalConfig !== undefined,
+	opengrepSwitchedOff: switches.globalConfig !== undefined,
 });
 
 /**
@@ -184,7 +177,9 @@ const COLUMNS: readonly Column[] = [
 	column("present, no aux", "fake", false),
 	column("disabled, no aux", "disabled", false),
 	column("missing, no aux", "missing", false),
-	column("--no-opengrep", "fake", true, { piFlags: { "no-opengrep": true } }),
+	column("--no-opengrep", "fake", true, {
+		globalConfig: { opengrep: { enabled: false } },
+	}),
 	column("opengrep.enabled=false", "fake", true, {
 		globalConfig: { opengrep: { enabled: false } },
 	}),
@@ -639,7 +634,12 @@ function makeFixture(column: Column): Fixture {
 	);
 	// Outside `.pi-lens`, so it is a global config file only.
 	const configPath = path.join(workspace, "global-config.json");
-	fs.writeFileSync(configPath, `${JSON.stringify(column.globalConfig)}\n`);
+	// The actionable-warning switches are on in every column (#4913 part D: they
+	// were pi flags on the double, which applied them before the factory).
+	fs.writeFileSync(
+		configPath,
+		`${JSON.stringify({ ...column.globalConfig, actionableWarnings: { enabled: true, includeLspCodeActions: true } })}\n`,
+	);
 	return {
 		workspace,
 		marker,
@@ -684,11 +684,7 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 			await import("../../clients/dispatch/dispatcher.js");
 		const { _awaitDeferredLspPullForTest } =
 			await import("../../clients/actionable-warnings.js");
-		const pi = createPiMock({
-			...column.piFlags,
-			"lens-actionable-warnings": true,
-			"lens-actionable-warning-actions": true,
-		});
+		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		// The host's own trust decision, which session_start latches: the
 		// command overrides are project config (#4248).

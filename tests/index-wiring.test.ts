@@ -169,6 +169,7 @@ import {
 	makeSessionStartEvent,
 } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import {
 	removeTempDirSync,
 	setupTestEnvironment,
@@ -288,6 +289,8 @@ const EXPECTED_HOOKS = [
 	// registers both so exactly one of them injects per request.
 	"context_with_system",
 ];
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("index.ts extension wiring", () => {
 	it.each(["reject", "throw"])(
@@ -579,21 +582,13 @@ describe("index.ts extension wiring", () => {
 		// failure. Keep the matrix across both registration-time feature flags and
 		// assert each registration group so a bypassed group cannot hide behind a
 		// passing helper-only test.
-		it.each([
-			{ compactToolLine: false, supportsActiveTools: false },
-			{ compactToolLine: false, supportsActiveTools: true },
-			{ compactToolLine: true, supportsActiveTools: false },
-			{ compactToolLine: true, supportsActiveTools: true },
-		])(
-			"registers non-empty descriptions through the host seam (compact=$compactToolLine, dynamic=$supportsActiveTools)",
-			({ compactToolLine, supportsActiveTools }) => {
+		it.each([{ supportsActiveTools: false }, { supportsActiveTools: true }])(
+			"registers non-empty descriptions through the host seam (dynamic=$supportsActiveTools)",
+			({ supportsActiveTools }) => {
 				activationToolFactoryOverride.enabled = true;
 				activationToolFactoryOverride.description = undefined;
 				try {
-					const pi = createPiMock(
-						compactToolLine ? { "lens-compact-tool-line": true } : {},
-						{ supportsActiveTools },
-					);
+					const pi = createPiMock({ supportsActiveTools });
 					extension(pi.asExtensionAPI());
 					expect(
 						(pi.getTool("pi_lens_activate_tools") as { description?: unknown })
@@ -802,13 +797,6 @@ describe("index.ts extension wiring", () => {
 			}
 		});
 
-		it("does not register a tool disabled by --no-tool through the real path", () => {
-			const pi = createPiMock({ "no-tool": "ast_grep_replace" });
-			extension(pi.asExtensionAPI());
-			expect(pi.getTool("ast_grep_replace")).toBeUndefined();
-			expect(pi.getTool("ast_grep_search")).toBeDefined();
-		});
-
 		// #771: symbol_search's ergonomics additions (paths/lang filters) must
 		// actually be registered on the tool's parameter schema, not just
 		// present in the tool's implementation.
@@ -842,7 +830,7 @@ describe("index.ts extension wiring", () => {
 			const prevDataDir = process.env.PILENS_DATA_DIR;
 			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
 			try {
-				const pi = createPiMock({}, { supportsActiveTools: false });
+				const pi = createPiMock({ supportsActiveTools: false });
 
 				expect(() => extension(pi.asExtensionAPI())).not.toThrow();
 				await pi.emit("session_start", {}, makeCtx({ cwd: tmp }));
@@ -1632,7 +1620,7 @@ describe("ui.compactWidget mount seam (#3959)", () => {
 
 	// Walk the real extension → session_start → setWidget path to grab the
 	// factory and instantiate the component it returns.
-	async function mountWidget(flags: Record<string, boolean | string>) {
+	async function mountWidget(config: Record<string, unknown>) {
 		// Earlier tests leave a primary registration behind; without a reset this
 		// session_start is classified concurrent-secondary and skips mounting.
 		_resetSessionLifecycleForTests();
@@ -1642,7 +1630,8 @@ describe("ui.compactWidget mount seam (#3959)", () => {
 		// the flag is decided by the mock alone.
 		process.env.PI_LENS_HOME = tmpDir;
 		try {
-			const pi = createPiMock(flags);
+			setGlobalConfig(config);
+			const pi = createPiMock();
 			extension(pi.asExtensionAPI());
 			const ctx = makeCtx({
 				cwd: process.cwd(),
@@ -1669,7 +1658,7 @@ describe("ui.compactWidget mount seam (#3959)", () => {
 
 	it("renders one compact line when lens-compact-widget is enabled", async () => {
 		try {
-			const component = await mountWidget({ "lens-compact-widget": true });
+			const component = await mountWidget({ ui: { compactWidget: true } });
 			// The session_start store restore during mounting clears widget state,
 			// so seed the fixture only after mounting.
 			seedSummaryFixture();

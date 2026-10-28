@@ -15,12 +15,22 @@ describe("createPiMock", () => {
 		expect(pi.getFlag("lens-opengrep-config")).toBeUndefined();
 	});
 
-	it("setFlag overrides getFlag (and pre-set wins over default)", () => {
-		const pi = createPiMock({ "no-lens-context": true });
+	it("setFlag overrides getFlag once the factory has registered the flag", () => {
+		const pi = createPiMock();
 		pi.registerFlag("no-lens-context", { type: "boolean", default: false });
-		expect(pi.getFlag("no-lens-context")).toBe(true); // pre-set, not default
-		pi.setFlag("no-lens-context", false);
-		expect(pi.getFlag("no-lens-context")).toBe(false);
+		expect(pi.getFlag("no-lens-context")).toBe(false); // the registered default
+		pi.setFlag("no-lens-context", true);
+		expect(pi.getFlag("no-lens-context")).toBe(true);
+	});
+
+	// #4913 part D: pi applies command-line flag values after every factory, so
+	// a value set before the factory registers its flag is the pre-set path this
+	// double no longer has. Recurrence: #4917's factory-time reads passed on a
+	// double that applied flags before the factory ran.
+	it("setFlag refuses a flag the factory has not registered yet (no pre-set path)", () => {
+		const pi = createPiMock();
+		expect(() => pi.setFlag("no-lens-context", true)).toThrow(/not registered/);
+		expect(pi.getFlag("no-lens-context")).toBeUndefined();
 	});
 
 	it("records tools and throws on duplicate names (like the host)", () => {

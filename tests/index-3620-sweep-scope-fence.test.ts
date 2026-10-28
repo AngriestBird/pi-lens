@@ -104,10 +104,13 @@ import {
 import { resetObservedMutationNet } from "../clients/observed-mutation.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("#3620 the settled sweep's replay is fenced by the settle's scope", () => {
 	let env: ReturnType<typeof setupTestEnvironment>;
@@ -139,7 +142,8 @@ describe("#3620 the settled sweep's replay is fenced by the settle's scope", () 
 				? "a sweep replay that lands after /new does not let the new session edit an unread file"
 				: "a sweep replay in its own session still credits its write",
 			async () => {
-				const pi = createPiMock({ "no-lsp": true });
+				setGlobalConfig({ lsp: { enabled: false } });
+				const pi = createPiMock();
 				extension(pi.asExtensionAPI());
 				const ctx = makeCtx({ cwd: env.tmpDir, sessionId: "s-3620" });
 				await pi.emit("session_start", { reason: "startup" }, ctx);

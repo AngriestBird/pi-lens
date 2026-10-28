@@ -75,7 +75,10 @@ import { normalizeMapKey } from "../clients/path-utils.js";
 import { readChangesSince } from "../clients/project-changes.js";
 import { ReadGuard } from "../clients/read-guard.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("#2465: index.ts's mutation-bridge wiring separates recordability from the no-read-guard stamp", () => {
 	let tmp: string;
@@ -101,7 +104,8 @@ describe("#2465: index.ts's mutation-bridge wiring separates recordability from 
 		// regardless of which instance index.ts's closure holds.
 		const recordWrittenSpy = vi.spyOn(ReadGuard.prototype, "recordWritten");
 
-		const pi = createPiMock({ "no-read-guard": true });
+		setGlobalConfig({ readGuard: { enabled: false } });
+		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		await pi.emit(
 			"session_start",

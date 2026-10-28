@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _resetSubagentModeForTests } from "../clients/subagent-mode.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock } from "./support/pi-mock.js";
+import { useGlobalConfig } from "./support/global-config.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { installLspServiceDouble } from "./support/lsp-service-seam.js";
 import {
@@ -16,13 +17,9 @@ const INTEGRATION_TIMEOUT_MS = 45_000;
 
 type IntegrationHook = (event: unknown, ctx: unknown) => unknown;
 
-function createMockPi(overrides: Record<string, boolean> = {}) {
-	const mock = createPiMock({
-		"lens-lsp": true,
-		"no-lsp": false,
-		"lens-guard": false,
-		...overrides,
-	});
+function createMockPi(config: Record<string, unknown> = {}) {
+	if (Object.keys(config).length > 0) setGlobalConfig(config);
+	const mock = createPiMock();
 	return {
 		pi: mock.asExtensionAPI(),
 		handlers: new Proxy({} as Record<string, IntegrationHook[]>, {
@@ -40,7 +37,7 @@ function createMockPi(overrides: Record<string, boolean> = {}) {
  * (#281).
  */
 async function setupLspStatusRepaint(
-	options: { flags?: Record<string, boolean> } = {},
+	options: { config?: Record<string, unknown> } = {},
 ) {
 	const { resetLSPService, overrides } = aliveServerHolder();
 	vi.doMock("../clients/bootstrap.js", async () => {
@@ -57,10 +54,7 @@ async function setupLspStatusRepaint(
 	// configure would otherwise replace the lifecycle (lsp-service-seam, step 2).
 	await installLspServiceDouble(overrides, { beforeReset: resetLSPService });
 	const { default: registerExtension } = await import("../index.js");
-	const { pi, handlers } = createMockPi({
-		"no-lsp": false,
-		...options.flags,
-	});
+	const { pi, handlers } = createMockPi(options.config);
 	registerExtension(pi);
 
 	const turnEnd = handlers.turn_end?.[0];
@@ -111,6 +105,8 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => ({
 	ReadGuard: MockReadGuard,
 	createReadGuard: () => new MockReadGuard(),
 }));
+
+const setGlobalConfig = useGlobalConfig();
 
 describe("index.ts LSP idle reset", () => {
 	let tmpDir: string;
@@ -174,7 +170,7 @@ describe("index.ts LSP idle reset", () => {
 		async () => {
 			const { turnEnd, ui, lspStatuses, resetLSPService } =
 				await setupLspStatusRepaint({
-					flags: { "lens-compact-lsp-status": true },
+					config: { ui: { compactLspStatus: true } },
 				});
 			const ctx = { cwd: tmpDir, ui };
 
@@ -209,7 +205,7 @@ describe("index.ts LSP idle reset", () => {
 		async () => {
 			const { turnEnd, ui, lspStatuses, resetLSPService } =
 				await setupLspStatusRepaint({
-					flags: { "lens-compact-lsp-status": true },
+					config: { ui: { compactLspStatus: true } },
 				});
 			const { recordLsp, setSessionLanguages } =
 				await import("../clients/widget-state.js");
@@ -249,7 +245,7 @@ describe("index.ts LSP idle reset", () => {
 		async () => {
 			const { turnEnd, ui, lspStatuses, resetLSPService } =
 				await setupLspStatusRepaint({
-					flags: { "lens-hide-lsp-status": true },
+					config: { ui: { hideLspStatus: true } },
 				});
 			const ctx = { cwd: tmpDir, ui };
 
@@ -279,10 +275,7 @@ describe("index.ts LSP idle reset", () => {
 		"off outranks compact when both lens-hide-lsp-status and lens-compact-lsp-status are on (#3099)",
 		async () => {
 			const { turnEnd, ui, lspStatuses } = await setupLspStatusRepaint({
-				flags: {
-					"lens-hide-lsp-status": true,
-					"lens-compact-lsp-status": true,
-				},
+				config: { ui: { hideLspStatus: true, compactLspStatus: true } },
 			});
 			const ctx = { cwd: tmpDir, ui };
 
