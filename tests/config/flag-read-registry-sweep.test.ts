@@ -112,6 +112,13 @@ describe("the detector's admitted forms and refusals (#4946)", () => {
 		]);
 	});
 
+	it("reads a template literal with no substitution as the literal it is", () => {
+		expect(refused("pi.getFlag(`no-lsp`);")).toEqual([]);
+		expect(refused("pi.getFlag(`no-typos`);")).toEqual([
+			"unregistered getFlag(...) `no-typos`",
+		]);
+	});
+
 	it("refuses an unregistered killSwitchFlag literal and admits a registered one", () => {
 		expect(refused('const p = { killSwitchFlag: "no-typos" };')).toEqual([
 			"unregistered killSwitchFlag `no-typos`",
