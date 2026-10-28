@@ -351,6 +351,7 @@ function buildConfigSchema(): ConfigSchemaNode {
 	}
 
 	for (const key of [
+		"fallow",
 		"knip",
 		"jscpd",
 		"madge",

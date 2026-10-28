@@ -31,15 +31,15 @@ on purpose.
 
 `scripts/verify.mjs drive fallow-lsp <variant>`:
 
-- **`off`: no config. No fallow finding, no `tools/fallow-lsp`, no fallow
+- **Goal, `off`: no config. No fallow finding, no `tools/fallow-lsp`, no fallow
   process, and the turn-end summary names none.** Drive the same variant on an
   old tree (`--tree "$OLD"`) and diff `analyze-last.txt` and `turn-end.txt` in
   the evidence directories after normalising the workspace path and durations.
-- **`config`: `fallow.enabled: true`. The unused export in `src/util.ts` comes
-  back as `fallow:unused-export`, the release is installed, a process runs, no
-  blocker, and `src/script.py` gets no fallow finding.**
-- **`flag`: the same through the tool's `flags: {"lens-fallow": true}`.**
-- **`bad`: `fallow.enabled: "yes"` behaves as `off`.**
+- **Goal, `config`: `fallow.enabled: true`. The unused export in `src/util.ts`
+  comes back as `fallow:unused-export`, the release is installed, a process
+  runs, no blocker, and `src/script.py` gets no fallow finding.**
+- **Goal, `flag`: the same through the tool's `flags: {"lens-fallow": true}`.**
+- **Goal, `bad`: `fallow.enabled: "yes"` behaves as `off`.**
 
 ## Gotchas
 

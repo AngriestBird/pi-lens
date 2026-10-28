@@ -15,7 +15,6 @@
  *    the host applies after the factory runs still decides.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -37,7 +36,7 @@ import {
 } from "../../../clients/lens-config.js";
 import { getLensFlagSpec } from "../../../clients/lens-flag-registry.js";
 import { _resetSubagentModeForTests } from "../../../clients/subagent-mode.js";
-import { removeTempDirSync } from "../test-utils.js";
+import { pinFixtureHome } from "../test-utils.js";
 
 const diag = (over: Partial<LSPDiagnostic>): LSPDiagnostic =>
 	({
@@ -48,8 +47,6 @@ const diag = (over: Partial<LSPDiagnostic>): LSPDiagnostic =>
 		code: "unused-export",
 		...over,
 	}) as LSPDiagnostic;
-
-const tmpDirs: string[] = [];
 
 beforeEach(() => {
 	_resetSubagentModeForTests();
@@ -63,7 +60,6 @@ afterEach(() => {
 	vi.unstubAllEnvs();
 	resetGlobalConfigLocationCache();
 	resetGlobalConfigWarnCache();
-	for (const dir of tmpDirs.splice(0)) removeTempDirSync(dir);
 });
 
 describe("the opt-in gate admits exactly `true` from the profile's own flag", () => {
@@ -146,10 +142,7 @@ describe("the opt-in gate admits exactly `true` from the profile's own flag", ()
 
 describe("the gate through the real global config and flag resolution", () => {
 	function resolveFromConfig(contents: string | undefined): boolean {
-		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4929-cfg-"));
-		tmpDirs.push(home);
-		vi.stubEnv("HOME", home);
-		vi.stubEnv("USERPROFILE", home);
+		const { home } = pinFixtureHome("fallow-gate-4929");
 		resetGlobalConfigLocationCache();
 		resetGlobalConfigWarnCache();
 		const configPath = getPiLensGlobalConfigPath(home);

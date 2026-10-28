@@ -399,6 +399,14 @@
       "x-stability": "stable"
     },
     "fallow": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "x-stability": "experimental"
+        }
+      },
       "x-stability": "stable"
     },
     "knip": {
