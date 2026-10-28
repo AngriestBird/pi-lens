@@ -136,6 +136,10 @@ describe("the detector's admitted forms and refusals (#4946)", () => {
 			[],
 		);
 		expect(refused('const doc = `getFlag("no-typos")`;')).toEqual([]);
+		// A template's substitution is code, so a read there is a read.
+		expect(refused('const m = `${pi.getFlag("no-typos")}`;')).toEqual([
+			"unregistered getFlag(...) `no-typos`",
+		]);
 	});
 
 	describe("spellings the author did not design for", () => {

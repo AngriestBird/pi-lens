@@ -9,12 +9,15 @@
  * see it.
  *
  * Population: the TypeScript files the caller hands in (`clients/`, `tools/`,
- * `mcp/`, `index.ts`). Input: {@link stripSource} text with `strings: "keep"`,
- * parsed by the census AST seam (`ast-census.ts`). Comments are blanked, so a
- * comment that quotes `getFlag("x")` is no node. Strings are KEPT because the
- * flag name IS a string literal (the per-needle policy of AGENTS.md "Detectors
- * match code, not prose"); the callee, the call and its arguments are AST
- * nodes, so a string that merely contains `getFlag("x")` is no read.
+ * `mcp/`, `index.ts`). Input: the raw source, parsed by the census AST seam
+ * (`ast-census.ts`). No regex reads source text: a comment is a `comment` node
+ * and a string (a template's fixed parts included) is a `string` node, so
+ * neither can hold a call or a `killSwitchFlag:` pair (a template's `${..}`
+ * substitution is code and is scanned), and a comment that quotes
+ * `getFlag("x")` is no read (AGENTS.md "Detectors match code, not
+ * prose"; the self-test below plants both spellings). The flag name IS a string
+ * literal, so the only string the scan reads is the first argument of a call it
+ * found as code.
  *
  * Registered names (the closed set): every `LENS_FLAGS` name the caller passes,
  * plus every literal first argument of a `registerFlag(...)` call in the scanned
@@ -47,7 +50,7 @@
  */
 import type { SgNode } from "@ast-grep/napi";
 import { parseNodes } from "./ast-census.js";
-import { lineOf, stripSource } from "./sweep-kit.js";
+import { lineOf } from "./sweep-kit.js";
 
 /** The callee names that read a flag: `getFlag`, `getLensFlag`, `getFlagSource`, ... */
 const READER_NAME = /^get\w*Flag\w*$/;
@@ -245,8 +248,7 @@ export function scanFlagReads(
 	admitted: FlagReadAdmission = {},
 ): FlagReadScan {
 	const parsed = Object.entries(files).map(([file, raw]) => {
-		const text = stripSource(raw, { strings: "keep" });
-		return { file, text, nodes: parseNodes(text) };
+		return { file, text: raw, nodes: parseNodes(raw) };
 	});
 	const registered = new Set(registeredByRegistry);
 	for (const { nodes } of parsed)
