@@ -1358,6 +1358,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the session-start LSP warm is a fire-and-forget promise inside the loaded extension copy and exposes no awaitable, so vi.waitFor joins the record it writes",
 	},
+	// 2026-10-28 (#4943): a collect-later runner's answer settles inside the
+	// loaded extension copy; the dispatcher logs a row when it lands.
+	"ungoverned-wait-for:index-4943-telemetry-session-stamp.test.ts": {
+		detector: "ungoverned-wait-for",
+		reason:
+			"a collect-later runner answer settles inside the loaded extension copy and exposes no awaitable, so vi.waitFor joins the latency row the dispatcher logs when it lands",
+	},
 	"ungoverned-wait-for:tools/symbol-search.test.ts": {
 		detector: "ungoverned-wait-for",
 		reason:

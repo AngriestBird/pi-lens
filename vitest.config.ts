@@ -764,6 +764,11 @@ export const wallClockBudgetInclude = [
 	// file the spawned server writes) over a bounded wall-clock window, through
 	// the helper in tests/support/marker-lsp-project.ts (flake-shape admission).
 	"tests/index-4913-no-lens-spawn.test.ts",
+	// #4943: a collect-later runner's answer settles inside the loaded
+	// extension copy, so the witness joins the latency row the dispatcher logs
+	// with vi.waitFor; the fake shellcheck's first run sleeps past the 5 s
+	// collect-later threshold (flake-shape admission).
+	"tests/index-4943-telemetry-session-stamp.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",

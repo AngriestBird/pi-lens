@@ -1,3 +1,4 @@
+// flake-shape: ungoverned-wait-for — a collect-later runner answer settles inside the loaded extension copy and exposes no awaitable, so vi.waitFor joins the latency row the dispatcher logs when it lands.
 /**
  * #4943: a write is stamped with the session that made it.
  *
