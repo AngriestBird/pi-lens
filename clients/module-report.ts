@@ -2279,10 +2279,10 @@ function compactCallbackLine(
 export function renderCompactModuleReport(report: ModuleReport): string {
 	if (!report.available) {
 		// #4949: a parse that recovered zero symbols lands here, the case the
-		// disclosure matters most for; keep the warning lines.
+		// disclosure matters most for; keep the caveat lines.
 		return [
 			`${report.path} — unavailable${report.error ? `: ${report.error}` : ""}`,
-			...(report.warnings ?? []).map((warning) => `WARNING: ${warning}`),
+			...(report.warnings ?? []).map((note) => `WARNING: ${note}`),
 		].join("\n");
 	}
 	const allEntries = [...report.api, ...report.internal];
