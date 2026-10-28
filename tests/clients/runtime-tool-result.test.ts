@@ -5043,6 +5043,73 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		}
 	});
 
+	it("logs deferred_format_queued only for a deferral the coordinator accepted (#4689 item 9)", async () => {
+		// Recurrence it prevents: the phase row was written after
+		// `deferFormat` whatever it answered, so an adopted project's edit
+		// (`canWriteAnalysisRoot` refuses it, nothing is queued) still logged
+		// "deferred_format_queued" and read as a queue entry in the latency log
+		// (#4689 probe row d1-obs). Observed through the production
+		// `handleToolResult` with a real coordinator; the control row proves
+		// the phase is still written for a session file.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-4689-deferred-queued-");
+		// A direct child of the temp root with no `pi-lens-` prefix: a pi-owned
+		// temp path is refused as an analysis root, which is the `none` class and
+		// not the adopted one this case measures (#4560).
+		const adopted = path.join(
+			path.dirname(env.tmpDir),
+			`capture-4689-adopted-${process.pid}`,
+		);
+		try {
+			const session = env.tmpDir;
+			fs.mkdirSync(adopted, { recursive: true });
+			fs.writeFileSync(path.join(adopted, "package.json"), "{}\n");
+			const sessionFile = createTempFile(session, "in.ts", "let a = 1;\n");
+			const adoptedFile = createTempFile(adopted, "out.ts", "let b = 1;\n");
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+				checkedClean: false,
+			});
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = session;
+			const run = async (filePath: string) => {
+				logLatency.mockClear();
+				await handleToolResult({
+					event: { toolName: "edit", input: { path: filePath }, content: [] },
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager: {
+						addModifiedRange: () => {},
+						readTurnState: () => ({}),
+					},
+					biomeClient: {},
+					ruffClient: {},
+					metricsClient: {},
+					resetLSPService: () => {},
+					agentBehaviorRecord: () => [],
+					formatBehaviorWarnings: () => "",
+				} as any);
+				return logLatency.mock.calls.filter(
+					([row]) => row?.phase === "deferred_format_queued",
+				);
+			};
+
+			expect(resolveAnalysisRoot(adoptedFile, session)).toBe("adopted");
+			expect(await run(sessionFile)).toHaveLength(1);
+			expect(runtime.consumeDeferredFormatFiles()).toHaveLength(1);
+
+			expect(await run(adoptedFile)).toHaveLength(0);
+			expect(runtime.consumeDeferredFormatFiles()).toHaveLength(0);
+		} finally {
+			fs.rmSync(adopted, { recursive: true, force: true });
+			env.cleanup();
+		}
+	});
+
 	it("queues format with deferred autofix under --immediate-format", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-runtime-tool-immediate-format-");

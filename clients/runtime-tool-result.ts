@@ -4245,6 +4245,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		resultLive &&
 		!result.isError &&
 		bashAuthorshipConfirmed &&
+		// #4689 item 9: `deferMutation` refuses a root the session may not write
+		// (an adopted project) and queues nothing, so the queued phase row, the
+		// debug line and `formatQueued` are claimed only for a root it accepts.
+		canWriteAnalysisRoot(analysisRootMode) &&
 		!getFlag("no-autoformat", filePath) &&
 		(autofixMode === "deferred" || !getFlag("immediate-format")) &&
 		nodeFs.existsSync(filePath)
