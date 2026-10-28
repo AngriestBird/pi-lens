@@ -1048,6 +1048,7 @@ describe("global pi-lens config", () => {
 			["no-tests", "tests"],
 			["no-delta", "delta"],
 			["no-opengrep", "opengrep"],
+			["no-ast-grep", "astGrep"],
 			["no-read-guard", "readGuard"],
 		] as const)(
 			"%s is disabled by %s.enabled=false in the parsed global config",

@@ -562,7 +562,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/diagnostic-dispositions.ts": 3,
 		"clients/diagnostic-tracker.ts": 1,
 		"clients/diagnostics-publish.ts": 2,
-		"clients/dispatch/auxiliary-lsp.ts": 3,
+		// 3 -> 5 (#4944): `dropExcludedServers` keeps the rows and the
+		// coverage-gap names of servers that are not switched off, two
+		// `Array.prototype.filter` calls, not a delivery filter.
+		"clients/dispatch/auxiliary-lsp.ts": 5,
 		// 16 -> 17 (#4484): `heldBackBlockers` keeps the blocking findings the
 		// delta calls not new, an `Array.prototype.filter` call, not a delivery
 		// filter.
@@ -672,7 +675,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 50 -> 51 (#3734): rename-file provenance selects contributing clients.
 		// 49 -> 50 (#4323): a read that excludes a switched-off server drops
 		// that server's rows from the last known answer it falls back to.
-		"clients/lsp/index.ts": 51,
+		// 51 -> 50 (#4944): the stored-rows filter above moved into
+		// `dropExcludedServers` (`clients/dispatch/auxiliary-lsp.ts`).
+		"clients/lsp/index.ts": 50,
 		"clients/lsp/inferred-project.ts": 2,
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,

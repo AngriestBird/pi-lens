@@ -174,6 +174,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		scope: "global",
 	},
 	{
+		name: "no-ast-grep",
+		description:
+			"Disable the ast-grep auxiliary LSP server (default-on; serves the bundled and repo ast-grep rules). Also via astGrep.enabled=false in ~/.pi-lens/config.json.",
+		configKey: "astGrep.enabled",
+		negated: true,
+		default: false,
+		scope: "global",
+	},
+	{
 		name: "no-read-guard",
 		description:
 			"Disable read-before-edit behavior monitor. Also via readGuard.enabled=false in ~/.pi-lens/config.json.",

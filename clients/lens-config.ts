@@ -110,6 +110,8 @@ export interface PiLensGlobalConfig {
 	guard?: PiLensToggleConfig;
 	/** Whether the Opengrep auxiliary LSP attaches (`--no-opengrep`). */
 	opengrep?: PiLensToggleConfig;
+	/** Whether the ast-grep auxiliary LSP attaches (`--no-ast-grep`). */
+	astGrep?: PiLensToggleConfig;
 	/** Whether the read-before-edit behavior monitor runs (`--no-read-guard`). */
 	readGuard?: PiLensToggleConfig;
 	format?: {

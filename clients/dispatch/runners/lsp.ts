@@ -46,6 +46,8 @@ import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
 import { demoteLanguageServerRows } from "../../lsp/inferred-project.js";
 import type { TsserverProjectIdentity } from "../../lsp/tsserver-sync.js";
 import {
+	configDisabledAuxiliaryLspServerIds,
+	dropExcludedServers,
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
 } from "../auxiliary-lsp.js";
@@ -247,11 +249,19 @@ const lspRunner: RunnerDefinition = {
 			// workspace sweep wrapper) and `tools/lsp-diagnostics.ts` (the tool
 			// consumer); wrap it as `{ diags }`; the incumbent branch already
 			// returns the wrapper.
-			const touched = attached?.available
+			// #4944: the incumbent answers every auxiliary; a switched-off one's
+			// rows and coverage-gap name are not this process's answer.
+			const answer = attached?.available
+				? dropExcludedServers(
+						attached.response,
+						configDisabledAuxiliaryLspServerIds((f) => ctx.pi.getFlag(f)),
+					)
+				: undefined;
+			const touched = answer
 				? {
-						diags: attached.response.diagnostics,
-						...(attached.response.unconfirmedServerIds !== undefined && {
-							unconfirmedServerIds: attached.response.unconfirmedServerIds,
+						diags: answer.diagnostics,
+						...(answer.unconfirmedServerIds !== undefined && {
+							unconfirmedServerIds: answer.unconfirmedServerIds,
 						}),
 					}
 				: await lspService.touchFile(ctx.filePath, content, {

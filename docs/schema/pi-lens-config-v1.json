@@ -139,6 +139,9 @@
     "guard": {
       "x-stability": "stable"
     },
+    "astGrep": {
+      "x-stability": "stable"
+    },
     "opengrep": {
       "x-stability": "stable"
     },
