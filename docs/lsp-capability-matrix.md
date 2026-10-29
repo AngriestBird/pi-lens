@@ -398,8 +398,8 @@ dispatched nightly replaces it on the first night that reaches the server.
 | tinymist | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: 1 publish event. Gated. | `node scripts/probe-save-verdict.mjs` (fixture typst) |
 | cue | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture cue) |
 | csharp | `save+text` | unknown | Unverified: not measured. Pull mode, so diagnostics are requested and a save is unlikely to be the only trigger. Gated. | none |
-| deno | `save` | no (pull) | Measured: pull mode — no save needed; a later save alone: 1 diagnostic. Gated. | `node scripts/probe-save-verdict.mjs` (fixture deno) |
-| svelte | `save` | no (pull) | Measured: pull mode — no save needed; a later save alone: 2 diagnostics. Gated. | `node scripts/probe-save-verdict.mjs` (fixture svelte) |
+| deno | `save` | no (pull) | Measured: pull mode — no save needed; a later save+request answered: 1 diagnostic. Gated. | `node scripts/probe-save-verdict.mjs` (fixture deno) |
+| svelte | `save` | no (pull) | Measured: pull mode — no save needed; a later save+request answered: 2 diagnostics. Gated. | `node scripts/probe-save-verdict.mjs` (fixture svelte) |
 | powershell | `save+text` | unknown | Unverified: not measured. Exempt: intermittent. | none |
 | cmake | `save` | inconclusive | Measured: inconclusive — no arm published, so this fixture does not distinguish a save-triggered server from one that never diagnoses it (arms: no-save silent (6000 ms), save alone silent (6000 ms), saved write silent (6000 ms)). Exempt from the clean gate. | `node scripts/probe-save-verdict.mjs` (fixture cmake) |
 

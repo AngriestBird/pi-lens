@@ -216,6 +216,21 @@ describe("saveVerdictCells: the three columns a run owns", () => {
 		expect(cells.evidence).toContain("fixture cpp");
 	});
 
+	it("attributes a pull row's late answer to the request, never to the save", () => {
+		// #4999 R3-2: a pull server's `saveAlone` arm is a save PLUS a
+		// `textDocument/diagnostic` request, so its count cannot be credited to the
+		// save — and the cell's own verdict says no save is needed. The `no (pull)`
+		// template said "a later save alone", which the nightly wrote for deno,
+		// svelte and csharp.
+		const cells = measure({
+			mode: "pull",
+			arms: { noSave: arm(1, 210), saveAlone: arm(1, 80) },
+		});
+		expect(cells[SAVE_VERDICT_COLUMN]).toBe("no (pull)");
+		expect(cells.verdict).toContain("save+request answered: 1 diagnostic");
+		expect(cells.verdict).not.toContain("a later save alone");
+	});
+
 	it("writes nothing a re-measurement of the same behaviour would move", () => {
 		// #4999 F7: the elapsed time of each arm and the run's `src` token used to
 		// live in the committed cells, so a night that changed only those arrived

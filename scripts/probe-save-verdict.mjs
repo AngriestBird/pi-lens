@@ -60,6 +60,7 @@ import {
 } from "./lib/lsp-fixture-workspace.mjs";
 import { commentFor } from "./lib/probe-fixture.mjs";
 import {
+	installCauses,
 	orderByNeed,
 	parseSaveVerdictRows,
 	refreshSaveVerdictTable,
@@ -135,8 +136,11 @@ const { isAuxiliary } = await imp("dist/clients/lsp/server-traits.js");
 // project-code server and every row reads as unreachable.
 await adoptFixtureProjectTrust({ repoRoot });
 let ensureTool;
+let getInstallAttempt;
 if (install) {
-	({ ensureTool } = await imp("dist/clients/installer/index.js"));
+	({ ensureTool, getInstallAttempt } = await imp(
+		"dist/clients/installer/index.js",
+	));
 }
 
 // ---- publish capture ------------------------------------------------------
@@ -263,14 +267,16 @@ async function probeFixture(fx, row) {
 	});
 	try {
 		if (install && ensureTool) {
-			for (const tool of fx.tools ?? []) {
-				try {
-					await ensureTool(tool);
-				} catch (e) {
-					// Recorded, never dropped: the arms below would otherwise read a
-					// toolchain that never installed as a server that stayed silent.
-					row.failures.push(`install failed for ${tool}: ${e?.message ?? e}`);
-				}
+			// #4999 R3-1: `ensureTool` answers `undefined` on a failed install instead
+			// of throwing, so the installer's own attempt record is the only place the
+			// cause survives. Without it the row below reads "server never spawned",
+			// which cannot tell an absent toolchain from a failed download.
+			row.failures.push(
+				...(await installCauses(fx, { ensureTool, getInstallAttempt })),
+			);
+			if (row.failures.length) {
+				row.detail = row.failures.join("; ");
+				return;
 			}
 		}
 		if (fx.setup) {

@@ -82,3 +82,16 @@ export function orderByNeed<F extends { lang: string }>(
 	rows: Array<{ server: string; verdict: string; evidence?: string }>,
 	serverOf: (fixture: F) => string,
 ): F[];
+
+export interface InstallAttemptRecord {
+	outcome: string;
+	reason?: string;
+}
+
+export function installCauses(
+	fixture: { lang?: string; tools?: string[] },
+	deps: {
+		ensureTool: (toolId: string) => Promise<string | undefined>;
+		getInstallAttempt?: (toolId: string) => InstallAttemptRecord | undefined;
+	},
+): Promise<string[]>;

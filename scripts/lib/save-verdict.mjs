@@ -80,6 +80,53 @@ function isCause(cause) {
 }
 
 /**
+ * The cause lines a fixture's install step records, one per declared tool that
+ * never resolved (#4999 R3-1).
+ *
+ * `ensureTool` answers `undefined` for every install failure it OWNS — a failed
+ * download, a policy decline, a held lock — and only throws for a bug in the
+ * installer, so a caller that catches around it records nothing for the failure
+ * mode it was written for. The installer already keeps the answer: every branch
+ * that leaves a tool unresolved records an `InstallAttempt` with its outcome and
+ * reason (`finishInstallAttempt` falls back to `"install failed"` itself), and
+ * the installer's module doc names this lane's row detail as the consumer
+ * (#2638). So this reads that record instead of re-deriving one; the refusal
+ * map needs no second read, because every unresolved attempt already carries
+ * its reason.
+ *
+ * A RESOLVED path is never a cause, whatever the attempt says: the trust-gated
+ * branch records `declined` and still returns the binary its discovery pass
+ * found, and the arms can measure on that binary.
+ *
+ * @param {{ lang?: string, tools?: string[] }} fixture
+ * @param {{
+ *   ensureTool: (toolId: string) => Promise<string | undefined>,
+ *   getInstallAttempt?: (toolId: string) => { outcome: string, reason?: string } | undefined,
+ * }} deps
+ * @returns {Promise<string[]>} the causes, in the fixture's declared tool order
+ */
+export async function installCauses(fixture, deps) {
+	const { ensureTool, getInstallAttempt } = deps;
+	const causes = [];
+	for (const tool of fixture?.tools ?? []) {
+		let resolved;
+		try {
+			resolved = await ensureTool(tool);
+		} catch (e) {
+			// A throw is a hole no arm can fill; it never resolves a toolchain.
+			causes.push(`install failed for ${tool}: ${e?.message ?? e}`);
+			continue;
+		}
+		if (resolved) continue;
+		const attempt = getInstallAttempt?.(tool);
+		const outcome = attempt?.outcome ?? "not attempted";
+		const reason = attempt?.reason ?? "no reason recorded";
+		causes.push(`install ${outcome} for ${tool}: ${reason}`);
+	}
+	return causes;
+}
+
+/**
  * Classify one server's save verdict from its measurement arms.
  *
  * `mode` is the server's diagnostic mode (`pull` for a server that answers
@@ -236,7 +283,10 @@ export function saveVerdictCells(row) {
 	const savedWrite = describeArm(row.arms?.savedWrite, row.waitMs, unit);
 	const observation = {
 		no: `Measured: answers without a save (${noSave} on didOpen); a later save alone: ${saveAlone}.`,
-		"no (pull)": `Measured: pull mode — no save needed; a later save alone: ${saveAlone}.`,
+		// #4999 R3-2: a pull server's save arm is a save PLUS a
+		// `textDocument/diagnostic` request, so the count is the request's answer and
+		// cannot be attributed to the save.
+		"no (pull)": `Measured: pull mode — no save needed; a later save+request answered: ${saveAlone}.`,
 		yes: `Measured: only the save published — silent on didOpen (${row.waitMs} ms), then ${saveAlone} after the save alone.`,
 		"yes (saved write)": `Measured: only a saved write published — silent on didOpen and on the save alone, then ${savedWrite} on a diagnostic-neutral edit plus a save.`,
 		"cannot measure": `Measured: cannot measure: ${reason}.`,
