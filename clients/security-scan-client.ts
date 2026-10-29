@@ -509,8 +509,8 @@ export abstract class SecurityScanClient<TResult> {
 	}
 
 	/**
-	 * Count a spawn error or a throw in the degradation ledger, once per tool
-	 * with the latest message kept. Before this, gitleaks and trivy surfaced
+	 * Count a spawn error, a throw, or a non-zero exit that left no report in
+	 * the degradation ledger, once per tool with the latest message kept. Before this, gitleaks and trivy surfaced
 	 * these only as the result's `summary`, while opengrep, the same shape,
 	 * recorded `opengrep-scan-refused`.
 	 */
