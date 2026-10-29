@@ -36,7 +36,7 @@
  * Refs: #131 (Mode 2)
  */
 
-import { classifyRunOutcome } from "./utils/spawn-outcome.js";
+import { processCutShort } from "./utils/spawn-outcome.js";
 import { formatToolFailure } from "./utils/tool-failure.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -266,14 +266,12 @@ const trivyConfigRunner: RunnerDefinition = {
 					stdout: result.stdout,
 				}),
 			});
-			// The shared classifier names the fault: a launch failure carries a
-			// negative errno status beside its `error`, which a status test misread
-			// as a rejected invocation.
-			const { kind } = classifyRunOutcome({
-				result,
-				exitCodes: { ran: [] },
-			});
-			return faultSkip(kind === "rejected-invocation" ? kind : "did-not-run");
+			// The shared test names the fault: a launch failure carries a negative
+			// errno status beside its `error`, which a status test misread as a
+			// rejected invocation.
+			return faultSkip(
+				processCutShort(result) ? "did-not-run" : "rejected-invocation",
+			);
 		}
 
 		const diagnostics = parseTrivyConfigOutput(
