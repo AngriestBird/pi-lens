@@ -665,6 +665,15 @@ describe("#1162 — bounded session_start sequence read", () => {
 					expect(phaseRecord("session_start_snapshot_load")?.metadata).toEqual(
 						expect.objectContaining({ fresh: false, sequenceUnknown: true }),
 					);
+					// The inner arm owns the wait, so the outer `bounded()` never fires
+					// first and writes no degradation row (#4977 review F4). Narrowing
+					// the outer bound to 1000 writes one on every stalled start while the
+					// recovery still runs, so only this line reds that mutant.
+					expect(
+						getDegradationSummary()
+							.find((group) => group.kind === "hook-await-exceeded")
+							?.latestReasons.map((row) => row.subject) ?? [],
+					).not.toContain("session_start:readSequenceWithBudget");
 
 					// The read lands after the wall: the recovery still runs.
 					slow.resolve({

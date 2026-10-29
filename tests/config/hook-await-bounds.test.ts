@@ -2937,9 +2937,11 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"`undefined` and this await runs on the wall clock alone, capped at " +
 		"`HOOK_WALL_BUDGET_MS.session_start`. The signal half is held one frame up: " +
 		"index.ts awaits the whole `handleSessionStart` under `bounded()` with the " +
-		"hook's `ctx.signal`, so Escape releases the handler there. This bound " +
-		"exists for the env-widened `PI_LENS_SEQUENCE_READ_BUDGET_MS`, which the " +
-		"inner race obeys but the hook budget does not cap.",
+		"hook's `ctx.signal`, so Escape releases the handler there. This bound is " +
+		"the registered census site for this await and the backstop if the inner " +
+		"cap regresses: `sequenceReadBudgetMs()` caps the inner race at the same " +
+		"wall budget and its timer is armed first, so the inner arm ends the wait " +
+		"and owns the recovery (the deferred reseed and the #1785 hydration).",
 	"call:clients/runtime-tool-call.ts#handleToolCallImpl:2dc2d1e2~ce33f035":
 		"The pre-edit linter capture (#4483) uses the tool_call's ctx.signal, " +
 		"absent only in a harness. #2523 gives tool_call no budget of its own, " +
