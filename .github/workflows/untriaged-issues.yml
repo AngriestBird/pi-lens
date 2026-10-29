@@ -35,19 +35,23 @@ jobs:
           node-version: "22"
       # #4691 (item 3 of #3920): warns, one annotation per job, when a required
       # job's p90 over the last 20 master runs passes 70% of its timeout-minutes,
-      # and names every required context it could not measure. It never gates; a
-      # failed read exits 1, which a schedule run reports as advisory
-      # (ci-verdict, #4090). These steps sit ABOVE the detector: it exits 1 on
-      # most days (8 of the last 10 scheduled runs), and GitHub skips every step
-      # after a failed one. The check is scripts/lib/ci-runtime-cap.mjs, the rule
-      # ci-verdict's "Runtime vs cap" report also uses; it reads the workflow caps
-      # through the compiled clients/deps/js-yaml.js, so it needs the install and
-      # the build.
+      # and names every required context it could not measure. It never gates: a
+      # failed read exits 1, and the step is `continue-on-error`: a broken read
+      # (a GitHub 502 from its `gh api` calls, run 40690133466) records its own
+      # failed outcome instead of reddening the nightly (#4989 r3). These
+      # steps sit ABOVE the detector: it exits 1 on most days (8 of the last 10
+      # scheduled runs), and GitHub skips every step after a failed one. The
+      # check is scripts/lib/ci-runtime-cap.mjs, the rule ci-verdict's
+      # "Runtime vs cap" report also uses; it reads the workflow caps through the
+      # compiled clients/deps/js-yaml.js, so it needs the install and the build.
       - name: Install dependencies for the CI job p90 check
         run: npm ci --no-audit --no-fund --ignore-scripts
       - name: Build the compiled clients for the CI job p90 check
         run: npm run build
       - name: Warn when a required CI job's p90 nears its timeout cap
+        # Advisory (#4691, #4989 r3): a gh 502 that fails the read must not red
+        # the nightly. The detector below still carries the job's verdict.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
