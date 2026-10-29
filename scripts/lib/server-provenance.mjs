@@ -30,11 +30,16 @@ export function serverToolId(fixture) {
  * Run the resolved binary's `--version`, bounded. A server that does not know
  * the flag and starts speaking LSP is closed by EOF on stdin; a hang is killed
  * by the timeout. Anything but a clean read is `undefined`, never a guess.
+ * `args` is the tool's registered `checkArgs` (`cue` answers `version`, not
+ * `--version`).
+ *
+ * @param {string | undefined} binPath
+ * @param {readonly string[]} [args]
  */
-export function readVersionFromBinary(binPath) {
+export function readVersionFromBinary(binPath, args = ["--version"]) {
 	if (!binPath) return undefined;
 	try {
-		const run = spawnSync(binPath, ["--version"], {
+		const run = spawnSync(binPath, [...args], {
 			input: "",
 			encoding: "utf8",
 			timeout: 5000,
@@ -79,24 +84,23 @@ export function collectServerProvenance(fixtures, facts) {
  * no probe there and its row records the install source alone.
  *
  * @param {Array<{ lang: string, tools?: string[] }>} fixtures
- * @param {{ TOOLS: Array<{ id: string, verification?: string }>, getAllToolStatuses: (ids: string[]) => Promise<Array<{ id: string, installed: boolean, source: string, path?: string }>> }} installer
- * @param {(binPath: string | undefined) => string | undefined} [readVersion]
+ * @param {{ TOOLS: Array<{ id: string, verification?: string, checkArgs?: string[] }>, getAllToolStatuses: (ids: string[]) => Promise<Array<{ id: string, installed: boolean, source: string, path?: string }>> }} installer
+ * @param {(binPath: string | undefined, args: readonly string[]) => string | undefined} [readVersion]
  */
 export async function resolveFixtureProvenance(
 	fixtures,
 	installer,
 	readVersion = readVersionFromBinary,
 ) {
-	const noVersionProbe = new Set(
-		installer.TOOLS.filter((t) => t.verification === "tree-manifest").map(
-			(t) => t.id,
-		),
-	);
+	const toolById = new Map(installer.TOOLS.map((t) => [t.id, t]));
 	return collectServerProvenance(fixtures, {
 		statuses: await installer.getAllToolStatuses(
 			fixtures.map(serverToolId).filter(Boolean),
 		),
-		readVersion: (status) =>
-			noVersionProbe.has(status.id) ? undefined : readVersion(status.path),
+		readVersion: (status) => {
+			const tool = toolById.get(status.id);
+			if (tool?.verification === "tree-manifest") return undefined;
+			return readVersion(status.path, tool?.checkArgs ?? ["--version"]);
+		},
 	});
 }

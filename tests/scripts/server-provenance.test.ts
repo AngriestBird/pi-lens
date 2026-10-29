@@ -145,6 +145,12 @@ describe("#4512 reading the binary and the installer filter", () => {
 		expect(versionToken(readVersionFromBinary(process.execPath))).toMatch(
 			/^\d+\.\d+\.\d+$/,
 		);
+		// The argv is the caller's: node exits 9 on an unknown flag, while the
+		// default `--version` would have answered, so only the passed args make
+		// this undefined.
+		expect(
+			readVersionFromBinary(process.execPath, ["--no-such-flag-4980"]),
+		).toBeUndefined();
 		expect(readVersionFromBinary("/no/such/binary-4512")).toBeUndefined();
 		expect(readVersionFromBinary(undefined)).toBeUndefined();
 	});
@@ -197,6 +203,45 @@ describe("#4512 resolveFixtureProvenance over the real installer registry", () =
 		expect(out.get("yaml")).toEqual({
 			install: "pi-lens-auto",
 			version: "1.38.0",
+		});
+	});
+
+	// Recurrence (#4980 CodeRabbit thread on server-provenance.mjs:49): the reader
+	// always ran `--version`, but the registry records tools whose version
+	// command differs (`cue` answers `version`; `--version` is an unknown flag,
+	// exit 1), so their rows recorded no version. The reader is handed each
+	// tool's registered `checkArgs`.
+	it("reads each tool's version with its registered checkArgs", async () => {
+		const asked: Array<[string | undefined, readonly string[] | undefined]> =
+			[];
+		const out = await resolveFixtureProvenance(
+			[
+				{ lang: "cue", tools: ["cue"] },
+				{ lang: "yaml", tools: ["yamllint"] },
+			],
+			{
+				TOOLS: installer.TOOLS,
+				getAllToolStatuses: async (ids: string[]) =>
+					ids.map((id) => ({
+						id,
+						installed: true,
+						source: "github-release",
+						path: `/bin/${id}`,
+					})),
+			},
+			(binPath, args) => {
+				asked.push([binPath, args]);
+				return "v0.17.1";
+			},
+		);
+		expect(asked).toEqual([
+			["/bin/cue", installer.TOOLS.find((t) => t.id === "cue")?.checkArgs],
+			["/bin/yamllint", ["--version"]],
+		]);
+		expect(asked[0]?.[1]).toEqual(["version"]);
+		expect(out.get("cue")).toEqual({
+			install: "github-release",
+			version: "0.17.1",
 		});
 	});
 

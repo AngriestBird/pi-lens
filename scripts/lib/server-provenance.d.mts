@@ -6,6 +6,7 @@ export function serverToolId(fixture: { tools?: string[] }): string | undefined;
 
 export function readVersionFromBinary(
 	binPath: string | undefined,
+	args?: readonly string[],
 ): string | undefined;
 
 export function collectServerProvenance(
@@ -29,12 +30,15 @@ export function collectServerProvenance(
 export function resolveFixtureProvenance(
 	fixtures: Array<{ lang: string; tools?: string[] }>,
 	installer: {
-		TOOLS: Array<{ id: string; verification?: string }>;
+		TOOLS: Array<{ id: string; verification?: string; checkArgs?: string[] }>;
 		getAllToolStatuses(
 			ids: string[],
 		): Promise<
 			Array<{ id: string; installed: boolean; source: string; path?: string }>
 		>;
 	},
-	readVersion?: (binPath: string | undefined) => string | undefined,
+	readVersion?: (
+		binPath: string | undefined,
+		args: readonly string[],
+	) => string | undefined,
 ): Promise<Map<string, { install: string; version?: string }>>;
