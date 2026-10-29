@@ -1656,8 +1656,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 		// @delivery-surface: runtime-turn:late-runner-findings
 		advisoryParts.push(lateRunnerPart);
-		// #4617: the part is about this file, which a no-write turn did not edit.
-		citePart(lateRunnerPart, [pending.filePath]);
+		// #4617: the part is about these files, which a no-write turn did not
+		// edit. A kept advisory can name a file other than the deferred one
+		// (the freshness gate reads each finding's own `filePath`), so cite
+		// each file the part names, not only `pending.filePath`.
+		citePart(lateRunnerPart, [
+			...new Set(advisoryKept.map((f) => f.filePath ?? pending.filePath)),
+		]);
 	}
 	logLatency({
 		type: "phase",

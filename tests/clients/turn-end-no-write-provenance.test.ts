@@ -410,6 +410,63 @@ describe.each([false, true])(
 			});
 		});
 
+		// Recurrence (#4962 r5, CodeRabbit outside-diff): a late runner's kept
+		// advisory can name a file other than the one the run was deferred for
+		// (the freshness gate and the line text read each finding's own
+		// `filePath`). The part cited only the deferred file, so a change to the
+		// named file after the turn end left the message current.
+		it("labels a late runner finding historical when the file it names changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-cross-file-${guard}`,
+				incident:
+					"A late runner advisory names a file other than its deferred one",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = h.write("src/late.sh", "echo hi\n");
+					const namedFile = h.write("src/named.sh", "echo named\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(runnerFile, past, past);
+					fs.utimesSync(namedFile, past, past);
+					deferRunnerFindings({
+						filePath: runnerFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "blocking_diagnostics",
+							semantic: "warning",
+							diagnostics: [
+								{
+									id: "late-runner-cross-1",
+									message: "late runner finding",
+									filePath: namedFile,
+									line: 1,
+									column: 1,
+									severity: "warning",
+									semantic: "warning",
+									tool: "shellcheck",
+									rule: "SC2086",
+								},
+							],
+						} as RunnerResult),
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(namedFile, "echo changed\n");
+						},
+					});
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// Recurrence (#4617 item 2, round 2): a late runner whose surviving
 		// findings are all blocking leaves the advisory and is delivered by the
 		// blocker replay ("Unresolved from this turn"), a second producer of the
