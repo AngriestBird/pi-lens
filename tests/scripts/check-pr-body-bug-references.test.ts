@@ -291,7 +291,11 @@ describe("resolveBugReferenced (#4968)", () => {
 });
 
 describe("a PR that only references a bug issue (#4968)", () => {
-	const eventFetch = (labels: string[] | "fail", text: string) =>
+	const eventFetch = (
+		labels: string[] | "fail",
+		text: string,
+		liveTitle?: string,
+	) =>
 		vi.fn().mockImplementation(async (url: string) => {
 			if (String(url).includes("/files"))
 				return new Response(JSON.stringify([]), { status: 200 });
@@ -302,18 +306,21 @@ describe("a PR that only references a bug issue (#4968)", () => {
 							JSON.stringify({ labels: labels.map((name) => ({ name })) }),
 							{ status: 200 },
 						);
-			return new Response(JSON.stringify({ body: text }), { status: 200 });
+			return new Response(JSON.stringify({ body: text, title: liveTitle }), {
+				status: 200,
+			});
 		});
 	const runEvent = async (
 		text: string,
 		labels: string[] | "fail",
 		title?: string,
+		liveTitle?: string,
 	) => {
 		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 		const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			const result = await lintPullRequestEvent(
-				eventFetch(labels, text),
+				eventFetch(labels, text, liveTitle),
 				{ pull_request: { number: 4968, body: text, title } },
 				() => "",
 			);
@@ -395,6 +402,27 @@ describe("a PR that only references a bug issue (#4968)", () => {
 		expect(run.errors).toContain("owner/repo#12");
 	});
 
+	// Recurrence guarded (#4976 CodeRabbit thread): a PR that closes a bug owes
+	// the full section already, so a cross-repository `Refs` beside it changes no
+	// requirement. Refusing it would redden a legitimate upstream citation
+	// (#4755 cites hashicorp/vscode-...#N) for a label read the verdict never uses.
+	it("CI passes a bug-closing PR that also cites an upstream issue", async () => {
+		const closing = base("Closes #4321. Refs owner/repo#12 upstream.");
+		const run = await runEvent(`${closing}\n${detection()}`, ["bug"]);
+		expect(run.errors).toBe("");
+		expect(run.result.valid).toBe(true);
+	});
+
+	it("CI still reds that bug-closing PR when the section is missing", async () => {
+		const run = await runEvent(
+			base("Closes #4321. Refs owner/repo#12 upstream."),
+			["bug"],
+		);
+		expect(run.result.valid).toBe(false);
+		expect(run.errors).toContain('missing "## Detection"');
+		expect(run.errors).not.toContain("cannot be judged");
+	});
+
 	it("CI reds a bug named only in the title (PR #4924)", async () => {
 		const run = await runEvent(body4924, ["bug"], title4924);
 		expect(run.result.valid).toBe(false);
@@ -409,6 +437,56 @@ describe("a PR that only references a bug issue (#4968)", () => {
 		);
 		expect(run.errors).toBe("");
 		expect(run.result.valid).toBe(true);
+	});
+
+	// Recurrence (#4976 CodeRabbit thread, the #2083 shape): "Re-run jobs"
+	// replays the opened-event payload, so a title edited afterwards is stale
+	// there. The body already came from the live PR; the title read from the
+	// payload judged a title the author no longer has.
+	it("CI reads a bug added to the title after the event", async () => {
+		const run = await runEvent(
+			body4924,
+			["bug"],
+			"fix: sweep held-document drift before lsp answers",
+			title4924,
+		);
+		expect(run.result.valid).toBe(false);
+		expect(run.errors).toContain('missing "## Detection"');
+	});
+
+	it("CI drops a bug removed from the title after the event", async () => {
+		const run = await runEvent(
+			body4924,
+			["bug"],
+			title4924,
+			"fix: sweep held-document drift before lsp answers",
+		);
+		expect(run.errors).toBe("");
+		expect(run.result.valid).toBe(true);
+	});
+
+	// The same live title reaches the refusal for an unreadable label and the
+	// `refactor:` gate of lintPrBody (a retitle to refactor owes a table).
+	it("CI refuses a label it cannot read for a bug added to the title", async () => {
+		const run = await runEvent(
+			body4924,
+			"fail",
+			"fix: sweep held-document drift before lsp answers",
+			title4924,
+		);
+		expect(run.result.valid).toBe(false);
+		expect(run.errors).toMatch(/#4532.*could not be read/s);
+	});
+
+	it("CI applies the refactor gate to a title retitled after the event", async () => {
+		const run = await runEvent(
+			body4924,
+			["enhancement"],
+			"fix: sweep held-document drift (refs #4532)",
+			"refactor: sweep held-document drift (refs #4532)",
+		);
+		expect(run.result.valid).toBe(false);
+		expect(run.errors).toContain("Behavior equivalence");
 	});
 
 	// F2: CI has the token, so an unreadable label refuses there. The message

@@ -269,7 +269,8 @@ rigor (#2599).
   close keyword the closing read does not own), or whose title names one
   (`(refs #N)`), owes the same section when that issue is labelled `bug` or
   `nightly-drift`; so does a body that closes a `nightly-drift` issue. A
-  reference written as `owner/repo#N` or a URL is refused. CI refuses a label
+  reference written as `owner/repo#N` or a URL is refused unless the body
+  already closes a bug, which owes the section whatever else it cites. CI refuses a label
   it cannot read; the local preflight, with no working gh, warns and skips it
   as for a closed issue (#4968). A non-bug PR either deletes the `## Detection` section or
   fills the three lines, and a `Shape:` or `Enforcer:` line it does write is

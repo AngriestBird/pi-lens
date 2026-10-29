@@ -3504,7 +3504,7 @@ function closedIssues(body) {
 // cross-repository token or an issue or pull request URL is returned as
 // unrecognised for the gate to refuse, never skipped. Another URL (a comment
 // permalink) is prose.
-const REFERENCE_KEYWORD = String.raw`(?:clos(?:e[sd]?)|fix(?:e[sd])?|resolv(?:e[sd]?)|refs?|references?)`;
+const REFERENCE_KEYWORD = String.raw`(?:close[sd]?|fix(?:e[sd])?|resolv(?:e[sd]?)|refs?|references?)`;
 const REFERENCE_TOKEN = String.raw`(?:https?://[^\s)\]>]+|[\w.-]+/[\w.-]+#\d+|(?:#|GH-)\d+(?!\w))`;
 const REFERENCE_LIST = String.raw`${REFERENCE_TOKEN}(?:(?:[ \t]*(?:,|&|\band\b)[ \t]*|[ \t]+)${REFERENCE_TOKEN})*`;
 const REFERENCE_GAP = String.raw`[ \t:\-\u2013\u2014(\[*_]*`;
@@ -4689,6 +4689,10 @@ export async function lintPullRequestEvent(
 	// Section readers get the cut text; the close-keyword and bug-label readers
 	// keep `fullBody`, because GitHub closes what the whole body names (#4778).
 	const fullBody = live.body;
+	// The title comes from the same live fetch as the body (#2083's seam), so a
+	// title edited after a replayed event is judged as it stands; the payload
+	// title stands in only when the live fetch fell back (#4976).
+	const title = live.title ?? pullRequest.title;
 	const body = authorText(fullBody);
 	const requireTestAssessment =
 		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
@@ -4709,11 +4713,7 @@ export async function lintPullRequestEvent(
 	let bugReferenced = false;
 	if (bugClosing !== true)
 		try {
-			bugReferenced = await resolveBugReferenced(
-				fullBody,
-				fetchImpl,
-				pullRequest.title,
-			);
+			bugReferenced = await resolveBugReferenced(fullBody, fetchImpl, title);
 		} catch {
 			bugReferenced = null;
 		}
@@ -4734,13 +4734,9 @@ export async function lintPullRequestEvent(
 		// Existing open bodies were authored before #4280. Set PI_LENS_PROSE_GRACE=1
 		// for the transition job; local preflight remains blocking by default.
 		proseMode: process.env.PI_LENS_PROSE_GRACE === "1" ? "warn" : "block",
-		title: pullRequest.title,
+		title,
 	});
-	const unreadable = lintReferencedBugLabels(
-		fullBody,
-		bugReferenced,
-		pullRequest.title,
-	);
+	const unreadable = lintReferencedBugLabels(fullBody, bugReferenced, title);
 	if (unreadable.length) {
 		result.valid = false;
 		result.errors.push(...unreadable);
