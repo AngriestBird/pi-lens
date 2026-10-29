@@ -630,10 +630,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :108, :205
 	"clients/gitleaks-client.ts": {
-		silent: 9,
-		identities: "a84c4542ebcd6944",
+		silent: 7,
+		identities: "b7d8104671a0bad6",
 		reason: PRE_RULE,
-	}, // :158, :269, :287, :301, :323, :461, :470, :525, :592
+	}, // :156, :267, :285, :299, :321, :489, :556
 	"clients/govulncheck-client.ts": {
 		silent: 5,
 		identities: "e7742f12d2580226",
@@ -1241,10 +1241,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :848
 	"clients/trivy-client.ts": {
-		silent: 8,
-		identities: "184de0f9f29457b3",
+		silent: 6,
+		identities: "7437ffe9ed1a72cd",
 		reason: PRE_RULE,
-	}, // :165, :186, :220, :403, :412, :442, :496, :539
+	}, // :163, :184, :218, :407, :461, :504
 	"clients/tui-fit.ts": {
 		silent: 1,
 		identities: "bdb9736abc0aae9d",
@@ -1386,10 +1386,12 @@ const BASELINE: Readonly<Record<string, Admission>> = {
  * 25 more silent sites visible, so the merged population is 1,188 (1,143 under
  * the old rule on the same tree). #4530 routed the installer's raw starts,
  * the launcher's PATH walk and metrics-history's git probe through the spawn
- * seam, and the merged tree's population is 1,175. It moves only downward
- * from here.
+ * seam, and the merged tree's population is 1,175. Folding gitleaks's and trivy's
+ * report-scan bodies onto `SecurityScanClient.runReportScan` removed four
+ * silent handlers and spent two `none:` lines in the one copy, so it is 1,171.
+ * It moves only downward from here.
  */
-const PINNED_TOTAL = 1175;
+const PINNED_TOTAL = 1171;
 
 interface Census {
 	byFile: Map<string, CatchSite[]>;

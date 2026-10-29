@@ -2452,7 +2452,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// inside the format service's own `bounded()` call, and the formatter seam
 	// carries no `AbortSignal` until #2523 AC4 threads it through.
 	"clients/formatters.ts": 118,
-	"clients/gitleaks-client.ts": 4,
+	"clients/gitleaks-client.ts": 3,
 	// #1892: the turn-end secrets LANE, extracted out of `runtime-turn.ts` with
 	// no behaviour change. Its one unbounded await is `collect`'s
 	// `await blockingGitleaksFindings(...)`, whose own inner await IS the
@@ -2736,7 +2736,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// removed), never rise.
 	"clients/tool-definition.ts": 1,
 	"clients/tree-sitter-shared.ts": 1,
-	"clients/trivy-client.ts": 2,
+	"clients/trivy-client.ts": 1,
 	// #4645: 9 -> 10. The incumbent awaits its own membership probe (the
 	// existing non-spawning read-only probe channel) and sends the answer beside
 	// the raw rows. The probe runs under `withinRemaining(…, req.deadlineAt -

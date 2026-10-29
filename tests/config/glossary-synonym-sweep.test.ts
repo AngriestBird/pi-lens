@@ -436,7 +436,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/formatters.ts": 26,
 		"clients/generation-lock.ts": 7,
 		"clients/git-tracked-ignore.ts": 2,
-		"clients/gitleaks-client.ts": 3,
 		"clients/govulncheck-client.ts": 6,
 		// 2 -> 4 (#4402): the worker loop's catch answers with an `error`, and
 		// readGzipStageWorkerResult reads the wire field `error` (the worker
@@ -489,7 +488,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-turn.ts": 10,
 		// 52 -> 53 (#4530): a lookup refusal builds its SpawnResult's `error`.
 		"clients/safe-spawn.ts": 53,
-		"clients/security-scan-client.ts": 2,
+		// 2 -> 6: the report-scan seam (`runReportScan`) carries the `result.error` reads
+		// gitleaks (3) and trivy (3) each had, plus the failure record; net 8 -> 6.
+		"clients/security-scan-client.ts": 6,
 		"clients/sg-runner.ts": 32,
 		"clients/shared-checkout-guard.ts": 1,
 		"clients/single-flight.ts": 3,
@@ -503,7 +504,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-client.ts": 6,
 		"clients/tree-sitter-logger.ts": 1,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
-		"clients/trivy-client.ts": 3,
 		"clients/warm-attach.ts": 14,
 		"clients/word-index-logger.ts": 1,
 		"clients/word-index.ts": 2,
@@ -868,7 +868,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/types.ts": 1,
 		"clients/disposition-logger.ts": 1,
 		"clients/extension-log.ts": 1,
-		"clients/gitleaks-client.ts": 1,
 		"clients/go-client.ts": 4,
 		"clients/govulncheck-client.ts": 12,
 		"clients/host-ports.ts": 2,
@@ -887,12 +886,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/ruff-client.ts": 4,
 		"clients/runtime-session.ts": 4,
 		"clients/rust-client.ts": 4,
-		"clients/security-scan-client.ts": 8,
+		"clients/security-scan-client.ts": 9,
 		"clients/sg-runner.ts": 5,
 		"clients/test-runner-client.ts": 17,
 		"clients/tool-cwd.ts": 2,
 		"clients/tree-sitter-logger.ts": 1,
-		"clients/trivy-client.ts": 1,
 		"clients/word-index-logger.ts": 1,
 		"clients/word-index.ts": 2,
 		"mcp/analyze-cli.ts": 1,
@@ -1075,7 +1073,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
 		"clients/git-tracked-ignore.ts": 3,
-		"clients/gitleaks-client.ts": 25,
+		"clients/gitleaks-client.ts": 23,
 		"clients/go-client.ts": 2,
 		"clients/govulncheck-client.ts": 7,
 		"clients/gradle-ktfmt-style.ts": 5,
@@ -1344,7 +1342,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.delimiter` and resolve each entry with `path` namespace calls.
 		"clients/safe-spawn.ts": 32,
 		"clients/search-read-registration.ts": 3,
-		"clients/security-scan-client.ts": 4,
+		"clients/security-scan-client.ts": 6,
 		// #4530: the bin layouts moved here from package-manager.ts.
 		"clients/session-repository.ts": 9,
 		"clients/session-state-store.ts": 3,
@@ -1391,7 +1389,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-query-loader.ts": 18,
 		"clients/tree-sitter-shared.ts": 2,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
-		"clients/trivy-client.ts": 6,
+		"clients/trivy-client.ts": 4,
 		"clients/warm-attach.ts": 3,
 		"clients/widget-state.ts": 7,
 		"clients/word-index-logger.ts": 2,
