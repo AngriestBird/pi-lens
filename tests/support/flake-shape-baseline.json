@@ -298,7 +298,6 @@
 		"mcp/session-end.smoke.test.ts": 1,
 		"mcp/turn-end-route.smoke.test.ts": 1,
 		"monorepo/size-cliff.test.ts": 1,
-		"scripts/prune-agent-worktrees.test.ts": 2,
 		"scripts/suite-lock-shared-slots.test.ts": 1,
 		"scripts/suite-lock.test.ts": 1,
 		"scripts/with-memory-watch.test.ts": 10,

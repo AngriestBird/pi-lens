@@ -575,6 +575,13 @@ describe("oxlint runner", () => {
 
 				expect(outcome.status).toBe(expectedStatus);
 				expect(outcome.skipReason).toBe(expectedSkipReason);
+				// #4130: a spawn that produced no result is a runner fault on the skip;
+				// the expected no-files skip and every completed run are not.
+				expect(outcome.skipFault).toBe(
+					expectedDegradation === "runner-empty-result"
+						? "did-not-run"
+						: undefined,
+				);
 				// A parsed-nothing row is finishParsedRun's parse-error arm (#3796).
 				expect(outcome.failureKind).toBe(
 					expectedFailureKind ??
