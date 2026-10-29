@@ -10,7 +10,8 @@
  * `prompt(text, { images })`), and a trailing tool result. Every other case here
  * asserts pi-lens's own return-value shaping for transcripts a scripted provider
  * cannot produce — an empty array, a custom `{ weird: true }` content object, an
- * empty transcript — so those stay on the pi double, which is the
+ * empty transcript, and the string content arm an empty prompt takes after a
+ * transcript rebuild (#4988 F1) — so those stay on the pi double, which is the
  * cheaper and only possible driver for them. Each of those direct-handler cells
  * now carries the host's real system head (`makeContextWithSystemEvent`), so its
  * index positions are the shape pi actually sends (#4631 round 6, R6-1); the
@@ -185,6 +186,53 @@ describe("context injection appends to last user message (#3693)", () => {
 				{ type: "text", text: `${INJECTION_DELIMITER}\n\nGuidance text` },
 			]);
 			expect(handle.errors).toEqual([]);
+		},
+		TIMEOUT_MS,
+	);
+
+	it(
+		"handles an empty string content arm without creating leading newline",
+		async () => {
+			// Direct handler (#4988 F1): pi hands the handler `content: [{ type:
+			// "text", text: "" }]` above, so that case reaches the ARRAY arm only.
+			// A transcript rebuilt from a released writer can carry a string last
+			// user message (AGENTS.md shape 57), which takes
+			// `appendToUserPromptContent`'s string arm; its empty sub-branch
+			// (`content.length > 0 ? … : injectedText`) is pinned here. A leading
+			// newline on the empty string reds this case and nothing else.
+			const { context } = await loadContextHandler();
+
+			new CacheManager(false).writeCache(
+				"session-start-guidance",
+				{ content: "Guidance text" },
+				tmpDir,
+			);
+
+			const emptyPrompt = { role: "user", content: "" };
+			const existing = [emptyPrompt];
+			const head = makeSystemHead();
+
+			const result = (await context(
+				makeContextWithSystemEvent(existing, head),
+				makeCtx({ cwd: tmpDir, sessionId: "sess-2" }),
+			)) as { messages: Array<{ role: string; content: unknown }> };
+
+			expect(result).toBeDefined();
+			expect(result.messages).toHaveLength(2);
+			// #4631 round 6 (R6-1): the host's request leads with the system head,
+			// which the handler must hand back untouched — the user prompt and the
+			// injected block follow it.
+			// Compared against a FRESH builder output, not the event's own object: a
+			// handler that mutated the head in place would pass the reference check.
+			expect(result.messages[0]).toEqual(makeSystemHead());
+			expect(result.messages[0].role).toBe("system");
+			const last = result.messages[1];
+			expect(last.role).toBe("user");
+			expect(typeof last.content).toBe("string");
+			expect((last.content as string).startsWith("\n")).toBe(false);
+			expect(last.content).toBe(`${INJECTION_DELIMITER}\n\nGuidance text`);
+			expect(last).not.toBe(emptyPrompt);
+			expect(emptyPrompt.content).toBe("");
 		},
 		TIMEOUT_MS,
 	);
