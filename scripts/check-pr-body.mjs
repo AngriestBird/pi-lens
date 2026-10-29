@@ -4616,11 +4616,11 @@ function hookAnchorsFromDiff(diff, map, options) {
 
 // `owner/repo` of the checkout's `origin`, or `undefined` when it has none or
 // it is not a GitHub URL. The local twin of GITHUB_REPOSITORY on the event path.
-function originRepository(cwd) {
+function originRepository(cwd, git) {
 	try {
 		return (
 			parseOwnerRepoFromGitRemote(
-				gitExecFileSync(["remote", "get-url", "origin"], {
+				git(["remote", "get-url", "origin"], {
 					cwd,
 					encoding: "utf8",
 					stdio: ["ignore", "pipe", "ignore"],
@@ -4643,7 +4643,7 @@ function originRepository(cwd) {
  */
 export function lintWorkflowRunEvidence(
 	body,
-	{ diff, cwd = process.cwd(), repository } = {},
+	{ diff, cwd = process.cwd(), repository, git = gitExecFileSync } = {},
 ) {
 	if (!diff) return [];
 	const unreadable = [];
@@ -4652,17 +4652,17 @@ export function lintWorkflowRunEvidence(
 	// the run-evidence rule; a base that cannot be resolved or read (a shallow
 	// checkout) answers "" instead, which fails closed: not added, and not a
 	// comment-only edit.
-	const mergeBase = resolvePrBase(cwd);
-	const existsOnBase = baseFileReader(cwd);
+	const mergeBase = resolvePrBase(cwd, git);
+	const existsOnBase = baseFileReader(cwd, git);
 	const errors = evaluateWorkflowRunEvidence({
 		changedFiles: parseChangedFiles(diff),
 		body,
-		repository: repository ?? originRepository(cwd),
+		repository: repository ?? originRepository(cwd, git),
 		readBaseWorkflow: (file) => {
 			if (!mergeBase) return "";
 			if (existsOnBase(file) === false) return null;
 			try {
-				return gitExecFileSync(["show", `${mergeBase}:${file}`], {
+				return git(["show", `${mergeBase}:${file}`], {
 					cwd,
 					encoding: "utf8",
 				});
@@ -4806,7 +4806,7 @@ export function lintLocalPrBody(
 	result.errors.push(...coverage.errors);
 	if (coverage.errors.length) result.valid = false;
 	for (const advisory of coverage.advisories) console.warn(advisory);
-	const workflowEvidence = lintWorkflowRunEvidence(body, { diff, cwd });
+	const workflowEvidence = lintWorkflowRunEvidence(body, { diff, cwd, git });
 	result.errors.push(...workflowEvidence);
 	if (workflowEvidence.length) result.valid = false;
 	const closeSyntax = lintCloseKeywords(fullBody);

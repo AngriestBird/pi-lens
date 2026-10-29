@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	changedHookAnchors,
 	evaluateTlaCoverage,
@@ -17,6 +17,19 @@ import {
 	lintTlaCoverage,
 	parseRuntimeHunks,
 } from "../../scripts/check-pr-body.mjs";
+
+// #3902: the PR-body lint cases inject a fake git, so none may spawn a real
+// one. The child-process boundary records every spawn and refuses it; a case
+// asserts the record stayed empty. A real spawn plus a lex of every matching
+// runtime file took 235 ms solo and over 5 s on a loaded Windows runner.
+const realGit = vi.hoisted(() => ({ calls: [] as string[][] }));
+vi.mock("node:child_process", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:child_process")>()),
+	execFileSync: (_file: string, args: string[]) => {
+		realGit.calls.push(args);
+		throw new Error("a real git spawn in a fake-git lint case (#3902)");
+	},
+}));
 
 // #3802 rule 2: a PR that changes a mapped runtime file must move its model
 // (a .tla/.cfg under the family) or say "TLA+ unaffected: <family> — <reason>".
@@ -407,6 +420,10 @@ describe("TLA+ coverage rule", () => {
 	});
 });
 
+beforeEach(() => {
+	realGit.calls.length = 0;
+});
+
 describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 	it("fails a mapped runtime change with no model change and no body line", () => {
 		const git = (args: string[]) =>
@@ -418,6 +435,7 @@ describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 		});
 		expect(result.valid).toBe(false);
 		expect(result.errors.join(" ")).toContain("formal/read-guard/");
+		expect(realGit.calls).toEqual([]);
 	});
 
 	it("passes the same diff when the body carries the unaffected line", () => {
@@ -425,11 +443,18 @@ describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 			args.includes("--name-only")
 				? "clients/read-guard.ts\n"
 				: READ_GUARD_DIFF;
-		const body = `${BASE_BODY}\n\nTLA+ unaffected: read-guard — only a local helper moved.\nTLA+ unaffected: session-lifecycle — the change does not touch session state.`;
+		// Before "## Class sweep", not at the end: a family name under
+		// "## Observability" reads as a record mention and starts a runtime-tree
+		// `git grep` and lex (#3902).
+		const body = BASE_BODY.replace(
+			"## Class sweep",
+			"TLA+ unaffected: read-guard — only a local helper moved.\nTLA+ unaffected: session-lifecycle — the change does not touch session state.\n\n## Class sweep",
+		);
 		const result = lintLocalPrBody(body, REPO_ROOT, git as never, {
 			headFiles: READ_GUARD_HEAD_FILES,
 		});
 		expect(result.valid).toBe(true);
+		expect(realGit.calls).toEqual([]);
 	});
 });
 
@@ -475,6 +500,7 @@ describe("lintTlaCoverage seam (#3802)", () => {
 			expect(warn.mock.calls.flat().join("\n")).toContain(
 				"TLA+ note: clients/lsp/client.ts",
 			);
+			expect(realGit.calls).toEqual([]);
 		} finally {
 			warn.mockRestore();
 		}

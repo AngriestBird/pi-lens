@@ -1010,6 +1010,27 @@ describe("test-reference positive recognition (#3013)", () => {
 		expect(reads).toBe(1);
 	});
 
+	// #3902 F1: the getter cases above count reads of an injected corpus only. A
+	// regression that scans the tree eagerly when no corpus is injected would pass
+	// them, so this counts the git calls the scan makes.
+	it("makes no git call for a prose body and at least one for a test reference", () => {
+		const calls: string[][] = [];
+		const git = (args: string[]) => {
+			calls.push(args);
+			return "";
+		};
+		expect(lintPrBody(body, { cwd: repositoryRoot, git }).errors).toEqual([]);
+		expect(calls).toEqual([]);
+		const named = lintPrBody(`${body}\nSee \`tests/missing-3902.test.ts\`.`, {
+			cwd: repositoryRoot,
+			git,
+		});
+		expect(named.errors).toEqual([
+			"PR body test reference is missing under tests/: tests/missing-3902.test.ts",
+		]);
+		expect(calls.some((args) => args[0] === "ls-files")).toBe(true);
+	});
+
 	// End-to-end proof: three real merged bodies that fail pre-fix pass
 	// post-fix. Only test-reference errors are asserted — the citation and
 	// master-claim surfaces belong to #2904 and are unaffected.
@@ -5489,6 +5510,32 @@ describe("added workflow accepts a push-run URL, through the real merge-base rea
 				repository: "o/r",
 			}).join("\n"),
 		).toContain("Changed workflow");
+	});
+
+	// #3902: the PR-body lint cases that inject a fake git must not reach a real
+	// one through this rule.
+	it("reads the merge base, the base file and origin through an injected git", () => {
+		fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-injected-"));
+		mkdirSync(join(fixtureCwd, ".github/workflows"), { recursive: true });
+		writeFileSync(
+			join(fixtureCwd, WORKFLOW),
+			"name: probe\non:\n  workflow_dispatch:\n",
+		);
+		const calls: string[] = [];
+		const git = (args: string[]) => {
+			calls.push(args[0]);
+			if (args[0] === "merge-base") return "abc123\n";
+			if (args[0] === "ls-tree") return `100644 blob e69de29\t${WORKFLOW}\0`;
+			return "";
+		};
+		lintWorkflowRunEvidence(pushRun, {
+			diff: `diff --git a/${WORKFLOW} b/${WORKFLOW}\n`,
+			cwd: fixtureCwd,
+			git,
+		});
+		expect(calls).toEqual(
+			expect.arrayContaining(["merge-base", "ls-tree", "show", "remote"]),
+		);
 	});
 });
 
