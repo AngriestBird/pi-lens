@@ -204,8 +204,13 @@ and `[]` mean no arguments.
   tree-sitter's conventional `comment` node — JS/TS is the primary target;
   languages sharing that node shape (confirmed: Python, and any grammar whose
   comment nodes are plain preceding siblings) get it for free with no
-  per-grammar query work. `exported` stays a boolean field only — it is NOT
-  also repeated inside `flags` (#512); `flags` carries only non-derivable
+  per-grammar query work. A Python def or class also reads its docstring (a
+  plain, `r` or `u` string that is the first statement of the body); when
+  both a `#` comment above the def and a docstring exist, the docstring wins.
+  When a file has syntax errors, tree-sitter recovers and drops the
+  declarations it cannot parse, so the report carries a `warnings` entry saying
+  the symbol list may be incomplete. `exported` stays a boolean field only — it
+  is NOT also repeated inside `flags` (#512); `flags` carries only non-derivable
   signals (`async`, `high fanout`, `high complexity`, `boundary wrapper`).
   Each entry carries a `decorators[]` array — the declaration's
   decorators/attributes/annotations (`@app.get("/x")`, `#[tokio::main]`,
@@ -230,7 +235,9 @@ and `[]` mean no arguments.
   for cross-file transitive dependents (read-only over the cached graph).
 - **`read_symbol`** — One symbol's verbatim source body, by name or by a
   `module_report` callback handle. Returned body is recorded as genuine
-  read-guard coverage for that symbol/callback's line range.
+  read-guard coverage for that symbol/callback's line range. In a file with
+  syntax errors a miss carries the same incomplete-symbol-list warning, so a
+  miss is not proof the symbol is absent.
 - **`read_enclosing`** — Maps a `path` + `line` (from `ast_grep_search`,
   diagnostics, or LSP locations) to the verbatim body of the smallest enclosing
   symbol or callback. Tree-sitter only — no LSP or graph build. Optional `kinds`
