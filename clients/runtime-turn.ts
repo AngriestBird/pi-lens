@@ -490,6 +490,13 @@ interface TurnEndDeps {
 	signal?: AbortSignal;
 	/** Delivery adapter whose tool names appear in agent-facing advisories. */
 	host?: LensToolHost;
+	/**
+	 * #4943: the address the staged message is delivered to (`deliverTo`).
+	 * Absent, the turn's session. The MCP host passes one constant address for
+	 * every server process, so a restarted server still reads what the last one
+	 * staged, while its owner id stays per process.
+	 */
+	deliveryAddress?: string;
 }
 
 /**
@@ -6375,7 +6382,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				sessionId: blockers.owner ?? deliverySessionId,
 				// #4943: only this turn's session's next request takes the message,
 				// whoever owns the blocker sections the record leads with.
-				deliverTo: deliverySessionId,
+				deliverTo: deps.deliveryAddress ?? deliverySessionId,
 				projectSeqStart: runtime.turnStartProjectSeq,
 				projectSeqEnd: runtime.projectSeq,
 				fileSeqByPath,
@@ -6408,7 +6415,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					affectedFilesTruncated,
 					provenance: stampProvenance(affectedFiles, affectedFilesTruncated),
 					// #4943: only this turn's session's next request takes it.
-					deliverTo: deliverySessionId,
+					deliverTo: deps.deliveryAddress ?? deliverySessionId,
 				},
 				cwd,
 			);

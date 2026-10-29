@@ -2284,6 +2284,61 @@ describe("F2: an oversized part is reached only when it leads the message (#3813
 });
 
 describe("#4943: the composer addresses its message to its own session", () => {
+	for (const lensGuard of [false, true]) {
+		it(`addresses its message to the host's delivery address when the host names one (--lens-guard ${lensGuard ? "on" : "off"})`, async () => {
+			// RECURRENCE GUARDED: #4943 R2. The MCP host's turn end addressed its
+			// message to its per-process coordinator id, so the address could not
+			// both outlive a server restart and set the MCP host's messages apart
+			// from a pi session's. It now stages to the address the host passes.
+			const rig = makeRig("pi-lens-4943-address-");
+			rig.lensGuard = lensGuard;
+			try {
+				const file = path.join(rig.cwd, "run-a.ts");
+				deferSettled(rig, "run-a.ts", {
+					status: "succeeded",
+					semantic: "warning",
+					diagnostics: [runnerDiagnostic(file, `late ${RUNNER_END}`)],
+				});
+				await handleTurnEnd({
+					...makeDeps(
+						rig.runtime,
+						rig.cacheManager,
+						rig.cwd,
+						undefined,
+						lensGuard,
+					),
+					deliveryAddress: "host-address",
+				});
+				expect(
+					rig.cacheManager.readCache<{ deliverTo?: string }>(
+						"turn-end-findings",
+						rig.cwd,
+						Number.POSITIVE_INFINITY,
+					)?.data?.deliverTo,
+				).toBe("host-address");
+				expect(
+					consumeTurnEndFindings(
+						rig.cacheManager,
+						rig.cwd,
+						rig.runtime,
+						SESSION,
+					),
+				).toBeUndefined();
+				expect(
+					consumeTurnEndFindings(
+						rig.cacheManager,
+						rig.cwd,
+						rig.runtime,
+						"another-process",
+						"host-address",
+					)?.messages[0]?.content,
+				).toContain(RUNNER_END);
+			} finally {
+				rig.cleanup();
+			}
+		});
+	}
+
 	it("hands this session its advisory-only message when the record leads with another session's blocker", async () => {
 		// RECURRENCE GUARDED: #4943 R1. With no blocker of its own, a turn end
 		// that carries another session's blocker writes that session as the

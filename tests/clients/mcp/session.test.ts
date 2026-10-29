@@ -75,6 +75,7 @@ const runtimeContext = vi.hoisted(() => ({
 vi.mock("../../../clients/runtime-context.js", () => runtimeContext);
 
 import {
+	MCP_DELIVERY_ADDRESS,
 	_peekInFlightIpcTurnEnds,
 	_resetMcpSessionContext,
 	_resetTurnEndChain,
@@ -163,11 +164,14 @@ describe("runTurnEnd", () => {
 		expect(deps.host).toBe("mcp");
 		// MCP delivery must classify provenance with the same live runtime as the
 		// in-process context hook; omitting this argument made legacy/stale data
-		// look current on one transport only.
+		// look current on one transport only. #4943 R2: and as the MCP host's
+		// reader, its coordinator id and its one delivery address.
 		expect(runtimeContext.consumeTurnEndFindings).toHaveBeenCalledWith(
 			expect.anything(),
 			tmpDir,
 			expect.anything(),
+			expect.stringMatching(/^lens-/),
+			MCP_DELIVERY_ADDRESS,
 		);
 		expect(runtimeContext.consumeTestFindings).toHaveBeenCalledWith(
 			expect.anything(),
@@ -196,6 +200,11 @@ describe("runTurnEnd", () => {
 		expect(handleTurnEnd).toHaveBeenCalledTimes(2);
 		for (const call of handleTurnEnd.mock.calls) {
 			expect((call[0] as { host?: unknown }).host).toBe("mcp");
+			// #4943 R2: and stage to the one address every MCP server reads as,
+			// not the per-process coordinator id a restarted server cannot read.
+			expect((call[0] as { deliveryAddress?: unknown }).deliveryAddress).toBe(
+				MCP_DELIVERY_ADDRESS,
+			);
 		}
 	});
 
