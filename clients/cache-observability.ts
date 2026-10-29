@@ -53,7 +53,11 @@
  * event handlers.
  */
 import { createHash } from "node:crypto";
-import { SessionKeyedStore } from "./session-keyed-store.js";
+import {
+	NO_SESSION_KEY,
+	sessionCell,
+	sessionLookupKey,
+} from "./session-scope.js";
 import {
 	recordDegradation,
 	recordDegradationOnce,
@@ -372,14 +376,18 @@ function newCacheUsageSummary(): CacheUsageSessionSummary {
 	};
 }
 
-// Shared cap for every per-session bounded map in this module (also used by
-// `prefixHashBySession` below) — a long-lived process cycling through many
-// sessions cannot grow any of them without limit.
-export const MAX_TRACKED_SESSIONS = 32;
-const attributionBySession = new SessionKeyedStore<SessionAttributionState>({
-	maxSessions: MAX_TRACKED_SESSIONS,
-	recency: "lru",
-});
+// #4965: this module's per-session state is one cell on the session's scope
+// (`sessionCell`), found by the lookup key `sessionLookupKey` derives from the
+// session id. It ends with the scope, so a long-lived process cycling through
+// sessions cannot grow it, and a retired session's late call finds nothing.
+const CACHE_OBSERVABILITY_CELL = "cache-observability";
+
+/** One session's miss-attribution state and `messages[0]` baseline hash. */
+interface CacheObservabilityCell {
+	attribution: SessionAttributionState | undefined;
+	/** The session's previous `messages[0]` hash; see {@link observeCachePrefix}. */
+	prefixHash: string | undefined;
+}
 
 function newAttributionState(): SessionAttributionState {
 	return {
@@ -442,16 +450,30 @@ function findingIdentities(text: string): string[] {
 	return out;
 }
 
+/** The session's cell, created on first write; `undefined` for a session with no live scope. */
+function cacheCellOf(
+	key: string,
+	create: boolean,
+): CacheObservabilityCell | undefined {
+	return sessionCell<CacheObservabilityCell>(
+		key,
+		CACHE_OBSERVABILITY_CELL,
+		create
+			? () => ({ attribution: undefined, prefixHash: undefined })
+			: undefined,
+	);
+}
+
 /**
- * Fetch (creating if absent) one session's attribution state, refreshing LRU
- * recency and evicting the oldest entries past the cap — same bounding as
- * {@link recordSessionHash}, so a long-lived process cycling through sessions
- * cannot grow this map without limit.
+ * Fetch (creating if absent) one session's attribution state. A session with
+ * no live scope gets a state that is not kept (the write is counted by
+ * `sessionCell`), so the classifier sees no baseline and fails closed.
  */
 function attributionFor(key: string): SessionAttributionState {
-	// Every fetch is a touch: an existing entry moves to MRU on `get`, a
-	// created one is inserted at MRU.
-	return attributionBySession.getOrCreate(key, newAttributionState);
+	const cell = cacheCellOf(key, true);
+	if (!cell) return newAttributionState();
+	cell.attribution ??= newAttributionState();
+	return cell.attribution;
 }
 
 /**
@@ -1360,21 +1382,6 @@ function sessionKey(sessionId?: string): string {
 	return sessionId?.trim() ? sessionId.trim() : NO_SESSION_KEY;
 }
 
-/**
- * A stable host session id is the only safe cross-event identity. When it is
- * absent, keep primary and concurrent-secondary observations in separate
- * buckets and let classification fail closed instead of allowing a secondary
- * to overwrite the primary's baseline.
- */
-function attributionKey(
-	sessionId?: string,
-	sessionRole?: "primary" | "concurrent-secondary",
-): string {
-	const key = sessionKey(sessionId);
-	if (key !== NO_SESSION_KEY) return key;
-	return `${sessionRole ?? "unknown"}:${key}`;
-}
-
 /** #4743: the retained-injection ledger's work on one request. */
 export interface CacheContextRetention {
 	/** Retained entries re-sent on this request. */
@@ -1519,7 +1526,7 @@ export function observeCacheContext(args: {
 			};
 		});
 		const state = attributionFor(
-			attributionKey(args.sessionId, args.sessionRole),
+			sessionLookupKey(args.sessionId, args.sessionRole),
 		);
 		for (const slice of injectionSlices) {
 			const key = sourceKey(slice.source);
@@ -1554,7 +1561,7 @@ export function observeCacheContext(args: {
 			existingMessages.length > MAX_REPORTED_MESSAGES ||
 			resultMessages.length > MAX_REPORTED_MESSAGES;
 		recordContextAttribution(
-			attributionKey(args.sessionId, args.sessionRole),
+			sessionLookupKey(args.sessionId, args.sessionRole),
 			existingMessages,
 			sizes,
 		);
@@ -1644,7 +1651,7 @@ export function observeCacheContext(args: {
 		// from an observation whose hashing/measurement never completed.
 		try {
 			const state = attributionFor(
-				attributionKey(args.sessionId, args.sessionRole),
+				sessionLookupKey(args.sessionId, args.sessionRole),
 			);
 			state.lastContextAtMs = Date.now();
 			state.requestEvidenceIncompleteSinceLastUsage = true;
@@ -1682,7 +1689,7 @@ export function logCacheUsage(
 		const usageRecord = usage as unknown as Record<string, unknown>;
 		// #1071: attribute the shortfall in-process, from state this module already
 		// keeps, so nothing re-reads latency.log.
-		const stateKey = attributionKey(context?.sessionId, context?.sessionRole);
+		const stateKey = sessionLookupKey(context?.sessionId, context?.sessionRole);
 		const state = attributionFor(stateKey);
 		const nowMs = Date.now();
 		const gap = resolveInterTurnGap(state, nowMs);
@@ -2091,7 +2098,7 @@ function hashSystemMessages(messages: ReadonlyArray<ContextMessageLike>): {
 }
 
 /**
- * Per-session baseline hash of `messages[0]`, keyed by the STABLE pi session id
+ * Per-session baseline hash of `messages[0]`, looked up by the STABLE pi session id
  * (`ctx.sessionManager.getSessionId()`). A single module-scoped var was wrong:
  * in ONE process, multiple logical conversations touch this module, and they
  * must not share a baseline —
@@ -2110,32 +2117,13 @@ function hashSystemMessages(messages: ReadonlyArray<ContextMessageLike>): {
  *     session state (read guard #1041, widget #190) which IS rehydrated from the
  *     sidecar.
  *
- * Bounded as insertion-ordered FIFO (evict oldest-inserted past the cap,
- * refreshed on every WRITE by {@link recordSessionHash}'s delete+set — a
- * plain read never reorders) so a long-lived process cycling through many
- * sessions can't grow this unbounded. Shares {@link MAX_TRACKED_SESSIONS}
- * with `attributionBySession` above.
- */
-const prefixHashBySession = new SessionKeyedStore<string>({
-	maxSessions: MAX_TRACKED_SESSIONS,
-});
-
-/**
- * Reported key used when no session id is available (undefined/empty). Internal
- * attribution additionally separates primary and concurrent-secondary roles;
- * neither role may overwrite the other's baseline when stable identity is
- * absent.
- */
-const NO_SESSION_KEY = "<no-session>";
-
-/**
- * Store `hash` for `key`, refreshing its LRU recency (re-insert moves it to the
- * newest position since `Map` preserves insertion order) and evicting the
- * oldest-inserted entries once the cap is exceeded.
+ * #4965: the hash is a field of the session's scope cell
+ * ({@link CacheObservabilityCell}), so it ends with the session's scope.
+ * A session with no live scope keeps no baseline.
  */
 function recordSessionHash(key: string, hash: string): void {
-	prefixHashBySession.retire(key);
-	prefixHashBySession.set(key, hash);
+	const cell = cacheCellOf(key, true);
+	if (cell) cell.prefixHash = hash;
 }
 
 /**
@@ -2181,10 +2169,10 @@ export function observeCachePrefix(
 		if (!first || typeof first !== "object") return "empty";
 		const firstMessageRole =
 			typeof first.role === "string" ? first.role : "unknown";
-		const key = attributionKey(sessionId, sessionRole);
+		const key = sessionLookupKey(sessionId, sessionRole);
 		const reportedSessionId = sessionKey(sessionId);
 		const currentHash = hashFirstMessage(first);
-		const previousHash = prefixHashBySession.get(key);
+		const previousHash = cacheCellOf(key, false)?.prefixHash;
 		const state = attributionFor(key);
 		// #4687 item 2: the ordered system-message set is the signal a mid-list
 		// tool/prompt delta moves; the head hash above never sees it. The tool
@@ -2271,12 +2259,14 @@ export function clearCachePrefixSession(
 	sessionId?: string,
 	sessionRole?: "primary" | "concurrent-secondary",
 ): void {
-	const key = attributionKey(sessionId, sessionRole);
-	prefixHashBySession.retire(key);
+	const key = sessionLookupKey(sessionId, sessionRole);
+	const cell = cacheCellOf(key, false);
+	if (!cell) return;
+	cell.prefixHash = undefined;
 	// The miss-attribution state has the same lifetime and the same reason to be
 	// reclaimed at session end; leaving it would let a reused session id inherit
 	// a stale gap baseline and a stale prefix-break flag.
-	attributionBySession.retire(key);
+	cell.attribution = undefined;
 }
 
 /** Record the exact quiet-window summary content handed to pi.sendMessage. */
@@ -2285,7 +2275,7 @@ export function recordTurnEndAdvisoryBytes(
 	bytes: number,
 	sessionRole: "primary" | "concurrent-secondary" = "primary",
 ): void {
-	const state = attributionFor(attributionKey(sessionId, sessionRole));
+	const state = attributionFor(sessionLookupKey(sessionId, sessionRole));
 	state.turnEndAdvisoryBytes = Math.min(
 		MAX_INJECTED_BYTES,
 		state.turnEndAdvisoryBytes + Math.max(0, bytes),
@@ -2308,7 +2298,7 @@ export function recordToolResultDelivery(args: {
 	truncated: boolean;
 }): void {
 	const state = attributionFor(
-		attributionKey(args.sessionId, args.sessionRole),
+		sessionLookupKey(args.sessionId, args.sessionRole),
 	);
 	const bytes = Number.isFinite(args.bytes)
 		? Math.max(0, Math.floor(args.bytes))
@@ -2329,9 +2319,10 @@ export function emitCacheUsageSummaryAtSessionEnd(
 	sessionId?: string,
 	sessionRole?: "primary" | "concurrent-secondary",
 ): void {
-	const key = attributionKey(sessionId, sessionRole);
-	const state = attributionBySession.get(key);
-	if (!state || state.summary.usageRecords === 0) return;
+	const key = sessionLookupKey(sessionId, sessionRole);
+	const cell = cacheCellOf(key, false);
+	const state = cell?.attribution;
+	if (!cell || !state || state.summary.usageRecords === 0) return;
 	logLatency({
 		type: "phase",
 		filePath: "<pi-lens>",
@@ -2350,55 +2341,18 @@ export function emitCacheUsageSummaryAtSessionEnd(
 			},
 		},
 	});
-	attributionBySession.retire(key);
-}
-
-/**
- * Clear all per-session prefix hashes and miss-attribution state. For tests and
- * session boundaries. Both maps are cleared together so a test can never start
- * with a half-reset session.
- */
-export function resetCachePrefixObservation(): void {
-	prefixHashBySession.clear();
-	attributionBySession.clear();
+	cell.attribution = undefined;
 }
 
 export function resetCacheFindingIdentitiesSession(
 	sessionId?: string,
 	sessionRole?: "primary" | "concurrent-secondary",
 ): void {
-	const state = attributionBySession.get(
-		attributionKey(sessionId, sessionRole),
-	);
+	const state = cacheCellOf(
+		sessionLookupKey(sessionId, sessionRole),
+		false,
+	)?.attribution;
 	if (!state) return;
 	state.findingIdentities.clear();
 	state.findingIdentityCapRecorded = false;
-}
-
-export function _attributionBySessionHasForTests(key: string): boolean {
-	return attributionBySession.has(key);
-}
-export function _prefixHashBySessionHasForTests(key: string): boolean {
-	return prefixHashBySession.has(key);
-}
-/** #2442 test-only: drive attributionFor's fetch-or-create touch directly
- *  (every call refreshes LRU recency, matching production — see
- *  attributionFor's own doc comment). */
-export function _touchAttributionForTests(key: string): void {
-	attributionFor(key);
-}
-/** #2442 test-only: drive recordSessionHash's write-refresh directly. */
-export function _recordSessionHashForTests(key: string, hash: string): void {
-	recordSessionHash(key, hash);
-}
-/**
- * #2442 test-only: the exact `prefixHashBySession.get(key)` that
- * `observeCachePrefix` performs to fetch a session's previous hash. A
- * `.has()` reorders nothing on either bounded class, so only a real `get`
- * can pin FIFO-vs-LRU behavior (#2442 review F4).
- */
-export function _prefixHashBySessionGetForTests(
-	key: string,
-): string | undefined {
-	return prefixHashBySession.get(key);
 }

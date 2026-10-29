@@ -75,6 +75,7 @@ import {
 	adoptHandoff,
 	asManager,
 	beginScope,
+	bindSessionId,
 	discardHandoff,
 	forwardHandoff,
 	type LineageHandle,
@@ -83,6 +84,7 @@ import {
 	reserveSessionStart,
 	type SessionScope,
 	scopeCell,
+	sessionLookupKey,
 	startKey,
 	stashHandoff,
 	successorStartKey,
@@ -2711,6 +2713,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// primary's generation, stays untouched (#473).
 						scope = beginScope({ role: "secondary" });
 						startingMember.scope = scope;
+						// #4965: a caller holding only this session's id reaches its scope.
+						bindSessionId(
+							scope,
+							sessionLookupKey(stableSessionId, ownedSessionRole),
+						);
 						logScopeTransition(scope, {
 							transition: "start",
 							reason: sessionReason,
@@ -2937,6 +2944,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
 					startingMember.scope = scope;
+					// #4965: a caller holding only this session's id reaches its scope.
+					bindSessionId(
+						scope,
+						sessionLookupKey(stableSessionId, ownedSessionRole),
+					);
 					registerPrimaryBridges(scope);
 					_turnSummaryEmitCtxGetter = rebindableProcessBridgeDeps(
 						"turn-summary-emit-context",
@@ -3351,7 +3363,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		runtime.beginTurn(getStableSessionId(ctx));
 		// #1332: post-idle heap reading. Bounded by this session's turn-end marker:
 		// at most one idle sample per idle period.
-		const idleGapMs = takeMemoryIdleGapMs(getStableSessionId(ctx), Date.now());
+		const idleGapMs = takeMemoryIdleGapMs(
+			sessionLookupKey(getStableSessionId(ctx), ownedSessionRole),
+			Date.now(),
+		);
 		if (idleGapMs !== null) emitMemorySample(idleGapMs);
 		// Capture before any awaited turn-end work can let a sibling session start.
 		turnStartScope = scope ?? runtime.sessionScope;
@@ -3701,7 +3716,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		if (!lensEnabled) return;
 		// #1332: the idle gap is measured from here to this session's next turn
 		// start; another session's turn never reads it (#4761 review F1).
-		recordMemoryTurnEnd(getStableSessionId(ctx), Date.now());
+		recordMemoryTurnEnd(
+			sessionLookupKey(getStableSessionId(ctx), ownedSessionRole),
+			Date.now(),
+		);
 		// Esc/abort during the turn-end flush (knip/madge/tests + debounced
 		// dispatch) kills in-flight children instead of waiting out their timeout.
 		try {

@@ -708,15 +708,18 @@ file-scoped worklist and receives no project-wide scanner output.
     last, so a second live session overwrites what another one read. Key the
     state by session identity, or decide from live membership. Instances:
     #4554 (fixed by #4563, still open) and #4564. Screen: whose data is the
-    store, and is the session in its key? Enforcer: the `ownerKey` column of
+    store, not what its key is? Seam: a session's state lives on a scope cell
+    (`scopeCell`, `clients/session-scope.ts`, #3609); a caller that holds only
+    a session id reaches the cell through `sessionCell`, which names live
+    scopes only. Enforcer: the `ownerKey` column of
     `tests/support/session-state-registry.ts`, audited by
     `tests/clients/session-state-conformance.test.ts` ("owner key (#4965)"):
     every entry names `session`, `repository`, `project` or `process-wide:
-    <reason>`, and a `session` owner is built on `SessionKeyedStore`
-    (`clients/session-keyed-store.ts`) or states `sessionSeamException`, the
-    census of members still keyed by the process. Partial: it reads the
-    registered stores only, so an unregistered module-level field is still not
-    scanned.
+    <reason>`, and a `session` owner states `sessionSeamException`, why a scope
+    cell cannot hold it yet. A moved store has no process container and no
+    entry; `scanScopeCellKeys` pins every cell by file and key
+    (`SESSION_CELL_KEYS`). Partial: it reads the registered stores only, so an
+    unregistered module-level field is still not scanned.
 
 87. **Factory-time read of a host value set later:** pi applies an extension flag's command-line value after every factory has run, so a flag read while the factory runs answers the registered default. Screen: does any flag read run while the factory runs, and does the host test apply the value after the factory, as pi does? Read it in a handler, a command or a tool, or once in `session_start`. Enforcer: `tests/config/factory-flag-read-sweep.test.ts` (partial: a reader handed to a callee that invokes it synchronously is not seen). Instances and dates: `HISTORY.md`.
 

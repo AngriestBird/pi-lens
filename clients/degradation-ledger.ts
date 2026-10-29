@@ -1716,6 +1716,12 @@ export type DegradationKind =
 	 */
 	| "session-scope-handoff-missed"
 	/**
+	 * #4965: a session-state write named a session with no live scope (never
+	 * started here, or already retired), so it was dropped. Subject: the scope
+	 * cell it targeted (`turn-warnings`, `cache-attribution`). Counted.
+	 */
+	| "session-scope-lookup-missed"
+	/**
 	 * #3611 (#3609 F1, decision A + C): a read-guard write was dropped because
 	 * its session scope retired, and its entry is still on its conversation's
 	 * branch. Subject `<retirement reason>:<site>` (`reload:deferred-format`),

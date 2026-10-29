@@ -190,11 +190,12 @@ type SessionResetPolicy = "session_start" | "turn_end" | "process_lifetime";
  * reset policy:
  *
  * - `session`: what one conversation was told or did (a delivered-once mark, a
- *   turn counter, a pending delivery). A `session` owner is built on
- *   `SessionKeyedStore` (`sessionSeam: true`) or states in
- *   `sessionSeamException` where its key is today.
- * - `repository`: keyed by a git repository root.
- * - `project`: keyed by a project root or working directory.
+ *   turn counter, a pending delivery), whatever the store's key is. A process
+ *   container that holds it states in `sessionSeamException` why a scope cell
+ *   (`scopeCell`, `clients/session-scope.ts`, #3609) cannot hold it yet; a
+ *   store that is on a scope cell has no process container and no entry.
+ * - `repository`: the answer is about a git repository root.
+ * - `project`: the answer is about a project root or working directory.
  * - `process-wide: <reason>`: one answer for the whole process, such as a fact
  *   about this machine or the shared LSP pool.
  *
@@ -226,12 +227,14 @@ export interface SessionStateEntry {
 	policy: SessionResetPolicy;
 	/** Who the state answers for (#4965); see {@link OwnerKey}. */
 	ownerKey: OwnerKey;
-	/** `session` owners only: the store is a `SessionKeyedStore` in `module`. */
-	sessionSeam?: true;
 	/**
-	 * `session` owners only: where the key is today when the store is not on
-	 * the seam. Each one is a shape 72 member: the PR that migrates it deletes
-	 * the exception.
+	 * Retired (#4965 r2): a scope-cell store has no entry. Typed so the audit can
+	 * refuse it; no entry sets it.
+	 */
+	sessionSeam?: never;
+	/**
+	 * `session` owners only: why a scope cell cannot hold the store yet. Each
+	 * one is a shape 72 member: the change that moves it deletes the entry.
 	 */
 	sessionSeamException?: string;
 	/**
@@ -315,13 +318,30 @@ export const SESSION_STORE_REGISTRY: Readonly<
 };
 
 /**
- * #4965: the files that name `SessionKeyedStore`, with their `new` / `extends`
- * counts, pinned both ways against `scanSessionKeyedStoreSites()`. A new site
- * (or a migrated one) edits this table and says so in review.
+ * #4965 (#3609): the census of the session-scope seam, pinned both ways against
+ * `scanScopeCellKeys()`: per file, one token per `scopeCell` / `sessionCell`
+ * use (the cell key, or `ident:NAME` for an imported constant). A moved store
+ * adds its cell here and loses its `SESSION_STATE_REGISTRY` entry; a spelling
+ * the scan cannot read (`?...`) never matches, so it reds until it is read.
+ * Cells, by store:
+ *
+ * - `cache-observability`: `clients/cache-observability.ts` (attribution state,
+ *   `messages[0]` baseline hash)
+ * - `memory-turn-end`: `clients/memory-sampler.ts` (a session's pending turn end)
+ * - `turn-warnings`: `clients/runtime-coordinator.ts` (per-turn actionable and
+ *   code-quality warnings; two uses, one for the coordinator's own scope, one
+ *   for a concurrent session found by id)
+ * - `read-guard`, `lazy-tool-memory`, `dead-code-late-scans`,
+ *   `knip-carried-files`: the declared stores and turn-end cells of #3609
  */
-export const SESSION_KEYED_STORE_SITES: Readonly<Record<string, number>> = {
-	"clients/cache-observability.ts": 2,
-	"clients/runtime-coordinator.ts": 2,
+export const SESSION_CELL_KEYS: Readonly<Record<string, readonly string[]>> = {
+	"clients/cache-observability.ts": ["cache-observability"],
+	"clients/memory-sampler.ts": ["memory-turn-end", "memory-turn-end"],
+	"clients/read-guard-branch.ts": ["read-guard"],
+	"clients/runtime-coordinator.ts": ["turn-warnings", "turn-warnings"],
+	"clients/runtime-turn.ts": ["dead-code-late-scans", "knip-carried-files"],
+	"clients/tool-set-policy.ts": ["lazy-tool-memory"],
+	"index.ts": ["ident:READ_GUARD_CELL"],
 };
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
@@ -330,8 +350,9 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		module: "dispatch/runners/ast-grep-napi.ts",
 		state: "defaultUnsupportedLanguageLog, the NAPI load latch",
 		policy: "session_start",
-		ownerKey:
-			"process-wide: the ast-grep native addon load result is a fact about this process's module cache",
+		ownerKey: "session",
+		sessionSeamException:
+			"defaultUnsupportedLanguageLog is a process Set keyed by language id that records which unsupported-language notice the agent was shown, so a second live session shares its marks; the native addon load result in this entry is a process fact, and the notice is the session-owned half (#4972 review F3)",
 		resetName: "resetAstGrepUnsupportedLanguageLog",
 		reason:
 			"A failed native-module load is evidence about one moment, and the unsupported-language log is a once-per-session notice.",
@@ -396,9 +417,8 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		module: "bootstrap.ts",
 		state: "bootstrapShutdown",
 		policy: "session_start",
-		ownerKey: "session",
-		sessionSeamException:
-			"one boolean and one AbortController that the primary's teardown sets (index.ts markAnalyzerBootstrapShutdown); a secondary's shutdown must not set it, so the gate is a process singleton, not a per-session partition (shape 72 member, no open issue)",
+		ownerKey:
+			"process-wide: the gate for the one shared analyzer-bootstrap flight, set by the departing primary's teardown and re-armed by the replacement's session_start; it holds no session's data",
 		resetName: "resetAnalyzerBootstrapSessionState",
 		reason:
 			"#2467: the analyzer bootstrap refuses NEW loads once the primary session has torn down, which is a per-SESSION claim held in process-lived storage — without a session_start reset a replacement session in the same process would find every analyzer refused for the rest of the process (defect shape 17). The resident clients themselves are deliberately NOT dropped: they are stateless constructions whose session-scoped latches are re-armed by their own registered resets (resetInstallRetryLatches, #1497), so re-paying the seventeen-module load at every session boundary would cost the interactive path for nothing.",
@@ -578,7 +598,9 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		module: "diagnostic-dispositions.ts",
 		state: "deferredByCwd",
 		policy: "session_start",
-		ownerKey: "project",
+		ownerKey: "session",
+		sessionSeamException:
+			"deferredByCwd holds one session's `defer` marks (a mark suppresses a diagnostic for THIS session by design) keyed by cwd with no session in the key, so a secondary in the same cwd defers for the primary (#4972 review F3 probe: the primary sees the subagent's defer)",
 		resetName: "resetDeferredDispositions",
 		reason:
 			"A `defer` mark suppresses a diagnostic for THIS session by design; carrying it into the next session hides a finding nobody deferred. #4701 F1 wired the reset #1625's gap declared missing: `resetDeferredDispositions` clears the anchor Set and the project index beside it, and `resetSessionScopedState` (reached from `handleSessionStart`) calls it.",
@@ -1069,11 +1091,10 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "memory-sampler:cadence",
 		module: "memory-sampler.ts",
 		state:
-			"_lastSampledHeapUsedBytes, _tightenThroughTurn (rising-edge cadence), _pendingTurnEnds (#1332 per-session pending turn end, capped BoundedFifoMap)",
+			"_lastSampledHeapUsedBytes, _tightenThroughTurn (rising-edge cadence)",
 		policy: "session_start",
-		ownerKey: "session",
-		sessionSeamException:
-			"the cadence scalars follow this process's heap, but _pendingTurnEnds is a hand-rolled BoundedFifoMap keyed by stable session id (memory-sampler.ts, #1332), retired at that session's turn start, that the seam can absorb in a follow-up",
+		ownerKey:
+			"process-wide: the rising-edge cadence follows this process's heap growth, not a conversation; a session's pending turn end moved to the memory-turn-end scope cell",
 		resetName: "resetMemorySamplerCadence",
 		sessionStartClosureReset: true,
 		reason:
@@ -1323,7 +1344,9 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		state:
 			"correctedAvailabilityByCwd, installAttemptsByCwd, resolveInstallInFlightByCwd",
 		policy: "session_start",
-		ownerKey: "project",
+		ownerKey: "session",
+		sessionSeamException:
+			"correctedAvailabilityByCwd is the once-per-correction memo that withholds a repeat compensating row from the session that already logged one, keyed by cwd and tool id with no session in the key; the install-attempt and in-flight maps in this entry are cwd-keyed machine facts (#4972 review F3)",
 		resetName: "resetDispatchAvailabilityState",
 		reason:
 			"#1615: the once-per-correction memo that suppresses repeat compensating rows is a per-session claim, so a new session must be able to log its own correction.",
@@ -1654,8 +1677,6 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	// --- Event-bus and publisher singletons: registration state, reset only so
 	// a test can re-register a fresh subscriber set. ---
 	"bus-publish.ts": "bus publisher registration",
-	"cache-observability.ts":
-		"cache-prefix observation and per-session miss-attribution/summary state; both maps are role-separated when session identity is absent, bounded by the same LRU cap, summarized then cleared on each role-specific shutdown; repeated-finding identities re-arm on the owned session_start through index.ts",
 	// #2418: the warn-once latch that used to live in lens-config.ts and
 	// project-lens-config.ts moved here when the three loaders' duplicated warn
 	// bodies were collapsed into one seam. Same lifetime as before — it is tied
@@ -1819,8 +1840,6 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"bounded-telemetry.ts": 1,
 	"bus-events-logger.ts": 1,
 	"bus-publish.ts": 0,
-	// #1071 added the per-session miss-attribution ledger (1 → 2).
-	"cache-observability.ts": 2,
 	// #4403 round 5 (V1): the primaries whose cascade line was delivered,
 	// registered above and reset by resetDispatchBaselines.
 	// #4487: the cascade pending-error record (1 -> 2), registered above and
@@ -2007,10 +2026,6 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// any export shape" predicate. See this file's EXEMPT_SESSION_STATE_FILES
 	// entry above.
 	"mcp/session.ts": 3,
-	// #1332 (#4761 review F4): `_pendingTurnEnds`, the per-session pending turn
-	// end, registered above under memory-sampler:cadence and cleared by
-	// resetMemorySamplerCadence (0 -> 1; the file was unflagged before).
-	"memory-sampler.ts": 1,
 	"module-report-lsp.ts": 1,
 	// #2423: the frozen built-in tool-name table plus the call-scoped
 	// resolved-range carry. Both are argued in EXEMPT_SESSION_STATE_FILES.

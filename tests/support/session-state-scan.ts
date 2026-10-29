@@ -780,52 +780,194 @@ const MIN_SEAM_EXCEPTION = 30;
 export interface OwnerKeyAuditEntry {
 	id: string;
 	module: string;
+	state?: string;
 	ownerKey?: unknown;
 	sessionSeam?: unknown;
 	sessionSeamException?: unknown;
 }
 
+/** A file's census of the session-scope seam: its cell keys, and what it spells unreadably. */
+export type ScopeCellCensus = Record<string, string[]>;
+
+const SEAM_NAME_PATTERN = /\b(?:scopeCell|sessionCell)\b/g;
+
 /**
- * `SessionKeyedStore` (clients/session-keyed-store.ts) sites by repo-relative
- * file: every file that names the class outside its own module, with the count
- * of `new SessionKeyedStore` and `extends SessionKeyedStore` in comment- and
- * string-blanked source. A file that names the class any other way (an alias,
- * a namespace member, a re-export) is still in the map, so it reds the pin
- * until it is read; the census cannot be dodged by spelling.
+ * The census of the session-scope seam (`scopeCell` and `sessionCell` in
+ * `clients/session-scope.ts`, #3609): per repo-relative file, the sorted cell
+ * keys it opens, one token per use. A key is a string literal or an identifier
+ * declared `const NAME = "literal"` in the same file; an identifier declared
+ * elsewhere reads `ident:NAME`. Every other spelling of the two names (an
+ * alias, a re-export, a namespace member, a value use, a call with a computed
+ * key) lands a `?` token, so the pin in `SESSION_CELL_KEYS` reds until it is
+ * read. Locates tokens in comment-and-string-blanked source and reads the key
+ * at the same offsets of comment-blanked source (offsets are preserved), so a
+ * name in prose is not a use.
  */
-export function scanSessionKeyedStoreSites(
+export function scanScopeCellKeys(
 	roots: readonly string[] = shippedContainerSourceRoots(),
-): Record<string, number> {
-	const sites: Record<string, number> = {};
+): ScopeCellCensus {
+	const census: ScopeCellCensus = {};
 	for (const root of roots) {
 		const files = fs.statSync(root).isDirectory()
 			? listSourceFiles(root, { extensions: [".ts"], skipTests: true })
 			: [root];
 		for (const absolute of files) {
 			const relative = relativePosix(repoRoot, absolute);
-			if (relative === "clients/session-keyed-store.ts") continue;
-			const text = stripCommentsAndStrings(fs.readFileSync(absolute, "utf8"));
-			if (!/\bSessionKeyedStore\b/.test(text)) continue;
-			sites[relative] = [
-				...text.matchAll(
-					/\bnew\s+(?:[A-Za-z_$][\w$]*\.)?SessionKeyedStore\b|\bextends\s+SessionKeyedStore\b/g,
-				),
-			].length;
+			if (relative === "clients/session-scope.ts") continue;
+			const raw = fs.readFileSync(absolute, "utf8");
+			const blanked = stripCommentsAndStrings(raw);
+			if (!SEAM_NAME_PATTERN.test(blanked)) continue;
+			SEAM_NAME_PATTERN.lastIndex = 0;
+			const keep = stripSource(raw, { strings: "keep" });
+			const tokens = seamTokens(blanked, keep);
+			if (tokens.length > 0) census[relative] = tokens.sort();
 		}
 	}
-	return sites;
+	return census;
+}
+
+/** Index ranges of the `{ ... }` lists of import and export-from statements. */
+function moduleListRanges(
+	blanked: string,
+): Array<{ start: number; end: number; kind: "import" | "export" }> {
+	const ranges: Array<{
+		start: number;
+		end: number;
+		kind: "import" | "export";
+	}> = [];
+	for (const match of blanked.matchAll(
+		/\b(import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\b/g,
+	)) {
+		const start = match.index + match[0].indexOf("{");
+		ranges.push({
+			start,
+			end: start + match[2].length + 2,
+			kind: match[1] as "import" | "export",
+		});
+	}
+	return ranges;
+}
+
+/** The `(` that opens a call at `from`, after optional whitespace and balanced `<...>` type arguments. */
+function callOpenParen(blanked: string, from: number): number | undefined {
+	let i = from;
+	while (/\s/.test(blanked[i] ?? "")) i++;
+	if (blanked[i] === "<") {
+		let depth = 0;
+		for (; i < blanked.length; i++) {
+			if (blanked[i] === "<") depth++;
+			else if (blanked[i] === ">" && blanked[i - 1] !== "=") depth--;
+			if (depth === 0) break;
+		}
+		i++;
+		while (/\s/.test(blanked[i] ?? "")) i++;
+	}
+	return blanked[i] === "(" ? i : undefined;
+}
+
+/** Every name an `import { ... } from` list brings into the file (the `as` alias when renamed). */
+function importedNames(blanked: string): Set<string> {
+	const names = new Set<string>();
+	for (const match of blanked.matchAll(
+		/\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\b/g,
+	))
+		for (const part of match[1]!.split(","))
+			names.add(
+				part
+					.trim()
+					.split(/\s+as\s+/)
+					.pop()!
+					.trim(),
+			);
+	return names;
+}
+
+function seamTokens(blanked: string, keep: string): string[] {
+	const tokens: string[] = [];
+	const lists = moduleListRanges(blanked);
+	for (const match of blanked.matchAll(SEAM_NAME_PATTERN)) {
+		const at = match.index;
+		const list = lists.find((range) => at > range.start && at < range.end);
+		const before = blanked.slice(Math.max(0, at - 12), at);
+		const after = blanked.slice(at + match[0].length);
+		if (list) {
+			if (list.kind === "export") tokens.push("?reexport");
+			else if (/^\s*as\b/.test(after)) tokens.push("?alias");
+			continue;
+		}
+		if (/\bfunction\s*$/.test(before)) continue;
+		if (/\.\s*$/.test(before)) {
+			tokens.push("?member");
+			continue;
+		}
+		const openAt = callOpenParen(blanked, at + match[0].length);
+		if (openAt === undefined) {
+			tokens.push("?value");
+			continue;
+		}
+		const closeAt = matchingCloseIndex(blanked, openAt, "(", ")");
+		const args = splitTopLevelArgs(keep.slice(openAt + 1, closeAt));
+		tokens.push(cellKeyToken(args[1]?.trim(), keep, importedNames(blanked)));
+	}
+	return tokens;
+}
+
+/** Split call arguments at the top-level commas (strings are kept, so quote-aware). */
+function splitTopLevelArgs(text: string): string[] {
+	const parts: string[] = [];
+	let depth = 0;
+	let quote: string | undefined;
+	let start = 0;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i]!;
+		if (quote) {
+			if (ch === "\\") i++;
+			else if (ch === quote) quote = undefined;
+			continue;
+		}
+		if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+		else if ("([{<".includes(ch)) depth++;
+		else if (")]}>".includes(ch) && text[i - 1] !== "=") depth--;
+		else if (ch === "," && depth === 0) {
+			parts.push(text.slice(start, i));
+			start = i + 1;
+		}
+	}
+	parts.push(text.slice(start));
+	return parts;
+}
+
+function cellKeyToken(
+	keyText: string | undefined,
+	keep: string,
+	imported: ReadonlySet<string>,
+): string {
+	if (keyText === undefined) return "?key:<missing>";
+	const literal = /^(["'])([^"'\\]*)\1$/.exec(keyText);
+	if (literal) return literal[2]!;
+	if (!/^[A-Za-z_$][\w$]*$/.test(keyText)) return `?key:${keyText}`;
+	const name = escapeRegExp(keyText);
+	const constant = new RegExp(
+		`\\bconst\\s+${name}\\s*(?::[^=]+)?=\\s*(["'])([^"'\\\\]*)\\1\\s*[;\\n]`,
+	).exec(keep);
+	if (constant) return constant[2]!;
+	// An imported constant is named, not read; anything else (a parameter, a
+	// `let`, a const with a computed initialiser) is not a readable key.
+	return imported.has(keyText) ? `ident:${keyText}` : `?key:${keyText}`;
 }
 
 /**
  * Fail closed on the owner-key column: a known value is admitted and every
- * other value is refused, including a missing column. A `session` owner is
- * built on `SessionKeyedStore` (`sessionSeam: true`, and its module is a pinned
- * site) or states why it is not (`sessionSeamException`); the two never
- * co-occur, and neither rides a non-session owner.
+ * other value is refused, including a missing column. A `session` owner states
+ * `sessionSeamException`, the census of what is still keyed by the process; a
+ * store that moved onto a scope cell has no process container and no entry
+ * (the cell census, `scanScopeCellKeys`, pins it instead), so the retired
+ * `sessionSeam` claim is refused wherever it appears: no field can claim a
+ * cell for a store that does not hold it. Neither field rides a non-session
+ * owner.
  */
 export function auditOwnerKeys(
 	entries: readonly OwnerKeyAuditEntry[],
-	seamSites: Readonly<Record<string, number>>,
 ): string[] {
 	const problems: string[] = [];
 	for (const entry of entries) {
@@ -843,30 +985,28 @@ export function auditOwnerKeys(
 			);
 			continue;
 		}
+		if (entry.sessionSeam !== undefined) {
+			problems.push(
+				`${where} sessionSeam is not a registry field: a store on a scope cell has no process container, so it has no entry; scanScopeCellKeys pins the cell`,
+			);
+			continue;
+		}
 		const exception = entry.sessionSeamException;
 		if (ownerKey !== "session") {
-			if (entry.sessionSeam !== undefined || exception !== undefined)
+			if (exception !== undefined)
 				problems.push(
-					`${where} sessionSeam/sessionSeamException belong to a "session" owner, not ${JSON.stringify(ownerKey)}`,
+					`${where} sessionSeamException belongs to a "session" owner, not ${JSON.stringify(ownerKey)}`,
 				);
 			continue;
 		}
-		const onSeam = entry.sessionSeam === true;
-		const hasException =
-			typeof exception === "string" &&
-			exception.trim().length >= MIN_SEAM_EXCEPTION;
-		if (entry.sessionSeam !== undefined && !onSeam)
-			problems.push(`${where} sessionSeam must be true or absent`);
-		else if (onSeam && exception !== undefined)
-			problems.push(`${where} is on the seam and also states an exception`);
-		else if (onSeam) {
-			if (!((seamSites[`clients/${entry.module}`] ?? 0) > 0))
-				problems.push(
-					`${where} claims sessionSeam but clients/${entry.module} constructs no SessionKeyedStore`,
-				);
-		} else if (!hasException)
+		if (
+			!(
+				typeof exception === "string" &&
+				exception.trim().length >= MIN_SEAM_EXCEPTION
+			)
+		)
 			problems.push(
-				`${where} is session-owned: build it on SessionKeyedStore (sessionSeam: true) or state sessionSeamException (${MIN_SEAM_EXCEPTION}+ chars)`,
+				`${where} is session-owned: move it onto a scope cell (scopeCell, clients/session-scope.ts) or state sessionSeamException (${MIN_SEAM_EXCEPTION}+ chars) naming why a scope cannot hold it`,
 			);
 	}
 	return problems;

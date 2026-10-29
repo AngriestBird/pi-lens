@@ -56,9 +56,10 @@ import {
 	type LineageHandle,
 	nextOrderTurn,
 	retireScope,
+	scopeCell,
 	type SessionScope,
+	sessionCell,
 } from "./session-scope.js";
-import { SessionKeyedStore } from "./session-keyed-store.js";
 
 /** Keep deferred cascade admission bounded without dropping late findings. */
 export const MAX_PENDING_CASCADE_RUNS = 32;
@@ -551,26 +552,24 @@ const TOOL_CALL_ATTRIBUTION_TTL_MS = 5 * 60_000;
  * #3613 (session-scope S4): per-turn warnings partitioned by the session
  * whose turn produced them. A concurrent secondary (an in-process subagent)
  * adds, reads and clears its own partition on the primary's coordinator, so
- * neither session's turn moves the other's warnings. A partition is retired
- * when its turn drains it, at its session's shutdown, or at the primary's
- * reset (#4965: the partition table is a {@link SessionKeyedStore}).
+ * neither session's turn moves the other's warnings.
+ *
+ * #4965: a partition is a cell on its session's scope (`scopeCell`), so it
+ * ends with that scope: a primary's when its coordinator begins the next
+ * scope, a secondary's at its shutdown. A turn drains it earlier
+ * (`clearTurnWarnings`). Both record kinds share one cell per session. The primary's cell is the coordinator's own scope;
+ * a foreign session's is found by its id (`sessionCell`), and a write for a
+ * session with no live scope is dropped and counted.
  */
-type TurnWarnings<T extends { id: string }> = SessionKeyedStore<Map<string, T>>;
-
-function addTurnWarnings<T extends { id: string }>(
-	store: TurnWarnings<T>,
-	sessionId: string,
-	items: readonly T[],
-): void {
-	const partition = store.getOrCreate(sessionId, () => new Map());
-	for (const item of items) partition.set(item.id, item);
+interface TurnWarningsCell {
+	readonly actionable: Map<string, ActionableWarningRecord>;
+	readonly codeQuality: Map<string, CodeQualityWarningRecord>;
 }
 
-function peekTurnWarnings<T extends { id: string }>(
-	store: TurnWarnings<T>,
-	sessionId: string,
-): T[] {
-	return [...(store.get(sessionId)?.values() ?? [])];
+const TURN_WARNINGS_CELL = "turn-warnings";
+
+function newTurnWarningsCell(): TurnWarningsCell {
+	return { actionable: new Map(), codeQuality: new Map() };
 }
 
 export class RuntimeCoordinator {
@@ -784,10 +783,6 @@ export class RuntimeCoordinator {
 	private readonly _resolvedBlockerFilesThisTurn =
 		new PathKeyedMap<ResolvedBlockerFile>(normalizeMapKey);
 	private _resolvedBlockerFilesDropped = 0;
-	private readonly _actionableWarningsThisTurn: TurnWarnings<ActionableWarningRecord> =
-		new SessionKeyedStore();
-	private readonly _codeQualityWarningsThisTurn: TurnWarnings<CodeQualityWarningRecord> =
-		new SessionKeyedStore();
 	// #484: opt-in per-RUN summary of diagnostics/autofixes/formats,
 	// accumulated across the run's turns and consumed once at the
 	// agent_settled quiet window. The collector itself is always constructed
@@ -829,10 +824,9 @@ export class RuntimeCoordinator {
 		this._reportedThisTurn.clear();
 		this._mutationReceipts = [];
 		this._droppedMutationReceipts = 0;
-		// #3613: the outgoing session's per-turn records; a live secondary's
-		// partition is its own and survives the primary's replacement.
-		this._actionableWarningsThisTurn.retire(this._telemetrySessionId);
-		this._codeQualityWarningsThisTurn.retire(this._telemetrySessionId);
+		// #3613, #4965: the outgoing session's per-turn records live on the scope
+		// this reset superseded, so they end with it; a live secondary's cell is
+		// on its own scope and survives the primary's replacement.
 		this._telemetrySessionId = nextTelemetrySessionId();
 		this._hasStableSessionId = false;
 		this._telemetryModel = "unknown";
@@ -1107,8 +1101,7 @@ export class RuntimeCoordinator {
 				turnSession,
 				this._turnIndex + this._foreignTurns / (this._foreignTurns + 1),
 			);
-			this._actionableWarningsThisTurn.retire(turnSession);
-			this._codeQualityWarningsThisTurn.retire(turnSession);
+			this.clearTurnWarnings(turnSession);
 			return;
 		}
 		// #1443: runs sitting here at turn_start were appended AFTER the last
@@ -1143,8 +1136,7 @@ export class RuntimeCoordinator {
 		// Inline blockers are session-scoped per-file state. They are cleared only
 		// when that file is re-analyzed clean or the session resets; a new turn must
 		// not let a clean unrelated file erase an unresolved blocker.
-		this._actionableWarningsThisTurn.retire(turnSession);
-		this._codeQualityWarningsThisTurn.retire(turnSession);
+		this.clearTurnWarnings(turnSession);
 		// _turnSummary is deliberately NOT cleared here (#484 rework): the
 		// summary entry is emitted once per RUN at the agent_settled quiet
 		// window (sendMessage during a live stream would STEER the agent, and
@@ -2651,48 +2643,63 @@ export class RuntimeCoordinator {
 		return sessionId ?? this._telemetrySessionId;
 	}
 
+	/**
+	 * The cell holding `sessionId`'s turn's warnings. The coordinator's own turn
+	 * is its scope's; a concurrent session's is found by id. `create` builds it
+	 * on first write; without it a missing cell is `undefined`.
+	 */
+	private turnWarnings(
+		sessionId: string | undefined,
+		create: boolean,
+	): TurnWarningsCell | undefined {
+		const turnSession = this.turnSession(sessionId);
+		const init = create ? newTurnWarningsCell : undefined;
+		return turnSession === this._telemetrySessionId
+			? scopeCell<TurnWarningsCell>(this._scope, TURN_WARNINGS_CELL, init)
+			: sessionCell<TurnWarningsCell>(turnSession, TURN_WARNINGS_CELL, init);
+	}
+
+	/** Drain both warning maps of `turnSession`; other sessions' cells are theirs. */
+	private clearTurnWarnings(turnSession: string): void {
+		const cell = this.turnWarnings(turnSession, false);
+		cell?.actionable.clear();
+		cell?.codeQuality.clear();
+	}
+
 	recordActionableWarnings(
 		warnings: ActionableWarningRecord[],
 		sessionId?: string,
 	): void {
-		addTurnWarnings(
-			this._actionableWarningsThisTurn,
-			this.turnSession(sessionId),
-			warnings,
-		);
+		const cell = this.turnWarnings(sessionId, true);
+		if (cell) for (const item of warnings) cell.actionable.set(item.id, item);
 	}
 
 	peekActionableWarnings(sessionId?: string): ActionableWarningRecord[] {
-		return peekTurnWarnings(
-			this._actionableWarningsThisTurn,
-			this.turnSession(sessionId),
-		);
+		return [
+			...(this.turnWarnings(sessionId, false)?.actionable.values() ?? []),
+		];
 	}
 
 	clearActionableWarnings(sessionId?: string): void {
-		this._actionableWarningsThisTurn.retire(this.turnSession(sessionId));
+		this.turnWarnings(sessionId, false)?.actionable.clear();
 	}
 
 	recordCodeQualityWarnings(
 		warnings: CodeQualityWarningRecord[],
 		sessionId?: string,
 	): void {
-		addTurnWarnings(
-			this._codeQualityWarningsThisTurn,
-			this.turnSession(sessionId),
-			warnings,
-		);
+		const cell = this.turnWarnings(sessionId, true);
+		if (cell) for (const item of warnings) cell.codeQuality.set(item.id, item);
 	}
 
 	peekCodeQualityWarnings(sessionId?: string): CodeQualityWarningRecord[] {
-		return peekTurnWarnings(
-			this._codeQualityWarningsThisTurn,
-			this.turnSession(sessionId),
-		);
+		return [
+			...(this.turnWarnings(sessionId, false)?.codeQuality.values() ?? []),
+		];
 	}
 
 	clearCodeQualityWarnings(sessionId?: string): void {
-		this._codeQualityWarningsThisTurn.retire(this.turnSession(sessionId));
+		this.turnWarnings(sessionId, false)?.codeQuality.clear();
 	}
 
 	/**
@@ -2730,8 +2737,7 @@ export class RuntimeCoordinator {
 		this._foreignTurnKeys.delete(turnSession);
 		this._foreignReadGuards.get(turnSession)?.releaseFileTime();
 		this._foreignReadGuards.delete(turnSession);
-		this._actionableWarningsThisTurn.retire(turnSession);
-		this._codeQualityWarningsThisTurn.retire(turnSession);
+		this.clearTurnWarnings(turnSession);
 	}
 
 	/** #484: the per-run diagnostics/autofix/format collector (accumulates

@@ -14,7 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	buildMemorySample,
 	collectMemorySampleSubsystems,
@@ -36,7 +36,9 @@ import {
 	getReviewGraphWorkspaceCacheSnapshot,
 } from "../../clients/review-graph/builder.js";
 import { getDispatchCascadeCacheStats } from "../../clients/dispatch/integration.js";
+import { sessionLookupKey } from "../../clients/session-scope.js";
 import type { WordIndex } from "../../clients/word-index.js";
+import { bindSession, retireBoundSessions } from "../support/bound-sessions.js";
 import {
 	WORD_POSTING_LIST_OVERHEAD_BYTES,
 	WordForwardEntry,
@@ -493,11 +495,14 @@ describe("post-idle sample decision (#1332)", () => {
 	// An explicit window: the decision takes the window as an argument, so the
 	// default (the LSP idle-evict value) is not pinned here.
 	const WINDOW_MS = 300_000;
-	const SESSION = "session-a";
-
+	// #4965: the pending turn end is a cell on the session's scope, found by the
+	// session's lookup key; `bindSession` does what index.ts's session_start does.
+	const SESSION = sessionLookupKey("session-a", "primary");
 	beforeEach(() => {
 		resetMemorySamplerCadence();
+		bindSession("session-a", "primary");
 	});
+	afterEach(() => retireBoundSessions());
 
 	it("#1332: no post-idle heap reading existed, so a turn after a gap over the window reports the measured idleMs", () => {
 		recordMemoryTurnEnd(SESSION, 1_000);
@@ -541,15 +546,31 @@ describe("post-idle sample decision (#1332)", () => {
 		).toBe(WINDOW_MS * 3);
 	});
 
-	it("#1332: session reset clears a pending turn end, so a new session's first turn is never measured against the old one", () => {
+	it("#1332: a new session scope for the same id starts with no pending turn end, so its first turn is never measured against the old one (#4965)", () => {
+		// RECURRENCE GUARDED: shape 72. The marker was a process table the primary's
+		// session_start cleared whole, which also dropped a live secondary's.
 		recordMemoryTurnEnd(SESSION, 0);
-		resetMemorySamplerCadence();
+		retireBoundSessions();
+		bindSession("session-a", "primary");
 		expect(takeMemoryIdleGapMs(SESSION, WINDOW_MS * 2, WINDOW_MS)).toBeNull();
+	});
+
+	it("#1332: the primary's reset leaves a live secondary's pending turn end (#4965)", () => {
+		// RECURRENCE GUARDED: resetMemorySamplerCadence cleared every session's
+		// marker, so a subagent running across the primary's /new lost its idle sample.
+		const secondary = sessionLookupKey("subagent-b", "concurrent-secondary");
+		bindSession("subagent-b", "concurrent-secondary");
+		recordMemoryTurnEnd(secondary, 0);
+		resetMemorySamplerCadence();
+		expect(takeMemoryIdleGapMs(secondary, WINDOW_MS * 2, WINDOW_MS)).toBe(
+			WINDOW_MS * 2,
+		);
 	});
 
 	it("#1332: another session's turn start neither consumes nor reports a session's pending turn end", () => {
 		// #4761 review F1 (AGENTS.md shape 72): one process-global slot let a
 		// coexisting session take the primary's marker.
+		bindSession("session-b", "concurrent-secondary");
 		recordMemoryTurnEnd(SESSION, 0);
 		expect(
 			takeMemoryIdleGapMs("session-b", WINDOW_MS * 2, WINDOW_MS),
@@ -559,40 +580,27 @@ describe("post-idle sample decision (#1332)", () => {
 		);
 	});
 
-	it("#1332: a host without session ids keeps one shared marker under the undefined key", () => {
+	it("#1332: a host without session ids keeps one marker per role under the no-session key", () => {
 		// Recurrence: a host whose ctx has no `getSessionId` (getStableSessionId
-		// answers undefined) must still get its post-idle reading.
-		recordMemoryTurnEnd(undefined, 0);
-		expect(takeMemoryIdleGapMs(SESSION, WINDOW_MS * 2, WINDOW_MS)).toBeNull();
-		expect(takeMemoryIdleGapMs(undefined, WINDOW_MS * 2, WINDOW_MS)).toBe(
+		// answers undefined) must still get its post-idle reading, and a secondary
+		// must not read the primary's marker.
+		const primary = sessionLookupKey(undefined, "primary");
+		const secondary = sessionLookupKey(undefined, "concurrent-secondary");
+		bindSession(undefined, "primary");
+		bindSession(undefined, "concurrent-secondary");
+		recordMemoryTurnEnd(primary, 0);
+		expect(takeMemoryIdleGapMs(secondary, WINDOW_MS * 2, WINDOW_MS)).toBeNull();
+		expect(takeMemoryIdleGapMs(primary, WINDOW_MS * 2, WINDOW_MS)).toBe(
 			WINDOW_MS * 2,
 		);
 	});
 
-	it("#1332: pending turn ends are capped per process, dropping the session whose turn ended first", () => {
-		// Recurrence: a long-lived process cycling through subagents leaves one
-		// entry per session whose last turn ended; the map must not grow with it.
-		const sessions = Array.from({ length: 33 }, (_, n) => `subagent-${n}`);
-		for (const id of sessions) recordMemoryTurnEnd(id, 0);
-		expect(
-			takeMemoryIdleGapMs(sessions[0], WINDOW_MS * 2, WINDOW_MS),
-		).toBeNull();
-		expect(takeMemoryIdleGapMs(sessions[1], WINDOW_MS * 2, WINDOW_MS)).toBe(
-			WINDOW_MS * 2,
-		);
-	});
-
-	it("#1332: a session's newer turn end moves it behind the cap's eviction order", () => {
-		recordMemoryTurnEnd("first", 0);
-		const others = Array.from({ length: 31 }, (_, n) => `other-${n}`);
-		for (const id of others) recordMemoryTurnEnd(id, 0);
-		// "first" ends another turn: it is now the newest, so the next session
-		// past the cap evicts other-0 instead.
-		recordMemoryTurnEnd("first", 0);
-		recordMemoryTurnEnd("late", 0);
-		expect(takeMemoryIdleGapMs("other-0", WINDOW_MS * 2, WINDOW_MS)).toBeNull();
-		expect(takeMemoryIdleGapMs("first", WINDOW_MS * 2, WINDOW_MS)).toBe(
-			WINDOW_MS * 2,
-		);
+	it("#1332: a turn end for a session with no live scope keeps no marker (#4965)", () => {
+		// RECURRENCE GUARDED: the resurrection a process table allowed; the cell
+		// must not outlive, or be created without, the session's scope.
+		const ghost = sessionLookupKey("never-started", "primary");
+		recordMemoryTurnEnd(ghost, 0);
+		bindSession("never-started", "primary");
+		expect(takeMemoryIdleGapMs(ghost, WINDOW_MS * 2, WINDOW_MS)).toBeNull();
 	});
 });
