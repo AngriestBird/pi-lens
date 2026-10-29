@@ -20,7 +20,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { landRefresh } from "../../scripts/lsp-refresh-landing.mjs";
 import {
 	GENERATED_LSP_DOCS,
@@ -252,6 +252,15 @@ describe("#4512 every other difference is a flip (fail closed)", () => {
 });
 
 describe("#4512 landRefresh: the PR body and the verdict the workflow reads", () => {
+	// Every scratch root is removed when this block ends. Recurrence: #4980 round
+	// 2 verify F4, where each run left one `landing-*` root in the tmp root
+	// (6 per run on this file at e38b34bc8) and no `afterAll` owned them.
+	const scratchRoots: string[] = [];
+	afterAll(() => {
+		for (const root of scratchRoots)
+			fs.rmSync(root, { recursive: true, force: true });
+	});
+
 	function scratch(
 		newDocs: Record<string, string | null>,
 		headDocs: Record<string, string | null>,
@@ -259,6 +268,7 @@ describe("#4512 landRefresh: the PR body and the verdict the workflow reads", ()
 		const root = fs.mkdtempSync(
 			path.join(process.env.TMPDIR ?? os.tmpdir(), "landing-"),
 		);
+		scratchRoots.push(root);
 		for (const [doc, text] of Object.entries(newDocs)) {
 			if (text === null) continue;
 			fs.mkdirSync(path.dirname(path.join(root, doc)), { recursive: true });
