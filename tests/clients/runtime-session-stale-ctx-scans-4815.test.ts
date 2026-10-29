@@ -32,6 +32,7 @@ import {
 	setProjectSnapshotPromotionSeamForTests,
 } from "../../clients/project-snapshot.js";
 import { suspendAt, waitFor } from "./interleaving-kit.js";
+import { withEnv } from "../support/with-env.js";
 import {
 	drainBackgroundWritesForTests,
 	pinFixtureHome,
@@ -139,7 +140,7 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 	};
 	let prevFirst: boolean | undefined;
 	let prevStartupMode: string | undefined;
-	let previousDataDir: string | undefined;
+	let restoreDataDir: () => void;
 	let env: ReturnType<typeof setupTestEnvironment>;
 
 	beforeEach(async () => {
@@ -147,13 +148,14 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		await installLspServiceDouble({ supportsLSP: () => false });
 		prevFirst = globals.__piLensFirstSessionDone;
 		prevStartupMode = process.env.PI_LENS_STARTUP_MODE;
-		previousDataDir = process.env.PILENS_DATA_DIR;
 		globals.__piLensFirstSessionDone = true;
 		process.env.PI_LENS_STARTUP_MODE = "full";
 		resetDegradationLedger();
 		_resetSubagentModeForTests();
 		env = setupTestEnvironment("pi-lens-stale-ctx-scans-4815-");
-		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		restoreDataDir = withEnv({
+			PILENS_DATA_DIR: path.join(env.tmpDir, "data"),
+		});
 	});
 
 	afterEach(async () => {
@@ -191,8 +193,7 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 			{ timeoutMs },
 		);
 		await drainBackgroundWritesForTests();
-		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-		else process.env.PILENS_DATA_DIR = previousDataDir;
+		restoreDataDir();
 		env.cleanup();
 	}
 
