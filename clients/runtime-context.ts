@@ -89,9 +89,9 @@ function turnEndMessage(
  * against the reader's `sessionId`; a record that names neither is anyone's.
  * A pi request passes its session for both. The MCP host passes its one
  * address for every server process (`deliverTo` must outlive a restart) and
- * its per-process coordinator id as the owner (advisory provenance tells a
- * predecessor's findings apart by it). A reader that passes no session takes
- * every message. A skip records one ledger row per addressee.
+ * its coordinator id as the owner, reassigned at each session start (advisory
+ * provenance tells a predecessor's findings apart by it). A reader that passes
+ * no session takes every message. A skip records one ledger row per addressee.
  */
 function addressedElsewhere(
 	data: Partial<TurnEndFindingsCache>,

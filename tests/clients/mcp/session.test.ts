@@ -201,7 +201,7 @@ describe("runTurnEnd", () => {
 		for (const call of handleTurnEnd.mock.calls) {
 			expect((call[0] as { host?: unknown }).host).toBe("mcp");
 			// #4943 R2: and stage to the one address every MCP server reads as,
-			// not the per-process coordinator id a restarted server cannot read.
+			// not the coordinator id: a session start reassigns it, and a restart cannot read it.
 			expect((call[0] as { deliveryAddress?: unknown }).deliveryAddress).toBe(
 				MCP_DELIVERY_ADDRESS,
 			);

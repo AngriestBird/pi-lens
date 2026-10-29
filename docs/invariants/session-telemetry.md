@@ -66,7 +66,7 @@
   (`deliveryEligible.sessionId`): a concurrent secondary never pins the
   coordinator id. The MCP host stages to one address shared by every server
   process (`MCP_DELIVERY_ADDRESS`) and reads as that address, with its
-  per-process coordinator id for a record whose rewrite left only the owner:
+  coordinator id, reassigned at each session start, for a record whose rewrite left only the owner:
   a restarted server still delivers what the last one staged, and neither its
   Stop pass nor its acknowledge takes a pi session's message.
   A staged message another writer replaces before its owner asks is not

@@ -494,7 +494,7 @@ interface TurnEndDeps {
 	 * #4943: the address the staged message is delivered to (`deliverTo`).
 	 * Absent, the turn's session. The MCP host passes one constant address for
 	 * every server process, so a restarted server still reads what the last one
-	 * staged, while its owner id stays per process.
+	 * staged, while its owner id is reassigned at each session start.
 	 */
 	deliveryAddress?: string;
 }

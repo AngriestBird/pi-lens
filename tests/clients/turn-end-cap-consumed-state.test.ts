@@ -2287,8 +2287,8 @@ describe("#4943: the composer addresses its message to its own session", () => {
 	for (const lensGuard of [false, true]) {
 		it(`addresses its message to the host's delivery address when the host names one (--lens-guard ${lensGuard ? "on" : "off"})`, async () => {
 			// RECURRENCE GUARDED: #4943 R2. The MCP host's turn end addressed its
-			// message to its per-process coordinator id, so the address could not
-			// both outlive a server restart and set the MCP host's messages apart
+			// message to its coordinator id, which a session start reassigns, so the
+			// address could not both outlive a server restart and set the MCP host's messages apart
 			// from a pi session's. It now stages to the address the host passes.
 			const rig = makeRig("pi-lens-4943-address-");
 			rig.lensGuard = lensGuard;
