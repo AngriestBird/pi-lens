@@ -1789,6 +1789,39 @@
 					"test": "tests/index-4554-last-member-teardown.test.ts",
 					"title": "keeps the LSP fleet at a full start while another session in the process is live"
 				},
+				"UnbindAtLeave": {
+					"value": "TRUE",
+					"test": "tests/index-4554-last-member-teardown.test.ts",
+					"title": "unbinds a sibling that leaves before the primary at its own leave",
+					"also": [
+						{
+							"test": "tests/index-4554-last-member-teardown.test.ts",
+							"title": "unbinds a primary that leaves before its sibling at its own leave"
+						}
+					]
+				},
+				"DisposalUnbinds": {
+					"value": "TRUE",
+					"test": "tests/index-4704-sibling-teardown.test.ts",
+					"title": "ends the scope of each subagent pi disposed without a shutdown at the next session start",
+					"also": [
+						{
+							"test": "tests/index-4554-last-member-teardown.test.ts",
+							"title": "unbinds a member pi disposed beside a live sibling at the next start"
+						}
+					]
+				},
+				"SweepAtStart": {
+					"value": "TRUE",
+					"test": "tests/index-4704-sibling-teardown.test.ts",
+					"title": "ends the scope of each subagent pi disposed without a shutdown at the next session start",
+					"also": [
+						{
+							"test": "tests/index-4554-last-member-teardown.test.ts",
+							"title": "unbinds a member pi disposed beside a live sibling at the next start"
+						}
+					]
+				},
 				"PrimaryClaims": {
 					"value": "TRUE",
 					"test": "tests/index-4751-newsession-turn-end-scope.test.ts",
