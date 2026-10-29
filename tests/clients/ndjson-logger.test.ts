@@ -27,6 +27,7 @@ vi.mock("node:fs", async (importOriginal) => {
 import {
 	_exitFlushersForTest,
 	createNdjsonLogger,
+	flushAllNdjsonWriters,
 	getSinkRotations,
 	getSinkWriteFailures,
 	resetSinkRotations,
@@ -36,18 +37,18 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
-import { createPiMock, makeCtx } from "../support/pi-mock.js";
 import { piSessionFixture, startPiSession } from "../support/pi-session.js";
 import { removeTempDirSync } from "./test-utils.js";
 
-// #4937 L2: the shutdown-drain case runs on a real pi session (tier 2) under this
-// file's one fixture root (pi-session.ts, "one fixture root per file"). The
-// wedged-drain case stays on the double: its ledger row is written into this
-// test graph, which a path-loaded copy does not share.
+// #4937 L2: both `session_shutdown` cases run on a real pi session (tier 2, the
+// inline-factory mode) under this file's one fixture root (pi-session.ts, "one
+// fixture root per file"). The extension runs on THIS test graph's modules, so
+// the degradation-ledger row the wedged drain records is the one the case reads,
+// and the session's own background writes (the project-snapshot persist decision
+// into `latency.log`) are joined by the handle's teardown drain. A path-loaded
+// copy leaves that write unreachable: it landed in whichever case ran next and
+// reddened the global `appendFile` call counts below (#4997 r1, seed 1).
 const fixture = piSessionFixture();
-
-// flake-shape: never-settling-wait — the timeout witness must hold a real
-// appendFile promise forever to prove shutdown proceeds at the bound.
 
 let tmpDir: string;
 let logFile: string;
@@ -132,13 +133,17 @@ describe("createNdjsonLogger", () => {
 	});
 
 	it("real session_shutdown drains an in-flight writer before exit flushSync", async () => {
-		// Tier 2: the loaded copy's own `session_shutdown` handler runs through
-		// pi's extension runner and returns the bounded NDJSON drain. The writer it
+		// Tier 2: the extension's own `session_shutdown` handler runs through pi's
+		// extension runner and returns the bounded NDJSON drain. The writer it
 		// awaits is the process-global one this logger registered into, so the held
 		// append is what the handler must wait for. The emit goes to the runner, not
 		// to `handle.dispose()`: dispose settles the sinks itself after the emit and
 		// would mask a handler that drains nothing.
-		const handle = await startPiSession({ root: fixture.root, responses: [] });
+		const handle = await startPiSession({
+			root: fixture.root,
+			responses: [],
+			inlineFactory: async () => (await import("../../index.js")).default,
+		});
 		let release!: () => void;
 		const held = new Promise<void>((resolve) => {
 			release = resolve;
@@ -181,32 +186,58 @@ describe("createNdjsonLogger", () => {
 	}, 60_000);
 
 	it("bounds a wedged shutdown drain and records one degradation", async () => {
-		// Earlier cases call vi.resetModules(), so the static ledger import is a
-		// different module instance from the one index.js records into. Read the
-		// ledger through the same dynamic import as the code under test.
-		const { default: registerExtension } = await import("../../index.js");
+		// Tier 2, inline-factory mode: the extension runs on THIS test graph's
+		// modules, so the degradation-ledger row the bounded drain records is the
+		// one this test reads. Earlier cases call vi.resetModules(), so the ledger
+		// is read through a dynamic import taken after the factory's, never the
+		// static import above.
+		const handle = await startPiSession({
+			root: fixture.root,
+			responses: [],
+			inlineFactory: async () => (await import("../../index.js")).default,
+		});
 		const { getDegradationSummary: summaryNow } =
 			await import("../../clients/degradation-ledger.js");
-		const mock = createPiMock();
-		registerExtension(mock.asExtensionAPI());
-		vi.spyOn(fs.promises, "appendFile").mockImplementation(
-			() => new Promise<never>(() => {}),
-		);
-		const logger = createNdjsonLogger({ filePath: logFile });
-		logger.log({ kind: "shutdown-timeout-witness" });
-		await mock.emit(
-			"session_shutdown",
-			{ type: "session_shutdown", reason: "quit" },
-			makeCtx({ cwd: tmpDir, sessionId: "shutdown-timeout-witness" }),
-		);
-		const rows = summaryNow().filter(
-			(row) => row.kind === "hook-await-exceeded",
-		);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]?.latestReasons[0]?.subject).toBe(
-			"session_shutdown:ndjson-writers",
-		);
-	});
+		// Hold every append behind a gate this case can open. A never-settling
+		// promise would stay in the process-global writer map after the case, and
+		// the next case that awaits `flushAllNdjsonWriters()` (the tier-2 teardown
+		// in tests/support/pi-session.ts) would wait on it for good: the CI
+		// shuffle lane hung 60 s on seed 424 (#4997 F1).
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
+		vi.spyOn(fs.promises, "appendFile").mockImplementation(async (...args) => {
+			await held;
+			return realAppendFile(...args);
+		});
+		try {
+			const logger = createNdjsonLogger({ filePath: logFile });
+			logger.log({ kind: "shutdown-timeout-witness" });
+			await handle.session.extensionRunner.emit({
+				type: "session_shutdown",
+				reason: "quit",
+			} as never);
+			const rows = summaryNow().filter(
+				(row) => row.kind === "hook-await-exceeded",
+			);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]?.latestReasons[0]?.subject).toBe(
+				"session_shutdown:ndjson-writers",
+			);
+		} finally {
+			// Leave no live writer state behind: open the gate, then wait until every
+			// writer in the process-global map has drained to disk (still inside
+			// `tmpDir`, which `afterEach` removes next).
+			release();
+			await flushAllNdjsonWriters();
+		}
+		// The released append landed: the writer is empty, not abandoned mid-write.
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ kind: "shutdown-timeout-witness" },
+		]);
+	}, 60_000);
 
 	it("lazily creates the parent directory", async () => {
 		const nested = path.join(tmpDir, "a", "b", "c", "deep.log");

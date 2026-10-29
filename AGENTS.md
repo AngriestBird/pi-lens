@@ -696,7 +696,7 @@ and a `vi.mock`, a prototype spy or a module-scope registry the test reads is
 the one it uses. Their header comments state the APIs and limits. A new tier
 capability adds a case to `pi-runner.test.ts` or `pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
 `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`), whose row states the
-class: `process-boundary` (3 rows), `internal-seam` (35: the case interposes on
+class: `process-boundary` (2 rows), `internal-seam` (35: the case interposes on
 a pi-lens `clients/` module either through `vi.mock`, which cannot reach the
 copy pi's loader builds, or through a test-side copy of a process-global
 service the loaded copy does not share, such as `clients/lsp`'s service),
@@ -715,8 +715,8 @@ the in-process `clients/lsp` service object stays `internal-seam`.
 No row carries a `pending slice` marker, and the sweep test refuses that
 label: slice 7 classified the last three with the probe that keeps each on the
 double, and every roadmap slice is closed, so a reopened placeholder reds
-instead of naming work no slice owns. The five classes cover the list's 44
-rows (52 at the slice 7 recording; the pi-mock L1 and L3 moves took two more out, the L2 move relabelled one `process-boundary` row `internal-seam`, and slice 7 moved the
+instead of naming work no slice owns. The five classes cover the list's 43
+rows (52 at the slice 7 recording; the pi-mock L1, L2 and L3 moves took three more out, the L2 move also relabelled one `process-boundary` row `internal-seam`, and slice 7 moved the
 `index-smells-rollup-wiring` row out with its file, and the inline-factory mode
 moved six `internal-seam` files to tier 2), and this command reproduces them:
 `grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.

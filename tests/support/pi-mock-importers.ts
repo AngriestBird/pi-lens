@@ -84,10 +84,7 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	// factory reload and reads the test-side `getIOBridge` copy (#4258).
 	"index-process-bridge-rebind-real-factory.test.ts": "internal-seam",
 	"tools/diagnostics-route-switch-matrix.test.ts": "internal-seam",
-	// #4937 L2: the shutdown-drain case moved to tier 2. The case still on the
-	// double reads the degradation-ledger row a wedged drain records in THIS test
-	// graph; a path-loaded copy records into its own ledger.
-	"clients/ndjson-logger.test.ts": "internal-seam",
+	"clients/handler-verdict-helper.test.ts": "internal-seam",
 	// unproducible-payload
 	"clients/context-append-to-last-user.test.ts": "unproducible-payload",
 	"index-4631-pre-087-context-shape.test.ts": "unproducible-payload",
@@ -98,7 +95,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-4554-last-member-teardown.test.ts": "internal-seam",
 	"index-multi-root-session-start.test.ts": "unproducible-payload",
 	// process-boundary
-	"clients/handler-verdict-helper.test.ts": "process-boundary",
 	"clients/pi-host-callable-schema-contract.test.ts": "process-boundary",
 	"clients/pi-lens-home-hermeticity.test.ts": "process-boundary",
 };
