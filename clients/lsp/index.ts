@@ -37,6 +37,8 @@ import {
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
 import {
 	applyAuxiliarySuppressions,
+	findAuxiliaryProfileForSource,
+	isOptInAuxiliaryServerId,
 	dropExcludedServers,
 } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
@@ -115,7 +117,11 @@ import {
 	peekOwnedLspService,
 	resetOwnedLspService,
 } from "./service-singleton.js";
-import { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
+import {
+	aggregateServersForFile,
+	groupFilesByPrimaryServer,
+	runPerServerGroups,
+} from "./grouping.js";
 export { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
 import {
 	BROKEN_BASE_COOLDOWN_MS,
@@ -1562,7 +1568,7 @@ export class LSPService {
 		// it does its owner; Pyrefly keeps a failed lookup through Changed.
 		this.announceCreatedFiles([filePath]);
 		return Promise.all(
-			getServersForFileWithConfig(filePath).map((server) =>
+			this.serversWithLiveReaderRoots(filePath).map((server) =>
 				this.clientRegistry.resolveServerRoot(server, filePath).then((root) => {
 					if (!root) return false;
 					const ownKey = `${server.id}:${normalizeMapKey(root)}`;
@@ -1580,6 +1586,32 @@ export class LSPService {
 			// client must receive a later A→B→A edit (#4156 M1).
 			this.siblingAnnouncementHashes.set(normalizedPath, contentHash);
 		});
+	}
+
+	/**
+	 * #4956 F1: the servers a per-file reader that acts only on LIVE clients (or
+	 * on a root decision a session already made) walks. An opt-in auxiliary
+	 * (`enabledByDefault: false`) joins every JS/TS candidate list whether or not
+	 * the operator turned it on, and each reader below resolves a root per
+	 * server (a `NearestRoot` walk; negatives are never cached), so a server
+	 * nobody started would add that walk to every touch of every file. It is
+	 * walked only while this service holds a client for it, which is the only
+	 * state in which these readers can find anything to act on.
+	 */
+	private serversWithLiveReaderRoots(filePath: string): LSPServerInfo[] {
+		return getServersForFileWithConfig(filePath).flatMap((server) =>
+			!isOptInAuxiliaryServerId(server.id) ||
+			this.holdsClientForServer(server.id)
+				? [server]
+				: [],
+		);
+	}
+
+	private holdsClientForServer(serverId: string): boolean {
+		const prefix = `${serverId}:`;
+		for (const key of this.state.clients.keys())
+			if (key.startsWith(prefix)) return true;
+		return false;
 	}
 
 	private notifyLiveClientsForServer(
@@ -2721,7 +2753,13 @@ export class LSPService {
 		const attached = new Set(spawned.map((entry) => entry.info.id));
 		const brokenSkippedServerIds: string[] = [];
 		const policySkippedServerIds: string[] = [];
-		for (const server of getServersForFileWithConfig(filePath)) {
+		// #4956 F5: an opt-in auxiliary is a gap only for the door that names it.
+		// The all-server door never admits one to a collecting touch, so it lists
+		// what it may admit and never walks an opt-in root per file.
+		const candidates = enabledAuxiliaries
+			? getServersForFileWithConfig(filePath)
+			: aggregateServersForFile(filePath);
+		for (const server of candidates) {
 			if (!isAuxiliary(server)) continue;
 			if (attached.has(server.id)) continue;
 			// An explicitly excluded server (the #584 workspace-sweep exclusion) was
@@ -3266,8 +3304,18 @@ export class LSPService {
 		 * the primary's.
 		 */
 		auxiliaryRoots?: Map<string, string>,
+		/**
+		 * #4956 F6: the touch only syncs content (`diagnostics: "none"`). This door
+		 * never names an opt-in auxiliary, so it never starts one; a sync still
+		 * reaches one whose live client already holds this file's root, or the
+		 * drift resync would leave that view stale for good. A collecting touch
+		 * never consults an opt-in server it did not name.
+		 */
+		syncOnly = false,
 	): Promise<{ clients: SpawnedServer[]; serverCountAttempted: number }> {
-		const allServers = getServersForFileWithConfig(filePath);
+		const allServers = syncOnly
+			? this.serversWithLiveReaderRoots(filePath)
+			: aggregateServersForFile(filePath);
 		const servers =
 			excludeServerIds && excludeServerIds.size > 0
 				? allServers.filter((s) => !excludeServerIds.has(s.id))
@@ -3275,6 +3323,8 @@ export class LSPService {
 		if (servers.length === 0) return { clients: [], serverCountAttempted: 0 };
 
 		// Resolve once to keep the attempted count tied to servers with a real root.
+		// An opt-in auxiliary stays only where a live client already holds its
+		// root, so the acquisition below is that client's warm reuse.
 		const rootedServers = (
 			await Promise.all(
 				servers.map(async (server) => ({
@@ -3284,7 +3334,11 @@ export class LSPService {
 			)
 		).filter(
 			(entry): entry is { server: LSPServerInfo; root: string } =>
-				entry.root !== undefined,
+				entry.root !== undefined &&
+				(!isOptInAuxiliaryServerId(entry.server.id) ||
+					this.state.clients
+						.get(`${entry.server.id}:${normalizeMapKey(entry.root)}`)
+						?.isAlive() === true),
 		);
 
 		for (const { server, root } of rootedServers)
@@ -3380,7 +3434,7 @@ export class LSPService {
 		filePath: string,
 	): Promise<SpawnedServer | undefined> {
 		if (this.checkDestroyed()) return undefined;
-		const servers = getServersForFileWithConfig(filePath);
+		const servers = this.serversWithLiveReaderRoots(filePath);
 		// #1934: the (server, root) pairs that COULD have served this file and
 		// were cold. A server with no resolvable root is not a pool miss — it
 		// never had a slot to miss — so it stays out of this list.
@@ -3568,7 +3622,7 @@ export class LSPService {
 		type: number,
 	): Promise<void> {
 		if (this.checkDestroyed()) return;
-		for (const server of getServersForFileWithConfig(filePath)) {
+		for (const server of this.serversWithLiveReaderRoots(filePath)) {
 			const root = await this.clientRegistry.resolveServerRoot(
 				server,
 				filePath,
@@ -3998,7 +4052,7 @@ export class LSPService {
 		const changed = new Map<string, string>();
 		for (const changedPath of changedPaths) {
 			const resolved = path.resolve(changedPath);
-			for (const server of getServersForFileWithConfig(resolved)) {
+			for (const server of this.serversWithLiveReaderRoots(resolved)) {
 				const root = await this.clientRegistry.resolveServerRoot(
 					server,
 					resolved,
@@ -4209,7 +4263,7 @@ export class LSPService {
 		filePath: string,
 	): Promise<Set<string>> {
 		const exclude = new Set<string>();
-		for (const server of getServersForFileWithConfig(filePath)) {
+		for (const server of this.serversWithLiveReaderRoots(filePath)) {
 			const root = await this.clientRegistry.resolveServerRoot(
 				server,
 				filePath,
@@ -4425,6 +4479,7 @@ export class LSPService {
 				options.excludeServerIds,
 				resolvedPrimaryRoots,
 				attemptedAuxiliaryRoots,
+				diagnosticsMode === "none",
 			);
 			spawned = result.clients;
 			serverCountAttempted = result.serverCountAttempted;
@@ -7110,7 +7165,7 @@ export class LSPService {
 		if (this.clientRegistry.analysisRootModeForFile(filePath) === "adopted")
 			return undefined;
 		const candidates = await Promise.all(
-			getServersForFileWithConfig(filePath).map((server) =>
+			this.serversWithLiveReaderRoots(filePath).map((server) =>
 				server.root(filePath),
 			),
 		);
@@ -7231,8 +7286,8 @@ export class LSPService {
 		const startedAt = Date.now();
 		// #4323: a server this read leaves unacquired is not a candidate for it,
 		// so the unavailable text never names one the operator switched off.
-		const candidateServerIds = getServersForFileWithConfig(filePath).flatMap(
-			(s) => (excludeServerIds?.has(s.id) ? [] : [s.id]),
+		const candidateServerIds = aggregateServersForFile(filePath).flatMap((s) =>
+			excludeServerIds?.has(s.id) ? [] : [s.id],
 		);
 		const resolvedPrimaryRoots = new Map<string, string>();
 		const { clients: spawned, serverCountAttempted } =
@@ -7245,11 +7300,22 @@ export class LSPService {
 			// #4323: an excluded server's last answer is not this read's answer.
 			// Drop its rows from what this caller sees; the shared store keeps
 			// them for callers that did not exclude it.
+			// #4956 r6: and only a candidate's rows. The live path below rewrites the
+			// store from `spawned`, so a row of a server this read does not name (an
+			// opt-in fallow the per-edit door stored, switched off since) is no part
+			// of its answer. `candidateServerIds` already leaves out every excluded
+			// server, so this one set covers #4323's exclusions too. A row naming no
+			// server stays, as `dropExcludedServers` documents.
 			const stored = this.lastKnownDiagnostics.get(normalizedPath);
+			const notCandidates = new Set<string>();
+			for (const d of stored ?? []) {
+				const id =
+					d.serverId ?? findAuxiliaryProfileForSource(d.source)?.serverId;
+				if (id && !candidateServerIds.includes(id)) notCandidates.add(id);
+			}
 			const stale =
 				stored &&
-				dropExcludedServers({ diagnostics: stored }, excludeServerIds)
-					.diagnostics;
+				dropExcludedServers({ diagnostics: stored }, notCandidates).diagnostics;
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
 			// #4322: with nothing acquired, every primary that resolved a root went
 			// unanswered, so an empty answer here is not a clean one.
@@ -7862,7 +7928,7 @@ export class LSPService {
 		if (this.checkDestroyed()) {
 			return { executed: false, reason: "lsp service destroyed" };
 		}
-		for (const server of getServersForFileWithConfig(filePath)) {
+		for (const server of this.serversWithLiveReaderRoots(filePath)) {
 			const root = await this.clientRegistry.resolveServerRoot(
 				server,
 				filePath,
@@ -7957,7 +8023,7 @@ export class LSPService {
 		const snapshots: LSPCapabilitySnapshot[] = [];
 
 		if (filePath) {
-			const servers = getServersForFileWithConfig(filePath);
+			const servers = this.serversWithLiveReaderRoots(filePath);
 			for (const server of servers) {
 				const root = await this.clientRegistry.resolveServerRoot(
 					server,

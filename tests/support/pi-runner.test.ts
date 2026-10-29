@@ -68,6 +68,7 @@ const DECLARED_FLAGS = [
 	"lens-compact-widget",
 	"no-lazy-tools",
 	"lens-turn-end-madge",
+	"lens-fallow",
 	"no-knip",
 	"no-jscpd",
 	"no-madge",

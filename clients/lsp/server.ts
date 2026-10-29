@@ -5206,6 +5206,40 @@ export const TyposServer: LSPServerInfo = {
 	autoInstall: async () => Boolean(await ensureTool("typos-lsp")),
 };
 
+// fallow-lsp (#4929) — the TS/JS dead-code, duplication, cycle and complexity
+// analyzer's LSP server. An OPT-IN, LANGUAGE-SCOPED auxiliary: `role:
+// "auxiliary"` keeps it beside the primary server and never in its place, and
+// `extensions` (the registry's one file gate, `fileMatchReason`) limits it to
+// JS/TS files, so a Python, Markdown or YAML file never attaches it. Its
+// profile (clients/dispatch/auxiliary-lsp.ts) is `enabledByDefault: false`
+// behind `--lens-fallow`: with the flag off nothing here is installed or
+// launched. It reads `.fallowrc.json`/`fallow.toml` as data and parses source
+// statically, so it executes no project code (see the trust census). It
+// analyses the whole project graph, so it is rooted at the repository, like
+// the other auxiliaries. Findings are advisory in this cut.
+export const FallowServer: LSPServerInfo = {
+	id: "fallow",
+	idleEviction: "unmeasured",
+	role: "auxiliary",
+	name: "fallow TS/JS Code Health",
+	extensions: JS_TS_LSP_EXTENSIONS,
+	root: RootWithFallback(NearestRoot([".git"])),
+	looseFileRoot: "decline",
+	availabilityKey: "fallow-lsp",
+	spawn(root, options) {
+		return resolveAndLaunchTreeBinary(
+			{
+				candidates: ["fallow-lsp"],
+				bundleToolId: "fallow-lsp",
+				binRelPath: "fallow-lsp",
+				cwd: root,
+				args: [],
+			},
+			options?.allowInstall,
+		);
+	},
+};
+
 export const LSP_SERVERS: LSPServerInfo[] = [
 	TypeScriptServer,
 	DenoServer,
@@ -5258,6 +5292,7 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	AstGrepServer,
 	ZizmorServer,
 	TyposServer,
+	FallowServer, // opt-in (--lens-fallow), JS/TS only
 ];
 
 /**

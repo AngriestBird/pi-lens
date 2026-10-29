@@ -1283,6 +1283,21 @@ const LSP_FIXTURES = [
 		auxiliarySourceMatch: "typos",
 		gitInit: true,
 	},
+	// fallow-lsp (auxiliary, opt-in, language-scoped to JS/TS; #4929). The fixture
+	// exports a function nothing imports, which fallow reports as `unused-export`.
+	// The harness names the server in `auxiliaryServerIds` directly, so this proves
+	// the pinned download -> sha256 check -> spawn -> scan -> publish path without
+	// the `fallow.enabled` gate (the gate has its own tests and verify scenario).
+	{
+		lang: "fallow",
+		dir: "tests/fixtures/tool-smoke/fallow-aux",
+		file: "src/util.ts",
+		serverHint: "fallow-lsp (auxiliary)",
+		tools: ["fallow-lsp"],
+		auxiliaryServerIds: ["fallow"],
+		auxiliarySourceMatch: "fallow",
+		gitInit: true,
+	},
 	// ast-grep no-sgconfig BASELINE (#239 Phase 2). NO sgconfig in the fixture, so
 	// the server must attach everywhere and launch with `lsp --config <shipped
 	// baseline>` to run pi-lens's bundled ruleset (`arr.sort()` → the shipped
