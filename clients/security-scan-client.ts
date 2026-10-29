@@ -479,11 +479,9 @@ export abstract class SecurityScanClient<TResult> {
 					const reason = formatToolFailure({
 						tool: this.toolName,
 						status: result.status,
-						signal: result.signal,
 						stderr: result.stderr,
 						reportMissing: true,
 					});
-					this.log(reason);
 					this.recordReportScanFailure(reason);
 					// `formatToolFailure` already bounds `reason` for the ledger.
 					return spec.fail({ scannedAt, summary: reason });
