@@ -26,7 +26,10 @@ import { handleSessionStart } from "../../clients/runtime-session.js";
 import { _resetSubagentModeForTests } from "../../clients/subagent-mode.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
-import { waitForProjectSnapshotPersistsForTests } from "../../clients/project-snapshot.js";
+import {
+	getProjectSnapshotPersistStateForTests,
+	waitForProjectSnapshotPersistsForTests,
+} from "../../clients/project-snapshot.js";
 import {
 	drainBackgroundWritesForTests,
 	pinFixtureHome,
@@ -239,7 +242,7 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		} finally {
 			process.off("unhandledRejection", onUnhandled);
 		}
-		return { unhandled, scanFile, writeCache, notify };
+		return { cwd, unhandled, scanFile, writeCache, notify };
 	}
 
 	it("leaves no unhandled rejection when the flag read meets the stale ctx", async () => {
@@ -367,7 +370,15 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		const prevDelay = process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
 		process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "200";
 		try {
-			await reloadDuringBootstrap({ flag: true, notify: false });
+			const { cwd } = await reloadDuringBootstrap({
+				flag: true,
+				notify: false,
+			});
+			// The case only proves the delayed worker arm if a persist for this
+			// fixture is still in flight at teardown. A writer that never queues,
+			// or a synchronous fallback that finishes first, leaves nothing to
+			// outlast the removal, so it must fail here, before teardown.
+			expect(getProjectSnapshotPersistStateForTests(cwd).active).toBe(true);
 			await teardownFixture();
 			await waitForProjectSnapshotPersistsForTests();
 			expect(fs.existsSync(env.tmpDir)).toBe(false);

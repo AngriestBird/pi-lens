@@ -102,6 +102,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
 	vi.unstubAllEnvs();
+	// projectCwd() creates this root lazily and no teardown removed it, so the
+	// file-level tmp-fixture sweep reported it (registered=1, #4958 siblings).
+	env?.cleanup();
 	await new Promise<void>((resolve) => server.close(() => resolve()));
 	fs.rmSync(TEST_HOME, { recursive: true, force: true });
 });
