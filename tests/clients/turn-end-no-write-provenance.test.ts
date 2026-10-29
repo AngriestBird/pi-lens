@@ -540,6 +540,40 @@ describe.each([false, true])(
 			});
 		});
 
+		// The excluded default (#4962 r3): a write turn's stamp binds its edits,
+		// as it did before #4617, so a part beside them that cites no file
+		// leaves it current. Applying the completeness rule there would label
+		// every write turn with such a part historical.
+		it("keeps a write turn current beside a part that cites no file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-write-uncited-${guard}`,
+				incident:
+					"The completeness rule must not reach a stamp that binds edits",
+				issue: "#4617",
+				async run(h) {
+					h.edit("src/app.ts", "export const app = 1;\n");
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// The other direction of the cell above (#4962 r3): a message whose
 		// every part cites a file stays current, so the completeness check
 		// reads each part's own citation and never fails a fully cited message.
@@ -558,6 +592,71 @@ describe.each([false, true])(
 					const view = await h.turnEnd({ flags });
 					expect(view.text).toContain("Unresolved from this turn");
 					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The cap's direction (#4962 r3): only a part the message carries can
+		// leave the stamp incomplete. An uncited part the cap cut is not text
+		// the model reads, so it must not label the delivered part historical.
+		it("keeps a message current when the cap cut its only uncited part", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-cut-uncited-${guard}`,
+				incident: "An uncited part the cap cut labelled the kept part",
+				issue: "#4617",
+				async run(h) {
+					const warnings = 25;
+					const runnerFile = h.write(
+						"src/late.sh",
+						Array.from({ length: warnings }, () => "echo hi").join("\n") + "\n",
+					);
+					const failedFile = h.write("src/other.sh", "echo other\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(runnerFile, past, past);
+					fs.utimesSync(failedFile, past, past);
+					deferRunnerFindings({
+						filePath: runnerFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "blocking_diagnostics",
+							semantic: "warning",
+							diagnostics: Array.from({ length: warnings }, (_, i) => ({
+								id: `late-runner-cut-${i}`,
+								message: "late runner finding",
+								filePath: runnerFile,
+								line: i + 1,
+								column: 1,
+								severity: "warning" as const,
+								semantic: "warning" as const,
+								tool: "shellcheck",
+								rule: "SC2086",
+							})),
+						} as RunnerResult),
+					});
+					deferRunnerFindings({
+						filePath: failedFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "slow-runner",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "timeout",
+							semantic: "warning",
+							diagnostics: [],
+						} as RunnerResult),
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Late runner diagnostics");
+					expect(view.text).not.toContain("Deferred runner slow-runner failed");
 					expect(view.text).not.toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
