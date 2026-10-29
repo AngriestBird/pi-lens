@@ -497,6 +497,73 @@ describe.each([false, true])(
 			});
 		});
 
+		// Recurrence (#4962 r3, CodeRabbit thread): one cited part made a
+		// no-write turn's stamp well-formed, so it spoke for the whole message.
+		// A part beside it that cited nothing read current although the file it
+		// reports changed after the turn end. Before the citations that message
+		// was historical; a stamp missing a part's files must not read current.
+		it("labels a message historical when one of its parts cites no file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-${guard}`,
+				incident:
+					"A cited replay vouched for an uncited secrets blocker in the same message",
+				issue: "#4617",
+				async run(h) {
+					deferBlockingLateRunner(h, "late-runner-mixed-1");
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
+						},
+					});
+					expect(view.text).toContain("Unresolved from this turn");
+					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The other direction of the cell above (#4962 r3): a message whose
+		// every part cites a file stays current, so the completeness check
+		// reads each part's own citation and never fails a fully cited message.
+		it("keeps a message current when every part it carries cites a file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-all-cited-${guard}`,
+				incident:
+					"Two cited producers in one no-write message, neither uncited",
+				issue: "#4617",
+				async run(h) {
+					deferBlockingLateRunner(h, "late-runner-all-cited-1");
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(indeterminateRun(primary));
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Unresolved from this turn");
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// Negative cells: the fix must not drop the label. A stamp taken at this
 		// turn end still flips to historical once the workspace moves on, or
 		// once the session that took it is over.

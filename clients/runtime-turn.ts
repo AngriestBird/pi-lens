@@ -1883,8 +1883,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				policy.suppressed > 0
 					? ` (suppressed by disposition: ${policy.suppressed} finding(s))`
 					: "";
-			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			const replayPart = `Unresolved from this turn — ${displayPath}${suppressedNote}:\n${policy.body}`;
+			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			blockerParts.push(replayPart);
 			// #4617: the replay is about this file, which a no-write turn did not
 			// edit; a late runner's blocking survivor is pending, not resolved.
@@ -6034,6 +6034,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// and let `capTurnEndMessage` truncate the overflow line away.
 	const resolvedParts =
 		resolvedLines.length > 0 ? [resolvedLines.join("\n")] : [];
+	// #4962 r3: the lines name these files, so the part passes the stamp's
+	// completeness check (`uncitedPartReached`) like every cited part.
+	if (resolvedParts[0] !== undefined)
+		citePart(
+			resolvedParts[0],
+			resolvedBlockerFileList.map((entry) => entry.filePath),
+		);
 
 	const asIs = (raw: string): ComposedPart => ({ raw, text: raw });
 	// Stale-secret parts sit between the two tiers and are NOT relabelled — they
@@ -6279,6 +6286,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const deliveredCitedFiles = holdPlan.reachedParts.flatMap(
 			(part) => provenanceCitations.get(part.raw) ?? [],
 		);
+		// #4962 r3: with no affected file, the citations are the stamp's only
+		// subjects, so the stamp speaks for the message only when every part
+		// the message carries cited a file. A part that cited none would read
+		// current whatever happened to the files it reports, so the stamp is
+		// incomplete (`truncated`): never current, and never proof of deletion.
+		const uncitedPartReached = holdPlan.reachedParts.some(
+			(part) => (provenanceCitations.get(part.raw)?.length ?? 0) === 0,
+		);
 		// #4954 F6: a file only the text names is `cited`, so deleting it labels
 		// the message historical and never drops it; the first role a path gets
 		// wins, so a file the turn wrote and also cites stays `affected`.
@@ -6307,7 +6322,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				runtime,
 				generation: 0,
 				files: stamped,
-				truncated: affectedTruncated || byKey.size > stamped.length,
+				truncated:
+					affectedTruncated ||
+					byKey.size > stamped.length ||
+					(affectedFiles.length === 0 && uncitedPartReached),
 			});
 		};
 		if (getFlag("lens-guard") || carried.length > 0) {
