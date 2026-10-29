@@ -643,7 +643,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"(#2523's `bounded but no abort race` list).",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-session.ts#handleSessionStart:cd0c710f~74098d00": {
+	"clients/runtime-session.ts#handleSessionStart:cd0c710f~652f281b": {
 		family: "hook-await",
 		site: "session_start",
 		reason:
