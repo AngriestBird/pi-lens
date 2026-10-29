@@ -26,7 +26,18 @@ import { handleSessionStart } from "../../clients/runtime-session.js";
 import { _resetSubagentModeForTests } from "../../clients/subagent-mode.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
-import { pinFixtureHome, setupTestEnvironment } from "./test-utils.js";
+import {
+	getProjectSnapshotPersistErrorForTests,
+	getProjectSnapshotPersistStateForTests,
+	setProjectSnapshotPromotionSeamForTests,
+} from "../../clients/project-snapshot.js";
+import { suspendAt, waitFor } from "./interleaving-kit.js";
+import { withEnv } from "../support/with-env.js";
+import {
+	drainBackgroundWritesForTests,
+	pinFixtureHome,
+	setupTestEnvironment,
+} from "./test-utils.js";
 
 /** The pi SDK's own `assertActive()` message after a session replacement. */
 const SDK_STALE_MESSAGE =
@@ -129,7 +140,7 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 	};
 	let prevFirst: boolean | undefined;
 	let prevStartupMode: string | undefined;
-	let previousDataDir: string | undefined;
+	let restoreDataDir: () => void;
 	let env: ReturnType<typeof setupTestEnvironment>;
 
 	beforeEach(async () => {
@@ -137,25 +148,54 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		await installLspServiceDouble({ supportsLSP: () => false });
 		prevFirst = globals.__piLensFirstSessionDone;
 		prevStartupMode = process.env.PI_LENS_STARTUP_MODE;
-		previousDataDir = process.env.PILENS_DATA_DIR;
 		globals.__piLensFirstSessionDone = true;
 		process.env.PI_LENS_STARTUP_MODE = "full";
 		resetDegradationLedger();
 		_resetSubagentModeForTests();
 		env = setupTestEnvironment("pi-lens-stale-ctx-scans-4815-");
-		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		restoreDataDir = withEnv({
+			PILENS_DATA_DIR: path.join(env.tmpDir, "data"),
+		});
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		resetLSPConfigStateForTests();
 		globals.__piLensFirstSessionDone = prevFirst;
 		if (prevStartupMode === undefined) delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = prevStartupMode;
-		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-		else process.env.PILENS_DATA_DIR = previousDataDir;
 		_resetSubagentModeForTests();
-		env.cleanup();
+		await teardownFixture();
 	});
+
+	/**
+	 * Remove the fixture root. The session start queues a project-snapshot
+	 * persist that outlives the test, and its write recreates the root when it
+	 * lands after the removal (#4958). Order matters in both directions:
+	 *  1. wait for this fixture's persist to land, on the event with a
+	 *     real-clock deadline that throws (the drain below stops at a silent
+	 *     2 s cap and swallows hook errors, so it cannot be the only wait);
+	 *  2. drain the other background writers;
+	 *  3. restore `PILENS_DATA_DIR`, only now: the persist resolves the meta
+	 *     path from the live env when it lands, so an earlier restore sends it
+	 *     to a directory that does not exist (ENOENT, a recorded persist
+	 *     failure);
+	 *  4. remove the root.
+	 * Every test's afterEach and the regression case below run this one
+	 * function; the restore is idempotent.
+	 */
+	async function teardownFixture(timeoutMs?: number): Promise<void> {
+		await waitFor(
+			() =>
+				getProjectSnapshotPersistStateForTests(
+					path.join(env.tmpDir, "project"),
+				),
+			(state) => !state.active && !state.queued,
+			{ timeoutMs },
+		);
+		await drainBackgroundWritesForTests();
+		restoreDataDir();
+		env.cleanup();
+	}
 
 	function project(): string {
 		const cwd = path.join(env.tmpDir, "project");
@@ -222,7 +262,7 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		} finally {
 			process.off("unhandledRejection", onUnhandled);
 		}
-		return { unhandled, scanFile, writeCache, notify };
+		return { cwd, unhandled, scanFile, writeCache, notify };
 	}
 
 	it("leaves no unhandled rejection when the flag read meets the stale ctx", async () => {
@@ -336,5 +376,64 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		// The live session's own TODO scan is the proof the scans were scheduled.
 		await written;
 		expect(staleGroup()).toBeUndefined();
+	});
+
+	it("leaves no fixture root and no failed persist once the session-start snapshot write has landed (#4958)", async () => {
+		// The writer is the project-snapshot persist the session start queues. Its
+		// worker thread writes the stage file under the root (clients/gzip-stage-write.ts,
+		// a recursive mkdir), and the main thread promotes it with a lock mkdir
+		// (clients/project-snapshot.ts promoteSnapshotBody). Either recreates
+		// `env.tmpDir` when it lands after the removal, and its meta write resolves
+		// `PILENS_DATA_DIR` when it lands, not when it was queued. The promotion
+		// seam parks the persist in flight until the test releases it, so the
+		// order is controlled instead of timed.
+		const errorBefore = getProjectSnapshotPersistErrorForTests();
+		const seam = vi.fn(async () => {});
+		const gate = suspendAt(seam);
+		setProjectSnapshotPromotionSeamForTests(seam);
+		try {
+			const { cwd } = await reloadDuringBootstrap({
+				flag: true,
+				notify: false,
+			});
+			await gate.admitted;
+			// Parked at the seam: the persist is in flight, deterministically.
+			expect(getProjectSnapshotPersistStateForTests(cwd).active).toBe(true);
+			let tornDown = false;
+			const tearingDown = teardownFixture().then(() => {
+				tornDown = true;
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			// Teardown must be parked on the persist, root untouched.
+			expect(tornDown).toBe(false);
+			expect(fs.existsSync(env.tmpDir)).toBe(true);
+			gate.release();
+			await tearingDown;
+			expect(fs.existsSync(env.tmpDir)).toBe(false);
+			expect(getProjectSnapshotPersistErrorForTests()).toBe(errorBefore);
+		} finally {
+			setProjectSnapshotPromotionSeamForTests(undefined);
+			gate.restore();
+		}
+	});
+
+	it("fails the teardown loudly when the snapshot persist never lands (#4958)", async () => {
+		// Recurrence: the shared drain stops at a silent 2 s cap and swallows hook
+		// errors, so a persist still in flight let the root removal run and the
+		// write recreate the root (the thread on #4969 r2). The fixture's own
+		// wait ends on the event or a real-clock deadline, and the deadline throws.
+		const seam = vi.fn(async () => {});
+		const gate = suspendAt(seam);
+		setProjectSnapshotPromotionSeamForTests(seam);
+		try {
+			await reloadDuringBootstrap({ flag: true, notify: false });
+			await gate.admitted;
+			await expect(teardownFixture(150)).rejects.toThrow(/waitFor exhausted/);
+			// The parked persist must have kept the root: nothing removed it.
+			expect(fs.existsSync(env.tmpDir)).toBe(true);
+		} finally {
+			setProjectSnapshotPromotionSeamForTests(undefined);
+			gate.restore();
+		}
 	});
 });

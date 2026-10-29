@@ -55,6 +55,7 @@ const TEST_HOME = vi.hoisted(() => {
 	return dir;
 });
 
+import { getProjectSnapshotPersistStateForTests } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
 import { resetManagedToolRefreshSession } from "../../clients/installer/managed-tool-refresh-session.js";
@@ -65,7 +66,12 @@ import {
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { withEnv } from "../support/with-env.js";
-import { pinFixtureHome, setupTestEnvironment } from "./test-utils.js";
+import { waitFor } from "./interleaving-kit.js";
+import {
+	drainBackgroundWritesForTests,
+	pinFixtureHome,
+	setupTestEnvironment,
+} from "./test-utils.js";
 
 const BIN_DIR = path.join(TEST_HOME, "bin");
 const CACHED = path.join(TEST_HOME, "rules", "opengrep-registry.yaml");
@@ -101,7 +107,25 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+	// #4958: the session-start snapshot persist is fire-and-forget and writes
+	// under TEST_HOME. Wait for it on the event with a real-clock deadline that
+	// throws (the drain below stops at a silent 2 s cap), while the env is
+	// still pinned, or a late write recreates TEST_HOME after the rmSync below.
+	// env?.cleanup() does not cover it.
+	if (env) {
+		await waitFor(
+			() =>
+				getProjectSnapshotPersistStateForTests(
+					path.join(env!.tmpDir, "project"),
+				),
+			(state) => !state.active && !state.queued,
+		);
+	}
+	await drainBackgroundWritesForTests();
 	vi.unstubAllEnvs();
+	// projectCwd() creates this root lazily and no teardown removed it, so the
+	// file-level tmp-fixture sweep reported it (registered=1, #4958 siblings).
+	env?.cleanup();
 	await new Promise<void>((resolve) => server.close(() => resolve()));
 	fs.rmSync(TEST_HOME, { recursive: true, force: true });
 });
