@@ -6,6 +6,7 @@ import { resetBoundedTelemetry } from "./bounded-telemetry.js";
 import { rotateMessageEndAttribution } from "./message-end-attribution.js";
 import type { CacheManager } from "./cache-manager.js";
 import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
+import { bounded } from "./deadline-utils.js";
 import type { DeadCodeResult } from "./dead-code-client.js";
 import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
@@ -38,6 +39,7 @@ import {
 	GovulncheckClient,
 	type GovulncheckResult,
 } from "./govulncheck-client.js";
+import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import { realIsPidAlive, sweepAtomicWriteStages } from "./instance-reaper.js";
 import type { JscpdClient } from "./jscpd-client.js";
 import type { KnipResult } from "./knip-client.js";
@@ -600,15 +602,31 @@ async function readSequenceAndHydrateFreshSnapshot(args: {
 		onDeferredSequenceResolved,
 	} = args;
 	const sequenceReadStartedAt = Date.now();
-	const { latestSeq, timedOut } = await readSequenceWithBudget({
-		snapshotRoot,
-		base: snapshotSequenceBase(snapshotRoot),
-		cwd,
-		runtime,
-		sessionGeneration,
-		dbg,
-		onDeferredSequenceResolved,
-	});
+	// `readSequenceWithBudget` races its read against `sequenceReadBudgetMs()`,
+	// an env-overridable knob (`PI_LENS_SEQUENCE_READ_BUDGET_MS`) that is not
+	// capped by the hook's wall budget. `bounded()` is that cap: an abandoned
+	// read is the same cold-start answer the inner race gives, so a stalled
+	// read reaches the `UNKNOWN_PROJECT_SEQ` path either way. `signal` is
+	// `undefined`: `SessionStartDeps` carries none, and `index.ts` awaits this
+	// whole handler under `bounded()` with the hook's `ctx.signal`.
+	const { latestSeq, timedOut } =
+		(await bounded(
+			readSequenceWithBudget({
+				snapshotRoot,
+				base: snapshotSequenceBase(snapshotRoot),
+				cwd,
+				runtime,
+				sessionGeneration,
+				dbg,
+				onDeferredSequenceResolved,
+			}),
+			{
+				ms: HOOK_WALL_BUDGET_MS.session_start,
+				signal: undefined,
+				hook: "session_start",
+				label: "readSequenceWithBudget",
+			},
+		)) ?? coldSequenceRead();
 	logLatency({
 		type: "phase",
 		phase: "session_start_sequence_read",
@@ -903,6 +921,14 @@ async function readSequenceWithBudget(args: {
 			});
 	}
 
+	return coldSequenceRead();
+}
+
+/** The cold-start answer for a sequence read that did not land in its bound. */
+function coldSequenceRead(): {
+	latestSeq: ProjectSequenceIndex;
+	timedOut: true;
+} {
 	return {
 		latestSeq: { projectSeq: 0, fileSeqByPath: new Map<string, number>() },
 		timedOut: true,

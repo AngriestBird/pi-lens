@@ -647,20 +647,21 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		family: "hook-await",
 		site: "session_start",
 		reason:
-			"`readSequenceAndHydrateFreshSnapshot` from the full-mode path: it " +
-			"awaits `readSequenceWithBudget` (the real 250ms budget, no " +
-			"abort arm; see that function's own entry), the same await " +
-			"that sat inline here before the two copies were folded.",
+			"`readSequenceAndHydrateFreshSnapshot` from the full-mode path: its " +
+			"only await, of `readSequenceWithBudget`, runs under `bounded()` " +
+			"inside the helper (registered in BOUNDED_CALL_SITES); a wrapper " +
+			"one level down reads as unbounded to this line scan.",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-session.ts#handleSessionStart:d7493ff5~a42f4a7e": {
 		family: "hook-await",
 		site: "session_start",
 		reason:
-			"`readSequenceAndHydrateFreshSnapshot` from the quick-mode snapshot-root path: it " +
-			"awaits `readSequenceWithBudget` (the real 250ms budget, no " +
-			"abort arm; see that function's own entry), the same await " +
-			"that sat inline here before the two copies were folded.",
+			"`readSequenceAndHydrateFreshSnapshot` from the quick-mode " +
+			"snapshot-root path: its only await, of `readSequenceWithBudget`, " +
+			"runs under `bounded()` inside the helper (registered in " +
+			"BOUNDED_CALL_SITES); a wrapper one level down reads as unbounded " +
+			"to this line scan.",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-session.ts#handleSessionStart:e20461cb~6148cbdf": {
@@ -780,16 +781,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"from session_start with no wall bound above the spawn.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-session.ts#readSequenceAndHydrateFreshSnapshot:07098027~436bac0c":
-		{
-			family: "hook-await",
-			site: "session_start",
-			reason:
-				"`readSequenceWithBudget` from the shared sequence/snapshot step: " +
-				"the budget is real (250ms default) but carries no abort arm; " +
-				"one await for both quick and full session_start.",
-			owner: "#2523 slice 2",
-		},
 	"clients/runtime-session.ts#readSequenceWithBudget:41c0b191~d5c54d05": {
 		family: "hook-await",
 		site: "session_start",
@@ -2941,6 +2932,14 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-agent-end.ts#handleAgentEnd:fc644b89~93eae0ad":
 		"The deferred formatter drain receives AgentEndDeps.signal, or the " +
 		"ambient signal in a standalone harness; agent_settled bounds the wait.",
+	"call:clients/runtime-session.ts#readSequenceAndHydrateFreshSnapshot:8d9498e9~c78f4265":
+		"No signal: `SessionStartDeps` carries none, so the key is written as " +
+		"`undefined` and this await runs on the wall clock alone, capped at " +
+		"`HOOK_WALL_BUDGET_MS.session_start`. The signal half is held one frame up: " +
+		"index.ts awaits the whole `handleSessionStart` under `bounded()` with the " +
+		"hook's `ctx.signal`, so Escape releases the handler there. This bound " +
+		"exists for the env-widened `PI_LENS_SEQUENCE_READ_BUDGET_MS`, which the " +
+		"inner race obeys but the hook budget does not cap.",
 	"call:clients/runtime-tool-call.ts#handleToolCallImpl:2dc2d1e2~ce33f035":
 		"The pre-edit linter capture (#4483) uses the tool_call's ctx.signal, " +
 		"absent only in a harness. #2523 gives tool_call no budget of its own, " +

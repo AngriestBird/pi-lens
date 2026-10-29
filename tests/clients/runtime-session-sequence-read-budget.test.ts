@@ -39,6 +39,7 @@ import {
 	readLatestProjectSequence,
 } from "../../clients/project-changes.js";
 import { getDegradationSummary } from "../../clients/degradation-ledger.js";
+import { HOOK_WALL_BUDGET_MS } from "../../clients/hook-budgets.js";
 import {
 	_resetProjectSnapshotParseCacheForTests,
 	buildProjectSnapshotFromRuntime,
@@ -594,6 +595,60 @@ describe("#1162 — bounded session_start sequence read", () => {
 						expect(runtime.cachedExports.get("x")).toBe(exportedPath(cwd));
 					}
 				} finally {
+					env.cleanup();
+				}
+			});
+
+			// Recurrence guarded: the step's one await of `readSequenceWithBudget`
+			// sat unbounded on a hook path (hook-await-bounds census, #4977 review)
+			// and its own race is capped only by an env-overridable budget, so a
+			// widened budget stalled `session_start` past the hook's wall budget.
+			// The shared step now awaits it under `bounded()`.
+			it("a read the widened sequence budget cannot cut is bounded at the session_start wall budget and takes the unknown-sequence path", async () => {
+				process.env.PI_LENS_STARTUP_MODE = mode;
+				// 2e9 ms: far above the 5s hook budget, below the 2^31 timer clamp.
+				process.env.PI_LENS_SEQUENCE_READ_BUDGET_MS = "2000000000";
+				const env = setupTestEnvironment(`pi-lens-seq-seam-wall-${mode}-`);
+				process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+				try {
+					const cwd = makeProject(env);
+					saveSeq0Snapshot(cwd);
+					readLatestProjectSequenceAsyncSpy.mockImplementation(
+						() => new Promise<ProjectSequenceIndex>(() => {}),
+					);
+					const runtime = new RuntimeCoordinator();
+
+					let settled = false;
+					void handleSessionStart(makeDeps(cwd, runtime)).then(() => {
+						settled = true;
+					});
+					// Real I/O runs before the read is reached, so yield to the real
+					// event loop and advance the fake clock only once the read is up.
+					for (let i = 0; i < 400 && !settled; i++) {
+						await new Promise((resolve) => setImmediate(resolve));
+						if (readLatestProjectSequenceAsyncSpy.mock.calls.length > 0) {
+							await vi.advanceTimersByTimeAsync(
+								HOOK_WALL_BUDGET_MS.session_start,
+							);
+						}
+					}
+
+					expect(settled).toBe(true);
+					expect(runtime.cachedExports.get("x")).toBeUndefined();
+					expect(phaseRecord("session_start_sequence_read")?.metadata).toEqual(
+						expect.objectContaining({ timedOut: true, entries: 0 }),
+					);
+					expect(phaseRecord("session_start_snapshot_load")?.metadata).toEqual(
+						expect.objectContaining({ fresh: false, sequenceUnknown: true }),
+					);
+					expect(
+						getDegradationSummary()
+							.find((group) => group.kind === "hook-await-exceeded")
+							?.latestReasons.map((row) => row.subject),
+					).toContain("session_start:readSequenceWithBudget");
+				} finally {
+					vi.useRealTimers();
 					env.cleanup();
 				}
 			});
