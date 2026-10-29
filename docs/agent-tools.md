@@ -206,7 +206,8 @@ and `[]` mean no arguments.
   comment nodes are plain preceding siblings) get it for free with no
   per-grammar query work. A Python def or class also reads its docstring (a
   plain, `r` or `u` string that is the first statement of the body); when
-  both a `#` comment above the def and a docstring exist, the docstring wins.
+  both a `#` comment above the def and a docstring exist, a docstring with text
+  wins; an empty docstring falls back to the comment.
   When a file has syntax errors, tree-sitter recovers and drops the
   declarations it cannot parse, so the report carries a `warnings` entry saying
   the symbol list may be incomplete. `exported` stays a boolean field only — it
