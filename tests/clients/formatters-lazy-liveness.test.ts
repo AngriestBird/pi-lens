@@ -1,12 +1,21 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPiMock, makeCtx } from "../support/pi-mock.js";
 import { useGlobalConfig } from "../support/global-config.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
+import {
+	endTurn,
+	readTarget,
+	step,
+} from "../support/pi-session-commit-gate.js";
+import {
+	fauxToolCall,
+	piSessionFixture,
+	startPiSession,
+} from "../support/pi-session.js";
 
 const setGlobalConfig = useGlobalConfig();
+const fixture = piSessionFixture();
 
 describe("formatter session warm/first-use liveness (#1394)", () => {
 	afterEach(() => vi.resetModules());
@@ -56,6 +65,7 @@ describe("formatter session warm/first-use liveness (#1394)", () => {
 				},
 				jscpdClient: { isAvailable: () => false },
 				depChecker: { isAvailable: () => false },
+				deadCodeClients: [],
 				testRunnerClient: { detectRunner: () => null },
 				goClient: { isGoAvailableAsync: async () => false },
 				rustClient: { isAvailableAsync: async () => false },
@@ -78,29 +88,40 @@ describe("formatter session warm/first-use liveness (#1394)", () => {
 			getStatus: () => [],
 			getAliveServerIds: () => [],
 		});
-		const { default: registerExtension } = await import("../../index.js");
 		setGlobalConfig({ format: { mode: "immediate" }, lsp: { enabled: false } });
-		const pi = createPiMock();
-		registerExtension(pi.asExtensionAPI());
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-format-live-"));
+		// Tier 2 (#4937 L6): a real pi session over the factory this test imported
+		// after the doMocks above. `no-autoformat` is a default of the tier, so the
+		// case turns it off: the claim is that the immediate format runs on the
+		// first edit after a start.
+		const cwd = path.join(fixture.root, "proj");
 		const filePath = path.join(cwd, "live.ts");
+		fs.mkdirSync(cwd, { recursive: true });
 		fs.writeFileSync(filePath, "export const formatted = false;\n");
-		try {
-			await pi.emit("session_start", {}, makeCtx({ cwd }));
-			await pi.emit("turn_start", {}, makeCtx({ cwd }));
-			await pi.emit(
-				"tool_result",
-				{
-					toolName: "edit",
-					input: { path: filePath },
-					details: { diff: "+ 1 export const formatted = false;" },
-					content: [{ type: "text", text: "ok" }],
-				},
-				makeCtx({ cwd }),
-			);
-			expect(fs.readFileSync(filePath, "utf8")).toContain("formatted = true");
-		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
-		}
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd,
+			flags: new Map([["no-autoformat", false]]),
+			inlineFactory: async () => (await import("../../index.js")).default,
+			responses: [
+				step(readTarget(filePath)),
+				step(
+					fauxToolCall("edit", {
+						path: filePath,
+						edits: [
+							{
+								oldText: "export const formatted = false;",
+								newText: "export const formatted = 0;",
+							},
+						],
+					}),
+				),
+				endTurn(),
+			],
+		});
+		await handle.prompt("edit it");
+
+		expect(handle.errors).toEqual([]);
+		// The edit wrote `formatted = 0`; only the formatter's write leaves `true`.
+		expect(fs.readFileSync(filePath, "utf8")).toContain("formatted = true");
 	}, 30_000);
 });

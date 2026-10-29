@@ -18,6 +18,9 @@
  *
  * Every write goes through the host order: `tool_call` (the bytes on disk are
  * still the old ones), then the write, then `tool_result`.
+ *
+ * The `--no-delta` cell moved to tier 2 with the real flag, in
+ * `tests/index-4483-no-delta-flag.test.ts` (#4937 L6).
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -589,19 +592,6 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 			outcome: "discarded",
 			reason: "already-dispatched",
 		});
-		await s.end();
-	});
-
-	it("captures nothing with --no-delta, where every finding is reported anyway", async () => {
-		const s = await openSession("no-delta", "scripts/no-delta.sh", OLD_ERROR, {
-			delta: { enabled: false },
-		});
-		const out = await s.edit("echo a", "echo b");
-		expect(out).toContain("🔴 STOP — 1 issue(s) must be fixed:");
-		// No run read the bytes before the edit.
-		expect(boundary.sh.runs).not.toContain(OLD_ERROR);
-		expect(await rows(s.target, "pre_edit_capture")).toEqual([]);
-		await s.write("#!/bin/sh\necho b\n");
 		await s.end();
 	});
 
