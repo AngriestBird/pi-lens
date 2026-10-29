@@ -179,6 +179,8 @@
 (*                       (the /new and /reload configs stay their size)    *)
 (*   "blockerScoped"     #4921: a turn_end delivers only its own session's *)
 (*                       inline-blocker records                            *)
+(*   "slotAddressed"     #4943: a request takes the per-project turn-end   *)
+(*                       message only when its own session staged it       *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -189,7 +191,7 @@ CONSTANTS
                     \*    "SecEnd","SecTurn","SecReload","SecFork","Dup",
                     \*    "Interrupt","InterruptPreScope","InterruptUnstarted",
                     \*    "DeferOwn","DrainDefer","TurnWork","TurnEnd",
-                    \*    "SecTurnEnd","ParkTake"}
+                    \*    "SecTurnEnd","ParkTake","Stage","TakeSlot"}
     Writers,        \* the writers in play, a subset of
                     \*   {"read","secRead","heartbeat","lsp","widget",
                     \*    "advisory","activate","stateW","debounce",
@@ -1638,6 +1640,10 @@ StateKinds == {"ranges", "summary", "gitguard"}
 \* take below is the delivery, which is what the isolation clause constrains.
 WorkKinds  == {"ranges", "cascade", "runner"}
                 \cup (IF Has("blockerStore") THEN {"blocker"} ELSE {})
+\* `staged`: the message a turn_end staged in the per-project delivery slot
+\* (the `turn-end-findings` record, #4943). A turn_end never drains it; the
+\* next request takes it (`TakeSlot`).
+SlotKinds  == {"staged"}
 
 M4Kinds(x) == IF x \in {"stateW", "debounce"} THEN StateKinds ELSE {"-"}
 
@@ -1851,6 +1857,37 @@ TurnEnd ==
     /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
                    pkOut>>
 
+\* #4943: a turn_end of any activation stages its message in the one
+\* per-project slot (`writeCache("turn-end-findings", ...)` in
+\* `handleTurnEnd`), replacing whatever another session staged there. The
+\* configs that use it take no replacement transition, so the slot lives in
+\* the one coordinator generation.
+Stage ==
+    /\ "Stage" \in Transitions /\ primary # 0 /\ pend.k = "none"
+    /\ \E s \in Tickets :
+          /\ st[s] = "live"
+          /\ ~\E c \in consumed : c.k = "staged" /\ c.o = s
+          /\ [k |-> "staged", o |-> s] \notin co[last]
+          /\ co' = [co EXCEPT ![last] = {r \in @ : r.k # "staged"}
+                                          \cup {[k |-> "staged", o |-> s]}]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
+                   consumed, pkOut>>
+
+\* The next request of a live session (`consumeTurnEndFindings` in the
+\* request hook, `index.ts`) takes the staged message. Before
+\* "slotAddressed" the slot named no reader, so whichever session asked
+\* first took it: a primary took the message a subagent's turn_end staged.
+TakeSlot ==
+    /\ "TakeSlot" \in Transitions /\ primary # 0 /\ pend.k = "none"
+    /\ \E s \in Tickets, r \in co[last] :
+          /\ st[s] = "live"
+          /\ r.k = "staged"
+          /\ Has("slotAddressed") => r.o = s
+          /\ consumed' = consumed \cup {[k |-> r.k, o |-> r.o, by |-> s]}
+          /\ co' = [co EXCEPT ![last] = @ \ {r}]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
+                   pkOut>>
+
 \* Actions that move no #3855 r2 variable keep them in Next.
 Next ==
     \/ (\E k \in {"fork", "clone"} : BeforeFork(k) /\ UNCHANGED r2V) /\ UNCHANGED m4V
@@ -1894,6 +1931,8 @@ Next ==
     \/ ParkTake
     \/ TurnWork
     \/ TurnEnd
+    \/ Stage
+    \/ TakeSlot
 
 Spec == Init /\ [][Next]_vars
 
@@ -1908,7 +1947,8 @@ TypeOK ==
     /\ primary \in 0..(MaxSteps + 2)
     /\ slot.reason \in {"-"} \cup SlotReasons
     /\ \A s \in Stores : \A r \in Reasons : Policy(s, r) \in Actions
-    /\ \A t \in Tickets : co[t] \subseteq [k : StateKinds \cup WorkKinds, o : Tickets]
+    /\ \A t \in Tickets :
+          co[t] \subseteq [k : StateKinds \cup WorkKinds \cup SlotKinds, o : Tickets]
     /\ \A t \in Tickets : dq[t] \subseteq [o : Tickets, e : Nat]
     /\ \A t \in Tickets : pk[t] \subseteq [o : Tickets, k : Files \cup {"-"}]
     /\ \A x \in M4Writers : mw[x].pc \in {"idle", "flight", "landed", "dropped"}
@@ -1983,7 +2023,8 @@ SecondaryIsolation ==
     \* M4, the turn_end half (#3613's R2, #3758): a turn_end drains only its
     \* own scope's work, so a subagent's never clears the primary's worklist,
     \* cascade runs or pending runner findings, and the primary's never takes
-    \* a subagent's.
+    \* a subagent's. #4943: nor does a request take the turn-end message
+    \* another session's turn_end staged.
     /\ \A c \in consumed : c.o = c.by
 
 \* F2: the slot is taken only by a primary start that replaced the scope
