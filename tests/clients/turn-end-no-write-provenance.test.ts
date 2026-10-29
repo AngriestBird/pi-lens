@@ -8,7 +8,11 @@ import {
 } from "../../clients/cascade-format.js";
 import { MAX_ADVISORY_AFFECTED_FILES } from "../../clients/advisory-provenance.js";
 import type { CascadeRun } from "../../clients/cascade-types.js";
-import type { Diagnostic } from "../../clients/dispatch/types.js";
+import {
+	deferRunnerFindings,
+	resetPendingRunnerFindings,
+} from "../../clients/dispatch/pending-runner-findings.js";
+import type { Diagnostic, RunnerResult } from "../../clients/dispatch/types.js";
 import {
 	markPendingAuxiliaryCoverage,
 	resetPendingAuxiliaryCoverage,
@@ -40,6 +44,7 @@ afterEach(() => {
 	resetCascadePendingNeighbors();
 	resetCascadeUnansweredPrimariesDelivered();
 	resetPendingAuxiliaryCoverage();
+	resetPendingRunnerFindings();
 });
 
 function neighborError(filePath: string): Diagnostic {
@@ -299,6 +304,107 @@ describe.each([false, true])(
 					const view = await h.turnEnd({ flags });
 					expect(view.text).toContain("late scanner finding");
 					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4617 item 2): a bash-only turn delivered a late runner's
+		// advisory whose file the turn neither wrote nor resolved, so the stamp
+		// named no file and the live findings read as historical.
+		it("keeps a late runner finding current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-${guard}`,
+				incident: "A late runner part cites a file the turn did not edit",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = h.write("src/late.sh", "echo hi\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(runnerFile, past, past);
+					deferRunnerFindings({
+						filePath: runnerFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "blocking_diagnostics",
+							semantic: "warning",
+							diagnostics: [
+								{
+									id: "late-runner-1",
+									message: "late runner finding",
+									filePath: runnerFile,
+									line: 1,
+									column: 1,
+									severity: "warning",
+									semantic: "warning",
+									tool: "shellcheck",
+									rule: "SC2086",
+								},
+							],
+						} as RunnerResult),
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Late runner diagnostics");
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4617 item 2): the stamp for a late runner's file must still
+		// go historical once that file changes after the turn end; citing it must
+		// bind the message, not silence the label.
+		it("labels a late runner finding historical when its file changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-older-${guard}`,
+				incident:
+					"A stamped late runner part from an older turn stays labelled",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = h.write("src/late.sh", "echo hi\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(runnerFile, past, past);
+					deferRunnerFindings({
+						filePath: runnerFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "blocking_diagnostics",
+							semantic: "warning",
+							diagnostics: [
+								{
+									id: "late-runner-2",
+									message: "late runner finding",
+									filePath: runnerFile,
+									line: 1,
+									column: 1,
+									severity: "warning",
+									semantic: "warning",
+									tool: "shellcheck",
+									rule: "SC2086",
+								},
+							],
+						} as RunnerResult),
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runnerFile, "echo changed\n");
+						},
+					});
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
 			});

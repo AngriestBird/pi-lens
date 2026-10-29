@@ -1656,6 +1656,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 		// @delivery-surface: runtime-turn:late-runner-findings
 		advisoryParts.push(lateRunnerPart);
+		// #4617: the part is about this file, which a no-write turn did not edit.
+		citePart(lateRunnerPart, [pending.filePath]);
 	}
 	logLatency({
 		type: "phase",
