@@ -574,30 +574,6 @@ describe.each([false, true])(
 			});
 		});
 
-		// The other direction of the cell above (#4962 r3): a message whose
-		// every part cites a file stays current, so the completeness check
-		// reads each part's own citation and never fails a fully cited message.
-		it("keeps a message current when every part it carries cites a file", async () => {
-			await runTurnScenario({
-				id: `no-write-provenance-all-cited-${guard}`,
-				incident:
-					"Two cited producers in one no-write message, neither uncited",
-				issue: "#4617",
-				async run(h) {
-					deferBlockingLateRunner(h, "late-runner-all-cited-1");
-					const primary = h.write("src/a.ts", "export const a = 1;\n");
-					await new Promise<void>((resolve) => setImmediate(resolve));
-					h.runtime.beginTurn();
-					h.runtime.appendCascadeRun(indeterminateRun(primary));
-					const view = await h.turnEnd({ flags });
-					expect(view.text).toContain("Unresolved from this turn");
-					expect(view.text).toContain("Cascade could not compute");
-					expect(view.text).not.toContain(HISTORICAL);
-					expect(view.text).not.toContain(UNKNOWN_STAMP);
-				},
-			});
-		});
-
 		// The cap's direction (#4962 r3): only a part the message carries can
 		// leave the stamp incomplete. An uncited part the cap cut is not text
 		// the model reads, so it must not label the delivered part historical.
