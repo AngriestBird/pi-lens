@@ -916,6 +916,13 @@ describe("#4554 one activation, four live sessions", () => {
  * sibling that left first, or a primary that left before its sibling, stayed
  * reachable by id after its session ended. Each case drives the production
  * handlers and reads the index the stores read.
+ *
+ * While a sibling is live the departed member's key goes and its scope
+ * stays: the coordinator's scope runs every member's coordinator work, and
+ * `turn_start` hands each member's turn the activation's last-started scope
+ * (index.ts `turnStartScope`), whose late dead-code scan a retired scope
+ * drops as `session-ended` (clients/runtime-turn.ts). So each case also
+ * pins that the departed member's scope is still live.
  */
 describe("#4965 a session's id lookup ends with its session", () => {
 	it("unbinds a sibling that leaves before the primary at its own leave", async () => {
@@ -925,11 +932,13 @@ describe("#4965 a session's id lookup ends with its session", () => {
 		await start(pi, primary);
 		await start(pi, sibling);
 		const { scopeOfSession } = await import("../clients/session-scope.js");
-		expect(scopeOfSession("s-leaves-first")?.isLive()).toBe(true);
+		const leaverScope = scopeOfSession("s-leaves-first");
+		expect(leaverScope?.isLive()).toBe(true);
 
 		await shutdown(pi, sibling);
 
 		expect(scopeOfSession("s-leaves-first")).toBeUndefined();
+		expect(leaverScope?.isLive()).toBe(true);
 		expect(scopeOfSession("m-stays")?.isLive()).toBe(true);
 		await shutdown(pi, primary);
 		expect(scopeOfSession("m-stays")).toBeUndefined();
@@ -942,10 +951,12 @@ describe("#4965 a session's id lookup ends with its session", () => {
 		await start(pi, primary);
 		await start(pi, sibling);
 		const { scopeOfSession } = await import("../clients/session-scope.js");
+		const coordinatorScope = scopeOfSession("m-leaves-first");
 
 		await shutdown(pi, primary);
 
 		expect(scopeOfSession("m-leaves-first")).toBeUndefined();
+		expect(coordinatorScope?.isLive()).toBe(true);
 		expect(scopeOfSession("s-stays")?.isLive()).toBe(true);
 		await shutdown(pi, sibling);
 		expect(scopeOfSession("s-stays")).toBeUndefined();
@@ -957,6 +968,8 @@ describe("#4965 a session's id lookup ends with its session", () => {
 		const disposed = makeCtx({ cwd: project, sessionId: "s-disposed" });
 		await start(pi, primary);
 		await start(pi, disposed);
+		const { scopeOfSession } = await import("../clients/session-scope.js");
+		const disposedScope = scopeOfSession("s-disposed");
 		Object.defineProperty(disposed, "isIdle", {
 			get() {
 				throw new Error(STALE_CTX_MESSAGE);
@@ -966,12 +979,12 @@ describe("#4965 a session's id lookup ends with its session", () => {
 		const next = makeCtx({ cwd: project, sessionId: "s-next" });
 		await start(pi, next);
 
-		const { scopeOfSession } = await import("../clients/session-scope.js");
 		expect(scopeOfSession("s-disposed")).toBeUndefined();
 		expect({
+			disposed: disposedScope?.isLive(),
 			primary: scopeOfSession("m-live")?.isLive(),
 			next: scopeOfSession("s-next")?.isLive(),
-		}).toEqual({ primary: true, next: true });
+		}).toEqual({ disposed: true, primary: true, next: true });
 		await shutdown(pi, next);
 		await shutdown(pi, primary);
 	}, 45_000);
