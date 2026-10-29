@@ -233,6 +233,43 @@ describe("#4943 ast_grep_replace names the session it was called in", () => {
 			"session-sub",
 		]);
 	});
+
+	it("tags a structural apply's rewrites with the calling session's id", async () => {
+		// RECURRENCE GUARDED: #4943 R1. The tool's structural branch
+		// (`insideKind` and its siblings) is a second call site; one that drops
+		// the session queues the subagent's rewrite under the coordinator.
+		recorded.length = 0;
+		const client = new AstGrepClient();
+		(client as unknown as { runner: unknown }).runner = {
+			tempScanDetailedAsync: vi.fn(async () => ({
+				matches: MATCHES,
+				status: 0,
+			})),
+			tempScanWithFixAsync: vi.fn(async () => ({ matches: MATCHES })),
+		};
+		vi.spyOn(client, "ensureAvailable").mockResolvedValue(true);
+		vi.spyOn(client, "formatMatches").mockReturnValue("");
+		const tool = createAstGrepReplaceTool(client);
+
+		await tool.execute(
+			"call-4943-ast-grep-rule",
+			{
+				pattern: "var $X",
+				rewrite: "let $X",
+				lang: "typescript",
+				insideKind: "function_declaration",
+				apply: true,
+			},
+			new AbortController().signal,
+			undefined,
+			{ cwd: ".", sessionManager: { getSessionId: () => "session-sub" } },
+		);
+
+		expect(recorded.map((entry) => entry.sessionId)).toEqual([
+			"session-sub",
+			"session-sub",
+		]);
+	});
 });
 
 /**

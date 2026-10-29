@@ -2786,6 +2786,78 @@ describe("runtime-agent-end deferred formatting", () => {
 			}
 		});
 
+		it("names the draining secondary on its deferred autofix's change-log row", async () => {
+			// RECURRENCE GUARDED: the drain's change-log rows were written under
+			// the coordinator's id, so a subagent's autofix read as the parent's
+			// edit in the change log.
+			const env = setupTestEnvironment("pi-lens-agent-end-4943-autofix-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const filePath = createTempFile(env.tmpDir, "src/app.ts", "let x=1\n");
+				// The Biome writer's agreement gate: config plus lockfile evidence.
+				fs.writeFileSync(path.join(env.tmpDir, "biome.json"), "{}\n");
+				fs.writeFileSync(
+					path.join(env.tmpDir, "package.json"),
+					JSON.stringify({ devDependencies: { "@biomejs/biome": "^1.0.0" } }),
+				);
+				fs.writeFileSync(
+					path.join(env.tmpDir, "package-lock.json"),
+					JSON.stringify({
+						packages: { "node_modules/@biomejs/biome": { version: "1.0.0" } },
+					}),
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferMutation(
+					filePath,
+					env.tmpDir,
+					"edit",
+					env.tmpDir,
+					"autofix",
+					"session-sub",
+				);
+				const biomeClient = {
+					isSupportedFile: () => true,
+					ensureAvailable: async () => true,
+					fixFileAsync: async (fp: string) => {
+						fs.writeFileSync(fp, "const x = 1;\n");
+						return { success: true, changed: true, fixed: 1 };
+					},
+				};
+
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					biomeClient: biomeClient as any,
+					ruffClient: {} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+					currentSessionId: "session-sub",
+					sessionRole: "concurrent-secondary",
+				});
+
+				expect(fs.readFileSync(filePath, "utf8")).toBe("const x = 1;\n");
+				expect(
+					readChangesSince(env.tmpDir, 0).map(({ source, sessionId }) => ({
+						source,
+						sessionId,
+					})),
+				).toEqual([{ source: "autofix", sessionId: "session-sub" }]);
+			} finally {
+				if (previousDataDir === undefined) {
+					delete process.env.PILENS_DATA_DIR;
+				} else {
+					process.env.PILENS_DATA_DIR = previousDataDir;
+				}
+				env.cleanup();
+			}
+		});
+
 		it("leaves the per-cwd actionable-warning quick fixes to the primary", async () => {
 			// RECURRENCE GUARDED: the quick-fix pass reads a per-cwd report, not
 			// a record any session owns; a secondary's settle applying it would
