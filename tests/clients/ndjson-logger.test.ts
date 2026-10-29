@@ -37,7 +37,14 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
+import { piSessionFixture, startPiSession } from "../support/pi-session.js";
 import { removeTempDirSync } from "./test-utils.js";
+
+// #4937 L2: the shutdown-drain case runs on a real pi session (tier 2) under this
+// file's one fixture root (pi-session.ts, "one fixture root per file"). The
+// wedged-drain case stays on the double: its ledger row is written into this
+// test graph, which a path-loaded copy does not share.
+const fixture = piSessionFixture();
 
 // flake-shape: never-settling-wait — the timeout witness must hold a real
 // appendFile promise forever to prove shutdown proceeds at the bound.
@@ -125,9 +132,13 @@ describe("createNdjsonLogger", () => {
 	});
 
 	it("real session_shutdown drains an in-flight writer before exit flushSync", async () => {
-		const { default: registerExtension } = await import("../../index.js");
-		const mock = createPiMock();
-		registerExtension(mock.asExtensionAPI());
+		// Tier 2: the loaded copy's own `session_shutdown` handler runs through
+		// pi's extension runner and returns the bounded NDJSON drain. The writer it
+		// awaits is the process-global one this logger registered into, so the held
+		// append is what the handler must wait for. The emit goes to the runner, not
+		// to `handle.dispose()`: dispose settles the sinks itself after the emit and
+		// would mask a handler that drains nothing.
+		const handle = await startPiSession({ root: fixture.root, responses: [] });
 		let release!: () => void;
 		const held = new Promise<void>((resolve) => {
 			release = resolve;
@@ -142,18 +153,32 @@ describe("createNdjsonLogger", () => {
 		const logger = createNdjsonLogger({ filePath: logFile });
 		logger.log({ kind: "shutdown-witness" });
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		const shutdown = mock.emit(
-			"session_shutdown",
-			{ type: "session_shutdown", reason: "quit" },
-			makeCtx({ cwd: tmpDir, sessionId: "shutdown-witness" }),
-		);
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		release();
-		await shutdown;
+		let shutdownSettled = false;
+		const shutdown = handle.session.extensionRunner
+			.emit({ type: "session_shutdown", reason: "quit" } as never)
+			.then((value) => {
+				shutdownSettled = true;
+				return value;
+			});
+		try {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			// The handler holds the emit while the append is in flight: a shutdown
+			// that returned here would have drained nothing.
+			expect(shutdownSettled).toBe(false);
+			release();
+			await shutdown;
+			// The drain wrote the in-flight line before the handler returned, so the
+			// line is on disk before any synchronous flush of this test's own.
+			expect(readLines(logFile)).toHaveLength(1);
+		} finally {
+			// A failed assertion above must not leave the append held: the handle's
+			// teardown drain waits on this same writer.
+			release();
+		}
 		logger.flushSync();
 		expect(appendFile).toHaveBeenCalled();
 		expect(readLines(logFile)).toHaveLength(1);
-	});
+	}, 60_000);
 
 	it("bounds a wedged shutdown drain and records one degradation", async () => {
 		// Earlier cases call vi.resetModules(), so the static ledger import is a
