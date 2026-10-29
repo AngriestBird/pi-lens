@@ -226,6 +226,12 @@ let control = {};
 try {
 	control = JSON.parse(fs.readFileSync(".fake-stryker/control.json", "utf8"));
 } catch {}
+// #4989: a pass the driver's kill bound must reach (control.dryRunHangMs), and a
+// first real run that spends wall clock so the admission after it sees a budget
+// too small to afford a mutant (control.firstRealRunSleepMs).
+const sleep = (ms) => {
+	if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
 // The two dry-run failures Stryker 10.0.0 logs at ERROR (3-dry-run-executor.js
 // logTimeoutInitialRun / logFailedTestsInInitialRun), then exits 1.
 const DRY_RUN_ERRORS = {
@@ -246,6 +252,7 @@ DRY_RUN_ERRORS.testsQuotingTimeout = [
 	DRY_RUN_ERRORS.timeout,
 ].join("\n");
 if (dryRun) {
+	sleep(control.dryRunHangMs || 0);
 	if (control.dryRunFails) {
 		console.error(DRY_RUN_ERRORS[control.dryRunFails]);
 		process.exit(1);
@@ -262,6 +269,15 @@ if (control.realRunFails) {
 	fs.writeFileSync("stryker.log", DRY_RUN_ERRORS[control.realRunFails] + "\n");
 	process.exit(1);
 }
+// #4989: only the FIRST real run spends the budget, so the retry after it faces
+// what is left.
+const countFile = ".fake-stryker/real-runs";
+let realRuns = 1;
+try {
+	realRuns = Number(fs.readFileSync(countFile, "utf8")) + 1;
+} catch {}
+fs.writeFileSync(countFile, String(realRuns));
+sleep(realRuns === 1 ? control.firstRealRunSleepMs || 0 : 0);
 const files = {};
 for (const pattern of patterns) {
 	const match = /^(.*):(\d+)-(\d+)$/.exec(pattern);
@@ -1389,6 +1405,103 @@ describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
 			fixture.cleanup();
 		}
 	}, 60_000);
+	// Recurrence this guards (#4989 F1): `remainingBudgetMs()` bottoms out at
+	// exactly 0 and `spawnSync` reads `timeout: 0` as NO timeout, so a spent
+	// budget launched the measurement pass with no kill bound. Probe:
+	// `timeout:1 -> error=ETIMEDOUT` against `timeout:0 -> ` a 20 s child that
+	// ran to completion. The fake Stryker hangs its dry run, so only a real kill
+	// bound ends this driver run instead of the harness timeout.
+	it("kills a Stryker child a spent budget would leave unbounded (#4989 F1)", () => {
+		const fixture = buildDriverFixture({
+			covering: true,
+			includeCompiled: false,
+		});
+		try {
+			mkdirSync(join(fixture.root, ".fake-stryker"), { recursive: true });
+			writeFileSync(
+				join(fixture.root, ".fake-stryker", "control.json"),
+				JSON.stringify({ dryRunHangMs: 20_000 }),
+			);
+			// A 0-minute budget is spent before the first Stryker child.
+			const result = runDriverResult(
+				fixture.root,
+				["--base", "main", "--budget-minutes", "0"],
+				10_000,
+			);
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(1);
+			expect(`${result.stdout}${result.stderr}`).toContain(
+				"the 0-minute mutation budget expired before Stryker produced a result",
+			);
+		} finally {
+			fixture.cleanup();
+		}
+	}, 60_000);
+	// Recurrence this guards (#4989, "skip the retry when the retry allowance is
+	// zero"): the first sample stops when the remaining budget affords no mutant
+	// (`allowedMutants === 0`), but the retry did not -- it spawned its count
+	// passes and another full run the budget could not pay for. The fake Stryker
+	// spends the first real run's wall clock, so the budget that reaches the
+	// retry is below the fixed run overhead.
+	it("spends no retry when the remaining budget affords no mutant (#4989)", () => {
+		const fixture = buildDriverFixture({
+			covering: true,
+			includeCompiled: false,
+			manyRanges: 12,
+		});
+		try {
+			const head = String(fixture.git(["rev-parse", "HEAD"])).trim();
+			const ranges = [
+				"scripts/thing.mjs:5-6",
+				...Array.from(
+					{ length: 12 },
+					(_, i) => `scripts/many.mjs:${2 * i + 1}-${2 * i + 1}`,
+				),
+			];
+			const binary = join(fixture.root, "node_modules", ".bin", "stryker");
+			// 5 minutes of fixed overhead, and a 220 s dry run: the remaining budget
+			// (5.5 minutes minus what the run has spent) affords exactly one mutant,
+			// so the sample keeps the one range that holds none.
+			writeFileSync(
+				binary,
+				readFileSync(binary, "utf8").replace(
+					"in 1 seconds (net 12 ms",
+					"in 220 seconds (net 220000 ms",
+				),
+			);
+			const empty = sampleRangesDeterministically(ranges, 1, head).selected;
+			const density = Object.fromEntries(
+				ranges.map((range) => [range, empty.includes(range) ? 0 : 4]),
+			);
+			const total = Object.values(density).reduce((a, b) => a + b, 0);
+			// The uniform estimate keeps no range at all: 13 x 1 / 48 = 0, floored up
+			// to the one range that holds the sample's whole mutant count.
+			expect(Math.floor((ranges.length * 1) / total)).toBe(0);
+			mkdirSync(join(fixture.root, ".fake-stryker"), { recursive: true });
+			writeFileSync(
+				join(fixture.root, ".fake-stryker", "control.json"),
+				JSON.stringify({ density, firstRealRunSleepMs: 40_000 }),
+			);
+			const result = runDriverResult(
+				fixture.root,
+				["--base", "main", "--budget-minutes", "5.5"],
+				120_000,
+			);
+			expect(result.error).toBeUndefined();
+			const calls = fakeStrykerInvocations(fixture.root);
+			const firstReal = calls.findIndex((call) => !call.dryRun);
+			expect(firstReal).toBeGreaterThan(0);
+			// Nothing is spawned after the zero-mutant run: no count pass, no retry.
+			expect(calls).toHaveLength(firstReal + 1);
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain(
+				`sampled 1 of ${ranges.length} ranges deterministically`,
+			);
+			expect(result.stdout).not.toContain("retry sample of");
+		} finally {
+			fixture.cleanup();
+		}
+	}, 120_000);
 	// Recurrence this guards (#3810 F3): the driver's fingerprint, incremental
 	// decision, generated Stryker config and run loop sat past the zero-mutant
 	// exits, so mutants on those added lines survived. This fixture installs a
@@ -2723,12 +2836,15 @@ describe("stryker diff wall-clock budget", () => {
 		// inert -- the runner still cancels the job. The executable proof is the
 		// quoted budget-expiry transcript in the PR body; this pins the wiring in
 		// the driver, which is a top-level script and cannot be imported. Round 2:
-		// the literal `timeout: budgetMs` this pinned before is gone -- the
-		// driver now bounds each Stryker child by the BUDGET REMAINING after
-		// time already spent (the dry-run cost measurement, the build), via
-		// `remainingBudgetMs()` -- so this now pins that function's own use as
-		// the timeout, not the removed literal.
-		expect(driver).toContain("timeout: remainingBudgetMs()");
+		// each Stryker child is killed at the budget REMAINING after time already
+		// spent (the dry-run cost measurement, the build), via `childBudgetMs()`,
+		// which floors a spent budget at the 1 ms `spawnSync` accepts -- it reads
+		// `timeout: 0` as NO timeout (#4989 F1; the spawned case above kills a
+		// hanging child at a 0-minute budget). Pinned over the WHOLE population:
+		// a fourth Stryker child, or one site reverted to the bare remaining
+		// budget, reds here as well as in the spawned case.
+		expect(driver.match(/timeout: childBudgetMs\(\),/g) ?? []).toHaveLength(3);
+		expect(driver).not.toContain("timeout: remainingBudgetMs(),");
 		expect(driver).toContain("--budget-minutes");
 		expect(driver).toContain("mutationRangePatterns");
 		expect(driver).toContain("describeStrykerFailure");

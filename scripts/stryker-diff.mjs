@@ -591,6 +591,15 @@ function remainingBudgetMs() {
 	return Math.max(0, budgetMs - (Date.now() - startedAt));
 }
 
+// #4989 F1: the time every Stryker child is bounded by. `remainingBudgetMs()`
+// runs out at exactly 0, and `spawnSync` reads `timeout: 0` as NO timeout -- so
+// handing the spent value to a spawn launched it with no kill bound. One
+// millisecond is the shortest bound spawnSync accepts, and a child killed that
+// fast still reports the same ETIMEDOUT the budget-expiry wording reads.
+function childBudgetMs() {
+	return Math.max(1, remainingBudgetMs());
+}
+
 // #3810 item 1: keep only the test files that execute a changed line. The
 // import graph (`selection.tests`) is the candidate pool; one vitest process
 // per candidate measures which changed lines it executes, in the coordinates of
@@ -737,7 +746,7 @@ const measureResult = spawnSync(
 	{
 		stdio: ["ignore", "pipe", "pipe"],
 		encoding: "utf8",
-		timeout: remainingBudgetMs(),
+		timeout: childBudgetMs(),
 		killSignal: "SIGTERM",
 	},
 );
@@ -765,7 +774,7 @@ function countSampleMutants(selection) {
 		{
 			stdio: ["ignore", "pipe", "pipe"],
 			encoding: "utf8",
-			timeout: remainingBudgetMs(),
+			timeout: childBudgetMs(),
 			killSignal: "SIGTERM",
 		},
 	);
@@ -1022,7 +1031,7 @@ for (;;) {
 		{
 			stdio: "inherit",
 			encoding: "utf8",
-			timeout: remainingBudgetMs(),
+			timeout: childBudgetMs(),
 			killSignal: "SIGTERM",
 		},
 	);
@@ -1209,39 +1218,47 @@ for (;;) {
 	// entry) must not render as a normal, scoreless "clean pass". round 2
 	// R2-1: before reporting that, try a fresh sample if this run's sample is
 	// the reason, not the changed lines themselves.
-	const plan = sampled
-		? planResample({
-				allPatterns,
-				triedPatterns,
-				keepRangeCount: patterns.length,
-				seed: sha,
-				attemptsSoFar: attempt,
-				maxAttempts: MAX_RESAMPLE_ATTEMPTS,
-				// #4171: a retry holds the same mutant allowance the first sample did,
-				// from the budget that is left now. Without a parsed cost there is no
-				// allowance, and the first sample was the plain range-cap fallback.
-				sample: !costEstimate
-					? undefined
-					: (pool, limit, retrySeed) => {
-							const retryAllowance = estimateAffordableMutants({
-								remainingMs: remainingBudgetMs(),
-								dryRunMs: costEstimate.dryRunMs,
-								fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
-							});
-							const fit = fitSampleToMutantAllowance({
-								patterns: pool,
-								startCount: limit,
-								allowedMutants: retryAllowance,
-								seed: retrySeed,
-								countMutants: countSampleMutants,
-							});
-							console.log(
-								`mutation diff: retry sample of ${fit.selected.length} range(s); ${describeSampledMutants(fit, retryAllowance)}`,
-							);
-							return fit;
-						},
+	//
+	// #4171: a retry holds the same mutant allowance the first sample did, from
+	// the budget that is left now. The allowance is derived ONCE, before the
+	// plan: a retry costs another full run, so an allowance of 0 -- the value the
+	// FIRST sample stops on -- must stop the retry before its sampler spawns a
+	// count pass (#4989). Without a parsed cost there is no allowance, and the
+	// first sample was the plain range-cap fallback.
+	const retryAllowance = costEstimate
+		? estimateAffordableMutants({
+				remainingMs: remainingBudgetMs(),
+				dryRunMs: costEstimate.dryRunMs,
+				fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
 			})
-		: { retry: false };
+		: null;
+	const plan =
+		sampled && retryAllowance !== 0
+			? planResample({
+					allPatterns,
+					triedPatterns,
+					keepRangeCount: patterns.length,
+					seed: sha,
+					attemptsSoFar: attempt,
+					maxAttempts: MAX_RESAMPLE_ATTEMPTS,
+					sample:
+						retryAllowance === null
+							? undefined
+							: (pool, limit, retrySeed) => {
+									const fit = fitSampleToMutantAllowance({
+										patterns: pool,
+										startCount: limit,
+										allowedMutants: retryAllowance,
+										seed: retrySeed,
+										countMutants: countSampleMutants,
+									});
+									console.log(
+										`mutation diff: retry sample of ${fit.selected.length} range(s); ${describeSampledMutants(fit, retryAllowance)}`,
+									);
+									return fit;
+								},
+				})
+			: { retry: false };
 	attempt += 1;
 
 	if (!plan.retry || remainingBudgetMs() <= 0) {
