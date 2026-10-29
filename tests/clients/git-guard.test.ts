@@ -4237,11 +4237,11 @@ describe("#4943: the turn-end delivery slot answers to the session it is address
 		}
 	});
 
-	it("hands a reader with no session (the MCP host) an addressed message, and any reader one no session is named on", () => {
-		// The MCP coordinator's id is per process, so its Stop hook reads
-		// unaddressed: a restarted server still delivers what the previous one
-		// staged. A record that names no session (3.8.74's `{ content }`) goes
-		// to whoever asks, as before.
+	it("hands a reader that names no session an addressed message, and any reader one no session is named on", () => {
+		// A caller that passes no reader identity takes every message (the
+		// contract the MCP host relied on before #4943 R2 gave it an address).
+		// A record that names no session (3.8.74's `{ content }`) goes to
+		// whoever asks, as before.
 		const env = setupTestEnvironment("pi-lens-git-guard-4943-unkeyed-");
 		try {
 			const cache = new CacheManager(false);

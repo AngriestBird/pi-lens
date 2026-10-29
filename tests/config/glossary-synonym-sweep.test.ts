@@ -406,11 +406,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/biome-check.ts": 4,
 		"clients/dispatch/runners/cpp-check.ts": 1,
 		"clients/dispatch/runners/cue-vet.ts": 9,
-		"clients/dispatch/runners/gleam-check.ts": 1,
 		"clients/dispatch/runners/helm-lint.ts": 2,
 		"clients/dispatch/runners/helm-render.ts": 7,
 		"clients/dispatch/runners/oxlint.ts": 3,
-		"clients/dispatch/runners/prisma-validate.ts": 1,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 3,
 		"clients/dispatch/runners/rust-clippy.ts": 1,
 		"clients/dispatch/runners/pyright.ts": 1,
@@ -1572,10 +1570,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/pending-runner-findings.ts": 1,
 		"clients/dispatch/runners/actionlint.ts": 2,
 		"clients/dispatch/runners/ast-grep-napi.ts": 11,
-		"clients/dispatch/runners/biome-check.ts": 9,
+		"clients/dispatch/runners/biome-check.ts": 8,
 		"clients/dispatch/runners/cpp-check.ts": 3,
 		"clients/dispatch/runners/credo.ts": 2,
-		"clients/dispatch/runners/cue-vet.ts": 7,
+		"clients/dispatch/runners/cue-vet.ts": 6,
 		"clients/dispatch/runners/dart-analyze.ts": 1,
 		"clients/dispatch/runners/detekt.ts": 6,
 		"clients/dispatch/runners/dotnet-build.ts": 4,
@@ -1585,7 +1583,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #4309: folded unavailable/absent-command exits remove one status use.
 		// 5 -> 6 (#4522): the exitless-run guard reads the exit status once.
 		"clients/dispatch/runners/fish-indent.ts": 6,
-		"clients/dispatch/runners/gleam-check.ts": 6,
+		"clients/dispatch/runners/gleam-check.ts": 5,
 		"clients/dispatch/runners/go-vet.ts": 5,
 		"clients/dispatch/runners/golangci-lint.ts": 4,
 		"clients/dispatch/runners/hadolint.ts": 3,
@@ -1600,9 +1598,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/oxlint.ts": 11,
 		"clients/dispatch/runners/php-lint.ts": 2,
 		"clients/dispatch/runners/phpstan.ts": 4,
-		"clients/dispatch/runners/prisma-validate.ts": 5,
+		"clients/dispatch/runners/prisma-validate.ts": 4,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 14,
-		"clients/dispatch/runners/pyright.ts": 4,
+		"clients/dispatch/runners/pyright.ts": 3,
 		"clients/dispatch/runners/rubocop.ts": 2,
 		"clients/dispatch/runners/ruff.ts": 2,
 		"clients/dispatch/runners/rust-clippy.ts": 10,
@@ -1621,20 +1619,23 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 14 -> 15 (#4226): the early-return runner result preserves the existing
 		// status field while disclosing a fully path-excluded query set.
 		"clients/dispatch/runners/tree-sitter.ts": 15,
-		"clients/dispatch/runners/trivy-config.ts": 10,
+		// 10 -> 9 (#4130 r2): the shared classifier replaces a status test.
+		"clients/dispatch/runners/trivy-config.ts": 9,
 		"clients/dispatch/runners/utils/availability-policy.ts": 5,
 		"clients/dispatch/runners/utils/candidate-probe.ts": 1,
 		"clients/dispatch/runners/utils/lazy-installer.ts": 3,
 		"clients/dispatch/runners/utils/runner-helpers.ts": 8,
-		"clients/dispatch/runners/utils/spawn-outcome.ts": 9,
+		// 9 -> 10 (#4130 r2): `processCutShort` reads the exit status once.
+		"clients/dispatch/runners/utils/spawn-outcome.ts": 10,
+		// 19 -> 20 (#4130 r2): `faultIfCutShort` builds the one partial-findings `failed` result.
 		"clients/dispatch/runners/utils/tool-failure.ts": 20,
 		"clients/dispatch/runners/vale.ts": 4,
 		"clients/dispatch/runners/yamllint.ts": 2,
-		"clients/dispatch/runners/zig-check.ts": 3,
+		"clients/dispatch/runners/zig-check.ts": 2,
 		// 5 -> 6 (#4484 r2): `reachedNoVerdict` reads the runner result's status.
 		// 6 -> 7 (#4733 r2): `checkedWholeFile` reads each latency row's status.
 		// 7 -> 8 (#4130): `faultResult` builds the one `failed` runner result.
-		"clients/dispatch/types.ts": 8,
+		"clients/dispatch/types.ts": 9,
 		"clients/file-utils.ts": 2,
 		"clients/finding-delivery-gate.ts": 3,
 		"clients/formatters.ts": 8,

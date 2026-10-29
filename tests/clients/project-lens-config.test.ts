@@ -16,6 +16,7 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { resolveLensToolEnabled } from "../../clients/tool-config.js";
 import { removeTempDirSync } from "./test-utils.js";
+import { useConfigPath } from "../support/global-config.js";
 
 // #1333: these config/telemetry warnings no longer reach the terminal — pi owns
 // it — they go to the ndjson sink in `clients/extension-log.ts`. The sink mock
@@ -1008,15 +1009,7 @@ describe("the config-deprecated ledger row survives a warm cache across sessions
 });
 
 describe("a global-only setting's notice names the file the resolver actually reads (#2426 review round 3, S1)", () => {
-	const originalConfigPath = process.env.PI_LENS_CONFIG_PATH;
-
-	afterEach(() => {
-		if (originalConfigPath === undefined) {
-			delete process.env.PI_LENS_CONFIG_PATH;
-		} else {
-			process.env.PI_LENS_CONFIG_PATH = originalConfigPath;
-		}
-	});
+	const setConfigPath = useConfigPath();
 
 	function warnedFor(substring: string): boolean {
 		return (console.error as ReturnType<typeof vi.fn>).mock.calls
@@ -1033,7 +1026,7 @@ describe("a global-only setting's notice names the file the resolver actually re
 			// homedir-anchored: PI_LENS_HOME does not participate (the #2457
 			// split-brain stays a separate issue), and vitest-setup neutralizes the
 			// agent-dir env the resolution does read.
-			delete process.env.PI_LENS_CONFIG_PATH;
+			setConfigPath(undefined);
 			resetGlobalConfigLocationCache();
 			fs.writeFileSync(
 				path.join(tmpDir, ".pi-lens.json"),
@@ -1052,7 +1045,7 @@ describe("a global-only setting's notice names the file the resolver actually re
 		// round 3, S1; the sibling defect the F1 test in
 		// `config-notice-ownership.test.ts` pins for the migration-notice path).
 		const relocated = path.join(tmpDir, "elsewhere", "pi-lens-config.json");
-		process.env.PI_LENS_CONFIG_PATH = relocated;
+		setConfigPath(relocated);
 
 		fs.writeFileSync(
 			path.join(tmpDir, ".pi-lens.json"),

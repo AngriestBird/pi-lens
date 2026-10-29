@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetIgnoredConfigWarnCache } from "../../clients/config-warn.js";
 import { resetUserNotifier } from "../../clients/user-notify.js";
 import { removeTempDirSync } from "./test-utils.js";
+import { useConfigPath } from "../support/global-config.js";
 
 const notices: string[] = [];
 const ledgerRows: Array<{ kind: string; subject: string; code?: string }> = [];
@@ -81,7 +82,7 @@ vi.mock("../../clients/config-resolve.js", async (importOriginal) => {
 });
 
 const roots: string[] = [];
-let previousConfigPath: string | undefined;
+const setConfigPath = useConfigPath();
 let previousHome: string | undefined;
 
 beforeEach(() => {
@@ -89,7 +90,6 @@ beforeEach(() => {
 	resetUserNotifier();
 	ledgerRows.length = 0;
 	fault.throwOnResolve = false;
-	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	previousHome = process.env.PI_LENS_HOME;
 	resetIgnoredConfigWarnCache();
 });
@@ -97,8 +97,6 @@ beforeEach(() => {
 afterEach(() => {
 	resetUserNotifier();
 	fault.throwOnResolve = false;
-	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 	else process.env.PI_LENS_HOME = previousHome;
 	resetIgnoredConfigWarnCache();
@@ -109,9 +107,7 @@ function globalConfigAt(prefix: string, value: unknown): string {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	roots.push(home);
 	const file = path.join(home, ".pi-lens", "config.json");
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, JSON.stringify(value, null, 2));
-	process.env.PI_LENS_CONFIG_PATH = file;
+	setConfigPath(file, JSON.stringify(value, null, 2));
 	process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
 	return file;
 }

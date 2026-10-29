@@ -17,7 +17,6 @@
  * Every case reads what the provider was sent (`handle.requests`) and what the
  * host holds (`getActiveTools`); no value comes from this file's own setup.
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -27,6 +26,7 @@ import {
 	startPiSession,
 	type PiSession,
 } from "./support/pi-session.js";
+import { withGlobalConfig } from "./support/global-config.js";
 
 const fixture = piSessionFixture();
 
@@ -91,29 +91,6 @@ function activeTools(handle: PiSession): string[] {
 	return handle.session.extensionRunner.getActiveTools();
 }
 
-/**
- * Run `body` with `PI_LENS_CONFIG_PATH` naming a global config file under the
- * fixture. The loaded copy reads the global config at its own factory run, so
- * the session must start inside `body`; the `finally` restores the variable.
- */
-async function withGlobalConfig(
-	slug: string,
-	config: Record<string, unknown>,
-	body: () => Promise<void>,
-): Promise<void> {
-	const configPath = path.join(fixture.root, "global", slug, "config.json");
-	fs.mkdirSync(path.dirname(configPath), { recursive: true });
-	fs.writeFileSync(configPath, JSON.stringify(config));
-	const previous = process.env.PI_LENS_CONFIG_PATH;
-	process.env.PI_LENS_CONFIG_PATH = configPath;
-	try {
-		await body();
-	} finally {
-		if (previous === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-		else process.env.PI_LENS_CONFIG_PATH = previous;
-	}
-}
-
 /** The text of one provider request, as its JSON, for literal searches. */
 function requestText(request: unknown): string {
 	return JSON.stringify(request);
@@ -137,7 +114,7 @@ describe("the situational orientation is true under every tools.lazy posture (#4
 		async (posture) => {
 			const slug = posture.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
 			await withGlobalConfig(
-				`4682-${slug}`,
+				path.join(fixture.root, "global", `4682-${slug}`, "config.json"),
 				{ tools: { lazy: posture.lazy } },
 				async () => {
 					const handle = await startPiSession({

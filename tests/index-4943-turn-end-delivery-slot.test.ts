@@ -27,6 +27,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
+import { getProjectDataDir } from "../clients/file-utils.js";
+import {
+	_resetMcpSessionContext,
+	_resetTurnEndChain,
+	acknowledgeTurnEnd,
+	runTurnEnd,
+	runTurnEndForIpc,
+} from "../clients/mcp/session.js";
 import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
 import {
 	_resetTestRunnerDeliveryForTests,
@@ -199,6 +207,61 @@ describe("#4943 R1: a staged turn-end message reaches only the session that stag
 			},
 		);
 	}
+
+	it(
+		"keeps a subagent's staged blocker from the MCP host's Stop pass and lens_turn_end, and hands it to the subagent",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
+		async () => {
+			// RECURRENCE GUARDED: #4943 R2 (the #4961 remainder). The MCP host
+			// read the project's slot with no reader identity, so a Stop pass in
+			// the same project rendered a pi session's staged blocker to the MCP
+			// client as a historical finding, its acknowledge consumed it, and
+			// the pi session's next request got nothing. The MCP server here is
+			// this test process's own copy, beside the pi sessions' loaded one:
+			// the two share only the project cache, as two processes do.
+			const proj = project("mcp");
+			const { primary, secondary } = await stageSubagentBlocker(
+				proj,
+				GUARDED_FLAGS,
+				[],
+				[endTurn("secondary reads its own")],
+			);
+			const record = path.join(
+				getProjectDataDir(proj),
+				"cache",
+				"turn-end-findings.json",
+			);
+			const staged = fs.readFileSync(record, "utf8");
+			expect(JSON.parse(staged)).toMatchObject({
+				consumed: false,
+				deliverTo: secondary.session.sessionManager.getSessionId(),
+			});
+			_resetMcpSessionContext();
+			_resetTurnEndChain();
+			try {
+				const stop = await runTurnEndForIpc(proj);
+				expect(stop.outcome.turnEnd ?? "").not.toContain("theirs.ts");
+				if (stop.deliveryId !== undefined)
+					expect(acknowledgeTurnEnd(proj, stop.deliveryId)).toBe(true);
+				const tool = await runTurnEnd(proj);
+				expect(tool.turnEnd ?? "").not.toContain("theirs.ts");
+				expect(fs.readFileSync(record, "utf8")).toBe(staged);
+			} finally {
+				_resetTurnEndChain();
+				_resetMcpSessionContext();
+			}
+
+			const secondaryBefore = secondary.requests.length;
+			await secondary.prompt("anything new?");
+			expect(userTextsFrom(secondary, secondaryBefore)).toContain(
+				`${UNRESOLVED} — ${THEIRS}`,
+			);
+			expect(primary.errors).toEqual([]);
+			expect(secondary.errors).toEqual([]);
+			await secondary.dispose();
+			await primary.dispose();
+		},
+	);
 
 	it(
 		"hands the subagent its blocker when the primary's turn end writes over the staged one first",

@@ -353,7 +353,6 @@ async function runTurns(
 	});
 }
 
-const previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 const previousInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
 
 beforeAll(() => {
@@ -379,8 +378,6 @@ afterAll(() => {
 	if (previousInstall === undefined)
 		delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
 	else process.env.PI_LENS_DISABLE_LSP_INSTALL = previousInstall;
-	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 });
 
 describe("a cascade neighbour no primary answered for, on the real host (#4403 N2)", () => {

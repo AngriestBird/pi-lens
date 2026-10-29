@@ -52,6 +52,8 @@ import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "./test-utils.js";
+import { useConfigPath } from "../support/global-config.js";
+const setConfigPath = useConfigPath();
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -200,11 +202,10 @@ async function runTurns(
 	turns: readonly Turn[],
 ): Promise<string[][]> {
 	const workspace = makeWorkspace(testCase);
-	const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
 	const configPath = path.join(workspace, "global-config.json");
 	fs.writeFileSync(configPath, "{}\n");
-	process.env.PI_LENS_CONFIG_PATH = configPath;
+	setConfigPath(configPath);
 	process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
 	let shutdown: (() => Promise<unknown>) | undefined;
 	const savedMaxChars = turnEndCap.maxChars;
@@ -252,8 +253,6 @@ async function runTurns(
 		await shutdown?.();
 		await getLSPService().shutdown();
 		resetLSPService();
-		if (savedConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-		else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
 		if (savedInstall === undefined)
 			delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
 		else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;

@@ -132,6 +132,54 @@ describe("trivy-config run() — terraform pass-through", () => {
 
 		expect(result.status).toBe("skipped");
 		expect(result.diagnostics).toEqual([]);
+		// #4130: trivy completed abnormally (it rejected its policy bundle).
+		expect(result.skipFault).toBe("rejected-invocation");
+	});
+
+	// #4130: a trivy that was killed before it exited names a different fault
+	// than one that exited nonzero.
+	it("names a signal death as did-not-run", async () => {
+		safeSpawnAsync.mockResolvedValue({
+			status: null,
+			signal: "SIGKILL",
+			stdout: "",
+			stderr: "",
+		});
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+
+		const result = await runner.run(
+			createCtx("terraform", tfFile, tfCwd) as never,
+		);
+
+		expect(result.status).toBe("skipped");
+		expect(result.skipFault).toBe("did-not-run");
+	});
+
+	// RECURRENCE THIS PREVENTS: #4130 round 2 (PR #4971 thread on trivy-config).
+	// A launch failure resolves with a negative errno status and an `error`
+	// (ENOENT is -2 on Linux), so a `status === null || signal` test named it
+	// `rejected-invocation`. The shared classifier names it `did-not-run`.
+	it("names a failed launch with a numeric errno status as did-not-run", async () => {
+		safeSpawnAsync.mockResolvedValue({
+			status: -2,
+			error: new Error("spawn trivy ENOENT"),
+			stdout: "",
+			stderr: "",
+		});
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+
+		const result = await runner.run(
+			createCtx("terraform", tfFile, tfCwd) as never,
+		);
+
+		expect(result.status).toBe("skipped");
+		expect(result.skipFault).toBe("did-not-run");
 	});
 
 	// #1757 F3: a rejected flag (e.g. the `--no-progress` bug that shipped in

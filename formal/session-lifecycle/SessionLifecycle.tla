@@ -181,6 +181,9 @@
 (*                       inline-blocker records                            *)
 (*   "slotAddressed"     #4943: a request takes the per-project turn-end   *)
 (*                       message only when its own session staged it       *)
+(*   "slotHostAddressed" #4943 R2: the MCP host (another process sharing   *)
+(*                       the project's slot) takes only a message an MCP   *)
+(*                       server staged, to its one address                 *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -191,7 +194,8 @@ CONSTANTS
                     \*    "SecEnd","SecTurn","SecReload","SecFork","Dup",
                     \*    "Interrupt","InterruptPreScope","InterruptUnstarted",
                     \*    "DeferOwn","DrainDefer","TurnWork","TurnEnd",
-                    \*    "SecTurnEnd","ParkTake","Stage","TakeSlot"}
+                    \*    "SecTurnEnd","ParkTake","Stage","TakeSlot",
+                    \*    "McpStage","McpTake"}
     Writers,        \* the writers in play, a subset of
                     \*   {"read","secRead","heartbeat","lsp","widget",
                     \*    "advisory","activate","stateW","debounce",
@@ -1644,6 +1648,9 @@ WorkKinds  == {"ranges", "cascade", "runner"}
 \* (the `turn-end-findings` record, #4943). A turn_end never drains it; the
 \* next request takes it (`TakeSlot`).
 SlotKinds  == {"staged"}
+\* #4943 R2: the MCP host, a reader and stager of the slot outside every pi
+\* scope (another process on the same project cache). Not a ticket.
+Mcp == 0
 
 M4Kinds(x) == IF x \in {"stateW", "debounce"} THEN StateKinds ELSE {"-"}
 
@@ -1887,6 +1894,32 @@ TakeSlot ==
     /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
                    pkOut>>
 
+\* #4943 R2: an MCP server's turn end (`lens_turn_end`, a Stop pass with
+\* nothing cached) stages its message in the same slot, replacing what is
+\* there. Its address is one constant for every server process
+\* (`MCP_DELIVERY_ADDRESS`), so the record names the host, not a process.
+McpStage ==
+    /\ "McpStage" \in Transitions /\ primary # 0 /\ pend.k = "none"
+    /\ co' = [co EXCEPT ![last] = {r \in @ : r.k # "staged"}
+                                    \cup {[k |-> "staged", o |-> Mcp]}]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
+                   consumed, pkOut>>
+
+\* #4943 R2: an MCP reader (`lens_turn_end`'s consume, the Stop pass's peek
+\* and the acknowledge that commits it, taken here as one step) takes the
+\* staged message. Before "slotHostAddressed" it named no reader, so it took
+\* a pi session's message. With it, it takes only the host's own, whichever
+\* server process staged it, so a restarted server still delivers.
+McpTake ==
+    /\ "McpTake" \in Transitions /\ primary # 0 /\ pend.k = "none"
+    /\ \E r \in co[last] :
+          /\ r.k = "staged"
+          /\ Has("slotHostAddressed") => r.o = Mcp
+          /\ consumed' = consumed \cup {[k |-> r.k, o |-> r.o, by |-> Mcp]}
+          /\ co' = [co EXCEPT ![last] = @ \ {r}]
+    /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,
+                   pkOut>>
+
 \* Actions that move no #3855 r2 variable keep them in Next.
 Next ==
     \/ (\E k \in {"fork", "clone"} : BeforeFork(k) /\ UNCHANGED r2V) /\ UNCHANGED m4V
@@ -1932,6 +1965,8 @@ Next ==
     \/ TurnEnd
     \/ Stage
     \/ TakeSlot
+    \/ McpStage
+    \/ McpTake
 
 Spec == Init /\ [][Next]_vars
 
@@ -1947,7 +1982,8 @@ TypeOK ==
     /\ slot.reason \in {"-"} \cup SlotReasons
     /\ \A s \in Stores : \A r \in Reasons : Policy(s, r) \in Actions
     /\ \A t \in Tickets :
-          co[t] \subseteq [k : StateKinds \cup WorkKinds \cup SlotKinds, o : Tickets]
+          co[t] \subseteq [k : StateKinds \cup WorkKinds, o : Tickets]
+                    \cup [k : SlotKinds, o : Tickets \cup {Mcp}]
     /\ \A t \in Tickets : dq[t] \subseteq [o : Tickets, e : Nat]
     /\ \A t \in Tickets : pk[t] \subseteq [o : Tickets, k : Files \cup {"-"}]
     /\ \A x \in M4Writers : mw[x].pc \in {"idle", "flight", "landed", "dropped"}
@@ -1964,10 +2000,11 @@ NoCrossSessionState ==
     \* M4: the live coordinator generation's work records come from its own
     \* scope or a concurrent subagent's (a shared coordinator, by design); a
     \* record from another primary scope is a retired session's write that
-    \* landed in the live one (#3759's rows 7, 12, 14, 15, 16).
+    \* landed in the live one (#3759's rows 7, 12, 14, 15, 16). The MCP host's
+    \* staged message is no pi scope's (#4943 R2).
     /\ \A t \in Tickets :
           st[t] = "live" =>
-              \A r \in co[t] : r.o = t \/ role[r.o] = "secondary"
+              \A r \in co[t] : r.o = t \/ r.o = Mcp \/ role[r.o] = "secondary"
 
 \* The design's NoOffBranchFact (#3521): a live scope's own-lineage facts
 \* name entries on its current branch.
@@ -2023,7 +2060,8 @@ SecondaryIsolation ==
     \* own scope's work, so a subagent's never clears the primary's worklist,
     \* cascade runs or pending runner findings, and the primary's never takes
     \* a subagent's. #4943: nor does a request take the turn-end message
-    \* another session's turn_end staged.
+    \* another session's turn_end staged, nor (R2) the MCP host one a pi
+    \* session's turn_end staged, nor a pi request the MCP host's.
     /\ \A c \in consumed : c.o = c.by
 
 \* F2: the slot is taken only by a primary start that replaced the scope
