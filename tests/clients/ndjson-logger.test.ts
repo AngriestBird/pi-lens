@@ -66,7 +66,8 @@ let logFile: string;
 // home the session writes to: the fixture's `home/`, or the setup's per-worker
 // home that this graph's sinks resolved at first import, before the tier-2 pin
 // (the inline-factory session shares them). Anything else reds the case in
-// `afterEach`, so a writer that outlives its own case in this file still fails.
+// `afterEach`, so a writer that outlives its own case and writes outside those
+// homes still fails.
 const realAppendFile = fs.promises.appendFile.bind(fs.promises);
 const caseSink: { appendFile: typeof fs.promises.appendFile } = {
 	appendFile: realAppendFile,
