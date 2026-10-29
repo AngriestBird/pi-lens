@@ -42,6 +42,7 @@ import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
 } from "../clients/session-lifecycle.js";
+import { type SessionScope, scopeOfSession } from "../clients/session-scope.js";
 import {
 	fauxAssistantMessage,
 	fauxText,
@@ -273,6 +274,50 @@ describe("#4704 a primary and a sibling on separate activations", () => {
 			expect.objectContaining({ subject: "no-shutdown", count: 2 }),
 		]);
 	}, 60_000);
+
+	it("ends the scope of each subagent pi disposed without a shutdown at the next session start", async () => {
+		// #4965 verify V1: the session-id lookup is a process-wide index, and
+		// pi's `AgentSession.dispose()` runs no `session_shutdown`, so nothing
+		// gave a disposed subagent's key back: every one kept its scope and its
+		// cells (the turn's `memory-turn-end` among them) for the life of the
+		// process, where #2442 had capped them at 32 sessions.
+		const primary = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "disposed-scope", "primary"),
+			responses: [fauxAssistantMessage(fauxText("primary ok"))],
+		});
+		const primaryId = primary.session.sessionManager.getSessionId();
+		const subagents: Array<{ id: string; scope: SessionScope | undefined }> =
+			[];
+		for (const name of ["sub-1", "sub-2", "sub-3"]) {
+			const sub = await startPiSession({
+				root: fixture.root,
+				cwd: path.join(fixture.root, "disposed-scope", name),
+				responses: [fauxAssistantMessage(fauxText(`${name} ok`))],
+			});
+			await sub.prompt("work");
+			const id = sub.session.sessionManager.getSessionId();
+			subagents.push({ id, scope: scopeOfSession(id) });
+			sub.session.dispose();
+		}
+
+		const next = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "disposed-scope", "next"),
+			responses: [fauxAssistantMessage(fauxText("next ok"))],
+		});
+
+		expect(
+			subagents.map(({ id, scope }) => ({
+				bound: scopeOfSession(id) !== undefined,
+				retiredBy: scope?.retiredBy(),
+			})),
+		).toEqual(subagents.map(() => ({ bound: false, retiredBy: "disposed" })));
+		expect(scopeOfSession(primaryId)?.isLive()).toBe(true);
+		await next.dispose();
+		await primary.dispose();
+		expect(scopeOfSession(primaryId)).toBeUndefined();
+	}, 90_000);
 
 	it("admits a /resume into another root as primary while the sibling is live", async () => {
 		// Review F1 on #4708: a primary that left while a sibling lived kept

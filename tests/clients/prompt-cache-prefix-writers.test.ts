@@ -35,11 +35,12 @@
  */
 import * as fs from "node:fs";
 import { describe, expect, it } from "vitest";
+import { clearCachePrefixSession } from "../../clients/cache-observability.js";
 import {
 	logCacheUsage,
 	observeCachePrefix,
 	resetCachePrefixObservation,
-} from "../../clients/cache-observability.js";
+} from "../support/cache-session-scopes.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -282,8 +283,11 @@ describe("#4687 prefix writers keep the provider's cached head", () => {
 			// Replay the collapsing provider's price for the same four requests and
 			// run the production observer/classifier over them, exactly as the
 			// loaded copy does for the raw requests.
-			resetCachePrefixObservation();
 			const sessionId = handle.session.sessionManager.getSessionId();
+			// The real session start already observed this id; start the replay from
+			// the empty state the old whole-table reset gave (#4965: the production
+			// per-session clear, which a session's shutdown runs).
+			clearCachePrefixSession(sessionId);
 			const prompts = requests.map((request) => collapsedPrompt(request));
 			const rows: Array<{ cacheRead: number; input: number }> = [];
 			for (let index = 0; index < requests.length; index += 1) {
@@ -341,8 +345,11 @@ describe("#4687 prefix writers keep the provider's cached head", () => {
 			expect(JSON.stringify(injecting[0])).toBe(JSON.stringify(before[0]));
 			expect(collapsedHead(injecting)).toBe(collapsedHead(before));
 
-			resetCachePrefixObservation();
 			const sessionId = handle.session.sessionManager.getSessionId();
+			// The real session start already observed this id; start the replay from
+			// the empty state the old whole-table reset gave (#4965: the production
+			// per-session clear, which a session's shutdown runs).
+			clearCachePrefixSession(sessionId);
 			observeCachePrefix(before, 0, sessionId);
 			logCollapseUsage(sessionId, { cacheRead: 0, input: 4_000 }, 0);
 			observeCachePrefix(injecting, 1, sessionId);
@@ -396,8 +403,11 @@ describe("#4687 prefix writers keep the provider's cached head", () => {
 			);
 			expect(JSON.stringify(after[0])).toBe(JSON.stringify(before[0]));
 
-			resetCachePrefixObservation();
 			const sessionId = handle.session.sessionManager.getSessionId();
+			// The real session start already observed this id; start the replay from
+			// the empty state the old whole-table reset gave (#4965: the production
+			// per-session clear, which a session's shutdown runs).
+			clearCachePrefixSession(sessionId);
 			const prompts = [collapsedPrompt(before), collapsedPrompt(after)];
 			observeCachePrefix(before, 0, sessionId);
 			// The pre-reload turn is a HEALTHY cached read: the baseline a miss is

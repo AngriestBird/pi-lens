@@ -1237,6 +1237,27 @@ The model has no disposed holder: only T can be disposed, and T never holds
 the registration. The last leave's release of a held registration whose
 holder pi disposed is pinned by the tier-2 witness instead.
 
+#4965 (verify V1 on #4972) adds the session-id lookup: a process-wide index
+from a session's key to its scope (`clients/session-scope.ts`), so a key
+nobody gives back holds an ended session's scope and cells for the life of
+the process. `bound` is the set of contexts whose key the index names (R's
+bind takes M's shared key), and the `leaked` ghost flags a start or a leave
+after which a context that left and is listed nowhere, or that pi disposed,
+is still bound. `NoLeakedBinding` forbids it. `DisposeT` stays lazy: T's key
+goes at the next process read. Three constants, each as-built `TRUE`, and
+`Pre4965KeysKept` sets all three `FALSE` (#4972 r1) and violates
+`NoLeakedBinding` (S leaves A before M):
+
+- `UnbindAtLeave`: every leave gives its key back. `= FALSE` is r1, where
+  only the activation's last leave did (through its retire); alone it is
+  violated by S leaving A before M.
+- `DisposalUnbinds`: a process read that finds a member pi disposed gives
+  its key back. `= FALSE` only counted it; alone it is violated when T is
+  disposed and M's subagent S starts.
+- `SweepAtStart`: every start reads the process. `= FALSE` read it only at a
+  full start and a leave; alone it is violated on the same schedule: a run
+  of subagent starts never finds the disposed ones.
+
 ### TurnStateOwner (#4751)
 
 `TurnStateOwner` models who owns the turn-state worklist inside one process.
