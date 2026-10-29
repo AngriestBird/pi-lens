@@ -266,4 +266,36 @@ describe("#4943 R2: the MCP host reads the turn-end slot as its own address", ()
 		expect(foreign.outcome.turnEnd).toBeUndefined();
 		expect(stored()).toBe(before);
 	});
+
+	it("acknowledges a deferred Stop pass only for the MCP host, not a pi turn end staged since", async () => {
+		// RECURRENCE GUARDED: #4943 R2, the deferred commit (`runTurnEndNowImpl`
+		// in `clients/mcp/session.ts`, reached when a Stop pass finds nothing
+		// cached and stages its own turn end). Its acknowledge once passed no
+		// reader and no address, and `addressedElsewhere` admits every message
+		// to a reader that names no session, so a pi turn end that staged
+		// between the Stop reply and its ack lost its message to the MCP ack.
+		const cache = new CacheManager(false);
+		handleTurnEnd.mockImplementationOnce(async () => {
+			stage(cache, {
+				content: "the MCP turn's advisory",
+				deliverTo: MCP_DELIVERY_ADDRESS,
+			});
+			return undefined;
+		});
+		const delivery = await runTurnEndForIpc(tmpDir);
+		expect(handleTurnEnd).toHaveBeenCalledTimes(1);
+		expect(delivery.outcome.turnEnd).toContain("the MCP turn's advisory");
+		expect(delivery.deliveryId).toBeTruthy();
+		const piStaged = stage(cache, {
+			content: "Unresolved from this turn — src/pi.ts",
+			hasBlockers: true,
+			sessionId: PI_SESSION,
+			deliverTo: PI_SESSION,
+			consumed: false,
+		});
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId as string)).toBe(
+			true,
+		);
+		expect(stored()).toBe(piStaged);
+	});
 });
