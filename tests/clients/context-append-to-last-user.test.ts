@@ -2,15 +2,15 @@
  * Tests for #3693: Appending context injection to active user prompt to preserve KV cache
  * for local models (llama.cpp / Qwen) and prefix-caching providers.
  *
- * TWO TIERS (#4632). Three cases run through a REAL pi session
+ * TWO TIERS (#4632). Four cases run through a REAL pi session
  * (`tests/support/pi-session.ts`, tier 2): the extension is the built
  * `index.js` loaded by pi's own loader, and the observable is the message the
  * SCRIPTED MODEL received, after pi's own request processing — a string
- * prompt, an image attachment (the host's own `prompt(text, { images })`), and
- * a trailing tool result. Every other case here asserts pi-lens's own
- * return-value shaping for transcripts a scripted provider cannot produce — an
- * empty-string prompt, an empty array, a custom `{ weird: true }` content
- * object, an empty transcript — so those stay on the pi double, which is the
+ * prompt, an empty string prompt (#4913 L3), an image attachment (the host's own
+ * `prompt(text, { images })`), and a trailing tool result. Every other case here
+ * asserts pi-lens's own return-value shaping for transcripts a scripted provider
+ * cannot produce — an empty array, a custom `{ weird: true }` content object, an
+ * empty transcript — so those stay on the pi double, which is the
  * cheaper and only possible driver for them. Each of those direct-handler cells
  * now carries the host's real system head (`makeContextWithSystemEvent`), so its
  * index positions are the shape pi actually sends (#4631 round 6, R6-1); the
@@ -159,41 +159,32 @@ describe("context injection appends to last user message (#3693)", () => {
 	it(
 		"handles empty string user prompt without creating leading newline",
 		async () => {
-			const { context } = await loadContextHandler();
-
+			// Tier 2 (#4913 L3): the real session sends the empty prompt as pi builds
+			// it, so the claim is the request the scripted model receives. pi keeps
+			// the empty text block, and the injected block after it starts with the
+			// delimiter, not with a newline.
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd: sessionCwd("empty-prompt"),
+				startupMode: "quick",
+				responses: [fauxAssistantMessage(fauxText("done"))],
+			});
 			new CacheManager(false).writeCache(
 				"session-start-guidance",
 				{ content: "Guidance text" },
-				tmpDir,
+				handle.cwd,
 			);
 
-			const emptyPrompt = { role: "user", content: "" };
-			const existing = [emptyPrompt];
-			const head = makeSystemHead();
+			await handle.prompt("");
 
-			const result = (await context(
-				makeContextWithSystemEvent(existing, head),
-				makeCtx({ cwd: tmpDir, sessionId: "sess-2" }),
-			)) as { messages: Array<{ role: string; content: unknown }> };
-
-			expect(result).toBeDefined();
-			expect(result.messages).toHaveLength(2);
-			// #4631 round 6 (R6-1): the host's request leads with the system head,
-			// which the handler must hand back untouched — the user prompt and the
-			// injected block follow it.
-			// Compared against a FRESH builder output, not the event's own object: a
-			// handler that mutated the head in place would pass the reference check.
-			expect(result.messages[0]).toEqual(makeSystemHead());
-			expect(result.messages[0].role).toBe("system");
-			const last = result.messages[1];
+			const last = handle.requests[0].at(-1);
+			if (!last) throw new Error("the empty prompt sent no request");
 			expect(last.role).toBe("user");
-			expect(typeof last.content).toBe("string");
-			expect((last.content as string).startsWith("\n")).toBe(false);
-			expect(last.content).toBe(
-				"[pi-lens automated context — not a user request]\n\nGuidance text",
-			);
-			expect(last).not.toBe(emptyPrompt);
-			expect(emptyPrompt.content).toBe("");
+			expect(last.content as ContentBlock[]).toEqual([
+				{ type: "text", text: "" },
+				{ type: "text", text: `${INJECTION_DELIMITER}\n\nGuidance text` },
+			]);
+			expect(handle.errors).toEqual([]);
 		},
 		TIMEOUT_MS,
 	);

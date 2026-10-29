@@ -73,8 +73,9 @@ const CLASS_VOCABULARY =
 
 const SPECIFIER_POSITION =
 	/\b(?:from|import|require|mock|doMock|unmock|importActual|importMock)\s*\(?\s*(["'`])((?:(?!\1)[^\n\\]|\\.)*)\1/g;
-const ENTRY_IDENTIFIER =
-	/\b(?:createPiMock|makeStaleCtx|SESSION_START_TEST_BUDGET_MS|STALE_CTX_MESSAGE)\b/;
+// `makeStaleCtx` and `STALE_CTX_MESSAGE` moved to tests/support/stale-ctx.ts
+// (#4913 L1): naming them no longer loads the double, so they are not entries.
+const ENTRY_IDENTIFIER = /\b(?:createPiMock|SESSION_START_TEST_BUDGET_MS)\b/;
 const ESCAPE = /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g;
 
 /** Does this source still use the double? For the stale direction only. */
@@ -247,7 +248,6 @@ describe("usesPiMock (stale direction): spellings and non-uses", () => {
 		"escaped specifier": `import { makeCtx } from "./support/pi${bs}x2Dmock.js";`,
 		"unicode-escaped specifier": `import { makeCtx } from "./support/pi${bs}u002Dmock.js";`,
 		"entry identifier": `const pi = createPiMock();`,
-		"STALE_CTX_MESSAGE only": `expect(msg).toBe(STALE_CTX_MESSAGE);`,
 		"after a comment": `/* tier 2 */ import { makeCtx } from "./pi-mock.js";`,
 		"after a url string": `const url = "http://x"; import "../support/pi-mock.js";`,
 	};
@@ -270,6 +270,9 @@ describe("usesPiMock (stale direction): spellings and non-uses", () => {
 		// tests/scripts/pre-push-targeted-tests.test.ts for naming a sibling path.
 		"sibling module whose name starts with the token": `"tests/support/pi-mock-importers.ts",`,
 		"import of the admit-list module": `import { PI_MOCK_IMPORTERS } from "../support/pi-mock-importers.js";`,
+		// #4913 L1: the stub moved to tests/support/stale-ctx.ts, so naming it is
+		// not a use of the double.
+		"stale-ctx stub name only": `expect(msg).toBe(STALE_CTX_MESSAGE);`,
 	};
 	for (const [name, source] of Object.entries(unusedPlants)) {
 		it(`does not use: ${name}`, () => {
