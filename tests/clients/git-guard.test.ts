@@ -1753,6 +1753,9 @@ describe("#4725: the record's writers read it whatever its age", () => {
 			["4738-carried-turn-end-findings.json", false, false],
 			// #4750: the stamped record, its project-lane partition long expired.
 			["4750-stamped-turn-end-findings.json", false, false],
+			// #4943: the --lens-guard-off writer's record now names the session
+			// it is addressed to; an address claims nothing, so it still retires.
+			["4943-addressed-guard-off-turn-end-findings.json", false, true],
 		];
 		const env = setupTestEnvironment("pi-lens-git-guard-4725-corpus-");
 		try {
