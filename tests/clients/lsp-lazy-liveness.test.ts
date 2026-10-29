@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useGlobalConfig } from "../support/global-config.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import {
 	endTurn,
@@ -15,7 +14,6 @@ import {
 	startPiSession,
 } from "../support/pi-session.js";
 
-const setGlobalConfig = useGlobalConfig();
 const fixture = piSessionFixture();
 
 describe("LSP session warm/first-use liveness (#1394)", () => {
@@ -78,7 +76,6 @@ describe("LSP session warm/first-use liveness (#1394)", () => {
 			touchFile,
 			supportsLSP: () => true,
 		});
-		setGlobalConfig({ format: { enabled: false } });
 		// Tier 2 (#4937 L6): a real pi session over the factory this test imported
 		// after the doMocks above. `no-lsp` is a default of the tier, so the case
 		// turns it off: the claim is that the first edit after a start reaches the

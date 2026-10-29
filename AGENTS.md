@@ -717,9 +717,8 @@ label: slice 7 classified the last three with the probe that keeps each on the
 double, and every roadmap slice is closed, so a reopened placeholder reds
 instead of naming work no slice owns. The five classes cover the list's 46
 rows (52 at the slice 7 recording; slice 7 moved the
-`index-smells-rollup-wiring` row out with its file, and #4937 L6 moved six
-`internal-seam` files to tier 2's inline-factory mode), and this command
-reproduces them:
+`index-smells-rollup-wiring` row out with its file, and the inline-factory mode
+moved six `internal-seam` files to tier 2), and this command reproduces them:
 `grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
 The double throws at load for a test file not on the list, so a new user fails
 however it imports it. The list only shrinks:

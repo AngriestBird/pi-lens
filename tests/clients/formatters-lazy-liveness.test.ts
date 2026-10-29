@@ -88,7 +88,7 @@ describe("formatter session warm/first-use liveness (#1394)", () => {
 			getStatus: () => [],
 			getAliveServerIds: () => [],
 		});
-		setGlobalConfig({ format: { mode: "immediate" }, lsp: { enabled: false } });
+		setGlobalConfig({ format: { mode: "immediate" } });
 		// Tier 2 (#4937 L6): a real pi session over the factory this test imported
 		// after the doMocks above. `no-autoformat` is a default of the tier, so the
 		// case turns it off: the claim is that the immediate format runs on the

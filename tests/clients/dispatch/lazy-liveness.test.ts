@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useGlobalConfig } from "../../support/global-config.js";
 import { installLspServiceDouble } from "../../support/lsp-service-seam.js";
 import {
 	endTurn,
@@ -27,7 +26,6 @@ const dispatchResult = {
 	hasBlockers: false,
 };
 
-const setGlobalConfig = useGlobalConfig();
 const fixture = piSessionFixture();
 
 describe("dispatch session warm/first-use liveness (#1394)", () => {
@@ -81,7 +79,6 @@ describe("dispatch session warm/first-use liveness (#1394)", () => {
 			getStatus: () => [],
 			getAliveServerIds: () => [],
 		});
-		setGlobalConfig({ lsp: { enabled: false }, format: { enabled: false } });
 		// Tier 2 (#4937 L6): a real pi session over the factory this test imported
 		// after the doMocks above, so the mocked dispatch seam is the one the
 		// extension calls. The model reads, then edits: pi's own tool result is

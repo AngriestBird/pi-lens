@@ -22,7 +22,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useGlobalConfig } from "../support/global-config.js";
 import {
 	endTurn,
 	readTarget,
@@ -162,7 +161,6 @@ async function startSpied(options: {
 		await import("../../clients/session-lifecycle.js");
 	_resetSessionLifecycleForTests();
 	await options.prepare?.();
-	setGlobalConfig({ format: { enabled: false }, lsp: { enabled: false } });
 	let demandsAfterFactory: readonly string[] = [];
 	const toolCallWindows: string[][] = [];
 	const handle = await startPiSession({
@@ -205,7 +203,6 @@ afterEach(() => {
 	vi.resetModules();
 });
 
-const setGlobalConfig = useGlobalConfig();
 const fixture = piSessionFixture();
 
 describe("#2467 — activation never loads the analyzer bootstrap", () => {

@@ -844,16 +844,20 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			let homeAtImport: string | undefined;
 			// An earlier case in this file already pinned the same home, so the
 			// variable is cleared: only a pin made BY this start can satisfy the read.
-			delete process.env.PI_LENS_HOME;
-			await startPiSession({
-				root: fixture.root,
-				cwd: path.join(fixture.root, "inline-pin", "proj"),
-				inlineFactory: async () => {
-					homeAtImport = process.env.PI_LENS_HOME;
-					return (await import("../../index.js")).default;
-				},
-				responses: [fauxAssistantMessage(fauxText("ready"))],
-			});
+			vi.stubEnv("PI_LENS_HOME", undefined);
+			try {
+				await startPiSession({
+					root: fixture.root,
+					cwd: path.join(fixture.root, "inline-pin", "proj"),
+					inlineFactory: async () => {
+						homeAtImport = process.env.PI_LENS_HOME;
+						return (await import("../../index.js")).default;
+					},
+					responses: [fauxAssistantMessage(fauxText("ready"))],
+				});
+			} finally {
+				vi.unstubAllEnvs();
+			}
 			expect(homeAtImport).toBe(path.join(fixture.root, "home"));
 		});
 	});
