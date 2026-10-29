@@ -328,7 +328,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"`handleTurnEnd` sits beneath it.",
 		owner: "#2523 slice 2",
 	},
-	"clients/mcp/session.ts#runTurnEndForIpcNow:fceb216b~09a23787": {
+	"clients/mcp/session.ts#runTurnEndForIpcNow:fceb216b~1d78168d": {
 		family: "hook-await",
 		site: "turn_end",
 		reason:

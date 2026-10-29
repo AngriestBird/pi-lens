@@ -64,8 +64,15 @@
   record with neither field goes to whoever asks. The sibling
   `test-runner-findings` slot is read with the same id
   (`deliveryEligible.sessionId`): a concurrent secondary never pins the
-  coordinator id. The MCP host reads unaddressed: its coordinator id is per
-  process, and a restarted server still delivers what the last one staged.
+  coordinator id. The MCP host stages to one address shared by every server
+  process (`MCP_DELIVERY_ADDRESS`) and reads as that address, with its
+  coordinator id, reassigned at each session start, for a record whose rewrite
+  left only the owner: a restarted server still delivers what the last one
+  staged, and neither its Stop pass nor its acknowledge takes a pi session's
+  message. The exception is a record a commit-gate rewrite replaced: it holds
+  only the owner id, so a server whose id was reassigned since (a restart, or
+  a later `pilens_session_start`) skips it and leaves it in place (accepted
+  residual, #4973).
   A staged message another writer replaces before its owner asks is not
   kept; the owner's next turn end composes its unresolved blockers again,
   since the dedupe's last writer was the other session, but a one-shot
