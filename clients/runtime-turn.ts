@@ -1145,6 +1145,25 @@ function resyncCommitGateForReadOnlyTurn(args: {
 	});
 }
 
+/**
+ * #1950/#4990: the delivery cap for a demoted record's OWN drift axis, or
+ * `undefined` for a `past-eof` demotion (#1944 retires that after one delivery
+ * and keeps no count) and for a record a sibling gate demoted.
+ */
+function driftDeliveryCap(
+	staleReason: "dependency-drift" | "past-eof" | "self-drift" | undefined,
+): { axis: "dependency-drift" | "self-drift"; cap: number } | undefined {
+	if (staleReason !== "dependency-drift" && staleReason !== "self-drift")
+		return undefined;
+	return {
+		axis: staleReason,
+		cap:
+			staleReason === "self-drift"
+				? SELF_DRIFT_MAX_DELIVERIES
+				: DEPENDENCY_DRIFT_MAX_DELIVERIES,
+	};
+}
+
 export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const {
 		ctxCwd,
@@ -1835,16 +1854,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// after this ONE delivery instead of re-serving it for the rest of the
 			// session.
 			//
-			// #4990 gap 2: a demotion is a CHANNEL change, never an exemption from
-			// the agent's own dispositions. This branch used to push the record's
-			// already-rendered `summary` verbatim, so a finding marked
-			// `false-positive` (or suppressed) while the record was live came back
-			// here on every turn end — the one PUSH surface the marks could not
-			// reach. Run the SAME stack the live branch uses (#3246), then render
-			// the survivors through the demoted-body renderer. An empty survivor
-			// set is the mark working: drop the part, and hand the file to the
-			// per-turn policy tally and the commit-gate resync exactly as the live
-			// branch does.
+			// #4990 gap 2: the demoted channel runs the SAME policy stack as the
+			// live one (#3246), so a mark silences it too; an empty survivor set
+			// drops the part and hands the file to the gate resync below.
 			const policy = applyInlineBlockerPolicy(record, cwd);
 			inlinePolicyEntries.push({ ...tally, stale: true, outcome: policy });
 			if (policy.body === undefined) {
@@ -1862,33 +1874,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// #1950/#4990: which axis's delivery cap applies, if this demotion has
 			// one. `past-eof` retires after its own single delivery (#1944) and has
 			// no count.
-			const driftAxis =
-				staleReason === "self-drift" || staleReason === "dependency-drift"
-					? staleReason
-					: undefined;
-			const driftCap =
-				driftAxis === "self-drift"
-					? SELF_DRIFT_MAX_DELIVERIES
-					: DEPENDENCY_DRIFT_MAX_DELIVERIES;
+			const drift = driftDeliveryCap(staleReason);
 			let retirementNote: string | undefined;
 			if (retires) {
 				retirementNote = formatRetirementNote(deadLines);
-			} else if (driftAxis !== undefined) {
-				// #1950/#4990: a drift demotion is recoverable (a fresh dispatch can
-				// confirm or clear it), so it does NOT retire after one delivery like
-				// past-EOF — but nothing capped how many times the SAME demoted-but-
-				// unconfirmed record re-serves. #1950 capped the import axis; #4990
-				// caps the self axis, whose re-arm covers only a file whose bytes
-				// COME BACK, not the ordinary case of an agent rewrite that does not.
-				//
-				// The count driving THIS render is a peek (fix-round F1): the actual
-				// increment is the hold's `onDelivered`, committed only once this
-				// turn's content is known to reach the agent, so neither a
-				// suppressed turn's tentative render nor a part the cap cut ever
-				// advances the stored count.
+			} else if (drift !== undefined) {
+				// #1950/#4990: a drift demotion is recoverable (its coordinates are
+				// still in bounds), so it does not retire after one delivery like the
+				// past-EOF case; the cap stops the repeat re-serve of a record that
+				// never heals. The count is a PEEK (fix-round F1): the hold's
+				// `onDelivered` commits it only once the content reaches the agent,
+				// so a suppressed turn or a part the cap cut never advances it.
 				const tentativeCount =
 					runtime.peekInlineBlockerStaleDeliveryCount(bPath) + 1;
-				if (tentativeCount >= driftCap) {
+				if (tentativeCount >= drift.cap) {
 					retirementNote = formatDeliveryCapNote(tentativeCount);
 				}
 			}
@@ -1902,14 +1901,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					part: advisoryPart,
 					onDelivered: retirePastEofOnDelivery(bPath, deadLines, displayPath),
 				});
-			} else if (driftAxis !== undefined) {
+			} else if (drift !== undefined) {
 				deliveryHolds.push({
 					part: advisoryPart,
 					onDelivered: countDriftDeliveryOnDelivery(
 						bPath,
 						displayPath,
-						driftAxis,
-						driftCap,
+						drift.axis,
+						drift.cap,
 					),
 					skipOnSuppressed: true,
 				});
@@ -6122,20 +6121,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const findingParts = composedParts.map((part) => part.text);
 	let heldSections = 0;
 	const logTurnEndRow = (deliverySuppressed?: "duplicate"): void => {
+		// #1622 review M2: a pending stale secret is NOT a clean turn. It gets its
+		// own result rather than being promoted to `blockers_found`, which would
+		// undo the demotion the freshness gate just made.
+		let turnResult: "clean" | "blockers_found" | "stale_secrets_pending" =
+			"clean";
+		if (blockerParts.length > 0) turnResult = "blockers_found";
+		else if (staleSecretParts.length > 0) turnResult = "stale_secrets_pending";
 		logLatency({
 			type: "tool_result",
 			toolName: "turn_end",
 			filePath: cwd,
 			durationMs: Date.now() - turnEndStart,
-			// #1622 review M2: a pending stale secret is NOT a clean turn. It gets its
-			// own result rather than being promoted to `blockers_found`, which would
-			// undo the demotion the freshness gate just made.
-			result:
-				blockerParts.length > 0
-					? "blockers_found"
-					: staleSecretParts.length > 0
-						? "stale_secrets_pending"
-						: "clean",
+			result: turnResult,
 			metadata: {
 				fileCount: files.length,
 				blockerSections: blockerParts.length,
