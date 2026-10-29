@@ -134,6 +134,30 @@ export function selfScanRuleIds(root = repoRoot(), suite = DEFAULT_SUITE) {
 }
 
 /**
+ * The ast-grep CLI, run with `root` as its cwd. A relative search-path entry
+ * (husky's pre-push hook prepends `node_modules/.bin`) resolves against the
+ * child's cwd, `root`; the same entry resolved against this process's cwd
+ * follows it, so a scan rooted outside the checkout still finds the CLI
+ * instead of failing with ENOENT (#4865). The entry is rewritten under the key
+ * the environment already uses.
+ */
+function spawnAstGrep(args, root) {
+	const env = { ...process.env };
+	for (const key of Object.keys(env)) {
+		if (key.toUpperCase() !== "PATH" || typeof env[key] !== "string") continue;
+		env[key] = env[key]
+			.split(path.delimiter)
+			.flatMap((entry) =>
+				entry && !path.isAbsolute(entry)
+					? [entry, path.resolve(entry)]
+					: [entry],
+			)
+			.join(path.delimiter);
+	}
+	return safeSpawn("ast-grep", args, { cwd: root, env });
+}
+
+/**
  * Runs the self-scan rule set (or an explicit `ruleIds` override, used by
  * the registered-or-fail fixture test) against `scanPaths` under `root`.
  *
@@ -159,8 +183,7 @@ export function runSelfScan({
 		);
 	}
 	const filterRegex = `^(${ids.map(escapeRegExp).join("|")})$`;
-	const result = safeSpawn(
-		"ast-grep",
+	const result = spawnAstGrep(
 		[
 			"scan",
 			"-c",
@@ -172,7 +195,7 @@ export function runSelfScan({
 			"--inspect",
 			"summary",
 		],
-		{ cwd: root },
+		root,
 	);
 	if (result.error) {
 		throw result.error;
@@ -224,10 +247,9 @@ export function runSelfScan({
  * members and admitted forms) through `ast-grep test`; returns the spawn
  * result, whose `status` is 0 only when every case passed (#4865). */
 export function runRuleTests(root = repoRoot(), suite = DEFAULT_SUITE) {
-	return safeSpawn(
-		"ast-grep",
+	return spawnAstGrep(
 		["test", "-c", sgConfigPath(root, suite), "--skip-snapshot-tests"],
-		{ cwd: root },
+		root,
 	);
 }
 
@@ -394,10 +416,9 @@ export function findUnreasonedIgnores(files, root = repoRoot()) {
 			(f) => extension.test(f) || isDirectory(path.resolve(root, f)),
 		);
 		if (group.length === 0) continue;
-		const result = safeSpawn(
-			"ast-grep",
+		const result = spawnAstGrep(
 			["run", "-l", lang, "-k", "comment", "--json=compact", ...group],
-			{ cwd: root },
+			root,
 		);
 		if (result.error) throw result.error;
 		// `ast-grep run` exits 1 with `[]` when nothing matched.
