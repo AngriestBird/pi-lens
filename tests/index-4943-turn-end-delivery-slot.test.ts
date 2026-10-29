@@ -17,11 +17,22 @@
  * blocker for the session's next request, which only the next prompt makes,
  * so the other session's request runs in between.
  *
+ * The sibling slot, `test-runner-findings`, is addressed the same way: the
+ * runner's delivery is made eligible for the session whose turn end ran it,
+ * and the request hook must read it as that session (#4961 review F1).
+ *
  * Lane: ubuntu Unit tests.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { CacheManager } from "../clients/cache-manager.js";
+import { RuntimeCoordinator } from "../clients/runtime-coordinator.js";
+import {
+	_resetTestRunnerDeliveryForTests,
+	deliverTestRunnerFindings,
+	stageTestRunnerDelivery,
+} from "../clients/test-runner-delivery.js";
 import {
 	BLOCKING_FILE,
 	CLEAN_FILE,
@@ -67,6 +78,29 @@ function userTextsFrom(handle: PiSession, from: number): string {
 				.flatMap((message) => textBlocks(message)),
 		)
 		.join("\n");
+}
+
+/**
+ * The `degradation_ledger` rows the copy wrote when a request left the slot's
+ * message for `subject`, the session it is addressed to (#4961 review F4).
+ */
+async function addressedElsewhereRows(
+	handle: PiSession,
+	subject: string,
+): Promise<unknown[]> {
+	const { rows, skipped } = await handle.latencyRows();
+	expect(skipped).toBe(0);
+	return (
+		rows as Array<{
+			phase?: string;
+			metadata?: { kind?: string; subject?: string };
+		}>
+	).filter(
+		(row) =>
+			row.phase === "degradation_ledger" &&
+			row.metadata?.kind === "turn-end-delivery-addressed-elsewhere" &&
+			row.metadata?.subject === subject,
+	);
 }
 
 /** The default flag set: `GUARDED_FLAGS` with the commit gate off. */
@@ -132,14 +166,25 @@ describe("#4943 R1: a staged turn-end message reaches only the session that stag
 				const { primary, secondary } = await stageSubagentBlocker(
 					project(mode === "--lens-guard" ? "guarded" : "default"),
 					flags,
-					[endTurn("primary looks again")],
+					[endTurn("primary looks again"), endTurn("primary looks once more")],
 					[endTurn("secondary reads its own")],
 				);
 				const primaryBefore = primary.requests.length;
 				await primary.prompt("anything new?");
+				await primary.prompt("and now?");
 				expect(userTextsFrom(primary, primaryBefore)).not.toContain(
 					"theirs.ts",
 				);
+				// RECURRENCE GUARDED: #4961 review F4. The primary's requests
+				// skipped the subagent's message and left no record, so a skip
+				// read the same as an empty slot. One row per addressee, not one
+				// per skipping request: both prompts above skip it.
+				expect(
+					await addressedElsewhereRows(
+						primary,
+						secondary.session.sessionManager.getSessionId(),
+					),
+				).toHaveLength(1);
 
 				const secondaryBefore = secondary.requests.length;
 				await secondary.prompt("anything new?");
@@ -229,6 +274,73 @@ describe("#4943 R1: a staged turn-end message reaches only the session that stag
 			expect(secondary.errors).toEqual([]);
 			await secondary.dispose();
 			await successor.dispose();
+		},
+	);
+
+	it(
+		"hands a subagent the test-runner findings its own turn end made eligible, not the primary",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
+		async () => {
+			// RECURRENCE GUARDED: #4961 review F1. The request hook read the
+			// sibling `test-runner-findings` slot as `runtime.telemetrySessionId`,
+			// which a concurrent secondary never pins, so the subagent's own
+			// eligible delivery read as another session's and reached no one.
+			const proj = project("test-runner");
+			const primary = await startPiSession({
+				root: fixture.root,
+				cwd: proj,
+				flags: new Map(GUARDED_FLAGS),
+				responses: [endTurn("primary looks")],
+			});
+			const secondary = await startPiSession({
+				root: fixture.root,
+				cwd: proj,
+				flags: new Map(GUARDED_FLAGS),
+				responses: [endTurn("secondary reads its own")],
+			});
+			const secondaryId = secondary.session.sessionManager.getSessionId();
+			// The subagent's turn end ran the suite and its idle boundary made
+			// the result eligible: the runner's record, then the real
+			// staging and eligibility writers, keyed to the subagent's session.
+			const cacheManager = new CacheManager(false);
+			const runtime = new RuntimeCoordinator();
+			const failure = "FAIL src/theirs.test.ts > adds";
+			cacheManager.writeCache(
+				"test-runner-findings",
+				{ content: failure, testRunGeneration: 3 },
+				proj,
+			);
+			stageTestRunnerDelivery({
+				cwd: proj,
+				sessionId: secondaryId,
+				generation: 3,
+				targetCount: 1,
+				hasFindings: true,
+			});
+			deliverTestRunnerFindings({
+				ctx: { cwd: proj, isIdle: () => true },
+				cacheManager,
+				runtime,
+				sessionId: secondaryId,
+			});
+			_resetTestRunnerDeliveryForTests();
+			expect(
+				cacheManager.readCache<{ deliveryEligible?: { sessionId?: string } }>(
+					"test-runner-findings",
+					proj,
+				)?.data?.deliveryEligible?.sessionId,
+			).toBe(secondaryId);
+
+			await primary.prompt("anything new?");
+			expect(userTextsFrom(primary, 0)).not.toContain(failure);
+
+			await secondary.prompt("anything new?");
+			expect(userTextsFrom(secondary, 0)).toContain(failure);
+
+			expect(primary.errors).toEqual([]);
+			expect(secondary.errors).toEqual([]);
+			await secondary.dispose();
+			await primary.dispose();
 		},
 	);
 });

@@ -4814,17 +4814,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 			// #4943: the turn end's own expression for its session
 			// (`deliverySessionId`), so this request takes only what its own
-			// session's turn end staged.
+			// session's turn end staged. The test-runner slot is keyed the same
+			// way (`firedSessionId`): a concurrent secondary never pins
+			// `telemetrySessionId`, so that id would read its own delivery as
+			// another session's (#4961 review F1).
+			const readerSessionId = prefixSessionId ?? runtime.telemetrySessionId;
 			const turnEndFindings = consumeTurnEndFindings(
 				cacheManager,
 				cwd,
 				runtime,
-				prefixSessionId ?? runtime.telemetrySessionId,
+				readerSessionId,
 			);
 			const sessionGuidance = consumeSessionStartGuidance(cacheManager, cwd);
 			const testFindings = consumeStagedTestRunnerFindings({
 				cwd,
-				sessionId: runtime.telemetrySessionId,
+				sessionId: readerSessionId,
 				ownerId: testRunnerDeliveryOwnerId,
 				cacheManager,
 				runtime,

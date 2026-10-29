@@ -7,6 +7,7 @@ import {
 	type AdvisoryProvenance,
 } from "./advisory-provenance.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	translateGuidanceToolNames,
@@ -136,8 +137,17 @@ export function consumeTurnEndFindings(
 		sessionId !== undefined &&
 		addressee !== undefined &&
 		addressee !== sessionId
-	)
+	) {
+		// Once per addressee, not per request: every request of the other
+		// session skips the same message until its owner reads it.
+		recordDegradationOnce({
+			kind: "turn-end-delivery-addressed-elsewhere",
+			subject: addressee,
+			reason:
+				"a staged turn-end message is addressed to another session; it waits for that session's next request",
+		});
 		return;
+	}
 	const validation = validateAdvisoryProvenance(findings.data, cwd, runtime);
 	logProvenanceDecision(validation, findings.data.provenance, "turn-end", cwd);
 

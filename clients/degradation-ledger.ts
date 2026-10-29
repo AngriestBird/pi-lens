@@ -2034,6 +2034,14 @@ export type DegradationKind =
 	 */
 	| "turn-end-advisory-carry-dropped"
 	/**
+	 * #4943 (#4961 review F4): a request found the per-project turn-end message
+	 * addressed to another session (`deliverTo`, or the owner of a gate
+	 * rewrite) and left it for that session. Once per addressee, so a skip
+	 * reads apart from an empty slot without one row per request. Subject is
+	 * the addressee's session id.
+	 */
+	| "turn-end-delivery-addressed-elsewhere"
+	/**
 	 * A turn_end knip scan did not fit the budget in a root that has linked
 	 * worktrees nested under it (#3872): knip walks them as project files
 	 * because the project never ignored them. The subject is the scan root.
