@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Type } from "../../clients/deps/typebox.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { scannerReportParentDir } from "../../clients/scanner-temp-root.js";
+import { ReadGuard } from "../../clients/read-guard.js";
 import { pinFixtureHome } from "../clients/test-utils.js";
 import {
 	getActivePrimaryRoot,
@@ -767,6 +768,98 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 				type: "warning",
 			},
 		]);
+	});
+
+	describe("inline-factory mode (#4937 L6)", () => {
+		/**
+		 * A prototype spy is the discriminator: the path load builds its OWN copy of
+		 * `clients/read-guard.ts` (consequence 1), so a spy on THIS graph's class is
+		 * called only when the extension runs on this graph's modules. Recurrence
+		 * it prevents: a file moved to tier 2 for a `vi.mock` or a spy and an
+		 * inline mode that quietly loaded by path would pass every assertion that
+		 * does not read the spy, and the moved file would test nothing.
+		 */
+		async function readOnce(
+			slug: string,
+			inline: boolean,
+		): Promise<{ spyCalls: number; modelSawFile: boolean }> {
+			const cwd = path.join(fixture.root, slug, "proj");
+			fs.mkdirSync(cwd, { recursive: true });
+			const target = path.join(cwd, "inline-target.ts");
+			fs.writeFileSync(target, "export const inlineTarget = 4937;\n");
+			const spy = vi.spyOn(ReadGuard.prototype, "recordRead");
+			try {
+				const handle = await startPiSession({
+					root: fixture.root,
+					cwd,
+					...(inline
+						? {
+								inlineFactory: async () =>
+									(await import("../../index.js")).default,
+							}
+						: {}),
+					responses: [
+						fauxAssistantMessage([
+							fauxText("reading"),
+							fauxToolCall("read", { path: target }),
+						]),
+						fauxAssistantMessage(fauxText("done")),
+					],
+				});
+				await handle.prompt("read it");
+				expect(handle.errors).toEqual([]);
+				return {
+					spyCalls: spy.mock.calls.length,
+					// The control: the read itself ran in both modes.
+					modelSawFile: JSON.stringify(handle.requests.at(-1)).includes(
+						"inlineTarget = 4937",
+					),
+				};
+			} finally {
+				spy.mockRestore();
+			}
+		}
+
+		// One session per case: the helper's `afterEach` disposes the first arm's
+		// session, so the second is not classified a concurrent secondary and
+		// declined (a single case holding both sessions recorded 0 calls on the
+		// inline arm).
+		it("runs the extension on the module copies pi's own loader builds by default", async () => {
+			expect(await readOnce("inline-off", false)).toEqual({
+				spyCalls: 0,
+				modelSawFile: true,
+			});
+		});
+
+		it("runs the extension on this test graph's modules when handed a factory", async () => {
+			const inline = await readOnce("inline-on", true);
+			expect(inline.modelSawFile).toBe(true);
+			expect(inline.spyCalls).toBeGreaterThan(0);
+		});
+
+		it("resolves the factory after the env pins, so a first import reads the pinned home", async () => {
+			// Recurrence: `index.js` and its clients read `PI_LENS_HOME` when they
+			// first load. A loader called before the pins would import them against
+			// the maintainer's real home and write there.
+			let homeAtImport: string | undefined;
+			// An earlier case in this file already pinned the same home, so the
+			// variable is cleared: only a pin made BY this start can satisfy the read.
+			vi.stubEnv("PI_LENS_HOME", undefined);
+			try {
+				await startPiSession({
+					root: fixture.root,
+					cwd: path.join(fixture.root, "inline-pin", "proj"),
+					inlineFactory: async () => {
+						homeAtImport = process.env.PI_LENS_HOME;
+						return (await import("../../index.js")).default;
+					},
+					responses: [fauxAssistantMessage(fauxText("ready"))],
+				});
+			} finally {
+				vi.unstubAllEnvs();
+			}
+			expect(homeAtImport).toBe(path.join(fixture.root, "home"));
+		});
 	});
 
 	it("refuses a second fixture root in one file", async () => {

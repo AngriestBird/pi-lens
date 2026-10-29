@@ -75,6 +75,7 @@ import {
 	adoptHandoff,
 	asManager,
 	beginScope,
+	bindSessionId,
 	discardHandoff,
 	forwardHandoff,
 	type LineageHandle,
@@ -83,9 +84,11 @@ import {
 	reserveSessionStart,
 	type SessionScope,
 	scopeCell,
+	sessionLookupKey,
 	startKey,
 	stashHandoff,
 	successorStartKey,
+	unbindScope,
 } from "./clients/session-scope.js";
 import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
 import {
@@ -343,7 +346,6 @@ import {
 	observeCacheContext,
 	observeCachePrefix,
 	recordToolResultDelivery,
-	resetCacheFindingIdentitiesSession,
 	recordTurnEndAdvisoryBytes,
 } from "./clients/cache-observability.js";
 import {
@@ -847,6 +849,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		role: "primary" | "concurrent-secondary";
 		ctx: unknown;
 		scope?: SessionScope;
+		onDisposed: () => void;
 	}> = [];
 	// Whether this activation ever ran a full admission (#4106: an activation
 	// that admitted none keeps the classifier's answer for an unmatched leave).
@@ -867,11 +870,31 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// The registration is keyed by the context its admission used, so a
 			// re-admission's context is the one this member's leave must hold.
 			known.ctx = ctx;
-			return known;
 		}
-		const member = { sessionId, role, ctx };
-		liveSessionMembers.push(member);
+		const member = known ?? {
+			sessionId,
+			role,
+			ctx,
+			onDisposed: () => endDisposedMember(member),
+		};
+		if (!known) liveSessionMembers.push(member);
+		// #4965: every start reads the process, so a member pi disposed with no
+		// shutdown ends by the next start, not only at a primary start or a leave.
+		hasLiveSessionInProcess(member);
 		return member;
+	};
+	/**
+	 * #4965: a member pi disposed with no shutdown (#4704) gives its session
+	 * id back to the lookup, as its leave would have. Its scope retires only
+	 * when no member of this activation is live, the last leave's rule: the
+	 * coordinator's scope is every member's, and `scope` may name this one.
+	 */
+	const endDisposedMember = (
+		member: (typeof liveSessionMembers)[number],
+	): void => {
+		if (!member.scope) return;
+		if (liveSessionMembers.some(isLiveSessionMember)) unbindScope(member.scope);
+		else retireScope(member.scope, "disposed");
 	};
 	/**
 	 * End this leave's membership, answering whether it was the activation's
@@ -2711,6 +2734,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// primary's generation, stays untouched (#473).
 						scope = beginScope({ role: "secondary" });
 						startingMember.scope = scope;
+						// #4965: a caller holding only this session's id reaches its scope.
+						bindSessionId(
+							scope,
+							sessionLookupKey(stableSessionId, ownedSessionRole),
+						);
 						logScopeTransition(scope, {
 							transition: "start",
 							reason: sessionReason,
@@ -2757,7 +2785,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// accepted cost on the other side (a torn-down secondary's own
 					// bracket goes stale until the next full session start).
 					resetCurrentPhaseForSession();
-					resetCacheFindingIdentitiesSession(stableSessionId, ownedSessionRole);
 					// #2526 review round 2, F1: the once-per-session phase claims
 					// (`config_resolved`) and the session record identity they are
 					// stamped with are re-armed HERE, not inside handleSessionStart.
@@ -2937,6 +2964,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
 					startingMember.scope = scope;
+					// #4965: a caller holding only this session's id reaches its scope.
+					bindSessionId(
+						scope,
+						sessionLookupKey(stableSessionId, ownedSessionRole),
+					);
 					registerPrimaryBridges(scope);
 					_turnSummaryEmitCtxGetter = rebindableProcessBridgeDeps(
 						"turn-summary-emit-context",
@@ -3351,7 +3383,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		runtime.beginTurn(getStableSessionId(ctx));
 		// #1332: post-idle heap reading. Bounded by this session's turn-end marker:
 		// at most one idle sample per idle period.
-		const idleGapMs = takeMemoryIdleGapMs(getStableSessionId(ctx), Date.now());
+		const idleGapMs = takeMemoryIdleGapMs(
+			sessionLookupKey(getStableSessionId(ctx), ownedSessionRole),
+			Date.now(),
+		);
 		if (idleGapMs !== null) emitMemorySample(idleGapMs);
 		// Capture before any awaited turn-end work can let a sibling session start.
 		turnStartScope = scope ?? runtime.sessionScope;
@@ -3701,7 +3736,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		if (!lensEnabled) return;
 		// #1332: the idle gap is measured from here to this session's next turn
 		// start; another session's turn never reads it (#4761 review F1).
-		recordMemoryTurnEnd(getStableSessionId(ctx), Date.now());
+		recordMemoryTurnEnd(
+			sessionLookupKey(getStableSessionId(ctx), ownedSessionRole),
+			Date.now(),
+		);
 		// Esc/abort during the turn-end flush (knip/madge/tests + debounced
 		// dispatch) kills in-flight children instead of waiting out their timeout.
 		try {
@@ -4571,9 +4609,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 			dumpActiveHandles("session_shutdown");
 			return ndjsonDrain;
 		} finally {
-			// A non-last leave keeps the activation current for its siblings.
+			// A non-last leave keeps the activation current for its siblings,
+			// and gives its session id back to the lookup (#4965).
 			if (isLastLiveMember)
 				retireOwnScope(shutdownReason, stableSessionId, shutdownScope);
+			else if (leave.scope) unbindScope(leave.scope);
 		}
 	});
 

@@ -13,6 +13,12 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { createFileTime } from "../../clients/file-time.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
+import {
+	beginScope,
+	bindSessionId,
+	retireScope,
+	type SessionScope,
+} from "../../clients/session-scope.js";
 
 describe("RuntimeCoordinator", () => {
 	it("resetForSession clears recorded tool-call path attributions (#1642 F5)", () => {
@@ -63,12 +69,24 @@ describe("RuntimeCoordinator", () => {
 	});
 	const rules = (records: { rule?: string }[]) => records.map((r) => r.rule);
 
+	/**
+	 * #4965: what a concurrent secondary's `session_start` does in index.ts: it
+	 * begins the session's scope and binds it to the session id, so the
+	 * coordinator finds the secondary's per-turn cells by id.
+	 */
+	const startSecondary = (sessionId: string): SessionScope => {
+		const scope = beginScope({ role: "secondary" });
+		bindSessionId(scope, sessionId);
+		return scope;
+	};
+
 	it("resetForSession drops the outgoing session's turn warnings and keeps a concurrent session's (#3613)", () => {
 		// The recurrences: a reset that clears every partition drops a live
 		// subagent's warnings at the primary's /new, and one that clears none
 		// carries a /reload's (same session id) old warnings into its turn.
 		const runtime = new RuntimeCoordinator();
 		runtime.setSessionLifecycle({ sessionId: "primary-session" });
+		startSecondary("subagent-session");
 		runtime.recordCodeQualityWarnings([quality("own")]);
 		runtime.recordCodeQualityWarnings([quality("sub")], "subagent-session");
 
@@ -85,6 +103,7 @@ describe("RuntimeCoordinator", () => {
 		// The recurrence: a secondary shutdown with no session id of its own,
 		// or the coordinator's id, cleared the primary's partition.
 		const runtime = new RuntimeCoordinator();
+		startSecondary("subagent-session");
 		runtime.recordCodeQualityWarnings([quality("own")]);
 		runtime.recordCodeQualityWarnings([quality("sub")], "subagent-session");
 
@@ -97,6 +116,113 @@ describe("RuntimeCoordinator", () => {
 			kept,
 			sub: rules(runtime.peekCodeQualityWarnings("subagent-session")),
 		}).toEqual({ kept: ["own"], sub: [] });
+	});
+
+	/** #4965: one actionable record; the actionable store is the seam's other tenant. */
+	const actionable = (name: string) => ({
+		id: `act:${name}`,
+		filePath: path.resolve("src/actionable.ts"),
+		displayPath: "src/actionable.ts",
+		line: 1,
+		severity: "warning" as const,
+		tool: "ast-grep",
+		rule: name,
+		message: name,
+		actions: [],
+		suppressed: false,
+		origin: "dispatch" as const,
+	});
+
+	it("the actionable-warning partitions follow the same session rules as the code-quality ones (#4965)", () => {
+		// RECURRENCE GUARDED: #4965 moved both stores onto scope cells. A drain that
+		// dropped every session's partition, or none, would only show on the half a
+		// test exercised: the first cut covered code-quality alone.
+		const runtime = new RuntimeCoordinator();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
+		const peek = (sessionId?: string) =>
+			rules(runtime.peekActionableWarnings(sessionId));
+		for (const id of ["sub-a", "sub-b", "sub-c"]) startSecondary(id);
+
+		runtime.recordActionableWarnings([actionable("own")]);
+		runtime.recordActionableWarnings([actionable("sub-a")], "sub-a");
+		runtime.recordActionableWarnings([actionable("sub-b")], "sub-b");
+		runtime.recordActionableWarnings([actionable("sub-b2")], "sub-b");
+		expect({ own: peek(), a: peek("sub-a"), b: peek("sub-b") }).toEqual({
+			own: ["own"],
+			a: ["sub-a"],
+			b: ["sub-b", "sub-b2"],
+		});
+
+		runtime.forgetTurnSession("sub-a");
+		expect({ own: peek(), a: peek("sub-a"), b: peek("sub-b") }).toEqual({
+			own: ["own"],
+			a: [],
+			b: ["sub-b", "sub-b2"],
+		});
+
+		runtime.beginTurn("sub-b");
+		expect({ own: peek(), b: peek("sub-b") }).toEqual({
+			own: ["own"],
+			b: [],
+		});
+
+		runtime.recordActionableWarnings([actionable("sub-c")], "sub-c");
+		runtime.resetForSession();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
+		expect({ own: peek(), c: peek("sub-c") }).toEqual({
+			own: [],
+			c: ["sub-c"],
+		});
+
+		runtime.clearActionableWarnings("sub-c");
+		expect(peek("sub-c")).toEqual([]);
+	});
+
+	it("a concurrent session's turn warnings end with its scope, without a forgetTurnSession call (#4965)", () => {
+		// RECURRENCE GUARDED: shape 72. The partitions were a process table that
+		// only an explicit forget (or the coordinator's reset) ended, so a
+		// secondary retired by any other path left both partitions behind.
+		const runtime = new RuntimeCoordinator();
+		const sub = startSecondary("sub-retired");
+		runtime.recordActionableWarnings([actionable("a")], "sub-retired");
+		runtime.recordCodeQualityWarnings([quality("q")], "sub-retired");
+
+		retireScope(sub, "shutdown");
+
+		expect({
+			actionable: rules(runtime.peekActionableWarnings("sub-retired")),
+			quality: rules(runtime.peekCodeQualityWarnings("sub-retired")),
+		}).toEqual({ actionable: [], quality: [] });
+	});
+
+	it("a write for a session with no live scope is dropped and counted once per store (#4965)", () => {
+		// RECURRENCE GUARDED: the resurrection a process table allowed. A late
+		// tool result for a retired session (or one that never started here)
+		// re-created its partition, which nothing then ended.
+		resetDegradationLedger();
+		const runtime = new RuntimeCoordinator();
+		const sub = startSecondary("sub-late");
+		retireScope(sub, "shutdown");
+
+		runtime.recordActionableWarnings([actionable("late")], "sub-late");
+		runtime.recordCodeQualityWarnings([quality("late")], "sub-late");
+		runtime.recordCodeQualityWarnings([quality("late2")], "never-started");
+
+		expect({
+			actionable: rules(runtime.peekActionableWarnings("sub-late")),
+			quality: rules(runtime.peekCodeQualityWarnings("sub-late")),
+			neverStarted: rules(runtime.peekCodeQualityWarnings("never-started")),
+		}).toEqual({ actionable: [], quality: [], neverStarted: [] });
+		const [missed] = getDegradationSummary().filter(
+			(group) => group.kind === "session-scope-lookup-missed",
+		);
+		expect({
+			count: missed?.count,
+			subjects: missed?.latestReasons.map((r) => r.subject).sort(),
+		}).toEqual({
+			count: 3,
+			subjects: ["turn-warnings"],
+		});
 	});
 
 	it("readGuardFor keys one guard per owner and answers the coordinator's own for its turns (#4942)", () => {
