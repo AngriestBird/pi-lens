@@ -170,12 +170,19 @@ export function oweDeclarationWalk(
 	if (demandsWalk(trigger, walk)) owedWalks.set(normalizeMapKey(root), true);
 }
 
-/** #4476's rule: a bash result always walks, unless the look is `"interval"`. */
+/** #4476's rule: a bash result always walks, unless the look is `"interval"`.
+ *
+ * #4532 gap 5: `"always"` is the caller saying it must not answer from a view
+ * the walk has not refreshed — the `lsp_diagnostics` body does, so a
+ * declaration file created inside `PI_LENS_DECLARATION_LOOK_MS` reaches the
+ * server before the answer rather than after the next bash result. */
 function demandsWalk(
 	trigger: "tool_call" | "tool_result",
 	walk: OutOfBandLookOptions["walk"],
 ): boolean {
-	return trigger === "tool_result" && walk !== "interval";
+	return (
+		walk === "always" || (trigger === "tool_result" && walk !== "interval")
+	);
 }
 
 const fingerprint = (stat: {
@@ -522,9 +529,11 @@ export interface OutOfBandLookOptions {
 	 * `PI_LENS_DECLARATION_LOOK_MS`. `"interval"` walks at most that often on
 	 * every trigger, which is what a look at an EXTRA root uses: the walk is
 	 * bounded per root, and the install stamp is what an extra root is looked at
-	 * for, so a big worktree's walk cannot run on every bash result.
+	 * for, so a big worktree's walk cannot run on every bash result. `"always"`
+	 * walks on this look whatever the interval says, for a caller that is about
+	 * to answer from the servers' view (#4532 gap 5).
 	 */
-	walk?: "trigger" | "interval";
+	walk?: "trigger" | "interval" | "always";
 }
 
 /**

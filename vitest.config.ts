@@ -485,6 +485,11 @@ const lspSpawnHeavyInclude = [
 	// initialize handshake plus a two-publish diagnostics sequence per case —
 	// the same #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-empty-first-publish-3310.test.ts",
+	// #4532 gap 5: the production lsp_diagnostics handler and LSPService over a
+	// real stdio fake-server child configured as a project custom server; each
+	// cell waits on a real handshake and an ambient-declaration round, the same
+	// #1022/#2332 contention class as its lane siblings.
+	"tests/tools/lsp-diagnostics-forced-walk-4532.test.ts",
 	// #4636: the production lsp_diagnostics handler and LSPService over a real
 	// stdio fake-server child (a project custom server for `.json`), reading the
 	// announced `languageId` off the wire after a real handshake and a

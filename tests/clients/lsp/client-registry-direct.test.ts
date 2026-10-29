@@ -1138,33 +1138,35 @@ describe("ClientRegistry.resolveServerRoot (#4449)", () => {
 		).resolves.toBe(normalizeMapKey(project));
 	});
 
-	// Recurrence: boundary verdicts are immutable per root and cached for the
-	// service's life, negatives included, so a hot touch path does not re-stat the
-	// markers on every call. Observed through the real probe: a manifest that
-	// appears AFTER the first answer does not change the cached verdict, which a
-	// dropped `set` or an always-recompute `if (!boundary)` would.
-	it("keeps the first boundary verdict for a root for the registry's life", async () => {
-		const project = tempProject("res-cache", false);
+	// Recurrence (#4532 gap 14): the boundary verdict was cached for the
+	// registry's life, negatives included, so a marker created in a subdirectory
+	// AFTER the ancestor client answered kept the subdirectory coalesced into that
+	// ancestor: its own `pyrightconfig.json` and manifests reached no server and
+	// no client was ever hosted there (real pyright 1.1.414: the importer stayed
+	// stale through 40 calls over 20.25 s). The verdict is the filesystem's, so it
+	// is read on every resolution: a marker that appears and a marker that goes
+	// away both move the answer. A restored `projectBoundaryCache` (or any
+	// `if (!boundary)` around the probe) reds this cell on the second expect.
+	it("re-reads the boundary verdict when a marker appears or goes away", async () => {
+		const project = tempProject("res-boundary", false);
 		const nested = path.join(project, "nested");
 		fs.mkdirSync(nested, { recursive: true });
 		vi.spyOn(process, "cwd").mockReturnValue(project);
 		const registry = new ClientRegistry(makeHooks().hooks);
 		registry.clients.set(keyFor("ts", project), live(project));
+		// `rootServer` models `resolveLspServerCwd`'s answer for a marker-less tree:
+		// the file's own directory. That candidate is what this verdict decides on.
+		// (`NearestRoot` is not driven here: its own #3412 memo serves a hit across a
+		// same-tick create, which is a different seam from this one.)
+		const detected = rootServer("ts", nested);
 		const resolve = () =>
-			registry.resolveServerRoot(
-				rootServer("ts", nested),
-				path.join(nested, "a.ts"),
-			);
+			registry.resolveServerRoot(detected, path.join(nested, "a.ts"));
 
 		await expect(resolve()).resolves.toBe(project); // no marker: coalesced
 		fs.writeFileSync(path.join(nested, "package.json"), "{}\n");
-		await expect(resolve()).resolves.toBe(project); // verdict is cached
-		await expect(
-			new ClientRegistry(makeHooks().hooks).resolveServerRoot(
-				rootServer("ts", nested),
-				path.join(nested, "a.ts"),
-			),
-		).resolves.toBe(nested); // control: a fresh registry sees the manifest
+		await expect(resolve()).resolves.toBe(nested); // the marker roots it
+		fs.rmSync(path.join(nested, "package.json"));
+		await expect(resolve()).resolves.toBe(project); // and its removal un-roots it
 	});
 
 	// Recurrence (#4854): a nested Xcode project (buildServer.json, no
