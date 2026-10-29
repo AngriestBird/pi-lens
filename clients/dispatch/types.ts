@@ -302,6 +302,16 @@ export const RUNNER_SKIP_REASONS = [
 ] as const;
 export type RunnerSkipReason = (typeof RUNNER_SKIP_REASONS)[number];
 
+/**
+ * #4130: why an invoked tool produced no result. The non-`ran` kinds of
+ * `classifyRunOutcome` (`runners/utils/spawn-outcome.ts`), so a new outcome
+ * kind fails to compile at `skipUnlessToolRan` until it is named here.
+ */
+export type RunnerSkipFault =
+	| "did-not-run"
+	| "rejected-invocation"
+	| "report-missing";
+
 /** Runtime guard for untyped/plugin-provided runner results. */
 export function isRunnerSkipReason(value: unknown): value is RunnerSkipReason {
 	return RUNNER_SKIP_REASONS.some((reason) => reason === value);
@@ -356,6 +366,15 @@ export interface RunnerResult {
 	failureMessage?: string;
 	/** Bounded machine-readable reason when status is an expected skip. */
 	skipReason?: RunnerSkipReason;
+	/**
+	 * #4130: a skip that is a runner fault, not an absent tool. The tool was
+	 * invoked and broke (killed, timed out, rejected its invocation, wrote no
+	 * report), so the run reached no verdict for a reason the user cannot act
+	 * on by installing something. Set only through {@link faultSkip}; a skip
+	 * with no tool to invoke leaves it unset. Smoke classification reads it so
+	 * "absent" and "broken" stop rendering alike.
+	 */
+	skipFault?: RunnerSkipFault;
 	/**
 	 * When the skip is `covered-by-primary`: which fact source supplied the
 	 * claim (`declared` — the row's own `covers`; `builtin-fact` — the facts
@@ -479,6 +498,20 @@ export function faultResult(
 		semantic: "warning",
 		failureKind: fault.kind,
 		failureMessage: fault.failureMessage.slice(0, 200),
+	};
+}
+
+/**
+ * The one skip a runner returns after it invoked its tool and the tool broke
+ * (#4130). An absent tool returns a bare skip instead: there is nothing to
+ * blame, and nothing was invoked.
+ */
+export function faultSkip(fault: RunnerSkipFault): RunnerResult {
+	return {
+		status: "skipped",
+		diagnostics: [],
+		semantic: "none",
+		skipFault: fault,
 	};
 }
 
