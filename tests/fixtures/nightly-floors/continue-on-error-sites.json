@@ -258,6 +258,10 @@
 		".github/workflows/tool-smoke.yml#tool-smoke-prs#Open/update idle-eviction promotion PR": {
 			"status": "no-floor",
 			"reason": "PR plumbing, not a producer: it opens only for a promotion the measurement step proposed, and the same job's non-continue-on-error refresh guard reads the docs the measurement wrote before either PR step runs."
+		},
+		".github/workflows/untriaged-issues.yml#detect#Warn when a required CI job's p90 nears its timeout cap": {
+			"status": "no-floor",
+			"reason": "An advisory reporter, not a producer (#4691, #4989 r3): scripts/check-ci-job-p90.mjs prints one ::warning annotation per job over the ratio and one per required context it could not measure, and exits 1 only when its data read failed, so a blown read (a GitHub 502, run 40690133466) is visible in the run log and as this step's own failed outcome without reddening the nightly. The job's verdict is the untriaged-issue detector below it, which is not continue-on-error and still reds the job."
 		}
 	}
 }
