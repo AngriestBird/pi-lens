@@ -4110,3 +4110,157 @@ describe("#4921: a turn end's own partition is its turn session's", () => {
 		}
 	});
 });
+
+describe("#4943: the turn-end delivery slot answers to the session it is addressed to", () => {
+	/** What `session`'s request receives from the slot, and the record after. */
+	function readAs(
+		cache: CacheManager,
+		cwd: string,
+		runtime: RuntimeCoordinator,
+		session: string | undefined,
+	): { delivered: string | undefined; after: string } {
+		const delivered = consumeTurnEndFindings(cache, cwd, runtime, session)
+			?.messages[0]?.content;
+		return { delivered, after: JSON.stringify(storedData(cache, cwd)) };
+	}
+
+	it("leaves a record another session owns and no turn end addressed to that owner's request", () => {
+		// RECURRENCE GUARDED: #4943 R1. The context hook consumed whatever the
+		// slot held; a record a commit-gate writer (or a released writer) left
+		// with no addressee names its owner, and only the owner takes it.
+		const env = setupTestEnvironment("pi-lens-git-guard-4943-owner-");
+		try {
+			const theirs = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(theirs, "x;\n");
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			writeGitGuardRecord(cache, runtime, env.tmpDir, {
+				...foreignRecord([theirs]),
+				consumed: false,
+			});
+			const before = JSON.stringify(storedData(cache, env.tmpDir));
+
+			expect(readAs(cache, env.tmpDir, runtime, "session-A")).toEqual({
+				delivered: undefined,
+				after: before,
+			});
+			expect(readAs(cache, env.tmpDir, runtime, EARLIER).delivered).toContain(
+				composerSections([theirs]),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("addresses the owner once a settled turn end rewrites the composer's message as the owner's blocker text", () => {
+		// RECURRENCE GUARDED: #4943 R1, the settled partition retire. It keeps
+		// the stored fields and replaces `content` with the remaining owner's
+		// sections; a composer's address kept beside them would hand session
+		// A the other session's blocker as its own message.
+		const env = setupTestEnvironment("pi-lens-git-guard-4943-retire-");
+		try {
+			const [theirs, mine] = ["a.ts", "b.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const file of [theirs, mine]) fs.writeFileSync(file, "x;\n");
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			const own = foreignRecord([mine], "session-A");
+			writeGitGuardRecord(cache, runtime, env.tmpDir, {
+				...own,
+				affectedFiles: [theirs, mine],
+				carriedBlockers: [
+					{
+						sessionId: EARLIER,
+						blockerContent: composerSections([theirs]),
+						blockingFiles: [theirs],
+					},
+				],
+				consumed: false,
+				deliverTo: "session-A",
+			});
+
+			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+				false,
+			);
+			const rewritten = JSON.stringify(storedData(cache, env.tmpDir));
+			expect(readAs(cache, env.tmpDir, runtime, "session-A")).toEqual({
+				delivered: undefined,
+				after: rewritten,
+			});
+			expect(readAs(cache, env.tmpDir, runtime, EARLIER).delivered).toContain(
+				composerSections([theirs]),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("addresses the owner once a passing test run rewrites the composer's message as the owner's blocker text", () => {
+		// RECURRENCE GUARDED: #4943 R1, the test-failure clear. Session A's turn
+		// end composed its own message over a record that leads with another
+		// session's blocker; the passing run keeps the stored fields and leaves
+		// only that blocker's text, which is the owner's.
+		const env = setupTestEnvironment("pi-lens-git-guard-4943-tests-");
+		try {
+			const theirs = path.join(env.tmpDir, "a.ts");
+			const testFile = path.join(env.tmpDir, "a.test.ts");
+			for (const file of [theirs, testFile]) fs.writeFileSync(file, "x;\n");
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			const owned = foreignRecord([theirs]);
+			writeGitGuardRecord(cache, runtime, env.tmpDir, {
+				...owned,
+				content: "session A's advisory",
+				affectedFiles: [theirs, testFile],
+				testFailures: true,
+				testFailureContent: "a.test.ts failed",
+				testFailureFiles: [testFile],
+				consumed: false,
+				deliverTo: "session-A",
+			});
+
+			clearGitGuardTestFailure(cache, env.tmpDir, runtime, [testFile]);
+			const rewritten = JSON.stringify(storedData(cache, env.tmpDir));
+			expect(readAs(cache, env.tmpDir, runtime, "session-A")).toEqual({
+				delivered: undefined,
+				after: rewritten,
+			});
+			expect(readAs(cache, env.tmpDir, runtime, EARLIER).delivered).toContain(
+				composerSections([theirs]),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("hands a reader with no session (the MCP host) an addressed message, and any reader one no session is named on", () => {
+		// The MCP coordinator's id is per process, so its Stop hook reads
+		// unaddressed: a restarted server still delivers what the previous one
+		// staged. A record that names no session (3.8.74's `{ content }`) goes
+		// to whoever asks, as before.
+		const env = setupTestEnvironment("pi-lens-git-guard-4943-unkeyed-");
+		try {
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			cache.writeCache(
+				"turn-end-findings",
+				{ content: "staged for the earlier one", deliverTo: EARLIER },
+				env.tmpDir,
+			);
+			expect(readAs(cache, env.tmpDir, runtime, undefined).delivered).toContain(
+				"staged for the earlier one",
+			);
+			cache.writeCache(
+				"turn-end-findings",
+				{ content: "addressed to no one" },
+				env.tmpDir,
+			);
+			expect(
+				readAs(cache, env.tmpDir, runtime, "session-A").delivered,
+			).toContain("addressed to no one");
+		} finally {
+			env.cleanup();
+		}
+	});
+});

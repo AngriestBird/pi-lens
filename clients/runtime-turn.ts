@@ -6236,8 +6236,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// matched), so the rewrite keeps the record current for the gate
 						// without handing the same text to the model again.
 						consumed: true,
-						// #4943: the content is this turn's session's message.
-						deliverTo: deliverySessionId,
 					});
 					// #4750: the write, not the read, records what it left out.
 					logCarriedDrops(cwd, dropped);
