@@ -1312,6 +1312,13 @@ describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
 			expect(output).toContain(
 				`sampled mutants ${held} of ${allowance} allowed`,
 			);
+			// Counting a sample must not run the related tests: every dry run after
+			// the measurement is a no-test pass (3 s each, not a 1-minute dry run).
+			const countPasses = calls.filter((call) => call.dryRun).slice(1);
+			expect(countPasses.length).toBeGreaterThan(0);
+			for (const pass of countPasses) {
+				expect(pass.command).not.toContain("vitest");
+			}
 		} finally {
 			fixture.cleanup();
 		}
