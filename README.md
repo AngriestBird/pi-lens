@@ -538,6 +538,10 @@ Thanks goes to these wonderful people:
       <td align="center" valign="top" width="14.28%"><a href="https://twitter.com/letwir"><img src="https://avatars.githubusercontent.com/u/16576177?v=4" width="100px;" alt=""/><br /><sub><b>letwir</b></sub></a><br /><a href="#doc-letwir" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="http://www.erikdarling.com/"><img src="https://avatars.githubusercontent.com/u/2136037?v=4" width="100px;" alt=""/><br /><sub><b>Erik Darling</b></sub></a><br /><a href="#bug-erikdarlingdata" title="Bug reports">🐛</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Silvio-Re"><img src="https://avatars.githubusercontent.com/u/5860449?v=4" width="100px;" alt=""/><br /><sub><b>Silvio</b></sub></a><br /><a href="#bug-Silvio-Re" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/forge18"><img src="https://avatars.githubusercontent.com/u/31629847?v=4" width="100px;" alt=""/><br /><sub><b>forge18</b></sub></a><br /><a href="#ideas-forge18" title="Ideas & Planning">🤔</a></td>
+    </tr>
   </tbody>
 </table>
 

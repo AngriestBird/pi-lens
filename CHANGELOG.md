@@ -16,6 +16,89 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Security
 
+## [4.4.7] - 2026-10-29
+
+### Added
+
+- **Projects with `@effect/tsgo` get Effect's TypeScript-Go language server (refs #4914)** — when a project installs `@effect/tsgo` beside TypeScript 7 or newer, pi-lens launches the project's own `effect-tsgo tsc --lsp --stdio` for TypeScript files, so the Effect language service's diagnostics reach pi-lens. Installing the package is the opt-in; there is no pi-lens setting. Projects without it keep the native TypeScript 7 or classic launch, a malformed `@effect/tsgo` install falls back to the native launch, and the binary follows the same project-trust gate as the project's compiler. pi-lens never installs `@effect/tsgo` or runs its setup. Requested by @forge18.
+
+- **Opt-in fallow-lsp: unused-export and dead-code findings for JS/TS files (refs #4929)** — set `fallow.enabled: true` in `~/.pi-lens/config.json` (or pass `--lens-fallow`) and pi-lens downloads the pinned fallow-lsp 3.37.0 release, checks its sha256, and runs it beside the TypeScript server on `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs` and `.cjs` files only. Findings arrive as advisory warnings tagged `fallow:<rule>` and never block. It is off by default; any value other than a literal `true` leaves it off, nothing is downloaded or launched while it is off, and the install and launch follow the same project-trust gate as the other language servers. knip, jscpd and madge are unchanged.
+
+### Fixed
+
+- **A Python config or stub changed outside pi now reaches the running server (#4532)** — a `pyrightconfig.json` or `pyproject.toml` created, edited or deleted after pyright answered is forwarded to it as a watched-files event at the next look, so an `extraPaths` finding clears on the next read instead of staying stale for the server's life. Python `.pyi` stubs changed outside pi are forwarded like `.d.ts` files. A dependency install into a virtualenv with no lockfile is still not detected.
+
+- **Stop labelling a late runner's current findings as historical on a turn that wrote no file.** The turn-end stamp now covers the file a delivered late-runner or replayed-blocker section cites, and a message on such a turn that also carries a section citing no file is labelled historical. (refs #4617)
+
+- **Stop labelling current turn-end findings as historical on turns that wrote no file.** The turn-end stamp now covers the files a resolution retired and the files its cascade, pending-error and late-auxiliary sections cite, with `--lens-guard` on or off. (refs #4617)
+
+- **The home-folder ceiling holds when HOME or the project is reached through a link (#4911)** — The startup scan, the session snapshot root, the cheap project scan, the heavyweight analyzers, jscpd, the word index, the review graph, the LSP workspace sweep, the TypeScript server lookup, project-local binary lookup, `ast_grep_search` and `lens_diagnostics` compare the home folder and the root by real path. A symlinked or junctioned `HOME` (for example `/home` linked to `/var/home`), or a root spelled through such a link, no longer lets a scan walk the whole home tree.
+
+- **`--no-lens` and three sibling command-line flags now take effect (#4913)** — `--no-lens`, `--no-lens-context`, `--lens-compact-tool-line` and `--no-tool <name>` were ignored because pi applies an extension flag's command-line value after the extension has loaded, so pi-lens read the registered default and ignored it. `pi --no-lens` still started language servers and ran the write-time runners; `--no-tool` only worked in the `--no-tool=<name>` spelling. pi-lens now reads these four at `session_start`, so `/lens-toggle` and `/lens-context-toggle` still win for the rest of the session. A tool named by `--no-tool` is dropped from the active set, and `pi_lens_activate_tools` refuses it.
+
+- **Python docstrings now show in the module outline and `read_symbol` (#4948)** — a Python def or class documented by a docstring carried no description, because only a `#` comment above it was read. The first sentence of the docstring (`"""`, `'''`, `r"""`, `u"""` or a one-line string) is now its description, capped at 120 characters. A `#` comment above the def still works, and the docstring wins when both exist. `read_symbol` still starts at the `def` line.
+
+- **A slow runner that could not read its tool's output is reported once, as a failure, and never blocks (refs #4130)** — a collect-later runner fault reached the agent twice at turn end (the failure note and its own synthetic diagnostic), and the cue and gleam faults carried blocking severity, so a tool that could not parse its output entered the blocker map and stopped `git commit`. Runner faults are now built at one seam as non-blocking warnings, and the deferred verdict drops them because the failure note already says it.
+
+- **A held file changed outside pi now reads fresh on the first diagnostics call (refs #4532)** — `lsp_diagnostics`, `lens_diagnostics source=lsp` and `lsp_navigation workspaceDiagnostics` run the forced document-drift sweep before they answer, so a file the language server already holds and that was copied or written outside pi (a `cp`, a shell redirect) is re-pushed first, and an importer's finding clears on the first call instead of the second. The pre-answer pass checks every held document and re-pushes every one that changed; the turn-settle sweep keeps its 64-document and 4-resync pacing. A held file that grew past the LSP sync limit is no longer pushed by a drift resync; its record stays and the next pass retries.
+
+- **A module changed outside pi no longer leaves its importer's diagnostics stale (refs #4532)** — when a file the diagnosed file imports directly was changed outside pi and no language server held it open, the server kept the old bytes it had read, so `lsp_diagnostics` reported (or missed) errors against the old module on the first call and every call after it. Each direct import no server holds is now compared with the bytes last seen, and a changed one is sent to its servers before the read, so the first call already answers against the new bytes. Each call that sends writes one `lsp_unheld_dependency_changed` row.
+
+- **A bash result that joins a running look still gets its declaration walk (refs #4532)** — when a tool call's look was in flight, a bash result that joined it got only the tool call's throttled look, so a `.d.ts` its command generated reached no language server until a later walk. The joined bash result's walk demand now rides the flight, in both the out-of-band look and the HEAD look, and the `lsp_out_of_band_change` row says `joinedWalk: true` when the walk was a joiner's.
+
+- **An unresolved blocker reaches the agent once per set, not on every turn that writes another file (refs #4921)** — the turn-end duplicate check keyed the turn's written-file set, so an unfixed blocker was sent again on each turn that touched a different file, and under `--lens-guard` on each repeated turn too; it now keys the delivered content, a changed or reintroduced blocker still arrives, and the commit gate keeps refusing while the blocker stands.
+
+- **A subagent no longer receives the parent session's blockers:** with two sessions in one pi process (an in-process subagent), each turn end now delivers, sweeps and re-judges only the inline blockers its own session's writes recorded, and the commit-gate record files each session's blocker section under that session's id. A subagent's turn end no longer saves the parent's session state into the subagent's project data dir or stamps that project's duplicate-findings record with the parent's id (refs #4921).
+
+- **A pi-lens status read no longer leaves `.git/index.lock` behind, so `git add` keeps working (#4930)** — the spawn seam now defaults `GIT_OPTIONAL_LOCKS=0` for every child, so the background `git status` reads skip the opportunistic index refresh whose lock a timeout or host exit could orphan; an exported `GIT_OPTIONAL_LOCKS` in your shell does not undo it for pi-lens's own git status reads, while a runner that passes its own environment keeps your value. On a checkout whose index is stat-dirty, each status read now re-hashes the dirty files until your own git command refreshes the index.
+
+- **A subagent's commit is no longer refused for a blocker in another repository:** with `--lens-guard` and two sessions in one pi process, the commit gate now judges the blockers inside the repository being committed instead of every blocker the process holds, and its refusal names only that repository's blocker. A commit where the blocker lives, by any session, is still refused, and a command the gate cannot place in a repository (`cd` first, `--git-dir`, an environment prefix, a wrapper) is still judged by every blocker (refs #4941).
+
+- **A subagent's read no longer licenses the parent's edit, nor the reverse:** with two sessions in one pi process (an in-process subagent), the read guard now keeps each session's read records and write authorship apart, so an edit is refused unless the editing session has its own authorization for the file: its own read, its own write authorship, or an exemption it armed. Another session's read or exemption no longer counts, nor does another session's write that names its own session. A session's own read still licenses its own edit (refs #4942).
+
+- **The MCP server no longer takes a pi session's staged findings:** when pi and an MCP client (the Stop hook or `lens_turn_end`) work in the same project, the MCP side now reads only the turn-end message an MCP server staged, so a pi session's blocker is no longer shown to the MCP client as a historical finding and marked delivered before the pi session sees it; a restarted MCP server still delivers what the previous one staged, except a message a commit-gate rewrite has replaced since (refs #4943).
+
+- **A subagent's edits are logged under its own session:** with two sessions in one pi process (an in-process subagent), the change log, the diagnostics log and the read-guard log now name the session that made the write, and a runner answer that finished after the subagent's edit (a collect-later run) is drained by that subagent's turn end, with its blocker recorded as the subagent's own instead of the parent session's (refs #4943).
+
+- **Turn-end findings reach only the session that produced them:** with two sessions in one pi process (an in-process subagent), the blockers and advisories a session's turn end staged for its next request are no longer taken by the other session's request first, so a subagent no longer loses its own blocker to the parent session, and the parent no longer reads the subagent's. A subagent's own test-runner results now reach the subagent instead of no one. A new session that replaces the one that staged a message (`/new`, a fork, or a fresh process) no longer receives that unconsumed message (refs #4943).
+
+- **`--no-ast-grep` and `astGrep.enabled=false` now switch the ast-grep server off.** The kill switch the server already read was never registered, so neither spelling existed; `lens_diagnostics mode=full` also now leaves a switched-off auxiliary server unstarted and names it, and a peer pi-lens session's findings from a switched-off server (`--no-opengrep` included) are no longer shown (refs #4944).
+
+- **`--no-zizmor`, `--no-typos` and `--lens-spotbugs` now exist, with `*.enabled` config keys.** The zizmor and typos servers read kill switches the registry never registered, so neither could be switched off. SpotBugs was documented as opt-in behind a flag that did not exist, so it never ran; it stays off unless you set the flag or `spotbugs.enabled=true` (refs #4946).
+
+- **read_symbol and module_report warn when a file has syntax errors (#4949)** — Tree-sitter recovers from syntax it cannot parse and drops declarations, so a `read_symbol` or `read_enclosing` miss in such a file read as "not there". A miss, and every `module_report`, now carries "tree-sitter could not parse part of this file; the symbol list may be incomplete." A `read_symbol` hit and a clean file are unchanged.
+
+### Internal
+
+<details>
+<summary>12 internal changes: tests, CI, tooling, and refactors</summary>
+
+- Tool-smoke now fails a runner whose tool was killed, timed out or rejected its invocation, instead of rendering it as a skipped tool. The skip carries the fault kind, and an absent tool still skips. A run cut short after it printed (cue-vet, gleam-check, prisma-validate, terragrunt) keeps its findings but no longer counts as a completed check, and trivy-config names a failed launch as did-not-run. (refs #4130)
+
+- The Bash guard hook now follows `cd -P` physically, resolves a not-yet-existing destination below a symlinked parent through its nearest existing ancestor, and no longer loses a command after a `case` pattern or `$'\''` inside `$( )` (refs #4060).
+
+- The LSP capability nightly records each matrix row's server `version` and `install` source, keeps a missed probe's last known value marked `stale` with its date instead of rewriting it to `unknown`, raises a cell that missed two consecutive nights on one tracking issue, and composes the refresh PR body with its capability flips; with the refresh GitHub App configured the PR starts CI on its own and a flip-free refresh can be armed for auto-merge (refs #4512).
+
+- The owning root is registered by its path identity when a file link from outside reaches no registrable ancestor, and `deferred_format_queued` is logged only for a deferral the coordinator accepts; the symlink fixture family gains the other-worktree and unrelated-repository members (refs #4689).
+
+- **Raw realpath calls feeding a config root, a write target and the data-dir probe move onto the identity seam (refs #4689)** — `clients/sgconfig.ts` and `clients/partial-edit-apply.ts` resolve through `realpathOrResolve`, and `dataDirCanonicalRoot` answers `fallback` with an existence check instead of a discarded `realpathSync`; the foreign-checkout lookup in `clients/test-runner-client.ts` keeps its raw realpaths and the sweep pin now says why.
+
+- The review-graph ignore-gated node test follows the lane's test-timeout scale instead of the 5 s default, so a slow Windows runner no longer times it out (closes #4910).
+
+- The stale-ctx session-start scan test drains its background snapshot writes before it removes its fixture root, so a late write no longer recreates the root for the tmp-fixture hygiene census (#4958).
+
+- The `## Detection` PR-body check is owed by any PR that closes, or whose `Refs` line or title names, an issue labelled `bug` or `nightly-drift`, not only by one that closes a `bug` issue; CI refuses a label it cannot read and, unless the body already closes a bug, a `owner/repo#N` or URL reference, and the local preflight warns and skips an unreadable label (refs #4968).
+
+- Quick and full session start share one sequence-read and snapshot-hydrate step instead of two 60-line copies and the shared step's sequence read is capped at the session_start wall budget even under a widened `PI_LENS_SEQUENCE_READ_BUDGET_MS` (refs #4907).
+
+- Five fast-check properties pin pure identity and freshness seams in their existing test files: the `dd:` and `ddw:` anchors, the rows the disposition filters read, `lineContentHash`, `freshnessFromMtime` and the workspace id (refs #4928).
+
+- Tier 2 (`tests/support/pi-session.ts`) gains an opt-in inline-factory mode, and six test files leave the pi double for it: the three lazy-liveness files, `bootstrap-lazy-liveness`, `index-cascade-resolved-clean-wiring` and `index-observed-sweep-no-read-guard`. The `--no-delta` case of `index-4483` moves to a tier-2 file with pi's real flag (refs #4937).
+
+- Every session-state registry entry now names its owner key (`session`, `repository`, `project` or `process-wide: <reason>`), the coordinator's per-turn warnings, the cache observability's per-session state and the memory sampler's pending turn end moved onto scope cells that end with their session's scope (reached by session id through `sessionCell`), and the conformance test refuses a `session` owner that states no reason a scope cell cannot hold it (defect shape 72, refs #4965).
+
+</details>
+
 ## [4.4.6] - 2026-10-27
 
 ### Changed
