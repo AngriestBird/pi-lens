@@ -606,8 +606,11 @@ export function createLspDiagnosticsTool(
 			// walks on this look whatever the interval says; the walk is bounded per
 			// root (`DECLARATION_WALK_MAX_DIRS`/`_FILES`), and it runs before the
 			// sweep so a client a publish restarts receives the re-push that follows.
+			// #5005 F3: the caller's signal rides along, so an abandoned answer is
+			// neither held by this walk nor paying for it.
 			await lookForOutOfBandChanges(cwd, "tool_call", undefined, {
 				walk: "always",
+				signal,
 			});
 
 			// #4532 gap 13: a document the server already holds may have changed

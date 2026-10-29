@@ -20,13 +20,23 @@
  *
  * The cells drive the same look the pi `tool_call` hook runs
  * (`lookForOutOfBandChanges(root, "tool_call")`) between the two answers, so
- * the second look is inside the interval and walks nothing. No sleep and no
- * clock: the window is the two back-to-back calls.
+ * the second look is inside the interval and walks nothing.
+ *
+ * #5005 F4: the cell CONSTRUCTS that premise instead of assuming it. At the
+ * shipped 2 s interval the fixture's own setup could exceed it on a slow host,
+ * so the hook's look would walk, publish the created declaration, and the cell
+ * would pass with the tool's forced-walk arm removed. The interval is pinned
+ * wide for the hook's look, and the publisher is counted to prove that look
+ * published nothing.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+	type DiskChange,
+	subscribeDiskChange,
+} from "../../clients/disk-changes.js";
 import {
 	resetProjectTrust,
 	setProjectTrustState,
@@ -156,10 +166,33 @@ describe("a declaration file created inside the look's interval (#4532 gap 5)", 
 			`declare const ${declared}: string;\n`,
 		);
 		// The hook's own look for this call: inside the interval, so it walks
-		// nothing and publishes nothing.
-		await hookLook();
-
-		const first = await diagnose(importer);
+		// nothing and publishes nothing. The interval stays pinned wide until the
+		// tool's own answer, so neither the hook's look nor the tool's
+		// interval-eligible pass can walk on any host; only the tool's
+		// `walk: "always"` arm may. The publish count proves the hook's look did
+		// nothing rather than trusting the pin (#5005 F4).
+		const hookPublishes: DiskChange[] = [];
+		const unsubscribe = subscribeDiskChange(
+			"probe-4532-g5-hook",
+			(change) => {
+				hookPublishes.push(change);
+			},
+			["out-of-band"],
+		);
+		const priorInterval = process.env.PI_LENS_DECLARATION_LOOK_MS;
+		process.env.PI_LENS_DECLARATION_LOOK_MS = "600000";
+		let first: Awaited<ReturnType<typeof diagnose>>;
+		try {
+			await hookLook();
+			unsubscribe();
+			expect(hookPublishes).toEqual([]);
+			first = await diagnose(importer);
+		} finally {
+			unsubscribe();
+			if (priorInterval === undefined)
+				delete process.env.PI_LENS_DECLARATION_LOOK_MS;
+			else process.env.PI_LENS_DECLARATION_LOOK_MS = priorInterval;
+		}
 
 		expect(first.text).not.toContain(missingName(declared));
 		expect(first.details.primaryDiagnosticsCount).toBe(0);

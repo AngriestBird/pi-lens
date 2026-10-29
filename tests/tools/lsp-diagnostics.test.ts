@@ -43,6 +43,11 @@ vi.mock("../../clients/widget-state.js", () => ({
 }));
 
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
+import {
+	type DiskChange,
+	subscribeDiskChange,
+} from "../../clients/disk-changes.js";
+import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import {
 	getDegradationSummary,
@@ -462,7 +467,15 @@ describe("lsp_diagnostics tool", () => {
 		);
 		const files = ["a.ts", "b.ts"].map((name) => path.join(tmpDir, name));
 		for (const file of files) fs.writeFileSync(file, "const value = 1;\n");
-		(mocked.service as any).touchFile = vi.fn(() => new Promise(() => {}));
+		// #5005 F3: the abort lands while a file is in flight, constructed from the
+		// file's own touch instead of a 20 ms wall-clock timer. The answer route
+		// looks for out-of-band changes before the batch (#4532 gap 5), and that
+		// look legitimately precedes the first file, so a short timer can fire
+		// inside the look and leave the batch with no file in flight.
+		(mocked.service as any).touchFile = vi.fn(() => {
+			setTimeout(() => controller.abort(), 0);
+			return new Promise(() => {});
+		});
 		const started = Date.now();
 		const pending = tool.execute(
 			"diag-abort-contract",
@@ -471,9 +484,10 @@ describe("lsp_diagnostics tool", () => {
 			null,
 			{ cwd: process.cwd() },
 		);
-		setTimeout(() => controller.abort(), 20);
 		try {
 			const result = (await pending) as any;
+			// Below the 1000 ms per-file deadline, so the abort is what released the
+			// in-flight file rather than the deadline expiring.
 			expect(Date.now() - started).toBeLessThan(500);
 			expect(result.details?.outcomeCounts?.inconclusive).toBe(1);
 			expect(result.details?.incompleteFiles).toBe(1);
@@ -513,6 +527,81 @@ describe("lsp_diagnostics tool", () => {
 		expect(result.details?.mode).toBe("batch");
 		expect(result.details?.filesChecked).toBe(0);
 		expect(result.details?.totalDiagnostics).toBe(0);
+	});
+
+	it("spends no declaration walk on an already-aborted call (#5005 F3)", async () => {
+		// Recurrence: the answer route's pre-answer look (#4532 gap 5) ran its
+		// whole forced walk for a call whose signal was already aborted, so an
+		// abandoned call paid a walk and published a declaration for an answer
+		// nobody reads.
+		const touchFile = vi.fn(async () => undefined);
+		(mocked.service as any).touchFile = touchFile;
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-diag-abort-look-"),
+		);
+		const file = path.join(tmpDir, "a.ts");
+		fs.writeFileSync(file, "const value = 1;\n");
+		const published: DiskChange[] = [];
+		const unsubscribe = subscribeDiskChange(
+			"probe-5005-f3",
+			(change) => {
+				published.push(change);
+			},
+			["out-of-band"],
+		);
+		const run = (signal: AbortSignal) =>
+			createLspDiagnosticsTool().execute(
+				"diag-abort-look",
+				{ paths: [file], severity: "all", concurrency: 1 },
+				signal,
+				null,
+				{ cwd: tmpDir },
+			) as Promise<any>;
+		try {
+			// The baseline look records the root's empty declaration population.
+			await run(new AbortController().signal);
+			expect(touchFile).toHaveBeenCalledTimes(1);
+			// A declaration the call's own forced walk would publish...
+			const ambient = path.join(tmpDir, "types", "ambient.d.ts");
+			fs.mkdirSync(path.dirname(ambient), { recursive: true });
+			fs.writeFileSync(ambient, "declare const A: number;\n");
+			published.length = 0;
+			touchFile.mockClear();
+			const aborted = new AbortController();
+			aborted.abort();
+			const abandoned = await run(aborted.signal);
+			// No file is started for an answer the caller already abandoned.
+			expect(touchFile).not.toHaveBeenCalled();
+			expect(abandoned.details?.filesChecked).toBe(0);
+			// A look of this root now joins whatever pass the aborted call may have
+			// started, so a background publish is observed here rather than racing
+			// the assertions. The interval is pinned wide, so this look itself
+			// cannot walk; only the aborted call's own `"always"` demand could.
+			const priorInterval = process.env.PI_LENS_DECLARATION_LOOK_MS;
+			process.env.PI_LENS_DECLARATION_LOOK_MS = "600000";
+			try {
+				await lookForOutOfBandChanges(tmpDir, "tool_call");
+			} finally {
+				if (priorInterval === undefined)
+					delete process.env.PI_LENS_DECLARATION_LOOK_MS;
+				else process.env.PI_LENS_DECLARATION_LOOK_MS = priorInterval;
+			}
+			// ...is not published for an answer the caller already abandoned.
+			expect(published).toEqual([]);
+			// Control: a live call publishes it, so the aborted call left the walk
+			// record untouched rather than the declaration unreadable.
+			await run(new AbortController().signal);
+			expect(
+				published.some((change) =>
+					(change.pathChanges ?? []).some(
+						(entry) => entry.filePath === ambient && entry.type === "created",
+					),
+				),
+			).toBe(true);
+		} finally {
+			unsubscribe();
+			removeTempDirSync(tmpDir);
+		}
 	});
 
 	it("short-circuits the directory fan-out when the signal is already aborted (#343)", async () => {
