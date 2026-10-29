@@ -842,6 +842,9 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			// first load. A loader called before the pins would import them against
 			// the maintainer's real home and write there.
 			let homeAtImport: string | undefined;
+			// An earlier case in this file already pinned the same home, so the
+			// variable is cleared: only a pin made BY this start can satisfy the read.
+			delete process.env.PI_LENS_HOME;
 			await startPiSession({
 				root: fixture.root,
 				cwd: path.join(fixture.root, "inline-pin", "proj"),

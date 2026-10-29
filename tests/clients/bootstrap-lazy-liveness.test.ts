@@ -118,6 +118,11 @@ async function startSpied(options: {
 	startupMode: "quick" | "full";
 	responses?: readonly PiFauxReply[];
 	flags?: ReadonlyMap<string, boolean | string>;
+	/**
+	 * Runs after the module graph is reset and the seam is mocked, before the
+	 * session starts: a module it imports is the copy the extension will use.
+	 */
+	prepare?: () => Promise<void>;
 }): Promise<Spied> {
 	vi.resetModules();
 	demands.length = 0;
@@ -156,6 +161,7 @@ async function startSpied(options: {
 	const { _resetSessionLifecycleForTests } =
 		await import("../../clients/session-lifecycle.js");
 	_resetSessionLifecycleForTests();
+	await options.prepare?.();
 	setGlobalConfig({ format: { enabled: false }, lsp: { enabled: false } });
 	let demandsAfterFactory: readonly string[] = [];
 	const toolCallWindows: string[][] = [];
@@ -250,19 +256,28 @@ describe("#2467 — session-start demands are not turn-scoped", () => {
 		// installed when the handler runs. Binding it to the deferred scans
 		// meant the whole session silently ran with no todo/dead-code/knip/jscpd
 		// scan and no retry — #1394's exact lesson.
-		const { setAmbientAbortSignal } =
-			await import("../../clients/safe-spawn.js");
-		const stale = new AbortController();
-		stale.abort();
-		setAmbientAbortSignal(stale.signal);
 		const cwd = project("stale");
 		fs.writeFileSync(path.join(cwd, "index.ts"), "export const a = 1;\n");
 		fs.writeFileSync(
 			path.join(cwd, "package.json"),
 			JSON.stringify({ name: "stale-signal-fixture", version: "0.0.0" }),
 		);
+		let clearSignal: () => void = () => undefined;
 		try {
-			const { handle } = await startSpied({ cwd, startupMode: "full" });
+			const { handle } = await startSpied({
+				cwd,
+				startupMode: "full",
+				// The signal goes on the safe-spawn copy the extension will import:
+				// one imported before the reset would be a second copy.
+				prepare: async () => {
+					const { setAmbientAbortSignal } =
+						await import("../../clients/safe-spawn.js");
+					const stale = new AbortController();
+					stale.abort();
+					setAmbientAbortSignal(stale.signal);
+					clearSignal = () => setAmbientAbortSignal(undefined);
+				},
+			});
 			expect(handle.errors).toEqual([]);
 			// Not merely "the demand was made" — EVERY demand was SERVED, so the
 			// scan and probe bodies behind them actually ran. Pre-fix the demands
@@ -275,7 +290,7 @@ describe("#2467 — session-start demands are not turn-scoped", () => {
 			expect(served).toEqual(requested);
 			expect(served).toContain("session-start-tool-probes");
 		} finally {
-			setAmbientAbortSignal(undefined);
+			clearSignal();
 		}
 	}, 60_000);
 });
