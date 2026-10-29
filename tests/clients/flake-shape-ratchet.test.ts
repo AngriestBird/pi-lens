@@ -264,6 +264,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	// 2026-10-29 (#4965 round 1): the cache observability's session state moved
+	// onto the session's scope; the summary and baseline rows are only visible in
+	// the logLatency call, as in cache-observability.test.ts.
+	"in-process-mock:clients/cache-observability-session-scope.test.ts::clients/latency-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the cache_usage_summary and baseline rows go through logLatency and test mode skips the file sink, so a passed-through spy is the only reader; the scope store under test is real",
+		},
 	// 2026-10-15 (#1712/#4485): the cascade's live twin over a real classic
 	// TypeScript server. Installation is the external tool boundary: the stub
 	// hands the real wrapper and a classic compiler to the real launcher.

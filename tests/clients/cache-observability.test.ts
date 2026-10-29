@@ -12,17 +12,18 @@ import {
 	clearCachePrefixSession,
 	DEFAULT_PROVIDER_CACHE_TTL_MS,
 	emitCacheUsageSummaryAtSessionEnd,
-	logCacheUsage,
 	MAX_ROLLING_DIGEST_CHARS,
 	MAX_ROLLING_DIGEST_MESSAGES,
+	rollingDigestAt,
+	rollingMessageDigests,
+} from "../../clients/cache-observability.js";
+import {
+	logCacheUsage,
 	observeCacheContext,
 	observeCachePrefix,
 	recordToolResultDelivery,
-	rollingDigestAt,
-	rollingMessageDigests,
-	resetCacheFindingIdentitiesSession,
 	resetCachePrefixObservation,
-} from "../../clients/cache-observability.js";
+} from "../support/cache-session-scopes.js";
 import {
 	getDegradationSummary,
 	renderDegradationLines,
@@ -680,22 +681,6 @@ describe("cache-observability — request-side prefix stability (#1018)", () => 
 		expect(latencyEntries).toHaveLength(2);
 		expect(latencyEntries[1].metadata?.baseline).toBeUndefined();
 		expect(latencyEntries[1].metadata?.sessionId).toBe("<no-session>");
-	});
-
-	it("LRU bound evicts oldest sessions past the cap without throwing", () => {
-		// Cap is 32; establish 40 distinct sessions, then re-observe the OLDEST.
-		for (let i = 0; i < 40; i++) {
-			observeCachePrefix([{ role: "user", content: `s${i}` }], 0, `lru-${i}`);
-		}
-		expect(latencyEntries).toHaveLength(40); // 40 baselines
-		latencyEntries.length = 0;
-
-		// lru-0 was evicted; re-observing it re-baselines rather than diffing.
-		expect(() =>
-			observeCachePrefix([{ role: "user", content: "s0" }], 1, "lru-0"),
-		).not.toThrow();
-		expect(latencyEntries).toHaveLength(1);
-		expect(latencyEntries[0].metadata?.baseline).toBe(true);
 	});
 
 	it("does nothing on an empty transcript and never throws", () => {
@@ -2344,6 +2329,9 @@ describe("cache-observability — per-source injection attribution (#1071)", () 
 		});
 	});
 
+	// #2841 via #4965: the identities live on the session's scope, so the
+	// session's end (its scope retires) is the reset; a same-id restart binds a
+	// new scope and counts nothing it saw before as repeated.
 	it("resets repeated-finding identities at a session_start boundary", () => {
 		const finding = "src/reset.ts:7 rule=E1";
 		const observe = (turnIndex: number) =>
@@ -2361,7 +2349,7 @@ describe("cache-observability — per-source injection attribution (#1071)", () 
 
 		observe(1);
 		logCacheUsage(assistantMessage(), undefined, { sessionId: "reset" });
-		resetCacheFindingIdentitiesSession("reset", "primary");
+		resetCachePrefixObservation();
 		observe(2);
 		logCacheUsage(assistantMessage(), undefined, { sessionId: "reset" });
 

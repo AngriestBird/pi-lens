@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { workflowDocument } from "../../scripts/dispatch-safety.mjs";
+import { STALE_CELLS_ISSUE_TITLE } from "../../scripts/lib/clean-signal.mjs";
 import { extractVitestFailureBlock } from "../../scripts/extract-vitest-failures.mjs";
 import {
 	commandBasename,
@@ -171,6 +172,135 @@ describe("nightly LSP capability refresh contract (#4277)", () => {
 			"needs.tool-smoke.outputs.census == 'success'",
 		);
 		expect(promotion.if).toBe("needs.tool-smoke.outputs.promoted == 'true'");
+	});
+});
+
+// ── #4512: the refresh PR starts CI, lands when flip-free, and raises misses ──
+//
+// Recurrence these keep out: PR #4338 sat open from 2026-10-13 because the
+// refresh PR was opened with the repository GITHUB_TOKEN, whose pushes trigger
+// no workflow, so every refresh waited for a maintainer's close and reopen; and
+// a missed-probe verdict that never reached the notifier job (a stale cell
+// stood unread, as the five `direct` cells did before they were rewritten).
+describe("nightly LSP refresh landing and stale-cell notifier (#4512)", () => {
+	const prSteps = () => loadWorkflow().jobs["tool-smoke-prs"].steps as any[];
+	const stepByName = (steps: any[], fragment: string) =>
+		steps.find((step: any) => String(step.name ?? "").includes(fragment));
+
+	it("opens the docs-refresh PR with the App token when it exists and GITHUB_TOKEN otherwise", () => {
+		const steps = prSteps();
+		const refresh = steps.find(
+			(step: any) => step.with?.branch === "bot/lsp-docs-refresh",
+		);
+		expect(refresh.id).toBe("refresh_pr");
+		expect(refresh.with.token).toBe(
+			"${{ steps.app_token.outputs.token || secrets.GITHUB_TOKEN }}",
+		);
+		const mint = stepByName(steps, "Mint the refresh App token");
+		expect(mint.uses).toMatch(
+			/^actions\/create-github-app-token@[0-9a-f]{40}$/,
+		);
+		expect(mint.if).toBe("vars.LSP_REFRESH_APP_ID != ''");
+		expect(mint["continue-on-error"]).toBe(true);
+		expect(steps.indexOf(mint)).toBeLessThan(steps.indexOf(refresh));
+		// The token is scoped to the two writes the PR step makes, nothing else.
+		const scopes = Object.keys(mint.with)
+			.filter((key) => key.startsWith("permission-"))
+			.sort();
+		expect(scopes).toEqual(["permission-contents", "permission-pull-requests"]);
+	});
+
+	it("keeps the promotion PR on the repository token (the App token is the docs refresh only)", () => {
+		const promotion = prSteps().find(
+			(step: any) => step.with?.branch === "bot/lsp-idle-evict-promote",
+		);
+		expect(promotion.with.token).toBe("${{ secrets.GITHUB_TOKEN }}");
+	});
+
+	it("writes the PR body from the flip check before the PR step reads it", () => {
+		const steps = prSteps();
+		const landing = stepByName(steps, "Compose the refresh PR body");
+		const refresh = steps.find((step: any) => step.id === "refresh_pr");
+		expect(landing.id).toBe("landing");
+		expect(landing.if).toBe(refresh.if);
+		expect(String(landing.run)).toContain("scripts/lsp-refresh-landing.mjs");
+		expect(String(landing.run)).toContain(
+			'--body "$RUNNER_TEMP/lsp-refresh-pr-body.md"',
+		);
+		expect(refresh.with["body-path"]).toBe(
+			"${{ runner.temp }}/lsp-refresh-pr-body.md",
+		);
+		expect(refresh.with.body).toBeUndefined();
+		expect(steps.indexOf(landing)).toBeLessThan(steps.indexOf(refresh));
+	});
+
+	it("arms auto-merge only for a flip-free refresh with the App token and the repository opt-in", () => {
+		const arm = stepByName(prSteps(), "Arm auto-merge");
+		for (const condition of [
+			"steps.refresh_pr.outputs.pull-request-number != ''",
+			"steps.landing.outputs.flip_free == 'true'",
+			"steps.app_token.outputs.token != ''",
+			"vars.LSP_REFRESH_AUTOMERGE == 'true'",
+		])
+			expect(arm.if, condition).toContain(condition);
+		expect(arm.run).toBe('gh pr merge "$PR_NUMBER" --auto --merge');
+		expect(arm.env.GH_TOKEN).toBe("${{ steps.app_token.outputs.token }}");
+		expect(arm["continue-on-error"]).toBe(true);
+	});
+
+	it("disarms auto-merge on a refresh that has flips, so last night's arming cannot carry them", () => {
+		// Recurrence shape: the branch is force-rebuilt every night, and an armed
+		// auto-merge survives the push.
+		const steps = prSteps();
+		const disarm = stepByName(steps, "Disarm auto-merge");
+		expect(disarm.if).toContain("steps.landing.outputs.flip_free != 'true'");
+		expect(disarm.if).toContain(
+			"steps.refresh_pr.outputs.pull-request-number != ''",
+		);
+		expect(disarm.run).toContain("--disable-auto");
+		expect(String(disarm.run)).toContain("set -euo pipefail");
+	});
+
+	it("disarms with the token that updated the PR, and a disarm that cannot run reds the job", () => {
+		// Recurrence (PR #4980 thread): the App token failed to mint on a night
+		// with flips, `refresh_pr` still updated the PR with GITHUB_TOKEN, and the
+		// disarm was gated on the App token, so it was skipped and last night's
+		// auto-merge stayed armed over tonight's flips.
+		const steps = prSteps();
+		const refresh = steps.find((step: any) => step.id === "refresh_pr");
+		const disarm = stepByName(steps, "Disarm auto-merge");
+		expect(disarm.env.GH_TOKEN).toBe(refresh.with.token);
+		expect(disarm.if).not.toContain("steps.app_token");
+		expect(disarm["continue-on-error"]).toBeUndefined();
+	});
+
+	it("files the stale-cell issue under the title the body builder and the issue text agree on", () => {
+		const notify = loadWorkflow().jobs["tool-smoke-notify"].steps as any[];
+		const step = stepByName(notify, "Notify on stale matrix cells");
+		const run = String(step.run);
+		expect(run).toContain(`TITLE='${STALE_CELLS_ISSUE_TITLE}'`);
+		expect(run).toContain("scripts/upsert-tracking-issue.mjs");
+		expect(run).toContain(
+			'--body-file "$RUNNER_TEMP/pilens-stale-cells-body.md"',
+		);
+		expect(run).toContain("--clean --close-when-clean");
+		// Only the two verdicts act; a missing verdict leaves the issue alone.
+		expect(run).toContain(
+			'STATE=$(cat "$RUNNER_TEMP/pilens-stale-cells-state" 2>/dev/null || echo missing)',
+		);
+		expect(step["continue-on-error"]).toBe(true);
+	});
+
+	it("stages the probe's verdict files under the names the notifier reads", () => {
+		const stage = stepByName(
+			loadWorkflow().jobs["tool-smoke"].steps,
+			"Stage the notifier inputs",
+		);
+		const run = String(stage.run);
+		expect(run).toContain("STALE_CELLS_BODY_PATH");
+		expect(run).toContain("STALE_CELLS_STATE_PATH");
+		expect(run).toContain('"$stage/pilens-stale-cells-body.md"');
+		expect(run).toContain('"$stage/pilens-stale-cells-state"');
 	});
 });
 

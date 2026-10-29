@@ -158,17 +158,23 @@ Merges never blank a prior good value, so a CI non-result leaves the dev
 classification standing.
 
 Two bounded guards keep that preservation from hiding a dead instrument
-(#3401). A `direct` `first-publish` cell whose axis the nightly probe does not
-re-observe is stamped once with the date of its first miss and degrades to
-`unknown` once five calendar days have elapsed since it (skipped nights do not
-stall it, and a re-observation clears the stamp). `empty-first` cells are never
-expired: they back the live `emptyFirstPublish` markers (php) and
-expiring one would erase the measurement behind a marker. That exception is
-bounded too (#4615): the refresh stamps the FIRST night it does not re-observe an
-`empty-first` cell, and the first-publish census reds once that stamp is five
-days old, so the cell+marker pair cannot outlive the instrument that produced it
-— a cell with no live measurement behind it is no longer indistinguishable from
-a healthy one. A `clean-behavior`/`tier` change is written only after two
+(#3401, #4512). A measured `first-publish` or `clean-behavior` cell the nightly
+probe does not re-observe keeps its last known value and is marked in the
+`stale` column with the date of the first miss (`since YYYY-MM-DD`). The refresh
+never rewrites it to `unknown`: before #4512 a `direct` cell degraded to
+`unknown` after five days, which erased five measured values in the #4338
+refresh with nothing raised. The streak of consecutive nightly misses is kept
+per lang and per axis in the refresh state below, so a `clean-behavior` miss one
+night and a `first-publish` miss the next are two first misses; a cell whose
+axis has missed two consecutive nights is
+raised on one tracking issue (`nightly: LSP capability probe missed (stale
+matrix cells)`), and an observation clears both the mark and the streak.
+`empty-first` cells back the live `emptyFirstPublish` markers and are stamped
+the same way (#4615): the refresh stamps the FIRST night it does not re-observe
+one, and the first-publish census reds once that stamp is five days old, so the
+cell+marker pair cannot outlive the instrument that produced it — a cell with
+no live measurement behind it is no longer indistinguishable from a healthy
+one. A `clean-behavior`/`tier` change is written only after two
 consecutive nightly runs observe the same new value, so one flapping nightly
 (ast-grep went 2 → 2* → 3 → 2* across four runs) cannot rewrite a cell; a night
 that measured nothing for the lang resets the hold. A subset probe (`probe-clean-signal.mjs <langs>`) leaves the
@@ -183,6 +189,20 @@ master's doc otherwise (branch absent, squash-merged, or master edited the doc
 since). Closing the bot PR unmerged does not reset the bookkeeping: the branch
 is kept and keeps seeding, so only deleting `bot/lsp-docs-refresh` resets it.
 
+The `version` and `install` columns (#4512) record what the nightly ran: the
+first version token of the server's own version command (the `checkArgs` its
+installer entry registers, `--version` by default, read within that entry's
+verification timeout) and the installer route that resolved it (`global-path`, `npm-global`, `pip-user`, `pi-lens-auto`,
+`github-release`, `maven-jar`, `archive-dist`). `characterize-lsp.mjs` writes
+them from the installer's resolution for the one tool a fixture names; a fixture
+that names none or several, a server the installer cannot find, or a launcher
+that answers every argument by starting a JVM (`tree-manifest`) records nothing,
+and the cell keeps its last known value or `—`. They record the installer's
+resolution, not the path the LSP launch finally spawned, so a PATH binary that
+shadows a managed one reads as `global-path`. A change in `version` or `install`
+is not a capability flip: the refresh PR's landing check ignores those columns
+and `stale`.
+
 `vue`'s `clean-behavior` was hand-reset to `unknown` (#3390): its
 `publishes-unversioned` cell came from 58/45 publishes that the shared
 `extension.log` window had attributed to vue but that belonged to `tinymist`.
@@ -192,37 +212,37 @@ to be cleared by hand. It stays `unknown` until a run observes
 `@vue/language-server` publish; `tests/config/lsp-clean-behavior-census.test.ts`
 carries the named admission until then.
 
-| lang | server | mode | clean-behavior | first-publish | tier | src |
-|---|---|---|---|---|---|---|
-| json | vscode-json-language-server | pull | — | n/a (pull) | 1 | dev+ci |
-| css | vscode-css-language-server | pull | — | n/a (pull) | 1 | dev+ci |
-| html | vscode-html-language-server | pull | — | n/a (pull) | 1 | dev+ci |
-| rust | rust-analyzer | pull | — | n/a (pull) | 1 | dev+ci |
-| svelte | svelte-language-server | pull | — | n/a (pull) | 1 | dev+ci |
-| deno | deno (alt of typescript) | pull | — | n/a (pull) | 1 | dev+ci |
-| ruby | ruby-lsp | pull | — | n/a (pull) | 1 | ci |
-| csharp | csharp-ls | pull | — | n/a (pull) | 1 | ci |
-| typescript | typescript-language-server | push-only | silent | direct | 3 | dev+ci |
-| markdown | marksman | push-only | silent | direct | 3 | ci |
-| lua | lua-language-server | push-only | silent | direct | 3 | dev+ci |
-| python | pyright | push-only | publishes-versioned | direct | 2 | dev+ci |
-| jedi | jedi-language-server (alt of python) | push-only | publishes-versioned | direct | 2 | ci |
-| yaml | yaml-language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| shell | bash-language-server | push-only | publishes-versioned | direct | 2 | dev+ci |
-| dockerfile | docker-langserver | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| dockerfile-official | docker-language-server (official) | push-only | publishes-versioned | direct | 2 | dev+ci |
-| toml | taplo | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| terraform | terraform-ls | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| prisma | @prisma/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| php | intelephense | push-only | publishes-unversioned | empty-first | 2* | dev+ci |
-| zig | zls | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| vue | @vue/language-server | push-only | unknown | unknown | 2/3? | dev+ci |
-| dart | dart language-server | push-only | publishes-unversioned | direct | 2* | ci |
-| gleam | gleam lsp | push-only | publishes-unversioned | direct | 2* | ci |
-| clojure | clojure-lsp | push-only | publishes-unversioned | direct | 2* | ci |
-| opengrep | opengrep (aux) | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| ast-grep | ast-grep (aux) | push-only | publishes-versioned | direct | 2 | dev+ci |
-| cue | CUE Language Server (cue lsp serve) | push-only | publishes-versioned | direct | 2 | dev+ci |
+| lang | server | mode | clean-behavior | first-publish | tier | src | version | install | stale |
+|---|---|---|---|---|---|---|---|---|---|
+| json | vscode-json-language-server | pull | — | n/a (pull) | 1 | dev+ci | — | — | — |
+| css | vscode-css-language-server | pull | — | n/a (pull) | 1 | dev+ci | — | — | — |
+| html | vscode-html-language-server | pull | — | n/a (pull) | 1 | dev+ci | — | — | — |
+| rust | rust-analyzer | pull | — | n/a (pull) | 1 | dev+ci | — | — | — |
+| svelte | svelte-language-server | pull | — | n/a (pull) | 1 | dev+ci | — | — | — |
+| deno | deno (alt of typescript) | pull | — | n/a (pull) | 1 | dev+ci | — | — | — |
+| ruby | ruby-lsp | pull | — | n/a (pull) | 1 | ci | — | — | — |
+| csharp | csharp-ls | pull | — | n/a (pull) | 1 | ci | — | — | — |
+| typescript | typescript-language-server | push-only | silent | direct | 3 | dev+ci | — | — | — |
+| markdown | marksman | push-only | silent | direct | 3 | ci | — | — | — |
+| lua | lua-language-server | push-only | silent | direct | 3 | dev+ci | — | — | — |
+| python | pyright | push-only | publishes-versioned | direct | 2 | dev+ci | — | — | — |
+| jedi | jedi-language-server (alt of python) | push-only | publishes-versioned | direct | 2 | ci | — | — | — |
+| yaml | yaml-language-server | push-only | publishes-unversioned | direct | 2* | dev+ci | — | — | — |
+| shell | bash-language-server | push-only | publishes-versioned | direct | 2 | dev+ci | — | — | — |
+| dockerfile | docker-langserver | push-only | publishes-unversioned | direct | 2* | dev+ci | — | — | — |
+| dockerfile-official | docker-language-server (official) | push-only | publishes-versioned | direct | 2 | dev+ci | — | — | — |
+| toml | taplo | push-only | publishes-unversioned | direct | 2* | dev+ci | — | — | — |
+| terraform | terraform-ls | push-only | publishes-unversioned | direct | 2* | dev+ci | — | — | — |
+| prisma | @prisma/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci | — | — | — |
+| php | intelephense | push-only | publishes-unversioned | empty-first | 2* | dev+ci | — | — | — |
+| zig | zls | push-only | publishes-unversioned | direct | 2* | dev+ci | — | — | — |
+| vue | @vue/language-server | push-only | unknown | unknown | 2/3? | dev+ci | — | — | — |
+| dart | dart language-server | push-only | publishes-unversioned | direct | 2* | ci | — | — | — |
+| gleam | gleam lsp | push-only | publishes-unversioned | direct | 2* | ci | — | — | — |
+| clojure | clojure-lsp | push-only | publishes-unversioned | direct | 2* | ci | — | — | — |
+| opengrep | opengrep (aux) | push-only | publishes-unversioned | direct | 2* | dev+ci | — | — | — |
+| ast-grep | ast-grep (aux) | push-only | publishes-versioned | direct | 2 | dev+ci | — | — | — |
+| cue | CUE Language Server (cue lsp serve) | push-only | publishes-versioned | direct | 2 | dev+ci | — | — | — |
 
 **Unknown — fixture exists, mode not yet captured.** The toolchain-gated family
 (no auto-install today; tracked in #241) — `go` (gopls), `java` (jdtls),
@@ -395,8 +415,9 @@ observations are never compared (a slow/absent server is not evidence either way
 ## Capability matrix refresh state (nightly-generated)
 
 Bookkeeping for the two-run `first-publish`/`clean-behavior` hysteresis, the
-date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
-counts (#3989). Regenerated every run; never a measurement.
+first-miss stamps (#3401, #4615), the consecutive-night `missed-probe`
+streaks behind the `stale` column (#4512) and consecutive-night
+`idle-eviction` counts (#3989). Regenerated every run; never a measurement.
 
 ```json
 {"idle-eviction":{"powershell":{"nights":[{"day":"2026-10-27","rssMb":155,"coldMs":2553}]}}}

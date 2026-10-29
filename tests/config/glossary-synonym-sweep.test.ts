@@ -1533,7 +1533,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/read-guard-tool-lines.ts": 3,
 		"clients/read-guard.ts": 2,
 		"clients/reverse-deps.ts": 14,
-		"clients/runtime-session.ts": 45,
+		"clients/runtime-session.ts": 38,
 		"clients/runtime-tool-call.ts": 2,
 		"clients/runtime-tool-result.ts": 2,
 		"clients/session-scope.ts": 2,

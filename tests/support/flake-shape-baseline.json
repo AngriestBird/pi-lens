@@ -437,6 +437,7 @@
 		"clients/bounded-telemetry.test.ts::clients/latency-logger": 1,
 		"clients/bus-publish.test.ts::clients/bus-events-logger": 1,
 		"clients/bus-publish.test.ts::clients/recent-touches": 1,
+		"clients/cache-observability-session-scope.test.ts::clients/latency-logger": 1,
 		"clients/cache-observability.test.ts::clients/latency-logger": 1,
 		"clients/cascade-classic-ts-live.test.ts::clients/installer/index": 1,
 		"clients/cascade-compute.test.ts::clients/cascade-logger": 1,

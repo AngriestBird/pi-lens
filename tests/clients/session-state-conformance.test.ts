@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	EXEMPT_SESSION_STATE_FILES,
+	SESSION_CELL_KEYS,
 	SESSION_STATE_REGISTRY,
 	SESSION_STATE_SYMBOL_COUNTS,
 	_resetRegistryProbeState,
@@ -31,10 +32,12 @@ import {
 import {
 	SWEEP_HEURISTIC_LIMITS,
 	auditContainerClassExclusions,
+	auditOwnerKeys,
 	callsWithinFunction,
 	callsWithinSessionStartClosure,
 	clientSourceFiles,
 	resetNameDefinitions,
+	scanScopeCellKeys,
 	scanSessionStateCandidates,
 	sessionStartClosureResetNames,
 	sessionStartResetNames,
@@ -1175,5 +1178,209 @@ describe("session-state scan — CONTAINER_CLASS_EXCLUSIONS guards (#2455 fix ro
 				expect(problems).toEqual([]);
 			},
 		);
+	});
+});
+
+// #4965 (defect shape 72): seven bug fixes in one week (#4961, #4955, #4952,
+// #4940, #4762, #4749, #4753) were stores that answered for the process when a
+// session owned the data. No check asked who owns a store; this one does.
+describe("session-state registry — owner key (#4965)", () => {
+	const OK_SESSION = {
+		id: "x:session",
+		module: "x.ts",
+		ownerKey: "session",
+		sessionSeamException:
+			"one process Set keyed by file path with no session in the key",
+	};
+
+	it("every registry entry declares an admitted owner key", () => {
+		expect(auditOwnerKeys(SESSION_STATE_REGISTRY)).toEqual([]);
+	});
+
+	it("an entry with the column removed is refused", () => {
+		const { ownerKey: _dropped, ...withoutColumn } = OK_SESSION;
+		expect(auditOwnerKeys([withoutColumn])).toEqual([
+			expect.stringContaining("x:session: ownerKey undefined is not"),
+		]);
+	});
+
+	it("fails closed: only the known values are admitted", () => {
+		const refused = [
+			"global",
+			"Session",
+			" session",
+			"session ",
+			"",
+			"process-wide",
+			"process-wide:",
+			"process-wide: ",
+			"process-wide: machine",
+			"process wide: a fact about this machine",
+			"cwd",
+			42,
+			null,
+			undefined,
+			["session"],
+		];
+		for (const ownerKey of refused)
+			expect(
+				auditOwnerKeys([{ id: "x", module: "x.ts", ownerKey }]),
+				`${JSON.stringify(ownerKey)} must be refused`,
+			).toHaveLength(1);
+		for (const ownerKey of [
+			"repository",
+			"project",
+			"process-wide: shared LSP pool: one service for every session",
+		])
+			expect(
+				auditOwnerKeys([{ id: "x", module: "x.ts", ownerKey }]),
+				`${ownerKey} must be admitted`,
+			).toEqual([]);
+	});
+
+	it("a session owner states why a scope cell cannot hold it", () => {
+		expect(auditOwnerKeys([OK_SESSION])).toEqual([]);
+		const bare = { id: "x", module: "x.ts", ownerKey: "session" };
+		expect(auditOwnerKeys([bare])).toEqual([
+			expect.stringContaining("move it onto a scope cell"),
+		]);
+		expect(
+			auditOwnerKeys([{ ...bare, sessionSeamException: "because" }]),
+		).toHaveLength(1);
+	});
+
+	it("a seam claim is refused whatever it names, with or without an exception", () => {
+		// RECURRENCE GUARDED: #4972 review F2 and F5. A claim checked per module
+		// admitted a wrong store (cacheUsageSummary riding the module's real cell),
+		// and a non-boolean claim beside a valid exception passed. A store on a
+		// scope cell has no registry entry, so no claim is admitted at all.
+		const wrongStore = {
+			id: "cache-observability:cacheUsageSummary",
+			module: "cache-observability.ts",
+			state: "cacheUsageSummary",
+			ownerKey: "session",
+		};
+		for (const sessionSeam of [
+			"cache-observability",
+			true,
+			"yes",
+			"",
+			null,
+		] as unknown[]) {
+			expect(
+				auditOwnerKeys([{ ...wrongStore, sessionSeam }]),
+				`${JSON.stringify(sessionSeam)} alone`,
+			).toEqual([
+				expect.stringContaining("sessionSeam is not a registry field"),
+			]);
+			expect(
+				auditOwnerKeys([
+					{
+						...wrongStore,
+						sessionSeam,
+						sessionSeamException: OK_SESSION.sessionSeamException,
+					},
+				]),
+				`${JSON.stringify(sessionSeam)} beside a valid exception`,
+			).toEqual([
+				expect.stringContaining("sessionSeam is not a registry field"),
+			]);
+		}
+	});
+
+	it("an exception does not ride a non-session owner", () => {
+		for (const ownerKey of [
+			"project",
+			"repository",
+			"process-wide: a fact about this machine",
+		])
+			expect(
+				auditOwnerKeys([
+					{
+						id: "x",
+						module: "x.ts",
+						ownerKey,
+						sessionSeamException: OK_SESSION.sessionSeamException,
+					},
+				]),
+			).toHaveLength(1);
+	});
+
+	it("every shipped scope cell is pinned, and every pin is a live use", () => {
+		expect(scanScopeCellKeys()).toEqual(SESSION_CELL_KEYS);
+	});
+
+	describe("the cell census reads code, not prose, and not one spelling", () => {
+		let root: string | undefined;
+		afterEach(() => {
+			if (root) fs.rmSync(root, { recursive: true, force: true });
+			root = undefined;
+		});
+		const scanPlanted = (files: Record<string, string>) => {
+			root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cell-scan-"));
+			for (const [name, text] of Object.entries(files))
+				fs.writeFileSync(path.join(root, name), text);
+			return Object.fromEntries(
+				Object.entries(scanScopeCellKeys([root])).map(([file, tokens]) => [
+					path.basename(file),
+					tokens,
+				]),
+			);
+		};
+		const IMPORT =
+			'import { scopeCell, sessionCell } from "./session-scope.js";\n';
+
+		it("reads a literal key, a const key and an imported key", () => {
+			expect(
+				scanPlanted({
+					"literal.ts": `${IMPORT}scopeCell<Map<string, number>>(scope, "a", () => new Map());`,
+					"const.ts": `${IMPORT}const KEY = "b";\nsessionCell(id, KEY);`,
+					"imported.ts": `${IMPORT}import { OTHER_KEY } from "./o.js";\nscopeCell(scope, OTHER_KEY);`,
+				}),
+			).toEqual({
+				"literal.ts": ["a"],
+				"const.ts": ["b"],
+				"imported.ts": ["ident:OTHER_KEY"],
+			});
+		});
+
+		it("lists an alias, an indirect call and a value through another binding instead of missing them", () => {
+			// Plants the author did not design for: each lands a `?` token, which
+			// no pin contains, so the census test reds until the spelling is read.
+			const tokens = scanPlanted({
+				"alias.ts":
+					'import { scopeCell as sc } from "./session-scope.js";\nsc(scope, "x");',
+				"indirect.ts": `${IMPORT}const open = scopeCell;\nopen(scope, "x");`,
+				"binding.ts": `${IMPORT}const OTHER = "x";\nconst KEY = OTHER;\nscopeCell(scope, KEY);`,
+				"member.ts":
+					'import * as seam from "./session-scope.js";\nseam.scopeCell(scope, "x");',
+				"reexport.ts": 'export { scopeCell } from "./session-scope.js";',
+				"computed.ts": `${IMPORT}scopeCell(scope, "a" + suffix);`,
+				"parameter.ts": `${IMPORT}function f(key: string) { return scopeCell(scope, key); }`,
+			});
+			for (const [file, found] of Object.entries(tokens))
+				expect(
+					found.some((token) => token.startsWith("?")),
+					`${file}: ${JSON.stringify(found)}`,
+				).toBe(true);
+			expect(Object.keys(tokens).sort()).toEqual([
+				"alias.ts",
+				"binding.ts",
+				"computed.ts",
+				"indirect.ts",
+				"member.ts",
+				"parameter.ts",
+				"reexport.ts",
+			]);
+		});
+
+		it("ignores a name that only a comment or a string carries", () => {
+			expect(
+				scanPlanted({
+					"prose.ts":
+						'// scopeCell(scope, "x")\nconst note = "sessionCell(id, \\"y\\")";',
+				}),
+			).toEqual({});
+		});
 	});
 });

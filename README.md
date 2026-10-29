@@ -136,7 +136,7 @@ flowchart TD
 Architecture-level view, updated when a lane changes. Per-tool inventories live
 in [features](docs/features.md) and
 [language coverage](docs/language-coverage.md). Today the edit-time lane carries
-45+ runner modules over 35+ file kinds, and the LSP lane speaks to 47
+45+ runner modules over 35+ file kinds, and the LSP lane speaks to 50
 language server definitions.
 
 The gating box is an abstraction, not a call order. Freshness covers several

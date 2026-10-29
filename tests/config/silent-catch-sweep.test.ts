@@ -230,9 +230,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :299, :345, :362, :386, :400, :623
 	"clients/cache-observability.ts": {
 		silent: 10,
-		identities: "765e8cbdadc92783",
+		identities: "1386f1967c2c9482",
 		reason: PRE_RULE,
-	}, // :507, :837, :862, :882, :1176, :1186, :1239, :1264, :1427, :1587
+	}, // :589, :1118, :1143, :1163, :1648, :1658, :1711, :1736, :1949, :2246
 	"clients/cache/rule-cache.ts": {
 		silent: 5,
 		identities: "4332dc8628e97e3b",
@@ -1111,10 +1111,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :1027, :1085, :1531, :2909
 	"clients/runtime-session.ts": {
-		silent: 25,
-		identities: "a7ef9ab6e86045e5",
+		silent: 24,
+		identities: "8e72ef4e0c693497",
 		reason: PRE_RULE,
-	}, // :385, :755, :803, :810, :896, :923, :971, :1005, :1007, :1032, :1062, :1195, :1246, :1389, :1986, :2560, :2592, :2695, :2766, :2771, :2837, :3025, :3355, :3369, :3442
+	}, // :403, :648, :901, :949, :956, :1042, :1069, :1146, :1181, :1183, :1208, :1238, :1371, :1422, :1592, :2189, :2782, :2814, :2922, :2999, :3004, :3414, :3428, :3501
 	"clients/runtime-tool-call.ts": {
 		silent: 11,
 		identities: "9c12ec155c04701f",
