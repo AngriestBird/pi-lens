@@ -410,6 +410,93 @@ describe.each([false, true])(
 			});
 		});
 
+		// Recurrence (#4617 item 2, round 2): a late runner whose surviving
+		// findings are all blocking leaves the advisory and is delivered by the
+		// blocker replay ("Unresolved from this turn"), a second producer of the
+		// same file-less part. The stamp named no file, so a STOP blocker the
+		// same message called historical of unknown provenance.
+		const deferBlockingLateRunner = (
+			h: { write: (rel: string, body: string) => string; cwd: string },
+			id: string,
+		): string => {
+			const runnerFile = h.write("src/late.sh", "echo hi\n");
+			const past = new Date(Date.now() - 10_000);
+			fs.utimesSync(runnerFile, past, past);
+			deferRunnerFindings({
+				filePath: runnerFile,
+				cwd: h.cwd,
+				projectRoot: h.cwd,
+				runnerId: "shellcheck",
+				markedAtMs: Date.now() - 2000,
+				promise: Promise.resolve({
+					status: "failed",
+					failureKind: "blocking_diagnostics",
+					semantic: "blocking",
+					diagnostics: [
+						{
+							id,
+							message: "late runner finding",
+							filePath: runnerFile,
+							line: 1,
+							column: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "shellcheck",
+							rule: "SC2086",
+						},
+					],
+				} as RunnerResult),
+			});
+			return runnerFile;
+		};
+
+		it("keeps a blocking-only late runner finding current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-blocking-${guard}`,
+				incident:
+					"A blocker replayed from a late runner cites no file the turn edited",
+				issue: "#4617",
+				async run(h) {
+					deferBlockingLateRunner(h, "late-runner-blocking-1");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Unresolved from this turn");
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Negative direction of the cell above: citing the blocker's file binds
+		// the message, it does not silence the label once the file moves on.
+		it("labels a blocking-only late runner finding historical when its file changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-blocking-older-${guard}`,
+				incident:
+					"A stamped replayed blocker from an older turn stays labelled",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = deferBlockingLateRunner(
+						h,
+						"late-runner-blocking-2",
+					);
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runnerFile, "echo changed\n");
+						},
+					});
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// Negative cells: the fix must not drop the label. A stamp taken at this
 		// turn end still flips to historical once the workspace moves on, or
 		// once the session that took it is over.

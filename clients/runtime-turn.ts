@@ -1884,9 +1884,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					? ` (suppressed by disposition: ${policy.suppressed} finding(s))`
 					: "";
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
-			blockerParts.push(
-				`Unresolved from this turn — ${displayPath}${suppressedNote}:\n${policy.body}`,
-			);
+			const replayPart = `Unresolved from this turn — ${displayPath}${suppressedNote}:\n${policy.body}`;
+			blockerParts.push(replayPart);
+			// #4617: the replay is about this file, which a no-write turn did not
+			// edit; a late runner's blocking survivor is pending, not resolved.
+			citePart(replayPart, [bPath]);
 		}
 	}
 	// #3248: the post-policy survivor set per file is FINAL here. The commit
