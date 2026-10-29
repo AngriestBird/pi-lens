@@ -1859,15 +1859,14 @@ TurnEnd ==
 
 \* #4943: a turn_end of any activation stages its message in the one
 \* per-project slot (`writeCache("turn-end-findings", ...)` in
-\* `handleTurnEnd`), replacing whatever another session staged there. The
-\* configs that use it take no replacement transition, so the slot lives in
-\* the one coordinator generation.
+\* `handleTurnEnd`), replacing whatever is staged there, its own earlier
+\* message included: the write is unconditional, so a session stages again
+\* after its message was taken. The configs that use it take no replacement
+\* transition, so the slot lives in the one coordinator generation.
 Stage ==
     /\ "Stage" \in Transitions /\ primary # 0 /\ pend.k = "none"
     /\ \E s \in Tickets :
           /\ st[s] = "live"
-          /\ ~\E c \in consumed : c.k = "staged" /\ c.o = s
-          /\ [k |-> "staged", o |-> s] \notin co[last]
           /\ co' = [co EXCEPT ![last] = {r \in @ : r.k # "staged"}
                                           \cup {[k |-> "staged", o |-> s]}]
     /\ UNCHANGED <<uOld, cell, landed, reads, recorded, ownDrop, mw, dq, pk,

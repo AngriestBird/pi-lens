@@ -449,13 +449,18 @@ against 398,844 without it, so that config keeps its three kinds.
 
 The composer's message itself is staged in one per-project slot (the
 `turn-end-findings` record) that the next request takes, not the `turn_end`.
-`Stage` replaces the slot's message with the staging session's; `TakeSlot` is
-a live session's request taking it. `Pre4943SlotUnaddressed` is master before
-#4943: the slot names no reader, so the subagent's request takes the message
-the primary's `turn_end` staged. `Fix4943SlotAddressed` adds `slotAddressed`
-and passes. The slot lives in one coordinator generation here, since neither
-config takes a replacement transition; an overwrite drops the earlier
-message, and its session stages again (its next `turn_end` re-composes it).
+`Stage` replaces the slot's message with the staging session's,
+unconditionally, as the cache write does: a session may stage again after its
+message was taken, and over its own staged message. `TakeSlot` is a live
+session's request taking it. `Pre4943SlotUnaddressed` is master before #4943:
+the slot names no reader, so the subagent's request takes the message the
+primary's `turn_end` staged. `Fix4943SlotAddressed` adds `slotAddressed` and
+passes. The slot lives in one coordinator generation here, since neither
+config takes a replacement transition. An overwrite drops the earlier
+message; a blocker comes back, because its session's next `turn_end`
+re-composes it, but a one-shot advisory does not. `Current` does not take
+`Stage` or `TakeSlot`, so its verdict says nothing about the slot; the two
+#4943 configs are the slot's only evidence.
 
 ### Overlap with `formal/turn-end-delivery-holds`
 
@@ -635,7 +640,7 @@ counterexample.
 | `Pre4921BlockerUnscoped` | #4921, master before the fix: the worklist, cascade and runner records are scoped, the inline-blocker map is not; a subagent's `turn_end` delivers the primary's blocker | `violated SecondaryIsolation` | 60 |
 | `Fix4921BlockerScoped` | #4921, shipped: a `turn_end` delivers only its own session's inline-blocker records | pass | 6642 |
 | `Pre4943SlotUnaddressed` | #4943, master before the fix: the per-project turn-end slot names no reader; a subagent's request takes the message the primary's `turn_end` staged | `violated SecondaryIsolation` | 8 |
-| `Fix4943SlotAddressed` | #4943, shipped: a request takes the staged message only when its own session staged it | pass | 11 |
+| `Fix4943SlotAddressed` | #4943, shipped: a request takes the staged message only when its own session staged it | pass | 16 |
 
 ## Pre-fix and Mut configs and their issues
 
