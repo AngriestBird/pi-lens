@@ -46,7 +46,7 @@ if (complete) {
 		process.exit(1);
 	}
 	if (result.inconclusive) {
-		console.error("lockfile:complete: inconclusive: npm pin unavailable");
+		console.error(`lockfile:complete: inconclusive: ${result.reason}`);
 		if (result.output) console.error(result.output);
 		process.exit(3);
 	}

@@ -80,6 +80,61 @@ describe("lockfile completeness guard", () => {
 		});
 	});
 
+	it("names the timeout and its budget when the npm child is killed", () => {
+		// Regression (#4995): ETIMEDOUT was read as an acquisition outage, so a
+		// killed gate printed "npm pin unavailable" and its own reason never ran.
+		const result = runLockfileCompleteness({
+			cwd: fixture(),
+			spawn: spawnSync,
+			timeoutMs: 5,
+		});
+		expect(result).toMatchObject({
+			ok: false,
+			inconclusive: true,
+			pin: "11.18.0",
+			reason: "timed out after 5ms",
+		});
+	});
+
+	it("names the timeout even when the killed run printed outage text", () => {
+		const result = runLockfileCompleteness({
+			cwd: fixture(),
+			spawn: (() => ({
+				error: Object.assign(new Error("spawnSync npx ETIMEDOUT"), {
+					code: "ETIMEDOUT",
+				}),
+				status: null,
+				stdout: "",
+				stderr: "npm ERR! FetchError: request failed ECONNREFUSED",
+			})) as unknown as typeof import("node:child_process").spawnSync,
+			timeoutMs: 7,
+		});
+		expect(result).toMatchObject({
+			ok: false,
+			inconclusive: true,
+			reason: "timed out after 7ms",
+		});
+	});
+
+	it("fails, not inconclusive, on a spawn error that is not a timeout", () => {
+		const result = runLockfileCompleteness({
+			cwd: fixture(),
+			spawn: (() => ({
+				error: Object.assign(new Error("spawnSync npx ENOENT"), {
+					code: "ENOENT",
+				}),
+				status: null,
+				stdout: "",
+				stderr: "",
+			})) as unknown as typeof import("node:child_process").spawnSync,
+		});
+		expect(result).toMatchObject({
+			ok: false,
+			reason: "spawnSync npx ENOENT",
+		});
+		expect(result.inconclusive).toBeUndefined();
+	});
+
 	it("copies only manifests into the isolated tree", () => {
 		// Regression: the old recursive copy placed arbitrary repository content
 		// in the npm cwd, despite the gate requiring manifest-only isolation.
