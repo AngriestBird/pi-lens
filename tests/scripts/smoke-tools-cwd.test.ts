@@ -178,9 +178,11 @@ describe("tool-smoke cwd-sensitive rows (#2697)", () => {
 		const workspace = fs.mkdtempSync(
 			path.join(repoRoot, ".probe-home", "cwd-"),
 		);
-		const shimDir = fs.mkdtempSync(
-			path.join(repoRoot, ".probe-home", "yamllint-"),
-		);
+		// Outside the session repository on purpose (#4530, #4996): while pi has
+		// not trusted the project, the spawn seam drops a PATH entry inside the
+		// checkout, so a shim under `.probe-home` is skipped and a host yamllint
+		// further down PATH answers instead.
+		const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-yamllint-"));
 		const previousPath = process.env.PATH;
 		const previousProcessCwd = process.cwd();
 		const spawn = vi.spyOn(safeSpawn, "safeSpawnAsync");
@@ -227,6 +229,9 @@ describe("tool-smoke cwd-sensitive rows (#2697)", () => {
 				"key-ordering",
 			);
 			expect(diagnostics).toHaveLength(1);
+			// The spawn is a bare `yamllint`, so the shim's own output is the proof
+			// that the shim, not a host yamllint, was the binary that ran (#4996).
+			expect(diagnostics[0]?.message).toContain("hermetic shim");
 		} finally {
 			process.chdir(previousProcessCwd);
 			if (previousPath === undefined) delete process.env.PATH;
