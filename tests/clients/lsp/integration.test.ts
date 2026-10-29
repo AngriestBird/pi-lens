@@ -25,6 +25,7 @@ import { createLSPClient } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { spawnFakeLspServer } from "../../support/fake-lsp-server.js";
 import { removeTempDirSync } from "../test-utils.js";
+import { waitFor } from "../interleaving-kit.js";
 import { CacheManager } from "../../../clients/cache-manager.js";
 import { getDegradationSummary } from "../../../clients/degradation-ledger.js";
 import { registerMutationBridge } from "../../../clients/mutation-bridge.js";
@@ -887,9 +888,11 @@ describe("LSP Client Integration — batched watched-files (#271)", () => {
 	// Poll until the server has echoed at least one frame (the flush is on a
 	// ~100ms debounce + a stdio round-trip), with a generous ceiling.
 	const waitForEcho = async () => {
-		for (let i = 0; i < 60 && received.length === 0; i++) {
-			await new Promise((r) => setTimeout(r, 25));
-		}
+		await waitFor(
+			() => received.length,
+			(n) => n > 0,
+			{ timeoutMs: 4_000 },
+		);
 	};
 
 	it("coalesces N rapid file opens into ONE wire frame with N changes", async () => {

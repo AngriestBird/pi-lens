@@ -23,11 +23,16 @@ import { copyFixtureGitHelper } from "../support/fixture-git-copy.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import {
 	findingSignature,
+	findingSignatures,
 	findingsInTrackedFiles,
+	findUnreasonedIgnores,
 	loadBaseline,
 	repoRoot,
+	runRuleTests,
 	runSelfScan,
 	selfScanRuleIds,
+	suiteByName,
+	trackedSelfScanFileSet,
 } from "../../scripts/lib/astgrep-self-scan.mjs";
 import { setProjectTrustState } from "../../clients/project-trust.js";
 
@@ -642,5 +647,159 @@ describe("self-scan argv and tracked filter (#3886 r3)", () => {
 		expect(baseline.allowed).toContain(
 			"no-raw-json-store-write::clients/untracked.ts::2",
 		);
+	});
+});
+
+// #4865: the governance suite (scripts/governance-rules/) runs through the same
+// runner and baseline machinery. Recurrence guarded: shape 86, a test that waits
+// for real I/O by counting turns (#4850 and #4830, fixed by #4852; #4969's
+// shared persist helper; #4977's sequence-read test), each found by a flaky red
+// or a bot review because no detector read the shape.
+d("governance suite: turn-count-wait (#4865)", () => {
+	const governance = suiteByName("governance");
+	const GOVERNANCE_SGCONFIG = path.join(
+		repoRoot(),
+		"scripts",
+		"governance-rules",
+		"sgconfig.yml",
+	);
+
+	/** A scratch root holding `tests/<name>` with `source`, scanned the way the
+	 * wrapper scans the tree: cwd at the root, a relative `tests` path, so the
+	 * rule's `files: tests/**` population applies. */
+	function scanScratch(name: string, source: string) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-gov-scan-"));
+		try {
+			fs.mkdirSync(path.join(root, "tests"));
+			fs.writeFileSync(path.join(root, "tests", name), source, "utf-8");
+			const result = runSelfScan({
+				root,
+				suite: governance,
+				scanPaths: ["tests"],
+				ruleIds: selfScanRuleIds(repoRoot(), governance),
+				sgConfigPath: GOVERNANCE_SGCONFIG,
+			});
+			return {
+				lines: result.findings.map(
+					(f) => `${f.ruleId}:${(f.range?.start?.line ?? -1) + 1}`,
+				),
+				scanned: result.scannedFileCount,
+				offenders: findUnreasonedIgnores([`tests/${name}`], root),
+			};
+		} finally {
+			removeTempDirSync(root);
+		}
+	}
+
+	it("the rule tests pass: every planted member reds and every admitted form stays clean", () => {
+		const run = runRuleTests(repoRoot(), governance);
+		const out = `${run.stdout ?? ""}${run.stderr ?? ""}`;
+		expect(run.status, out).toBe(0);
+		expect(out).toMatch(/PASS turn-count-wait /);
+		expect(out).toMatch(/PASS turn-count-wait-test-hook /);
+	});
+
+	it("the tree has no untriaged member, and every baseline row has a reason and a live member", () => {
+		const result = runSelfScan({ suite: governance });
+		const tracked = trackedSelfScanFileSet(repoRoot(), governance.scanPaths);
+		const findings = findingsInTrackedFiles(result.findings, tracked);
+		const signatures = findingSignatures(findings, governance);
+		// loadBaseline throws on a row without a reason.
+		const baseline = loadBaseline(repoRoot(), governance);
+		const untriaged = findings.filter((_f, i) => !baseline.has(signatures[i]));
+		expect(untriaged, JSON.stringify(untriaged, null, 2)).toEqual([]);
+		const live = new Set(signatures);
+		expect([...baseline].filter((sig) => !live.has(sig))).toEqual([]);
+		expect(result.scannedFileCount).toBeGreaterThan(1000);
+	});
+
+	it("flags the pre-#4852 cells and an aliased pump through the real scan", () => {
+		const { lines, scanned } = scanScratch(
+			"cells.test.ts",
+			[
+				"async function cells(file: string) {",
+				"	for (let i = 0; i < 5000 && !fs.existsSync(file); i++)",
+				"		await new Promise<void>((resolve) => setImmediate(resolve));",
+				"	for (let i = 0; i < 100 && vi.getTimerCount() === 0; i++)",
+				"		await Promise.resolve();",
+				"	const pump = () => new Promise((resolve) => setImmediate(resolve));",
+				"	let turns = 0;",
+				"	while (accepted.length === 0) {",
+				"		await pump();",
+				"		if (turns++ > 400) throw new Error('never accepted');",
+				"	}",
+				"	await waitFor(() => fs.existsSync(file), Boolean, { timeoutMs: 4_000 });",
+				"}",
+				"",
+			].join("\n"),
+		);
+		expect(scanned).toBe(1);
+		expect(lines).toEqual([
+			"turn-count-wait:2",
+			"turn-count-wait:4",
+			"turn-count-wait:8",
+		]);
+	});
+
+	it("a reasoned ignore exempts its loop; a bare one is refused on its own line and trailing", () => {
+		const { lines, offenders } = scanScratch(
+			"ignores.test.ts",
+			[
+				"async function ignores() {",
+				"	// ast-grep-ignore: turn-count-wait -- fake connection releases one pull per turn",
+				"	for (let i = 0; i < 50 && pending.length === 0; i++) await tick();",
+				"	// ast-grep-ignore",
+				"	for (let i = 0; i < 50 && pending.length === 0; i++) await tick();",
+				"	for (let i = 0; i < 50 && pending.length === 0; i++) await tick(); // ast-grep-ignore",
+				"	// ast-grep-ignore: turn-count-wait",
+				"	for (let i = 0; i < 50 && pending.length === 0; i++) await tick();",
+				"	const text = '// ast-grep-ignore';",
+				"}",
+				"",
+			].join("\n"),
+		);
+		// The reasoned ignore hid line 3; the bare ones hid lines 5, 6 and 8
+		// from the scan, which is why the comment check exists.
+		expect(lines).toEqual([]);
+		expect(offenders.map((o) => o.line)).toEqual([4, 6, 7]);
+	});
+
+	it("the wrapper exits NONZERO on a trailing bare ignore", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-gov-wrapper-"));
+		try {
+			fs.writeFileSync(
+				path.join(dir, "bare.ts"),
+				"async function f() {\n\tfor (let i = 0; i < 9 && !d; i++) await t(); // ast-grep-ignore\n}\n",
+				"utf-8",
+			);
+			const run = runWrapper(["--suite", "governance", dir]);
+			expect(run.status).not.toBe(0);
+			expect(run.stderr).toMatch(/without a rule id and a reason/);
+			expect(run.stderr).toMatch(/bare\.ts:2/);
+		} finally {
+			removeTempDirSync(dir);
+		}
+	});
+
+	it("loadBaseline refuses a governance row without a reason", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-gov-base-"));
+		try {
+			const dir = path.join(root, "scripts", "governance-rules");
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, "baseline.json"),
+				JSON.stringify({
+					allowed: [
+						{ signature: "turn-count-wait::tests/a.ts::abc#0", reason: " " },
+					],
+				}),
+				"utf-8",
+			);
+			expect(() => loadBaseline(root, governance)).toThrow(
+				/without a signature and a reason/,
+			);
+		} finally {
+			removeTempDirSync(root);
+		}
 	});
 });

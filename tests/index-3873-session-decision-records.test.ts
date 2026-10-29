@@ -88,6 +88,7 @@ import {
 	drainBackgroundWritesForTests,
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
+import { waitFor } from "./clients/interleaving-kit.js";
 
 const FLAGS = new Map<string, boolean>([
 	["no-lsp", true],
@@ -305,16 +306,14 @@ async function reload(runtime: AgentSessionRuntime): Promise<void> {
 	await runtime.session.reload();
 }
 
-/** Let a fire-and-forget sidecar write land (no timer: yield the loop). */
+/** Let a fire-and-forget sidecar write land, bounded by a real-clock deadline. */
 async function sidecarSettled(sessionId: string): Promise<void> {
 	const file = path.join(
 		getProjectDataDir(cwd),
 		"sessions",
 		`${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`,
 	);
-	for (let i = 0; i < 5000 && !fs.existsSync(file); i++)
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(fs.existsSync(file), `sidecar ${file}`).toBe(true);
+	await waitFor(() => fs.existsSync(file), Boolean, { timeoutMs: 4_000 });
 }
 
 async function turnEnd(runtime: AgentSessionRuntime): Promise<void> {

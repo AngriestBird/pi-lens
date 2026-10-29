@@ -622,8 +622,12 @@ file-scoped worklist and receives no project-wide scanner output.
     (`tests/clients/interleaving-kit.ts`), which reads a real-clock deadline
     scaled by `PI_LENS_TEST_TIMEOUT_SCALE`, and give the test a timeout above
     that deadline. Screen: does the wait end on the event it waits for or on a
-    real-clock deadline, never on a count? Enforcer: none yet; the detector is
-    tracked in #4865. Instances and dates: `HISTORY.md`.
+    real-clock deadline, never on a count? Enforcer: the governance ast-grep
+    rules `turn-count-wait` and `turn-count-wait-test-hook`
+    (`scripts/governance-rules/`, run by `npm run astgrep:self-scan`), with a
+    reasoned baseline. It does not see a count loop with no exit besides the
+    count (a pure `for (N) await yield` flush) or a wait spelled as recursion.
+    Instances and dates: `HISTORY.md`.
 
 </important>
 

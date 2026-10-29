@@ -33,6 +33,7 @@ import {
 	pinFixtureHome,
 	setupTestEnvironment,
 } from "./test-utils.js";
+import { waitFor } from "./interleaving-kit.js";
 
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
@@ -437,9 +438,11 @@ describe("review graph service", () => {
 			// Wait for the offloaded persist to land instead of only a fixed 500 ms
 			// poll: the worker write outlived it on the Windows runner (#4019).
 			await waitForReviewGraphPersistsForTests();
-			for (let i = 0; i < 20 && isReviewGraphMigrationNeeded(env.tmpDir); i++) {
-				await new Promise((r) => setTimeout(r, 25));
-			}
+			await waitFor(
+				() => isReviewGraphMigrationNeeded(env.tmpDir),
+				(needed) => !needed,
+				{ timeoutMs: 4_000 },
+			);
 			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
 		} finally {
 			clearReviewGraphWorkspaceCache();
@@ -510,9 +513,11 @@ describe("review graph service", () => {
 			// Wait for the offloaded persist to land instead of only a fixed 500 ms
 			// poll: the worker write outlived it on the Windows runner (#4019).
 			await waitForReviewGraphPersistsForTests();
-			for (let i = 0; i < 20 && isReviewGraphMigrationNeeded(env.tmpDir); i++) {
-				await new Promise((r) => setTimeout(r, 25));
-			}
+			await waitFor(
+				() => isReviewGraphMigrationNeeded(env.tmpDir),
+				(needed) => !needed,
+				{ timeoutMs: 4_000 },
+			);
 			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
 		} finally {
 			clearReviewGraphWorkspaceCache();
@@ -574,9 +579,11 @@ describe("review graph service", () => {
 			// Wait for the offloaded persist to land instead of only a fixed 500 ms
 			// poll: the worker write outlived it on the Windows runner (#4019).
 			await waitForReviewGraphPersistsForTests();
-			for (let i = 0; i < 20 && isReviewGraphMigrationNeeded(env.tmpDir); i++) {
-				await new Promise((r) => setTimeout(r, 25));
-			}
+			await waitFor(
+				() => isReviewGraphMigrationNeeded(env.tmpDir),
+				(needed) => !needed,
+				{ timeoutMs: 4_000 },
+			);
 			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
 		} finally {
 			clearReviewGraphWorkspaceCache();

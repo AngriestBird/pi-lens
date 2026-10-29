@@ -1123,7 +1123,6 @@
 		"tests/config/latency-logger-mock-shape.test.ts": 1.47,
 		"tests/config/live-pin-literal-sweep.test.ts": 0.18,
 		"tests/config/lsp-advertised-capability-senders.test.ts": 0.02,
-		"tests/config/lsp-capabilities-import-sweep.test.ts": 0.6,
 		"tests/config/lsp-capability-refresh-workflow.test.ts": 0.06,
 		"tests/config/lsp-clean-behavior-census.test.ts": 0.01,
 		"tests/config/lsp-first-publish-census.test.ts": 0.01,

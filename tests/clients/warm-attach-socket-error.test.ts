@@ -18,8 +18,9 @@
  * no in-process double emits it, and a double that did would be pinning this
  * test's own fixture rather than the host boundary. So the server is the
  * production one (`configureWarmAttach`) and the client is a real
- * `net.createConnection`. No child process and no clock: the wait is a bounded
- * `setImmediate` pump, so none of `flake-shape-ratchet`'s four detectors
+ * `net.createConnection`. No child process and no raw timer: the accept waits
+ * on the kit's `waitFor` (a `setImmediate` pump under a real-clock deadline,
+ * #4865), so none of `flake-shape-ratchet`'s four detectors
  * (real-process-spawn, elapsed-time-assertion, raw-timer-wait,
  * ungoverned-wait-for) apply.
  */
@@ -41,6 +42,7 @@ import {
 	configureWarmAttach,
 } from "../../clients/warm-attach.js";
 import { removeTempDirSync } from "./test-utils.js";
+import { waitFor } from "./interleaving-kit.js";
 
 /** One event-loop turn, including the poll phase that delivers socket I/O. */
 const pump = (): Promise<void> =>
@@ -162,8 +164,14 @@ describe("warm diagnostics server: an accepted socket's error event (#3389)", ()
 			client.once("connect", resolve);
 			client.once("error", reject);
 		});
-		for (let turn = 0; turn < 100 && accepted.length === 0; turn++)
-			await pump();
+		await waitFor(
+			() => accepted.length,
+			(n) => n > 0,
+			{
+				timeoutMs: 4_000,
+				yieldControl: pump,
+			},
+		);
 		const socket = accepted[0];
 		expect(socket).toBeDefined();
 		socket?.emit("error", new Error("code-less socket failure"));
@@ -210,9 +218,14 @@ describe("warm diagnostics server: an accepted socket's error event (#3389)", ()
 				client.once("connect", resolve);
 				client.once("error", reject);
 			});
-			for (let turn = 0; turn < 100 && accepted.length === 0; turn++) {
-				await pump();
-			}
+			await waitFor(
+				() => accepted.length,
+				(n) => n > 0,
+				{
+					timeoutMs: 4_000,
+					yieldControl: pump,
+				},
+			);
 			accepted[0]?.emit(
 				"error",
 				Object.assign(new Error("malformed errno"), { code }),
