@@ -3608,9 +3608,9 @@ export function referencedIssues(body = "") {
 // #4968: the title channel. The template makes the title carry the issue
 // (`(refs #NNN)`), a short regular field, so every `#N` in it is a reference
 // whatever words the body uses (PR #4924: title `(refs #4532)`, body `Part (a)
-// of #4532`). A `#N` glued to a word or a path is another repository's.
+// of #4532`). A `#N` glued to a word (`owner/repo#N`) is another repository's.
 function titleIssues(title) {
-	return [...String(title ?? "").matchAll(/(?<![\w/])#(\d+)(?!\w)/g)].map(
+	return [...String(title ?? "").matchAll(/(?<!\w)#(\d+)(?!\w)/g)].map(
 		(match) => Number(match[1]),
 	);
 }
