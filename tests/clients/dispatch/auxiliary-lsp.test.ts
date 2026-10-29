@@ -1116,9 +1116,13 @@ describe("every auxiliary kill switch is a registered switch (#4946)", () => {
 
 	const switchable = AUXILIARY_LSP_PROFILES.filter((p) => p.killSwitchFlag);
 
-	it("covers every profile", () => {
+	// #4929: an opt-in profile (`fallow`) is switched by its `optInFlag`, not a
+	// kill switch, so the kill switches cover exactly the default-on profiles.
+	it("covers every default-on profile", () => {
 		expect(switchable.map((p) => p.serverId).sort()).toEqual(
-			AUXILIARY_LSP_PROFILES.map((p) => p.serverId).sort(),
+			AUXILIARY_LSP_PROFILES.filter((p) => p.enabledByDefault)
+				.map((p) => p.serverId)
+				.sort(),
 		);
 	});
 
