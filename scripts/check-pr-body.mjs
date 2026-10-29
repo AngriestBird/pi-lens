@@ -3532,6 +3532,7 @@ const LINK_DEFINITION =
 	/^ {0,3}\[([^\]\n]{1,200})\]:[ \t]*<?([^\s>]{1,500})>?/gm;
 const INLINE_LINK =
 	/\[([^\]\n]{0,200})\]\(<?([^)\s>]{0,500})>?(?:[ \t][^)\n]{0,200})?\)/g;
+const SHORTCUT_LINK = /\[([^\]\n]{1,200})\](?![[(:])/g;
 const REFERENCE_LINK = /\[([^\]\n]{0,200})\]\[([^\]\n]{0,200})\]/g;
 
 // The link patterns are length-bounded: an unbounded scan from every `[` of a
@@ -3562,10 +3563,9 @@ export function referencedIssues(body = "") {
 		if (/^https?:/i.test(shown) && !REFERENCE_ISSUE_URL.test(shown)) return;
 		if (!unrecognised.includes(shown)) unrecognised.push(shown);
 	};
-	const text = blankMarkdownRegions(String(body ?? ""), {
-		code: "blocks",
-		codeSpans: true,
-	});
+	// Fenced and indented code is quoted material; an inline code span is not
+	// (fail closed): `Refs` before a code-spanned number still names the issue.
+	const text = blankMarkdownRegions(String(body ?? ""), { code: "blocks" });
 	const definitions = new Map(
 		[...text.matchAll(LINK_DEFINITION)].map((m) => [m[1].toLowerCase(), m[2]]),
 	);
@@ -3576,6 +3576,12 @@ export function referencedIssues(body = "") {
 			)
 			.replace(REFERENCE_LINK, (match, label, key) => {
 				const destination = definitions.get((key || label).toLowerCase());
+				return destination === undefined
+					? match
+					: linkTarget(label, destination);
+			})
+			.replace(SHORTCUT_LINK, (match, label) => {
+				const destination = definitions.get(label.toLowerCase());
 				return destination === undefined
 					? match
 					: linkTarget(label, destination);

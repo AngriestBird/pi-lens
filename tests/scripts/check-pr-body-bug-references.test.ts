@@ -74,7 +74,10 @@ describe("referencedIssues (#4968)", () => {
 		["See Refs #12 and #13 and Closes #14", [12, 13, 14]],
 		["No keyword mentions #12 here.", []],
 		["```\nRefs #12\n```", []],
-		["Use `Refs #12` for a remainder.", []],
+		// Quoted material in a fence is not a reference; an inline code span is
+		// (fail closed: `Refs` before a code-spanned number still names it).
+		["Refs `#12`", [12]],
+		["Use `Refs #12` for a remainder.", [12]],
 		["Refs the template placeholder #NNN", []],
 		// Recurrence: PR 4641 opened a bullet with the verb "Fix" and linked a
 		// review comment; a URL after the keyword's own span is prose.
@@ -107,6 +110,10 @@ describe("referencedIssues (#4968)", () => {
 		// The destination reached through a definition, and mid-line.
 		[
 			"Refs [the bug][1]\n\n[1]: https://github.com/o/r/issues/12",
+			"https://github.com/o/r/issues/12",
+		],
+		[
+			"Refs [bug]\n\n[bug]: https://github.com/o/r/issues/12",
 			"https://github.com/o/r/issues/12",
 		],
 		[
