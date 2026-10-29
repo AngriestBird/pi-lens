@@ -102,8 +102,15 @@ export function runLockfileCompleteness({
 		);
 		const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
 		if (result.error || result.status !== 0) {
+			if (result.error?.code === "ETIMEDOUT")
+				return {
+					ok: false,
+					inconclusive: true,
+					pin,
+					reason: `timed out after ${timeoutMs}ms`,
+					output,
+				};
 			const unavailable =
-				result.error?.code === "ETIMEDOUT" ||
 				/\b(?:ECONNREFUSED|ECONNRESET|ENETUNREACH|EAI_AGAIN|ENOTFOUND|FetchError|ENOTCACHED)\b/i.test(
 					output,
 				);
@@ -116,9 +123,7 @@ export function runLockfileCompleteness({
 					output,
 				};
 			const reason =
-				result.error?.code === "ETIMEDOUT"
-					? `timed out after ${timeoutMs}ms`
-					: (result.error?.message ?? `exited with status ${result.status}`);
+				result.error?.message ?? `exited with status ${result.status}`;
 			return { ok: false, pin, reason, output };
 		}
 		const after = readFileSync(copiedLockfile);
@@ -145,7 +150,7 @@ if (
 			if (result.output) console.error(result.output);
 			process.exitCode = 1;
 		} else if (result.inconclusive) {
-			console.error("lockfile:complete: inconclusive: npm pin unavailable");
+			console.error(`lockfile:complete: inconclusive: ${result.reason}`);
 			if (result.output) console.error(result.output);
 			process.exitCode = 3;
 		} else {
