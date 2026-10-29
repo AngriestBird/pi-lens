@@ -266,7 +266,7 @@ const trivyConfigRunner: RunnerDefinition = {
 				}),
 			});
 			return faultSkip(
-				result.error || result.signal || result.status === null
+				result.status === null || result.signal
 					? "did-not-run"
 					: "rejected-invocation",
 			);

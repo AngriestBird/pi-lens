@@ -296,6 +296,8 @@ describe("terragrunt runner", () => {
 
 			expect(result.status).toBe("skipped");
 			expect(result.diagnostics).toEqual([]);
+			// #4130: terragrunt was invoked and gave nothing to parse.
+			expect(result.skipFault).toBe("did-not-run");
 		} finally {
 			env.cleanup();
 		}
@@ -322,6 +324,7 @@ describe("terragrunt runner", () => {
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 
 			expect(result.status).toBe("skipped");
+			expect(result.skipFault).toBe("did-not-run");
 		} finally {
 			env.cleanup();
 		}
@@ -538,6 +541,8 @@ describe("terragrunt runner", () => {
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 
 			expect(result.status).toBe("skipped");
+			// #4130: an absent terragrunt invokes nothing, so it carries no fault.
+			expect(result.skipFault).toBeUndefined();
 			expect(safeSpawnAsync).not.toHaveBeenCalled();
 		} finally {
 			env.cleanup();

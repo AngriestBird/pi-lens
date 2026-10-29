@@ -10,6 +10,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
+import { faultSkip } from "../types.js";
 import {
 	createAvailabilityChecker,
 	resolveAvailableOrInstall,
@@ -185,7 +186,7 @@ const terragruntRunner: RunnerDefinition = {
 			{ cwd: fileDir, timeout: 30000 },
 		);
 
-		if (spawnFailedWithNoOutput(result)) return SKIPPED;
+		if (spawnFailedWithNoOutput(result)) return faultSkip("did-not-run");
 
 		const diagnostics = parseTerragruntOutput(
 			result.stdout || "",

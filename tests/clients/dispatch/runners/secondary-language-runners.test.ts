@@ -402,6 +402,45 @@ describe("secondary language fallback runners", () => {
 		},
 	);
 
+	// RECURRENCE THIS PREVENTS: #4130 item 3, same shape as the zig/gleam rows
+	// above. pyright and prisma-validate resolved their tool, the spawn failed,
+	// and the bare skip read as "tool absent" to the smoke classifier.
+	it.each([
+		["pyright", "python", "app.py", "x = 1\n"],
+		["prisma-validate", "prisma", "schema.prisma", "model A { id Int @id }\n"],
+	] as const)(
+		"%s names a spawn failure on its skip (#4130)",
+		async (id, kind, file, source) => {
+			const env = setupTestEnvironment(`pi-lens-${id}-spawn-fault-`);
+			try {
+				const filePath = path.join(env.tmpDir, file);
+				fs.writeFileSync(filePath, source);
+				safeSpawnAsync.mockResolvedValue({
+					error: new Error("Process timed out after 60000ms"),
+					status: null,
+					stdout: "",
+					stderr: "",
+				});
+				const runner = (
+					await import(`../../../../clients/dispatch/runners/${id}.js`)
+				).default;
+
+				const result = await runner.run(
+					makeRunnerCtx(filePath, env.tmpDir, {
+						kind,
+						pi: { getFlag: (name: string) => name === "no-lsp" },
+					} as never) as never,
+				);
+				expect(safeSpawnAsync).toHaveBeenCalled();
+				expect(result.status).toBe("skipped");
+				expect(result.skipFault).toBe("did-not-run");
+			} finally {
+				env.cleanup();
+			}
+		},
+		30_000,
+	);
+
 	it("surfaces a warning when zig exits non-zero without structured diagnostics", async () => {
 		const env = setupTestEnvironment("pi-lens-zig-runner-");
 		try {
