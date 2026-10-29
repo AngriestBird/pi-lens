@@ -27,9 +27,11 @@ import { _resetSubagentModeForTests } from "../../clients/subagent-mode.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
 import {
+	getProjectSnapshotPersistErrorForTests,
 	getProjectSnapshotPersistStateForTests,
-	waitForProjectSnapshotPersistsForTests,
+	setProjectSnapshotPromotionSeamForTests,
 } from "../../clients/project-snapshot.js";
+import { suspendAt, waitFor } from "./interleaving-kit.js";
 import {
 	drainBackgroundWritesForTests,
 	pinFixtureHome,
@@ -159,8 +161,6 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		globals.__piLensFirstSessionDone = prevFirst;
 		if (prevStartupMode === undefined) delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = prevStartupMode;
-		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-		else process.env.PILENS_DATA_DIR = previousDataDir;
 		_resetSubagentModeForTests();
 		await teardownFixture();
 	});
@@ -168,12 +168,31 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 	/**
 	 * Remove the fixture root. The session start queues a project-snapshot
 	 * persist that outlives the test, and its write recreates the root when it
-	 * lands after the removal (#4958). The background writers drain first, so
-	 * the removal runs after the last write. Every test's teardown and the
-	 * regression case below both run through this one function.
+	 * lands after the removal (#4958). Order matters in both directions:
+	 *  1. wait for this fixture's persist to land, on the event with a
+	 *     real-clock deadline that throws (the drain below stops at a silent
+	 *     2 s cap and swallows hook errors, so it cannot be the only wait);
+	 *  2. drain the other background writers;
+	 *  3. restore `PILENS_DATA_DIR`, only now: the persist resolves the meta
+	 *     path from the live env when it lands, so an earlier restore sends it
+	 *     to a directory that does not exist (ENOENT, a recorded persist
+	 *     failure);
+	 *  4. remove the root.
+	 * Every test's afterEach and the regression case below run this one
+	 * function; the restore is idempotent.
 	 */
-	async function teardownFixture(): Promise<void> {
+	async function teardownFixture(timeoutMs?: number): Promise<void> {
+		await waitFor(
+			() =>
+				getProjectSnapshotPersistStateForTests(
+					path.join(env.tmpDir, "project"),
+				),
+			(state) => !state.active && !state.queued,
+			{ timeoutMs },
+		);
 		await drainBackgroundWritesForTests();
+		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+		else process.env.PILENS_DATA_DIR = previousDataDir;
 		env.cleanup();
 	}
 
@@ -358,35 +377,62 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		expect(staleGroup()).toBeUndefined();
 	});
 
-	it("leaves no fixture root once the session-start snapshot write has landed (#4958)", async () => {
+	it("leaves no fixture root and no failed persist once the session-start snapshot write has landed (#4958)", async () => {
 		// The writer is the project-snapshot persist the session start queues. Its
 		// worker thread writes the stage file under the root (clients/gzip-stage-write.ts,
 		// a recursive mkdir), and the main thread promotes it with a lock mkdir
 		// (clients/project-snapshot.ts promoteSnapshotBody). Either recreates
-		// `env.tmpDir` when it lands after the removal. The worker's test delay
-		// holds the write in flight past teardown, the same late landing the
-		// full file meets. Teardown runs, the writes settle, then the root must
-		// still be absent.
-		const prevDelay = process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
-		process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "200";
+		// `env.tmpDir` when it lands after the removal, and its meta write resolves
+		// `PILENS_DATA_DIR` when it lands, not when it was queued. The promotion
+		// seam parks the persist in flight until the test releases it, so the
+		// order is controlled instead of timed.
+		const errorBefore = getProjectSnapshotPersistErrorForTests();
+		const seam = vi.fn(async () => {});
+		const gate = suspendAt(seam);
+		setProjectSnapshotPromotionSeamForTests(seam);
 		try {
 			const { cwd } = await reloadDuringBootstrap({
 				flag: true,
 				notify: false,
 			});
-			// The case only proves the delayed worker arm if a persist for this
-			// fixture is still in flight at teardown. A writer that never queues,
-			// or a synchronous fallback that finishes first, leaves nothing to
-			// outlast the removal, so it must fail here, before teardown.
+			await gate.admitted;
+			// Parked at the seam: the persist is in flight, deterministically.
 			expect(getProjectSnapshotPersistStateForTests(cwd).active).toBe(true);
-			await teardownFixture();
-			await waitForProjectSnapshotPersistsForTests();
+			let tornDown = false;
+			const tearingDown = teardownFixture().then(() => {
+				tornDown = true;
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			// Teardown must be parked on the persist, root untouched.
+			expect(tornDown).toBe(false);
+			expect(fs.existsSync(env.tmpDir)).toBe(true);
+			gate.release();
+			await tearingDown;
 			expect(fs.existsSync(env.tmpDir)).toBe(false);
+			expect(getProjectSnapshotPersistErrorForTests()).toBe(errorBefore);
 		} finally {
-			if (prevDelay === undefined)
-				delete process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
-			else
-				process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = prevDelay;
+			setProjectSnapshotPromotionSeamForTests(undefined);
+			gate.restore();
+		}
+	});
+
+	it("fails the teardown loudly when the snapshot persist never lands (#4958)", async () => {
+		// Recurrence: the shared drain stops at a silent 2 s cap and swallows hook
+		// errors, so a persist still in flight let the root removal run and the
+		// write recreate the root (the thread on #4969 r2). The fixture's own
+		// wait ends on the event or a real-clock deadline, and the deadline throws.
+		const seam = vi.fn(async () => {});
+		const gate = suspendAt(seam);
+		setProjectSnapshotPromotionSeamForTests(seam);
+		try {
+			await reloadDuringBootstrap({ flag: true, notify: false });
+			await gate.admitted;
+			await expect(teardownFixture(150)).rejects.toThrow(/waitFor exhausted/);
+			// The parked persist must have kept the root: nothing removed it.
+			expect(fs.existsSync(env.tmpDir)).toBe(true);
+		} finally {
+			setProjectSnapshotPromotionSeamForTests(undefined);
+			gate.restore();
 		}
 	});
 });
