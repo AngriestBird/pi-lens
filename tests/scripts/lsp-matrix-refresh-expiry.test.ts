@@ -1028,7 +1028,9 @@ describe("#4512 the raised set reaches the tracking issue", () => {
 	// runner tmpdir. A subset probe (`probe-clean-signal.mjs python`) that wrote
 	// "clean" would close the tracking issue the last full run raised.
 	describe("writeStaleCellsVerdict", () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stale-verdict-"));
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-stale-verdict-"),
+		);
 		afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 		const paths = {
 			bodyPath: path.join(dir, "body.md"),
