@@ -28,12 +28,14 @@
  * run inputs, an injected clock and no LSP spawn.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import {
 	STALE_CELLS_ISSUE_TITLE,
 	staleCellsVerdict,
+	writeStaleCellsVerdict,
 	strategyKeyForLang,
 } from "../../scripts/lib/clean-signal.mjs";
 import { SERVER_DIAGNOSTIC_STRATEGIES } from "../../clients/lsp/wait-policy/strategies.js";
@@ -1020,6 +1022,63 @@ describe("#4512 the raised set reaches the tracking issue", () => {
 		expect(STALE_CELLS_ISSUE_TITLE).toBe(
 			"nightly: LSP capability probe missed (stale matrix cells)",
 		);
+	});
+
+	// Recurrence: the notifier reads the verdict files the probe leaves in the
+	// runner tmpdir. A subset probe (`probe-clean-signal.mjs python`) that wrote
+	// "clean" would close the tracking issue the last full run raised.
+	describe("writeStaleCellsVerdict", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stale-verdict-"));
+		afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+		const paths = {
+			bodyPath: path.join(dir, "body.md"),
+			statePath: path.join(dir, "state"),
+		};
+		const cells = describeRaisedCells(replay(2).text, FIVE);
+
+		it("writes the body and a drift state on a full run with raised cells", () => {
+			const state = writeStaleCellsVerdict(cells, {
+				fullRun: true,
+				env: {
+					GITHUB_SERVER_URL: "https://example.test",
+					GITHUB_REPOSITORY: "o/r",
+					GITHUB_RUN_ID: "7",
+				},
+				...paths,
+			});
+			expect(state).toBe("drift");
+			expect(fs.readFileSync(paths.statePath, "utf8")).toBe("drift");
+			expect(fs.readFileSync(paths.bodyPath, "utf8")).toContain(
+				"https://example.test/o/r/actions/runs/7",
+			);
+		});
+
+		it("a clean full run removes the body and writes clean", () => {
+			expect(
+				writeStaleCellsVerdict([], { fullRun: true, env: {}, ...paths }),
+			).toBe("clean");
+			expect(fs.existsSync(paths.bodyPath)).toBe(false);
+			expect(fs.readFileSync(paths.statePath, "utf8")).toBe("clean");
+		});
+
+		it("a subset run writes nothing and leaves the last verdict standing", () => {
+			fs.writeFileSync(paths.statePath, "drift");
+			expect(
+				writeStaleCellsVerdict([], { fullRun: false, env: {}, ...paths }),
+			).toBe("skipped");
+			expect(fs.readFileSync(paths.statePath, "utf8")).toBe("drift");
+		});
+
+		it("an unwritable path is logged and never throws", () => {
+			expect(
+				writeStaleCellsVerdict(cells, {
+					fullRun: true,
+					env: {},
+					bodyPath: path.join(dir, "no-such-dir", "body.md"),
+					statePath: paths.statePath,
+				}),
+			).toBe("unwritten");
+		});
 	});
 });
 

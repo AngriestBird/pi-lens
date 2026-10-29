@@ -17,10 +17,12 @@
  * `mergeCharacterization`.
  */
 import { describe, expect, it } from "vitest";
+import * as installer from "../../clients/installer/index.js";
 import { getAllToolStatuses } from "../../clients/installer/index.js";
 import {
 	collectServerProvenance,
 	readVersionFromBinary,
+	resolveFixtureProvenance,
 	serverToolId,
 	versionToken,
 } from "../../scripts/lib/server-provenance.mjs";
@@ -157,5 +159,60 @@ describe("#4512 reading the binary and the installer filter", () => {
 			"typescript-language-server",
 		]);
 		expect(await getAllToolStatuses(["no-such-tool-4512"])).toEqual([]);
+	});
+});
+
+describe("#4512 resolveFixtureProvenance over the real installer registry", () => {
+	// Recurrence: a tree-manifest launcher (kotlin-language-server) answers any
+	// argument by starting a JVM, so a nightly that ran `--version` there hung or
+	// recorded the JVM banner as the server version. The reader must not be
+	// called for it, while an ordinary tool is read.
+	const FIXTURES = [
+		{ lang: "kotlin", tools: ["kotlin-language-server"] },
+		{ lang: "yaml", tools: ["yamllint"] },
+	];
+
+	it("never runs --version for a tree-manifest tool and reads the others", async () => {
+		const asked: Array<string | undefined> = [];
+		const fakeInstaller = {
+			TOOLS: installer.TOOLS,
+			getAllToolStatuses: async (ids: string[]) =>
+				ids.map((id) => ({
+					id,
+					installed: true,
+					source: "pi-lens-auto",
+					path: `/bin/${id}`,
+				})),
+		};
+		const out = await resolveFixtureProvenance(
+			FIXTURES,
+			fakeInstaller,
+			(binPath) => {
+				asked.push(binPath);
+				return "yamllint 1.38.0";
+			},
+		);
+		expect(asked).toEqual(["/bin/yamllint"]);
+		expect(out.get("kotlin")).toEqual({ install: "pi-lens-auto" });
+		expect(out.get("yaml")).toEqual({
+			install: "pi-lens-auto",
+			version: "1.38.0",
+		});
+	});
+
+	it("asks the installer only for the fixtures' own tools", async () => {
+		const requested: string[][] = [];
+		await resolveFixtureProvenance(
+			[...FIXTURES, { lang: "none", tools: [] }],
+			{
+				TOOLS: installer.TOOLS,
+				getAllToolStatuses: async (ids: string[]) => {
+					requested.push(ids);
+					return [];
+				},
+			},
+			() => undefined,
+		);
+		expect(requested).toEqual([["kotlin-language-server", "yamllint"]]);
 	});
 });

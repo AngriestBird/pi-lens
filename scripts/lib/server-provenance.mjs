@@ -71,3 +71,32 @@ export function collectServerProvenance(fixtures, facts) {
 	}
 	return out;
 }
+
+/**
+ * The nightly's provenance read over the installer: resolve every fixture's
+ * tool once, then read `--version` for each. A tree-manifest launcher answers
+ * any argument by starting a JVM (installer `verification`), so `--version` is
+ * no probe there and its row records the install source alone.
+ *
+ * @param {Array<{ lang: string, tools?: string[] }>} fixtures
+ * @param {{ TOOLS: Array<{ id: string, verification?: string }>, getAllToolStatuses: (ids: string[]) => Promise<Array<{ id: string, installed: boolean, source: string, path?: string }>> }} installer
+ * @param {(binPath: string | undefined) => string | undefined} [readVersion]
+ */
+export async function resolveFixtureProvenance(
+	fixtures,
+	installer,
+	readVersion = readVersionFromBinary,
+) {
+	const noVersionProbe = new Set(
+		installer.TOOLS.filter((t) => t.verification === "tree-manifest").map(
+			(t) => t.id,
+		),
+	);
+	return collectServerProvenance(fixtures, {
+		statuses: await installer.getAllToolStatuses(
+			fixtures.map(serverToolId).filter(Boolean),
+		),
+		readVersion: (status) =>
+			noVersionProbe.has(status.id) ? undefined : readVersion(status.path),
+	});
+}

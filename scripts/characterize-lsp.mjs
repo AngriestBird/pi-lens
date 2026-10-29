@@ -15,11 +15,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeEvaluatedRecord } from "./lib/assert-evaluated.mjs";
 import { mergeCharacterization } from "./lib/md-matrix.mjs";
-import {
-	collectServerProvenance,
-	readVersionFromBinary,
-	serverToolId,
-} from "./lib/server-provenance.mjs";
+import { resolveFixtureProvenance } from "./lib/server-provenance.mjs";
 import {
 	adoptFixtureProjectTrust,
 	bootstrapFixtureWorkspace,
@@ -50,9 +46,8 @@ const { initLSPConfig } = await imp("dist/clients/lsp/config.js");
 // the first touch, or the launch gate refuses every project-local and
 // project-code server and the rows read as unavailable.
 await adoptFixtureProjectTrust({ repoRoot });
-let ensureTool;
 const installer = await imp("dist/clients/installer/index.js");
-if (install) ({ ensureTool } = installer);
+const { ensureTool } = installer;
 
 const fixtures = langs.length
 	? LSP_FIXTURES.filter((f) => langs.includes(f.lang))
@@ -105,22 +100,8 @@ for (const fx of fixtures) {
 }
 
 // #4512: what each server ran (version, install source), read after the
-// installs above. A tree-manifest launcher answers any argument by starting a
-// JVM, so `--version` is no probe there (installer `verification`).
-const noVersionProbe = new Set(
-	installer.TOOLS.filter((t) => t.verification === "tree-manifest").map(
-		(t) => t.id,
-	),
-);
-const provenance = collectServerProvenance(fixtures, {
-	statuses: await installer.getAllToolStatuses(
-		fixtures.map(serverToolId).filter(Boolean),
-	),
-	readVersion: (status) =>
-		noVersionProbe.has(status.id)
-			? undefined
-			: readVersionFromBinary(status.path),
-});
+// installs above.
+const provenance = await resolveFixtureProvenance(fixtures, installer);
 for (const [lang, p] of [...provenance].sort())
 	console.error(`[${lang}] install=${p.install} version=${p.version ?? "—"}`);
 
@@ -169,16 +150,17 @@ function updateMatrix(measuredRows, provenance) {
 		);
 		return;
 	}
-	const original = fs.readFileSync(docPath, "utf8");
-	const result = mergeCharacterization(original, measuredRows, provenance, src);
-	if (!result) {
+	const text = fs.readFileSync(docPath, "utf8");
+	const tbl = mergeCharacterization(text, measuredRows, provenance, src);
+	if (!tbl) {
 		console.error("matrix update skipped: capability table not found in doc");
 		return;
 	}
-	if (result.text !== original) {
-		fs.writeFileSync(docPath, result.text);
+	const out = tbl.text;
+	if (out && out !== text) {
+		fs.writeFileSync(docPath, out);
 		console.error(
-			`Updated docs/lsp-capability-matrix.md mode column (${result.measured} servers measured, ${result.rows} rows preserved).`,
+			`Updated docs/lsp-capability-matrix.md mode column (${tbl.measured} servers measured, ${tbl.rows} rows preserved).`,
 		);
 	} else {
 		console.error("matrix mode column: no changes.");

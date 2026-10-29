@@ -25,3 +25,16 @@ export function collectServerProvenance(
 		}) => string | undefined;
 	},
 ): Map<string, { install: string; version?: string }>;
+
+export function resolveFixtureProvenance(
+	fixtures: Array<{ lang: string; tools?: string[] }>,
+	installer: {
+		TOOLS: Array<{ id: string; verification?: string }>;
+		getAllToolStatuses(
+			ids: string[],
+		): Promise<
+			Array<{ id: string; installed: boolean; source: string; path?: string }>
+		>;
+	},
+	readVersion?: (binPath: string | undefined) => string | undefined,
+): Promise<Map<string, { install: string; version?: string }>>;

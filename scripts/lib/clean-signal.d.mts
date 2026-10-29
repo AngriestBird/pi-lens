@@ -28,6 +28,16 @@ export function staleCellsVerdict(
 	opts?: { runUrl?: string | null },
 ): { state: "drift"; body: string } | { state: "clean" };
 
+export function writeStaleCellsVerdict(
+	cells: readonly StaleCell[],
+	opts: {
+		fullRun: boolean;
+		env?: Record<string, string | undefined>;
+		bodyPath?: string;
+		statePath?: string;
+	},
+): "drift" | "clean" | "skipped" | "unwritten";
+
 export interface CleanSignalObservations {
 	dirtyPublishes?: number;
 	dirtyVersioned?: number;

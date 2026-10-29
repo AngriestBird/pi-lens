@@ -31,6 +31,7 @@
 // Kept as a side-effect-free function so it can be unit-tested without spawning
 // a server (see tests/scripts/clean-signal.test.ts). #240/#460.
 
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isAuxiliary } from "../../dist/clients/lsp/server-traits.js";
@@ -704,4 +705,37 @@ export function staleCellsVerdict(cells, opts = {}) {
 	return cells.length
 		? { state: "drift", body: buildStaleCellsBody(cells, opts) }
 		: { state: "clean" };
+}
+
+/**
+ * #4512: write the stale-cells tracking-issue body and verdict for the
+ * notifier. A subset probe (`fullRun: false`) cannot say a streak ended, so it
+ * writes nothing and leaves the last full run's verdict standing. Best-effort
+ * like the drift summary: a write failure is logged and never escalates, the
+ * probe's own exit-0 contract stands.
+ *
+ * @param {Parameters<typeof staleCellsVerdict>[0]} cells
+ * @param {{ fullRun: boolean, env?: NodeJS.ProcessEnv, bodyPath?: string, statePath?: string }} opts
+ * @returns {"drift" | "clean" | "skipped" | "unwritten"}
+ */
+export function writeStaleCellsVerdict(cells, opts) {
+	if (!opts.fullRun) return "skipped";
+	const env = opts.env ?? process.env;
+	const bodyPath = opts.bodyPath ?? STALE_CELLS_BODY_PATH;
+	const statePath = opts.statePath ?? STALE_CELLS_STATE_PATH;
+	try {
+		const verdict = staleCellsVerdict(cells, {
+			runUrl:
+				env.GITHUB_SERVER_URL && env.GITHUB_REPOSITORY && env.GITHUB_RUN_ID
+					? `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`
+					: null,
+		});
+		if (verdict.state === "drift") fs.writeFileSync(bodyPath, verdict.body);
+		else fs.rmSync(bodyPath, { force: true });
+		fs.writeFileSync(statePath, verdict.state);
+		return verdict.state;
+	} catch (e) {
+		console.error(`stale-cells verdict write skipped: ${e?.message ?? e}`);
+		return "unwritten";
+	}
 }
