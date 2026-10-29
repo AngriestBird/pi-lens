@@ -26,7 +26,12 @@ import { handleSessionStart } from "../../clients/runtime-session.js";
 import { _resetSubagentModeForTests } from "../../clients/subagent-mode.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { resetLSPConfigStateForTests } from "../../clients/lsp/config.js";
-import { pinFixtureHome, setupTestEnvironment } from "./test-utils.js";
+import { waitForProjectSnapshotPersistsForTests } from "../../clients/project-snapshot.js";
+import {
+	drainBackgroundWritesForTests,
+	pinFixtureHome,
+	setupTestEnvironment,
+} from "./test-utils.js";
 
 /** The pi SDK's own `assertActive()` message after a session replacement. */
 const SDK_STALE_MESSAGE =
@@ -146,7 +151,7 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		resetLSPConfigStateForTests();
 		globals.__piLensFirstSessionDone = prevFirst;
 		if (prevStartupMode === undefined) delete process.env.PI_LENS_STARTUP_MODE;
@@ -154,8 +159,20 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 		else process.env.PILENS_DATA_DIR = previousDataDir;
 		_resetSubagentModeForTests();
-		env.cleanup();
+		await teardownFixture();
 	});
+
+	/**
+	 * Remove the fixture root. The session start queues a project-snapshot
+	 * persist that outlives the test, and its write recreates the root when it
+	 * lands after the removal (#4958). The background writers drain first, so
+	 * the removal runs after the last write. Every test's teardown and the
+	 * regression case below both run through this one function.
+	 */
+	async function teardownFixture(): Promise<void> {
+		await drainBackgroundWritesForTests();
+		env.cleanup();
+	}
 
 	function project(): string {
 		const cwd = path.join(env.tmpDir, "project");
@@ -336,5 +353,29 @@ describe("session replaced during the analyzer bootstrap await (#4815)", () => {
 		// The live session's own TODO scan is the proof the scans were scheduled.
 		await written;
 		expect(staleGroup()).toBeUndefined();
+	});
+
+	it("leaves no fixture root once the session-start snapshot write has landed (#4958)", async () => {
+		// The writer is the project-snapshot persist the session start queues. Its
+		// worker thread writes the stage file under the root (clients/gzip-stage-write.ts,
+		// a recursive mkdir), and the main thread promotes it with a lock mkdir
+		// (clients/project-snapshot.ts promoteSnapshotBody). Either recreates
+		// `env.tmpDir` when it lands after the removal. The worker's test delay
+		// holds the write in flight past teardown, the same late landing the
+		// full file meets. Teardown runs, the writes settle, then the root must
+		// still be absent.
+		const prevDelay = process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
+		process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "200";
+		try {
+			await reloadDuringBootstrap({ flag: true, notify: false });
+			await teardownFixture();
+			await waitForProjectSnapshotPersistsForTests();
+			expect(fs.existsSync(env.tmpDir)).toBe(false);
+		} finally {
+			if (prevDelay === undefined)
+				delete process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
+			else
+				process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = prevDelay;
+		}
 	});
 });
