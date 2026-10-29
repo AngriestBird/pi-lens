@@ -394,7 +394,11 @@ describe("nightly wiring of the idle-eviction document (#3645)", () => {
 		expect(promotionPr?.with?.["body-path"]).toContain(
 			"idle-eviction-promote.md",
 		);
-		expect(promotionPr?.with?.token).toBe(docsPr?.with?.token);
+		// #4512: the docs refresh PR may now open with the refresh App token (it
+		// falls back to this same repository token); the promotion PR never
+		// does, so it holds nothing the docs refresh PR does not.
+		expect(promotionPr?.with?.token).toBe("${{ secrets.GITHUB_TOKEN }}");
+		expect(docsPr?.with?.token).toContain("secrets.GITHUB_TOKEN");
 	});
 
 	it("keeps the measurement non-gating and bounded well under the job cap", () => {

@@ -211,6 +211,8 @@ function scriptWriters(run: string): string[] {
 
 // A trailing slash is a prefix (every action under that owner/repo).
 const WRITER_ACTIONS = [
+	// #4512: mints the installation token the docs-refresh PR is opened with.
+	"actions/create-github-app-token",
 	"actions/create-release",
 	"actions/deploy-pages",
 	"actions/first-interaction",
@@ -428,6 +430,9 @@ const DISPATCHABLE_WORKFLOWS = 18;
 // #4077: the split moved every writer step into its own job without adding one,
 // except codeql.yml, whose SARIF upload moved into the `upload` job as the
 // `github/codeql-action/upload-sarif` writer action (+1).
+// #4512: tool-smoke.yml +4: the refresh App token mint, the auto-merge arm and
+// disarm steps (all in `tool-smoke-prs`, which already held the write scopes),
+// and the stale-cell tracking-issue upsert in `tool-smoke-notify`.
 const WRITER_STEPS: Record<string, number> = {
 	".github/workflows/codeql.yml": 1,
 	".github/workflows/compat-smoke.yml": 1,
@@ -438,7 +443,7 @@ const WRITER_STEPS: Record<string, number> = {
 	".github/workflows/stale-open-issues.yml": 1,
 	".github/workflows/stale.yml": 1,
 	".github/workflows/stryker-nightly.yml": 1,
-	".github/workflows/tool-smoke.yml": 9,
+	".github/workflows/tool-smoke.yml": 13,
 };
 
 // Every dispatchable job that holds a write scope, with the scopes it holds.

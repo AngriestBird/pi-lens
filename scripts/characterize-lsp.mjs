@@ -14,12 +14,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeEvaluatedRecord } from "./lib/assert-evaluated.mjs";
+import { mergeCharacterization } from "./lib/md-matrix.mjs";
 import {
-	mergeRows,
-	mergeSrc,
-	parseTable,
-	replaceTable,
-} from "./lib/md-matrix.mjs";
+	collectServerProvenance,
+	readVersionFromBinary,
+	serverToolId,
+} from "./lib/server-provenance.mjs";
 import {
 	adoptFixtureProjectTrust,
 	bootstrapFixtureWorkspace,
@@ -51,9 +51,8 @@ const { initLSPConfig } = await imp("dist/clients/lsp/config.js");
 // project-code server and the rows read as unavailable.
 await adoptFixtureProjectTrust({ repoRoot });
 let ensureTool;
-if (install) {
-	({ ensureTool } = await imp("dist/clients/installer/index.js"));
-}
+const installer = await imp("dist/clients/installer/index.js");
+if (install) ({ ensureTool } = installer);
 
 const fixtures = langs.length
 	? LSP_FIXTURES.filter((f) => langs.includes(f.lang))
@@ -105,6 +104,26 @@ for (const fx of fixtures) {
 	}
 }
 
+// #4512: what each server ran (version, install source), read after the
+// installs above. A tree-manifest launcher answers any argument by starting a
+// JVM, so `--version` is no probe there (installer `verification`).
+const noVersionProbe = new Set(
+	installer.TOOLS.filter((t) => t.verification === "tree-manifest").map(
+		(t) => t.id,
+	),
+);
+const provenance = collectServerProvenance(fixtures, {
+	statuses: await installer.getAllToolStatuses(
+		fixtures.map(serverToolId).filter(Boolean),
+	),
+	readVersion: (status) =>
+		noVersionProbe.has(status.id)
+			? undefined
+			: readVersionFromBinary(status.path),
+});
+for (const [lang, p] of [...provenance].sort())
+	console.error(`[${lang}] install=${p.install} version=${p.version ?? "—"}`);
+
 console.log("\nDiagnostic-mode matrix (affirmative-clean-signal first cut)\n");
 console.log(`  ${"LANG".padEnd(16)} ${"MODE".padEnd(12)} SERVER`);
 for (const r of rows.sort((a, b) =>
@@ -131,7 +150,7 @@ writeEvaluatedRecord({ producer: "characterize-lsp", input: rows });
 // `src`. Rows whose mode came back "unknown"/"no-lsp"/error are NOT written
 // (don't blank a prior good value).
 try {
-	updateMatrix(rows);
+	updateMatrix(rows, provenance);
 } catch (e) {
 	console.error(`matrix update skipped: ${e?.message ?? e}`);
 }
@@ -141,7 +160,7 @@ try {
 } catch {}
 process.exit(0);
 
-function updateMatrix(measuredRows) {
+function updateMatrix(measuredRows, provenance) {
 	const src = process.env.CI ? "ci" : "dev";
 	const docPath = path.join(repoRoot, "docs", "lsp-capability-matrix.md");
 	if (!fs.existsSync(docPath)) {
@@ -150,44 +169,16 @@ function updateMatrix(measuredRows) {
 		);
 		return;
 	}
-	const text = fs.readFileSync(docPath, "utf8");
-	const marker = "| lang | server |";
-	const tbl = parseTable(text, marker);
-	if (!tbl) {
+	const original = fs.readFileSync(docPath, "utf8");
+	const result = mergeCharacterization(original, measuredRows, provenance, src);
+	if (!result) {
 		console.error("matrix update skipped: capability table not found in doc");
 		return;
 	}
-	// Only rows we actually measured a mode for (pull/push-only) are authoritative.
-	const measurable = measuredRows.filter(
-		(r) => r.mode === "pull" || r.mode === "push-only",
-	);
-	// pull ⇒ Tier 1 by protocol; push-only tier is decided by the clean-behavior
-	// probe, so leave `tier` untouched for push rows (don't clobber a probed value).
-	// Key on `lang` (the matrix's first column + the fixture's stable id) — the
-	// hand-written `server` column doesn't always equal a fixture's serverHint.
-	const keyIdx = tbl.header.indexOf("lang");
-	const srcIdx = tbl.header.indexOf("src");
-	const existingByLang = new Map(tbl.rows.map((c) => [c[keyIdx], c]));
-	const measured = measurable.map((r) => {
-		const cell = { lang: r.lang, mode: r.mode };
-		if (r.mode === "pull") cell.tier = "1";
-		const prior = existingByLang.get(r.lang);
-		cell.src = mergeSrc(prior ? prior[srcIdx] : "", src);
-		return cell;
-	});
-	const merged = mergeRows(
-		tbl.rows,
-		tbl.header,
-		measured,
-		"lang",
-		["mode", "tier", "src"],
-		{ updateOnly: true },
-	);
-	const out = replaceTable(text, marker, tbl.header, tbl.sep, merged);
-	if (out && out !== text) {
-		fs.writeFileSync(docPath, out);
+	if (result.text !== original) {
+		fs.writeFileSync(docPath, result.text);
 		console.error(
-			`Updated docs/lsp-capability-matrix.md mode column (${measured.length} servers measured, ${tbl.rows.length} rows preserved).`,
+			`Updated docs/lsp-capability-matrix.md mode column (${result.measured} servers measured, ${result.rows} rows preserved).`,
 		);
 	} else {
 		console.error("matrix mode column: no changes.");

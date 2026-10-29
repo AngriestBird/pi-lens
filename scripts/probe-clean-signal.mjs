@@ -47,6 +47,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeEvaluatedRecord } from "./lib/assert-evaluated.mjs";
 import {
 	DRIFT_SUMMARY_PATH,
+	STALE_CELLS_BODY_PATH,
+	STALE_CELLS_STATE_PATH,
+	staleCellsVerdict,
 	buildMatrixObservations,
 	createPublishTraceDrainer,
 	describeFirstPublishAuthors,
@@ -62,7 +65,10 @@ import {
 	withScratchHome,
 } from "./lib/lsp-fixture-workspace.mjs";
 import { createProbeFixture } from "./lib/probe-fixture.mjs";
-import { refreshCapabilityMatrix } from "./lib/md-matrix.mjs";
+import {
+	describeRaisedCells,
+	refreshCapabilityMatrix,
+} from "./lib/md-matrix.mjs";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -459,13 +465,42 @@ function updateMatrix(measuredRows) {
 		return;
 	}
 	out = result.text;
+	// #4512: raise the cells two consecutive nights missed. A subset probe
+	// (`langs`) cannot say a streak ended, so only a full run writes a verdict.
+	if (!langs.length) writeStaleVerdict(result);
 	if (out !== text) {
 		fs.writeFileSync(docPath, out);
 		console.error(
-			`Updated docs/lsp-capability-matrix.md (committed: ${nameList(result.committedLangs)}; pending: ${nameList(result.pendingLangs)}; expired: ${nameList(result.expiredLangs)}).`,
+			`Updated docs/lsp-capability-matrix.md (committed: ${nameList(result.committedLangs)}; pending: ${nameList(result.pendingLangs)}; stale: ${nameList(result.staleLangs)}; raised: ${nameList(result.raisedLangs)}).`,
 		);
 	} else {
 		console.error("matrix clean-behavior column: no changes.");
+	}
+}
+
+/**
+ * #4512: write the stale-cells tracking-issue body and verdict for the
+ * notifier. Best-effort like the drift summary: a write failure is logged and
+ * never escalates, the probe's own exit-0 contract stands.
+ */
+function writeStaleVerdict(result) {
+	try {
+		const { GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID } = process.env;
+		const verdict = staleCellsVerdict(
+			describeRaisedCells(result.text, result.raisedLangs),
+			{
+				runUrl:
+					GITHUB_SERVER_URL && GITHUB_REPOSITORY && GITHUB_RUN_ID
+						? `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`
+						: null,
+			},
+		);
+		if (verdict.state === "drift")
+			fs.writeFileSync(STALE_CELLS_BODY_PATH, verdict.body);
+		else fs.rmSync(STALE_CELLS_BODY_PATH, { force: true });
+		fs.writeFileSync(STALE_CELLS_STATE_PATH, verdict.state);
+	} catch (e) {
+		console.error(`stale-cells verdict write skipped: ${e?.message ?? e}`);
 	}
 }
 

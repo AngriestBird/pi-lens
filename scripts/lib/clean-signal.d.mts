@@ -4,6 +4,30 @@
 // notify-clean-signal-drift.mjs (reader).
 export const DRIFT_SUMMARY_PATH: string;
 
+/** #4512: the stale-cells tracking-issue body and verdict the probe stages. */
+export const STALE_CELLS_BODY_PATH: string;
+export const STALE_CELLS_STATE_PATH: string;
+export const STALE_CELLS_ISSUE_TITLE: string;
+
+export interface StaleCell {
+	lang: string;
+	server: string;
+	cleanBehavior: string;
+	firstPublish: string;
+	since: string;
+	misses: number;
+}
+
+export function buildStaleCellsBody(
+	cells: readonly StaleCell[],
+	opts?: { runUrl?: string | null },
+): string;
+
+export function staleCellsVerdict(
+	cells: readonly StaleCell[],
+	opts?: { runUrl?: string | null },
+): { state: "drift"; body: string } | { state: "clean" };
+
 export interface CleanSignalObservations {
 	dirtyPublishes?: number;
 	dirtyVersioned?: number;

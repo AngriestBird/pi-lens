@@ -47,6 +47,18 @@ export const DRIFT_SUMMARY_PATH = path.join(
 	"pilens-clean-signal-drift-summary.json",
 );
 
+// #4512: the raised stale cells' tracking-issue body and its verdict (`drift`
+// or `clean`; absent when the matrix refresh did not run). Same-job runner
+// tmpdir, staged by the notifier-inputs step like the drift summary above.
+export const STALE_CELLS_BODY_PATH = path.join(
+	os.tmpdir(),
+	"pilens-stale-cells-body.md",
+);
+export const STALE_CELLS_STATE_PATH = path.join(
+	os.tmpdir(),
+	"pilens-stale-cells-state",
+);
+
 /**
  * @typedef {Object} CleanSignalObservations
  * @property {number} [dirtyPublishes]           publishes during the dirty touch
@@ -643,4 +655,53 @@ export const LANG_TO_STRATEGY_KEY = {
 /** Resolve a matrix/fixture lang to its strategy-table key. */
 export function strategyKeyForLang(lang) {
 	return LANG_TO_STRATEGY_KEY[lang] ?? lang;
+}
+
+export const STALE_CELLS_ISSUE_TITLE =
+	"nightly: LSP capability probe missed (stale matrix cells)";
+
+/**
+ * #4512: the tracking issue body for matrix cells the probe has not
+ * re-observed for `MISSED_PROBE_RAISE_RUNS` consecutive nights. The matrix
+ * keeps each cell's last known value and marks it stale; this body names them
+ * so a dead probe is read by a person instead of standing in the doc.
+ *
+ * @param {Array<{ lang: string, server: string, cleanBehavior: string, firstPublish: string, since: string, misses: number }>} cells
+ * @param {{ runUrl?: string | null }} [opts]
+ * @returns {string}
+ */
+export function buildStaleCellsBody(cells, opts = {}) {
+	const lines = [
+		"Auto-filed/updated by the nightly `tool-smoke` workflow's `probe-clean-signal.mjs` step (#4512).",
+		"",
+		"Each row below is a matrix cell the nightly probe did not re-observe on two or more consecutive nights. `docs/lsp-capability-matrix.md` keeps the last known value and marks the row `stale` with the date of the first miss; it is never rewritten to `unknown`. A cell stays stale until a night observes the server again.",
+		"",
+		"| lang | server | clean-behavior (last known) | first-publish (last known) | stale since | consecutive misses |",
+		"|---|---|---|---|---|---|",
+		...cells.map(
+			(c) =>
+				`| ${c.lang} | ${c.server} | ${c.cleanBehavior} | ${c.firstPublish} | ${c.since} | ${c.misses} |`,
+		),
+	];
+	if (opts.runUrl) lines.push("", `Workflow run: ${opts.runUrl}`);
+	lines.push(
+		"",
+		"This issue is closed automatically once no cell has missed two consecutive nights.",
+	);
+	return lines.join("\n");
+}
+
+/**
+ * #4512: the stale-cells notifier's verdict for one full probe run. `drift`
+ * carries the tracking-issue body; `clean` closes the issue. Pure, so the
+ * recorded-run tests read exactly what the workflow stages.
+ *
+ * @param {Parameters<typeof buildStaleCellsBody>[0]} cells  the raised cells
+ * @param {{ runUrl?: string | null }} [opts]
+ * @returns {{ state: "drift", body: string } | { state: "clean" }}
+ */
+export function staleCellsVerdict(cells, opts = {}) {
+	return cells.length
+		? { state: "drift", body: buildStaleCellsBody(cells, opts) }
+		: { state: "clean" };
 }

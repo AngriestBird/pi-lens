@@ -235,9 +235,25 @@
 			"status": "no-floor",
 			"reason": "Tracker maintenance over the clean-signal probe's summary: the probe's own continue-on-error outcome and the #4514 evaluated floor carry the verdict; this step only files, refreshes or closes the #594 issue."
 		},
+		".github/workflows/tool-smoke.yml#tool-smoke-notify#Notify on stale matrix cells (file/update/close tracking issue)": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance over the probe's stale-cell verdict (#4512): the probe, the matrix refresh and tests/scripts/lsp-matrix-refresh-expiry.test.ts carry the verdict, and a missing verdict file leaves the issue as it is rather than reading clean."
+		},
 		".github/workflows/tool-smoke.yml#tool-smoke-notify#Notify on tool-smoke red (file/update/close tracking issue)": {
 			"status": "no-floor",
 			"reason": "Tracker maintenance over the six gating layer outcomes (#2723): it reports a red the non-continue-on-error layers already produced, so gating the notifier itself would only hide that verdict."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-prs#Arm auto-merge for a flip-free refresh": {
+			"status": "no-floor",
+			"reason": "PR plumbing, not a producer (#4512): it runs only for a refresh the non-continue-on-error 'Refuse a degraded refresh' guard passed and the flip check found flip-free, and a failed arming shows as this step's own outcome with the PR left for a maintainer."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-prs#Disarm auto-merge when the refresh has flips": {
+			"status": "no-floor",
+			"reason": "PR plumbing, not a producer (#4512): it undoes a previous night's arming on a refresh that has flips, and a failed disarm shows as this step's own outcome."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-prs#Mint the refresh App token (starts CI on the refresh PR)": {
+			"status": "no-floor",
+			"reason": "Token plumbing, not a producer (#4512): when the App is absent or the mint fails the refresh PR falls back to the repository token, which the PR body states, and a failed mint shows as this step's own outcome."
 		},
 		".github/workflows/tool-smoke.yml#tool-smoke-prs#Open/update LSP-docs refresh PR": {
 			"status": "no-floor",
