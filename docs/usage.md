@@ -122,6 +122,7 @@ pi --lens-hide-lsp-status     # Publish no pi-lens-lsp footer status at all, so 
 pi --lens-compact-widget      # Render the widget as one summary line (languages + totals, LSP↑ chip while servers spawn) with no file rows or blocker details (refs #3959)
 pi --no-lazy-tools       # Keep every pi-lens tool active instead of activating the situational ones on demand
 pi --lens-turn-end-madge # Run the madge circular-dependency check at every turn end, not just at session start
+pi --lens-fallow         # Run fallow-lsp beside the TypeScript server on JS/TS files (advisory unused-code, duplication and cycle findings; opt-in)
 pi --no-knip             # Disable the knip session-start analyzer
 pi --no-jscpd            # Disable the jscpd session-start analyzer
 pi --no-madge            # Disable the madge session-start analyzer

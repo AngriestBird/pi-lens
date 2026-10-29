@@ -41,6 +41,7 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-compact-widget` | `ui.compactWidget` | `false` |
 | `--no-lazy-tools` | `tools.lazy` | `true` |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | `false` |
+| `--lens-fallow` | `fallow.enabled` | `false` |
 | `--no-knip` | `knip.enabled` | `true` |
 | `--no-jscpd` | `jscpd.enabled` | `true` |
 | `--no-madge` | `madge.enabled` | `true` |
@@ -150,6 +151,8 @@ Hide the diagnostics widget by default, run formatting immediately after write/e
 `actionableWarnings.enabled` gates the turn_end report. `includeLspCodeActions` fetches LSP code actions for each warning (requires an active language server). `deltaOnly` (default `true`) limits the report to lines touched in the current turn. `autoFix.enabled` applies conservative LSP quickfixes at `agent_end`; `autoFix.maxFixes` caps the number applied per turn (default `5`, must be a non-negative whole number). `maxFixes: 0` keeps the report and applies nothing, which is a useful halfway step before enabling `autoFix` for real. Unlike the toggles in the table above there is no CLI counterpart, since it takes a number rather than being on or off.
 
 `turnEnd.madge.enabled` (default `false`) runs the per-turn-end madge circular-dependency check on import-changed files. It is off by default because that pass only writes debug output — user-facing madge diagnostics come from the session-start scan cache and the `lens_diagnostics` extractor — and its subprocess spawns dominated the turn-end latency tail (#766). Enable it with `--lens-turn-end-madge` or `turnEnd.madge.enabled: true` if you want the per-edit circular-dependency note.
+
+`fallow.enabled` (default `false`, or `--lens-fallow`) runs [fallow](https://github.com/fallow-rs/fallow)'s `fallow-lsp` beside the TypeScript server on JS/TS files (`.ts .tsx .js .jsx .mjs .cjs .mts .cts`; no other file ever attaches it). It reports unused files, exports and dependencies, duplication and cycles as advisory warnings and never blocks. It overlaps knip, jscpd and madge, which keep running either way. Only the exact value `true` turns it on: an absent, misspelled or non-boolean value leaves it off, and pi-lens installs and launches nothing. On first use pi-lens downloads the pinned fallow release into `~/.pi-lens/tools/fallow-lsp` (a `fallow-lsp` already on `PATH` wins); the install is refused on a checksum mismatch. The per-edit diagnostics path runs it; the aggregate all-server checks (`lens_diagnostics source=lsp`, workspace sweeps) do not start it.
 
 `ignore` is an array of gitignore-style glob patterns excluded from pi-lens scans across **every** project — the global counterpart to the per-project `.pi-lens.json` `ignore` below. Precedence is lowest: a project `.gitignore` or `.pi-lens.json` (including a `!negation`) overrides it, so you can globally hide e.g. `scratch/**` and still re-include it in one repo.
 

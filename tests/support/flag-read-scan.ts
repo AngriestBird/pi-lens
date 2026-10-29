@@ -24,7 +24,9 @@
  * plus every literal first argument of a `registerFlag(...)` call in the scanned
  * files (`index.ts` registers `no-tool` outside the registry).
  *
- * ADMITTED forms; every other form is REFUSED and reported with file and line:
+ * ADMITTED forms; every other form the scan reads is REFUSED and reported with
+ * file and line. Forms it never reads, so no site is reported, are named under
+ * UNREAD below:
  *
  * - R1: a call to a reader whose first argument is a string literal naming a
  *   registered flag.
@@ -67,10 +69,23 @@
  *
  * NOT READ (spellings whose field name is not written in the source, reported
  * to the maintainer, not admitted): a name built at run time (`const k =
- * "killSwitchFlag"; p[k] = ..`, `{ [k]: .. }`), reflection by string argument
- * (`Object.defineProperty(p, "killSwitchFlag", ..)`, `Reflect.set`), and a
- * forwarder parameter's default value (`function f(name = "x") { getFlag(name)
- * }`). Each needs dataflow the AST seam does not do.
+ * "killSwitchFlag"; p[k] = ..`, `{ [k]: .. }`), and a forwarder parameter's
+ * default value (`function f(name = "x") { getFlag(name) }`). Each needs
+ * dataflow the AST seam does not do.
+ *
+ * UNREAD, accepted residuals (#4960; live population 0 for each flag-name form).
+ * The scan emits no site for these, so a flag name written in them is never
+ * checked and the ratchet stays green. The PR body records each one as a p3
+ * residual with its measured population.
+ * - A reader called through a method, a class field or an object-pair key:
+ *   `this.pi.getFlag(name)` in `class A { flagOn(name) { .. } }`,
+ *   `check = (f) => pi.getFlag(f)` in a class, `{ check: (f) => pi.getFlag(f) }`.
+ *   The forwarder's name is no bound name, so its callers are not scanned.
+ * - A computed callee with a non-literal index: `pi[g]("x")`, `pi["get" +
+ *   "Flag"]("x")`. It has no callee name, so the whole call is skipped. The
+ *   measured computed callees are `x[Symbol.iterator]()`, which read no flag.
+ * - A reflection write that names a `<x>Flag` field: `Object.defineProperty(p,
+ *   "killSwitchFlag", ..)` and `Reflect.set(p, "killSwitchFlag", ..)`.
  */
 import type { SgNode } from "@ast-grep/napi";
 import { parseNodes } from "./ast-census.js";

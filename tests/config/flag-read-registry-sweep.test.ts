@@ -36,6 +36,11 @@ const ADMITTED: FlagReadAdmission = {
 		reason:
 			"`profile` is an `AuxiliaryLspProfile`; its `killSwitchFlag` is only ever assigned by the profile table's pairs, each checked as a literal against the registry",
 	},
+	"clients/dispatch/auxiliary-lsp.ts:getFlag(profile.optInFlag)": {
+		count: 1,
+		reason:
+			"`profile` is an `AuxiliaryLspProfile`; its `optInFlag` is only ever set by the profile table (one pair, `lens-fallow`, a registered literal), and the read is guarded by `!== undefined`",
+	},
 	"clients/runtime-session.ts:analyzerEnabled(flag)": {
 		count: 1,
 		reason:

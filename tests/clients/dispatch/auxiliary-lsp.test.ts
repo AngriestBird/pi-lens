@@ -157,15 +157,24 @@ describe("configDisabledAuxiliaryLspServerIds (#4323)", () => {
 		}
 	});
 
-	it("is the complement of the enabled set for every profile outside the degrade", () => {
+	it("is the complement of the enabled set for every default-on profile outside the degrade", () => {
 		const switches = new Set(["no-opengrep", "no-ast-grep"]);
 		const getFlag = (f: string) => switches.has(f);
 		const enabled = new Set(enabledAuxiliaryLspServerIds(getFlag));
 		const disabled = configDisabledAuxiliaryLspServerIds(getFlag);
-		for (const profile of AUXILIARY_LSP_PROFILES) {
+		for (const profile of AUXILIARY_LSP_PROFILES.filter(
+			(p) => p.enabledByDefault,
+		)) {
 			expect(enabled.has(profile.serverId)).toBe(
 				!disabled.has(profile.serverId),
 			);
+		}
+		// #4929: an opt-in profile that is not enabled was not "switched off", so
+		// it is never reported (auxiliary-lsp-opt-in-4929.test.ts names why).
+		for (const profile of AUXILIARY_LSP_PROFILES.filter(
+			(p) => !p.enabledByDefault,
+		)) {
+			expect(disabled.has(profile.serverId)).toBe(false);
 		}
 	});
 });

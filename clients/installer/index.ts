@@ -507,9 +507,11 @@ export interface ArchiveSpec {
 	 * For a tree bundle (no launcher), a path relative to the extract dir that must
 	 * exist after extraction to confirm success, e.g.
 	 * "PowerShellEditorServices/Start-EditorServices.ps1". Used in place of the
-	 * launcher-existence check.
+	 * launcher-existence check. A resolver `(platform) => path` is for a flat
+	 * bundle whose one marker file is spelled per platform (`fallow-lsp` against
+	 * `fallow-lsp.exe`, #4929).
 	 */
-	treeMarker?: string;
+	treeMarker?: string | ((platform: string) => string);
 	/**
 	 * Lowercase-hex sha256 of every archive this spec can resolve, KEYED BY THE
 	 * RESOLVED URL (#3400). An archive install has no `--version` verdict, so the
@@ -1652,6 +1654,67 @@ export const TOOLS: ToolDefinition[] = [
 				return undefined;
 			},
 			binaryInArchive: "typos-lsp",
+		},
+	},
+	{
+		// fallow-lsp (#4929): the TS/JS dead-code, duplication and cycle analyzer's
+		// LSP server, an OPT-IN language-scoped auxiliary (`--lens-fallow`). One
+		// release archive per target holds four sibling binaries (`fallow`,
+		// `fallow-lsp`, `fallow-mcp`, `fallow-similar-code`) at the archive root
+		// (verified on the 3.37.0 tar.gz and zip listings), so this is a native TREE
+		// BUNDLE like clangd and FallowServer launches `<bundle>/fallow-lsp`. The
+		// version is pinned and every archive is checked against its sha256 before
+		// extraction (a mismatch or an unpinned URL refuses the install). The
+		// release's `SHA256SUMS` lists only the VS Code extension files, so the pins
+		// are the per-asset digests GitHub publishes (`gh api
+		// repos/fallow-rs/fallow/releases/tags/v3.37.0 --jq
+		// '.assets[]|[.name,.digest]|@tsv'`), each re-computed here from the
+		// downloaded bytes. The tree marker is the `fallow-lsp` binary itself
+		// (`fallow-lsp.exe` on Windows). Linux uses the gnu build (needs glibc 2.30);
+		// Windows arm64 has its own build.
+		id: "fallow-lsp",
+		name: "fallow-lsp",
+		checkCommand: "fallow-lsp",
+		checkArgs: ["--version"],
+		installStrategy: "archive",
+		binaryName: "fallow-lsp",
+		archive: {
+			url: (platform, arch) => {
+				const base =
+					"https://github.com/fallow-rs/fallow/releases/download/v3.37.0";
+				if (arch !== "x64" && arch !== "arm64") return undefined;
+				if (platform === "linux")
+					return arch === "arm64"
+						? `${base}/fallow-aarch64-unknown-linux-gnu.tar.gz`
+						: `${base}/fallow-x86_64-unknown-linux-gnu.tar.gz`;
+				if (platform === "darwin")
+					return arch === "arm64"
+						? `${base}/fallow-aarch64-apple-darwin.tar.gz`
+						: `${base}/fallow-x86_64-apple-darwin.tar.gz`;
+				if (platform === "win32")
+					return arch === "arm64"
+						? `${base}/fallow-aarch64-pc-windows-msvc.zip`
+						: `${base}/fallow-x86_64-pc-windows-msvc.zip`;
+				return undefined;
+			},
+			kind: (platform) => (platform === "win32" ? "zip" : "tgz"),
+			stripComponents: 0,
+			treeMarker: (platform) =>
+				platform === "win32" ? "fallow-lsp.exe" : "fallow-lsp",
+			sha256: {
+				"https://github.com/fallow-rs/fallow/releases/download/v3.37.0/fallow-aarch64-unknown-linux-gnu.tar.gz":
+					"cbbf98681687fd2f43be852f15aab8ad34fb51cf6f7e354d3bdc1a9b7cba9c5a",
+				"https://github.com/fallow-rs/fallow/releases/download/v3.37.0/fallow-x86_64-unknown-linux-gnu.tar.gz":
+					"7c09d9b7812be030951f75ebfdd98a4e23ecaee6260c34d7e7f3a6c28a0c3cf0",
+				"https://github.com/fallow-rs/fallow/releases/download/v3.37.0/fallow-aarch64-apple-darwin.tar.gz":
+					"02caed6d3da52ea5ffff84b8619bc399a9302c5c6748633177db64005895a159",
+				"https://github.com/fallow-rs/fallow/releases/download/v3.37.0/fallow-x86_64-apple-darwin.tar.gz":
+					"abf1897d6521dbd8fbfb01a4add5070538fdb7cde049090f991780fd3576acc6",
+				"https://github.com/fallow-rs/fallow/releases/download/v3.37.0/fallow-aarch64-pc-windows-msvc.zip":
+					"26529ecf3a031c01d13adbdbf831ba627c20cf5e4ff95000a1b6ec1497513c83",
+				"https://github.com/fallow-rs/fallow/releases/download/v3.37.0/fallow-x86_64-pc-windows-msvc.zip":
+					"f20ad53eb2190e9ab04288a58068f568699757744fccf5adca216a5250789134",
+			},
 		},
 	},
 	{
@@ -3175,8 +3238,9 @@ async function getArchiveTreeBundlePath(
 		return undefined;
 	}
 	const extractDir = path.join(TOOLS_DIR, tool.id);
-	const marker = tool.archive?.treeMarker
-		? path.join(extractDir, ...tool.archive.treeMarker.split("/"))
+	const treeMarker = tool.archive && resolveTreeMarker(tool.archive);
+	const marker = treeMarker
+		? path.join(extractDir, ...treeMarker.split("/"))
 		: extractDir;
 	try {
 		await fs.access(marker);
@@ -5233,6 +5297,16 @@ export function resolveArchiveUrl(
 	return typeof spec.url === "function" ? spec.url(platform, arch) : spec.url;
 }
 
+/** The tree-bundle marker path for a platform, or undefined when the spec declares none. */
+function resolveTreeMarker(
+	spec: ArchiveSpec,
+	platform: string = installerPlatform(),
+): string | undefined {
+	return typeof spec.treeMarker === "function"
+		? spec.treeMarker(platform)
+		: spec.treeMarker;
+}
+
 /** Resolve the archive format independently from the extractor implementation. */
 export function resolveArchiveKind(
 	spec: ArchiveSpec,
@@ -5557,8 +5631,9 @@ async function installArchiveTool(
 		// consuming server launches a runtime against a bootstrap inside it (e.g.
 		// PSES via pwsh).
 		if (!spec.launcher) {
-			const tmpMarker = spec.treeMarker
-				? path.join(tmpExtractDir, ...spec.treeMarker.split("/"))
+			const treeMarker = resolveTreeMarker(spec, platform);
+			const tmpMarker = treeMarker
+				? path.join(tmpExtractDir, ...treeMarker.split("/"))
 				: tmpExtractDir;
 			try {
 				await fs.access(tmpMarker);

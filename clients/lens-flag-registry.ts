@@ -322,6 +322,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		default: false,
 		scope: "global",
 	},
+	{
+		name: "lens-fallow",
+		description:
+			"Opt-in (#4929): run fallow-lsp beside the TypeScript server on JS/TS files, an advisory auxiliary LSP for unused code, duplication and cycles (auto-installs the pinned release; never blocks; knip, jscpd and madge keep running). Default off. Also via fallow.enabled=true in ~/.pi-lens/config.json.",
+		configKey: "fallow.enabled",
+		negated: false,
+		default: false,
+		scope: "global",
+	},
 	...(
 		[
 			"knip",
