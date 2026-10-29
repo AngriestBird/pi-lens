@@ -8,7 +8,7 @@
  * `tests/clients/project-scale.test.ts`).
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import { resolveStartupScanContext } from "../../clients/startup-scan.js";
 import { buildOrUpdateGraph } from "../../clients/review-graph/service.js";
@@ -20,6 +20,7 @@ import {
 import { clearModuleGraphCache } from "../../clients/review-graph/workspace-modules.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import { makeMonorepo, type MonorepoPackageSpec } from "./fixture.js";
+import { withEnv } from "../support/with-env.js";
 
 function fileMap(count: number): Record<string, string> {
 	const files: Record<string, string> = {};
@@ -30,7 +31,18 @@ function fileMap(count: number): Record<string, string> {
 }
 
 describe("monorepo .pi-lens.json maxProjectFiles scale knob, end-to-end (#775 item 3, post-#779)", () => {
+	// `PI_LENS_REVIEW_GRAPH_MAX_FILES` wins outright over the derived budget
+	// (`getReviewGraphMaxFiles`, clients/review-graph/builder.ts), so an ambient
+	// value decides every review-graph verdict here. Cleared for each case and
+	// restored after. Recurrence: with it set to 2, the skip case below reds and
+	// the new it.each rows stay green under the floor mutation (review of #4979).
+	let restoreEnv: (() => void) | undefined;
+	beforeEach(() => {
+		restoreEnv = withEnv({ PI_LENS_REVIEW_GRAPH_MAX_FILES: undefined });
+	});
 	afterEach(() => {
+		restoreEnv?.();
+		restoreEnv = undefined;
 		resetProjectLensConfigCache();
 		clearReviewGraphWorkspaceCache();
 		clearModuleGraphCache();
