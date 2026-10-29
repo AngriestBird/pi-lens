@@ -122,9 +122,15 @@ export function createAstGrepReplaceTool(
 			params: Record<string, unknown>,
 			_signal: AbortSignal,
 			_onUpdate: unknown,
-			ctx: { cwd?: string; resultMaxItems?: number },
+			ctx: {
+				cwd?: string;
+				resultMaxItems?: number;
+				sessionManager?: { getSessionId?: () => string };
+			},
 		) {
 			const lineage = captureLineage?.();
+			// #4943: the calling session owns the deferred pass of the apply.
+			const sessionId = ctx.sessionManager?.getSessionId?.();
 			const startedAt = Date.now();
 			const {
 				pattern,
@@ -255,7 +261,7 @@ export function createAstGrepReplaceTool(
 					ruleYaml,
 					searchPaths,
 					applyFlag,
-					{ lineage, toolCallId: _toolCallId },
+					{ lineage, toolCallId: _toolCallId, sessionId },
 				);
 				if (ruleResult.stalePreview) {
 					logOutcome("error", { errorRaw: "stale_preview" });
@@ -307,7 +313,7 @@ export function createAstGrepReplaceTool(
 				lang,
 				searchPaths,
 				applyFlag,
-				{ strictness, lineage, toolCallId: _toolCallId },
+				{ strictness, lineage, toolCallId: _toolCallId, sessionId },
 			);
 
 			if (result.stalePreview) {

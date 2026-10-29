@@ -47,6 +47,8 @@ import {
 	resetProjectTrust,
 	setProjectTrustState,
 } from "../../clients/project-trust.js";
+import { useConfigPath } from "../support/global-config.js";
+const setConfigPath = useConfigPath();
 
 // The extension log is an ndjson sink, not the terminal; a fixture that
 // deliberately carries a legacy location would otherwise spray test output.
@@ -113,9 +115,8 @@ async function viewFor(
 	fs.mkdirSync(projectDir, { recursive: true });
 
 	const previousHome = process.env.PI_LENS_HOME;
-	const previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
-	process.env.PI_LENS_CONFIG_PATH = path.join(home, ".pi-lens", "config.json");
+	setConfigPath(path.join(home, ".pi-lens", "config.json"));
 
 	resetLSPConfigStateForTests();
 	resetLSPConfigWarnCache();
@@ -131,9 +132,6 @@ async function viewFor(
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 		else process.env.PI_LENS_HOME = previousHome;
-		if (previousConfigPath === undefined)
-			delete process.env.PI_LENS_CONFIG_PATH;
-		else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	}
 }
 
@@ -324,9 +322,8 @@ describe("effectiveConfig — why is X running (#2415 AC)", () => {
 		);
 
 		const previousHome = process.env.PI_LENS_HOME;
-		const previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
-		process.env.PI_LENS_CONFIG_PATH = global;
+		setConfigPath(global);
 		try {
 			resetLSPConfigWarnCache();
 			expect((await loadLSPConfig(projectDir, home)).disabledServers).toEqual([
@@ -335,9 +332,6 @@ describe("effectiveConfig — why is X running (#2415 AC)", () => {
 		} finally {
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
-			if (previousConfigPath === undefined)
-				delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 		}
 	});
 
@@ -565,21 +559,13 @@ describe("effectiveConfig — asking must not report (#2427 rule 2)", () => {
 		// suppressing by consuming the latch looks identical from inside the
 		// query and is exactly the defect.
 		const previousHome = process.env.PI_LENS_HOME;
-		const previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 		process.env.PI_LENS_HOME = path.join(result.home, ".pi-lens");
-		process.env.PI_LENS_CONFIG_PATH = path.join(
-			result.home,
-			".pi-lens",
-			"config.json",
-		);
+		setConfigPath(path.join(result.home, ".pi-lens", "config.json"));
 		try {
 			await loadLSPConfig(result.projectDir, result.home);
 		} finally {
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
-			if (previousConfigPath === undefined)
-				delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 		}
 		expect(logSink.messages.join("\n")).toContain("deprecated");
 	});
@@ -697,17 +683,13 @@ describe("effectiveConfig — asking changes no session state (#2427 round 3)", 
 		fs.writeFileSync(subConfig, JSON.stringify(subDocument));
 
 		const previousHome = process.env.PI_LENS_HOME;
-		const previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
-		process.env.PI_LENS_CONFIG_PATH = globalConfig;
+		setConfigPath(globalConfig);
 		resetLSPConfigStateForTests();
 		resetLSPConfigWarnCache();
 		const restore = (): void => {
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
-			if (previousConfigPath === undefined)
-				delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 			resetLSPConfigStateForTests();
 		};
 		return {
@@ -1056,13 +1038,8 @@ describe("effectiveConfig — a file outside cwd is rejected, not silently resol
 		);
 
 		const previousHome = process.env.PI_LENS_HOME;
-		const previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
-		process.env.PI_LENS_CONFIG_PATH = path.join(
-			home,
-			".pi-lens",
-			"config.json",
-		);
+		setConfigPath(path.join(home, ".pi-lens", "config.json"));
 		resetLSPConfigStateForTests();
 		resetLSPConfigWarnCache();
 		try {
@@ -1086,9 +1063,6 @@ describe("effectiveConfig — a file outside cwd is rejected, not silently resol
 		} finally {
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
-			if (previousConfigPath === undefined)
-				delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 			resetLSPConfigStateForTests();
 		}
 	});

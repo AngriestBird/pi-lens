@@ -69,6 +69,13 @@ export interface TurnEndFindingsCache {
 	carriedBlockers?: BlockerPartition[] | undefined;
 	/** When `sessionId` wrote the top-level sections (#4750, `BlockerPartition`). */
 	blockerWrittenAt?: number | undefined;
+	/**
+	 * The session whose turn end composed `content` (#4943), the only session
+	 * whose next request takes it. Absent, `content` is the owner's
+	 * (`sessionId`): a commit-gate writer that rewrites `content` as the
+	 * owner's blocker text leaves it out. Not a claim: the gate never reads it.
+	 */
+	deliverTo?: string | undefined;
 }
 
 /** One session's blocker sections in the record, with their owner (#4738). */
@@ -1559,12 +1566,14 @@ function carriedTurnEndBlockers(
  * The only fields a record that makes NO claim carries (#4733 r1 F3): what the
  * `--lens-guard`-off turn-end writer stores for delivery
  * (`clients/runtime-turn.ts`, the `else` branch), and 3.8.74's `{ content }`.
+ * `deliverTo` (#4943) addresses the content; it claims nothing.
  */
 const NO_CLAIM_FIELDS = [
 	"content",
 	"affectedFiles",
 	"affectedFilesTruncated",
 	"provenance",
+	"deliverTo",
 ] as const;
 
 /**
@@ -1730,6 +1739,9 @@ function retireOwnPartition(
 		sessionId: owner,
 		// Nothing new to deliver: the sections kept were already in the record.
 		consumed: stored.consumed === true,
+		// #4943: the content is now the owner's blocker text, not the message
+		// the composer addressed.
+		deliverTo: undefined,
 	});
 	return false;
 }
@@ -2419,6 +2431,8 @@ export function clearGitGuardTestFailure(
 				.map(([filePath, seq]) => [guardPathKey(filePath, cwd), seq]),
 		),
 		fileContentHashes: {},
+		// #4943: the content is now the owner's blocker text.
+		deliverTo: undefined,
 	});
 }
 

@@ -3002,7 +3002,7 @@ export const DETECTION_MESSAGE =
 // #4519: the retro read 139 of 363 closed bugs as "unknown". A bug-closing PR
 // owes a layer word and a reason; "unknown", "n/a", "tbd" and "?" are neither.
 export const DETECTION_UNKNOWN_MESSAGE =
-	'PR body "## Detection" answers "unknown", "n/a", "tbd" or "?" (or a reason that starts with "unknown"), which is not a detection lesson: a bug-closing PR names the layer that caught the bug (and the layer that should have), a real reason after "Gap: none:", the shape name, and the enforcer reason. ' +
+	'PR body "## Detection" answers "unknown", "n/a", "tbd" or "?" (or a reason that starts with "unknown"), which is not a detection lesson: a PR that closes or references a bug names the layer that caught the bug (and the layer that should have), a real reason after "Gap: none:", the shape name, and the enforcer reason. ' +
 	DETECTION_LAYER_HINT;
 
 // A field value is found by its line prefix, never a sentence mention: a
@@ -3492,6 +3492,142 @@ function closedIssues(body) {
 	return parseCloseKeywords(
 		blankMarkdownRegions(body, { code: "blocks", codeSpans: true }),
 	).issues;
+}
+
+// #4968: the detection lesson is owed by any PR that references a bug issue,
+// not only one that closes it (the 2026-10-29 audit: 24 bug-linked PRs merged
+// with `Refs #N` and no `## Detection`). A reference is a keyword and the
+// issue token(s) it names: directly after it (`refs #N`, `Closes: #A, #B`), on
+// the rest of a line the keyword opens (`Refs the audit in #N`), or on the
+// next line when the keyword or a trailing comma ends the line (a wrapped
+// `Refs\n#N`). The reader labels one token spelling, `#N` and `GH-N`; a
+// cross-repository token or an issue or pull request URL is returned as
+// unrecognised for the gate to refuse, never skipped. Another URL (a comment
+// permalink) is prose.
+const REFERENCE_KEYWORD = String.raw`(?:close[sd]?|fix(?:e[sd])?|resolv(?:e[sd]?)|refs?|references?)`;
+const REFERENCE_TOKEN = String.raw`(?:https?://[^\s)\]>]+|[\w.-]+/[\w.-]+#\d+|(?:#|GH-)\d+(?!\w))`;
+const REFERENCE_LIST = String.raw`${REFERENCE_TOKEN}(?:(?:[ \t]*(?:,|&|\band\b)[ \t]*|[ \t]+)${REFERENCE_TOKEN})*`;
+const REFERENCE_GAP = String.raw`[ \t:\-\u2013\u2014(\[*_]*`;
+const REFERENCE_READABLE = /^(?:#|GH-)(\d+)$/i;
+const REFERENCE_ISSUE_URL = /^https?:\/\/.*\/(?:issues|pull)\/\d+\/?$/i;
+const REFERENCE_ADJACENT = new RegExp(
+	String.raw`\b${REFERENCE_KEYWORD}\b${REFERENCE_GAP}(${REFERENCE_LIST})`,
+	"gi",
+);
+const REFERENCE_LEADING = new RegExp(
+	String.raw`^[ \t>]*(?:[-*+]|\d+[.)])?[ \t]*(?:\*\*|__)?${REFERENCE_KEYWORD}\b(.*)$`,
+	"i",
+);
+// A line the keyword ends: its tokens are on the next line.
+const REFERENCE_OPEN = new RegExp(
+	String.raw`\b${REFERENCE_KEYWORD}\b${REFERENCE_GAP}$`,
+	"i",
+);
+const REFERENCE_CONTINUATION = new RegExp(
+	String.raw`^[ \t>*_(\[-]*(${REFERENCE_LIST})`,
+);
+const REFERENCE_TOKENS = new RegExp(REFERENCE_TOKEN, "gi");
+const REFERENCE_WHOLE_TOKEN = new RegExp(`^${REFERENCE_TOKEN}$`, "i");
+const LINK_DEFINITION =
+	/^ {0,3}\[([^\]\n]{1,200})\]:[ \t]*<?([^\s>]{1,500})>?/gm;
+const INLINE_LINK =
+	/\[([^\]\n]{0,200})\]\(<?([^)\s>]{0,500})>?(?:[ \t][^)\n]{0,200})?\)/g;
+const SHORTCUT_LINK = /\[([^\]\n]{1,200})\](?![[(:])/g;
+const REFERENCE_LINK = /\[([^\]\n]{0,200})\]\[([^\]\n]{0,200})\]/g;
+
+// The link patterns are length-bounded: an unbounded scan from every `[` of a
+// bracket-only line is quadratic.
+// A link names its target by its text when that text is itself an issue token
+// (`[#12](url)`), and by its destination otherwise (`[the bug](url)`), whether
+// the destination is inline or reached through a definition (`[bug][1]`).
+function linkTarget(text, destination) {
+	const label = text.trim();
+	return REFERENCE_WHOLE_TOKEN.test(label) ? label : (destination ?? "");
+}
+
+/**
+ * The issues a body references and the tokens it cannot read, from the text
+ * outside code. `issues` is in order of first appearance.
+ */
+export function referencedIssues(body = "") {
+	const issues = [];
+	const unrecognised = [];
+	const note = (token) => {
+		const readable = REFERENCE_READABLE.exec(token);
+		if (readable) {
+			if (!issues.includes(Number(readable[1])))
+				issues.push(Number(readable[1]));
+			return;
+		}
+		const shown = token.replace(/[.,;:]+$/, "");
+		if (/^https?:/i.test(shown) && !REFERENCE_ISSUE_URL.test(shown)) return;
+		if (!unrecognised.includes(shown)) unrecognised.push(shown);
+	};
+	// Fenced and indented code is quoted material; an inline code span is not
+	// (fail closed): `Refs` before a code-spanned number still names the issue.
+	const text = blankMarkdownRegions(String(body ?? ""), { code: "blocks" });
+	const definitions = new Map(
+		[...text.matchAll(LINK_DEFINITION)].map((m) => [m[1].toLowerCase(), m[2]]),
+	);
+	const lines = text.split(/\r?\n/).map((line) =>
+		line
+			.replace(INLINE_LINK, (_, label, destination) =>
+				linkTarget(label, destination),
+			)
+			.replace(REFERENCE_LINK, (match, label, key) => {
+				const destination = definitions.get((key || label).toLowerCase());
+				return destination === undefined
+					? match
+					: linkTarget(label, destination);
+			})
+			.replace(SHORTCUT_LINK, (match, label) => {
+				const destination = definitions.get(label.toLowerCase());
+				return destination === undefined
+					? match
+					: linkTarget(label, destination);
+			}),
+	);
+	let continues = false;
+	for (const line of lines) {
+		const spans = [...line.matchAll(REFERENCE_ADJACENT)].map((m) => m[1]);
+		const leading = REFERENCE_LEADING.exec(line);
+		if (leading) spans.push(leading[1]);
+		if (continues) {
+			const next = REFERENCE_CONTINUATION.exec(line);
+			if (next) spans.push(next[1]);
+		}
+		for (const span of spans)
+			for (const [token] of span.matchAll(REFERENCE_TOKENS)) note(token);
+		continues =
+			REFERENCE_OPEN.test(line) ||
+			(spans.length > 0 && /(?:[,&]|\band)[ \t]*$/i.test(line));
+	}
+	return { issues, unrecognised };
+}
+
+// #4968: the title channel. The template makes the title carry the issue
+// (`(refs #NNN)`), a short regular field, so every `#N` in it is a reference
+// whatever words the body uses (PR #4924: title `(refs #4532)`, body `Part (a)
+// of #4532`). A `#N` glued to a word (`owner/repo#N`) is another repository's.
+function titleIssues(title) {
+	return [...String(title ?? "").matchAll(/(?<!\w)#(\d+)(?!\w)/g)].map(
+		(match) => Number(match[1]),
+	);
+}
+
+// What the reference rule reads: the author's text (a bot block quoting a
+// commit title is not the author's reference) and every `#N` of the title,
+// minus the issues the whole body closes, which keep their own `bugClosing`
+// route.
+function referencedOnly(fullBody, title = "") {
+	const closed = closedIssues(fullBody);
+	const { issues, unrecognised } = referencedIssues(authorText(fullBody));
+	for (const number of titleIssues(title))
+		if (!issues.includes(number)) issues.push(number);
+	return {
+		issues: issues.filter((number) => !closed.includes(number)),
+		unrecognised,
+	};
 }
 
 function sectionVerdict(section, text, { closes = [] } = {}) {
@@ -4351,9 +4487,15 @@ export async function resolveTouchesTests(
 	}
 }
 
+// #4968: the labels that make an issue owe the detection lesson, for a PR that
+// closes it and for one that references it. One list: 17 of 20 nightly-drift
+// issues carry no `bug` label, and the issue names both for Closes and Refs.
+const DETECTION_BUG_LABELS = ["bug", "nightly-drift"];
+
 /**
- * #4288: does the PR close an issue carrying the `bug` label? Returns `true`
- * (some closed issue is bug-labelled), `false` (no closed issue is), or `null`
+ * #4288: does the PR close an issue carrying the `bug` or `nightly-drift` label
+ * (#4968)? Returns `true`
+ * (some closed issue is so labelled), `false` (no closed issue is), or `null`
  * when the label cannot be read (no API credentials, a non-2xx, or a malformed
  * body). A `null` never blocks the lint: the callers warn and skip the
  * `## Detection` requirement rather than demanding a section they cannot
@@ -4362,12 +4504,13 @@ export async function resolveTouchesTests(
 export async function resolveBugClosing(body, fetchImpl = globalThis.fetch) {
 	const issues = closedIssues(body);
 	if (issues.length === 0) return false;
-	// A missing env makes githubGet reject, which anyIssueLabelledBug reads as
+	// A missing env makes githubGet reject, which anyIssueLabelled reads as
 	// "cannot read the label" (null), as the old early return did.
-	return anyIssueLabelledBug(issues, async (number) => {
-		const response = await githubGet(`/issues/${number}`, fetchImpl);
-		return response.ok ? await response.json() : null;
-	});
+	return anyIssueLabelled(
+		issues,
+		apiIssueReader(fetchImpl),
+		DETECTION_BUG_LABELS,
+	);
 }
 
 /**
@@ -4381,7 +4524,91 @@ export async function resolveBugClosingViaGh(
 	cwd = process.cwd(),
 	exec = execFileSync,
 ) {
-	return anyIssueLabelledBug(closedIssues(body), (number) => {
+	return anyIssueLabelled(
+		closedIssues(body),
+		ghIssueReader(cwd, exec),
+		DETECTION_BUG_LABELS,
+	);
+}
+
+/**
+ * #4968: does the body REFERENCE (Refs, or any close keyword the closing route
+ * does not already own) an issue labelled `bug` or `nightly-drift`? `true`,
+ * `false`, or `null`. Unlike `resolveBugClosing`, `null` is a refusal at the
+ * callers (`lintReferencedBugLabels`): a reference the rule cannot read is not
+ * a pass. A reference token it cannot turn into `#N` is `null` without a read.
+ * `fullBody` is the whole body; the author's text is cut inside. `title` is the
+ * PR title, whose every `#N` is a reference too (`titleIssues`).
+ */
+export function resolveBugReferenced(
+	fullBody,
+	fetchImpl = globalThis.fetch,
+	title = "",
+) {
+	return anyReferencedBug(fullBody, apiIssueReader(fetchImpl), title);
+}
+
+/** The `gh api` reader of `resolveBugReferenced`, as `resolveBugClosingViaGh`. */
+export function resolveBugReferencedViaGh(
+	fullBody,
+	cwd = process.cwd(),
+	exec = execFileSync,
+	title = "",
+) {
+	return anyReferencedBug(fullBody, ghIssueReader(cwd, exec), title);
+}
+
+async function anyReferencedBug(fullBody, readIssue, title) {
+	const { issues, unrecognised } = referencedOnly(fullBody, title);
+	if (unrecognised.length) return null;
+	if (issues.length === 0) return false;
+	return anyIssueLabelled(issues, readIssue, DETECTION_BUG_LABELS);
+}
+
+/**
+ * #4968: the refusal for a reference whose label could not be read. `[]` when
+ * the read succeeded (`resolved` is true or false) or nothing is referenced.
+ * A reference the reader cannot turn into `#N` needs no network and always
+ * refuses. An API error refuses in CI, which has the token; the local
+ * preflight passes `skipUnreadableLabels` and warns and skips instead, as the
+ * closing route does, so an offline sandbox is not reddened (#4968 F2).
+ */
+export function lintReferencedBugLabels(
+	fullBody,
+	resolved,
+	title = "",
+	{ skipUnreadableLabels = false } = {},
+) {
+	if (resolved !== null) return [];
+	const { issues, unrecognised } = referencedOnly(fullBody, title);
+	if (unrecognised.length)
+		return [
+			`PR body "## Detection" cannot be judged: the reference ${unrecognised.join(", ")} is not an issue of this repository written as "#N", so its label cannot be read and the check refuses (#4968). Write each reference as "Refs #N".`,
+		];
+	if (issues.length === 0) return [];
+	const named = issues.map((number) => `#${number}`).join(", ");
+	if (skipUnreadableLabels) {
+		console.warn(
+			`::warning::PR body check could not read the label of ${named} (gh missing, unauthenticated, or failed), so the "## Detection" requirement for a referenced bug was skipped; CI reads it (#4968).`,
+		);
+		return [];
+	}
+	return [
+		`PR body "## Detection" cannot be judged: the label of ${named} could not be read (an API error), so the check cannot tell whether a detection lesson is owed and refuses (#4968). Retry once the label read works.`,
+	];
+}
+
+// The label readers the two transports share: `(number) => issue JSON`, or
+// null / a throw when the issue cannot be read.
+function apiIssueReader(fetchImpl) {
+	return async (number) => {
+		const response = await githubGet(`/issues/${number}`, fetchImpl);
+		return response.ok ? await response.json() : null;
+	};
+}
+
+function ghIssueReader(cwd, exec) {
+	return (number) => {
 		const raw = exec("gh", ["api", `repos/{owner}/{repo}/issues/${number}`], {
 			cwd,
 			encoding: "utf8",
@@ -4390,18 +4617,19 @@ export async function resolveBugClosingViaGh(
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		// gh output that is not JSON is unreadable label evidence, the same
-		// verdict a thrown exec already gets from anyIssueLabelledBug.
+		// verdict a thrown exec already gets from anyIssueLabelled.
 		try {
 			return JSON.parse(raw);
 		} catch {
 			return null;
 		}
-	});
+	};
 }
 
 // The one label reader both transports share: `readIssue(number)` returns the
-// issue JSON, or null / throws when it cannot be read.
-async function anyIssueLabelledBug(issues, readIssue) {
+// issue JSON, or null / throws when it cannot be read. `names` are the labels
+// that count (`DETECTION_BUG_LABELS`).
+async function anyIssueLabelled(issues, readIssue, names) {
 	for (const number of issues) {
 		let data;
 		try {
@@ -4412,8 +4640,8 @@ async function anyIssueLabelledBug(issues, readIssue) {
 		if (data === null) return null;
 		const labels = Array.isArray(data?.labels) ? data.labels : [];
 		if (
-			labels.some(
-				(label) => (typeof label === "string" ? label : label?.name) === "bug",
+			labels.some((label) =>
+				names.includes(typeof label === "string" ? label : label?.name),
 			)
 		)
 			return true;
@@ -4461,6 +4689,10 @@ export async function lintPullRequestEvent(
 	// Section readers get the cut text; the close-keyword and bug-label readers
 	// keep `fullBody`, because GitHub closes what the whole body names (#4778).
 	const fullBody = live.body;
+	// The title comes from the same live fetch as the body (#2083's seam), so a
+	// title edited after a replayed event is judged as it stands; the payload
+	// title stands in only when the live fetch fell back (#4976).
+	const title = live.title ?? pullRequest.title;
 	const body = authorText(fullBody);
 	const requireTestAssessment =
 		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
@@ -4476,6 +4708,15 @@ export async function lintPullRequestEvent(
 		console.warn(
 			'::warning::PR body check could not read the closed issue label(s), so the "## Detection" section is not required (#4288).',
 		);
+	// #4968: a reference to a bug owes the same lesson. Unlike the closing
+	// read above, an unreadable reference refuses (`lintReferencedBugLabels`).
+	let bugReferenced = false;
+	if (bugClosing !== true)
+		try {
+			bugReferenced = await resolveBugReferenced(fullBody, fetchImpl, title);
+		} catch {
+			bugReferenced = null;
+		}
 	let diff = "";
 	try {
 		diff = diffImpl();
@@ -4485,7 +4726,7 @@ export async function lintPullRequestEvent(
 	}
 	const result = lintPrBody(body, {
 		requireTestAssessment,
-		bugClosing: bugClosing === true,
+		bugClosing: bugClosing === true || bugReferenced === true,
 		existsOnBase: baseFileReader(),
 		shapeCatalog: shapeCatalogReader(),
 		diff,
@@ -4493,8 +4734,13 @@ export async function lintPullRequestEvent(
 		// Existing open bodies were authored before #4280. Set PI_LENS_PROSE_GRACE=1
 		// for the transition job; local preflight remains blocking by default.
 		proseMode: process.env.PI_LENS_PROSE_GRACE === "1" ? "warn" : "block",
-		title: pullRequest.title,
+		title,
 	});
+	const unreadable = lintReferencedBugLabels(fullBody, bugReferenced, title);
+	if (unreadable.length) {
+		result.valid = false;
+		result.errors.push(...unreadable);
+	}
 	const classSweep = lintClassSweep(body, { diff });
 	if (classSweep.length) {
 		result.valid = false;
@@ -4760,11 +5006,22 @@ export function lintLocalPrBody(
 		console.warn(
 			'::warning::PR body check could not read the closed issue label (gh missing, unauthenticated, or failed), so the "## Detection" requirement check was skipped (#4288).',
 		);
+	// #4968: a reference to a bug owes the lesson too, and an unreadable
+	// reference refuses. A closing bug already owes it, so nothing is read.
+	let bugReferenced = false;
+	if (bugClosing !== true) {
+		bugReferenced = options.bugReferenced;
+		if (bugReferenced === undefined)
+			bugReferenced =
+				typeof options.resolveBugReferenced === "function"
+					? options.resolveBugReferenced(fullBody, options.title)
+					: null;
+	}
 	const existsOnBase = baseFileReader(cwd, git);
 	const shapeCatalog = shapeCatalogReader(cwd, git);
 	const result = lintPrBody(body, {
 		requireTestAssessment: localTouchesTests(cwd, git),
-		bugClosing: bugClosing === true,
+		bugClosing: bugClosing === true || bugReferenced === true,
 		existsOnBase,
 		shapeCatalog,
 		diff,
@@ -4778,7 +5035,7 @@ export function lintLocalPrBody(
 	// #4288: a present section is validated whatever the label, so a prose-form
 	// answer reds here instead of at CI. `lintPrBody` already did it for a
 	// resolved bug.
-	if (bugClosing !== true) {
+	if (bugClosing !== true && bugReferenced !== true) {
 		const detection = lintDetectionSection(body, {
 			ignoreUnfilled: true,
 			existsOnBase,
@@ -4786,6 +5043,16 @@ export function lintLocalPrBody(
 		});
 		result.errors.push(...detection);
 		if (detection.length) result.valid = false;
+	}
+	const unreadable = lintReferencedBugLabels(
+		fullBody,
+		bugReferenced,
+		options.title,
+		{ skipUnreadableLabels: true },
+	);
+	if (unreadable.length) {
+		result.valid = false;
+		result.errors.push(...unreadable);
 	}
 	const classSweep = lintClassSweep(body, { diff });
 	if (classSweep.length) {
@@ -4879,11 +5146,22 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 		// --title is accepted for preflight parity. Title validation belongs to
 		// check-pr-title.mjs, but preflight passes both local input files.
 		const localBody = readFileSync(localBodyPath, "utf8");
+		const bugClosing = await resolveBugClosingViaGh(localBody);
 		const result = lintLocalPrBody(localBody, process.cwd(), gitExecFileSync, {
 			title,
 			ref,
 			proseMode,
-			bugClosing: await resolveBugClosingViaGh(localBody),
+			bugClosing,
+			// #4968: a closing bug already owes the section; skip the extra reads.
+			bugReferenced:
+				bugClosing === true
+					? false
+					: await resolveBugReferencedViaGh(
+							localBody,
+							process.cwd(),
+							execFileSync,
+							title,
+						),
 		});
 		for (const error of result.errors) console.error(error);
 		process.exitCode = result.valid ? 0 : 1;

@@ -19,6 +19,7 @@ import {
 } from "../../clients/lens-flag-registry.js";
 import { EMPTY_PROJECT_CONFIG } from "../../clients/project-lens-config.js";
 import { removeTempDirSync } from "./test-utils.js";
+import { useConfigPath } from "../support/global-config.js";
 
 // #1333: these config/telemetry warnings no longer reach the terminal — pi owns
 // it — they go to the ndjson sink in `clients/extension-log.ts`. The sink mock
@@ -37,7 +38,7 @@ vi.mock("../../clients/extension-log.js", async (importOriginal) => {
 });
 
 const tmpDirs: string[] = [];
-let previousConfigPath: string | undefined;
+const setConfigPath = useConfigPath();
 let previousAgentDir: string | undefined;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
@@ -88,7 +89,6 @@ function enablingConfigValue(spec: LensFlagSpec): unknown {
 }
 
 beforeEach(() => {
-	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	previousHome = process.env.HOME;
 	previousUserProfile = process.env.USERPROFILE;
 	previousEnvValues = new Map(
@@ -98,7 +98,7 @@ beforeEach(() => {
 		]),
 	);
 	for (const name of previousEnvValues.keys()) delete process.env[name];
-	delete process.env.PI_LENS_CONFIG_PATH;
+	setConfigPath(undefined);
 	// The global-config-location PR (refs #2457) reads PI_CODING_AGENT_DIR in
 	// the resolution's agent-dir tier; the ambient value (set by a pi host)
 	// must not decide which file these assertions read.
@@ -112,8 +112,6 @@ beforeEach(() => {
 afterEach(() => {
 	vi.restoreAllMocks();
 	resetGlobalConfigWarnCache();
-	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 	if (previousHome === undefined) delete process.env.HOME;
@@ -189,7 +187,7 @@ describe("global pi-lens config", () => {
 
 	it("honors an explicit config path override", () => {
 		const home = makeTempHome();
-		process.env.PI_LENS_CONFIG_PATH = path.join(home, "custom-config.json");
+		setConfigPath(path.join(home, "custom-config.json"));
 
 		expect(getPiLensGlobalConfigPath()).toBe(
 			path.join(home, "custom-config.json"),

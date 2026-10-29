@@ -31,11 +31,23 @@ CONSTANTS ProcessWideLast, StaleMemberHolds
 \* another session is truly live (TRUE, as-built)? FALSE resets it under T,
 \* the start-side twin of an early teardown.
 CONSTANTS SplitRelease, StartKeepsLiveFleet
+\* #4965: the session-id lookup (`clients/session-scope.ts`) is a process-wide
+\* index from a session's key to its scope, so a key nobody gives back holds an
+\* ended session's scope and cells for the life of the process. `bound` is the
+\* set of contexts whose key the index names. M and R share one key, so R's
+\* bind takes M's. UnbindAtLeave: does every leave give its key back (TRUE,
+\* as-built), or only the activation's last leave, whose retire did (FALSE,
+\* #4972 r1: S leaving before M stayed bound)? DisposalUnbinds: does a process
+\* read that finds a member pi disposed give its key back (TRUE, as-built), or
+\* is it only counted (FALSE, r1: T stayed bound)? SweepAtStart: does every
+\* start read the process (TRUE, as-built), or only a primary's (FALSE, r1:
+\* a run of subagent starts never found the disposed ones)?
+CONSTANTS UnbindAtLeave, DisposalUnbinds, SweepAtStart
 
 VARIABLES members, admitted, owner, started, cleaned, departed, saved, foreignTeardown,
-          earlyTeardown, stale, missedTeardown, declinedSuccessor
+          earlyTeardown, stale, missedTeardown, declinedSuccessor, bound, leaked
 vars == <<members, admitted, owner, started, cleaned, departed, saved, foreignTeardown,
-          earlyTeardown, stale, missedTeardown, declinedSuccessor>>
+          earlyTeardown, stale, missedTeardown, declinedSuccessor, bound, leaked>>
 Acts == {"A", "B", "C"}
 Ctxs == {"M", "R", "S", "T"}
 Role(c) == IF c \in {"S", "T"} THEN "secondary" ELSE "primary"
@@ -44,32 +56,50 @@ AllMembers(m) == UNION {m[a] : a \in Acts}
 TrueLive(m) == {c \in AllMembers(m) : c \notin stale}
 \* What the code counts as live.
 CodeLive(m) == IF StaleMemberHolds THEN AllMembers(m) ELSE TrueLive(m)
+\* #4965: a process read (`hasLiveSessionInProcess`) gives back the key of
+\* every member pi disposed, beside a live sibling or not.
+Swept(b) == IF DisposalUnbinds THEN b \ stale ELSE b
+\* The read a start makes: every start as-built, only a full start before.
+StartSweep(b, full) == IF SweepAtStart \/ full THEN Swept(b) ELSE b
+\* The ghost: after this start or leave, an ended session is still bound. A
+\* context is gone once it left and no activation lists it (a LateLeave of a
+\* context another activation still holds names no key of its own).
+Leaks(b, m, d) == b \cap ((d \ AllMembers(m)) \cup stale) # {}
 Init == /\ members = [a \in Acts |-> {}]
         /\ admitted = [a \in Acts |-> "none"]
         /\ owner = "none" /\ started = {} /\ cleaned = {} /\ departed = {}
         /\ saved = [c \in Ctxs |-> "none"] /\ foreignTeardown = FALSE
         /\ earlyTeardown = FALSE /\ stale = {} /\ missedTeardown = FALSE
         /\ declinedSuccessor = FALSE
+        /\ bound = {} /\ leaked = FALSE
 StartM == /\ "M" \notin started
           /\ members' = [members EXCEPT !["A"] = {"M"}]
           /\ admitted' = [admitted EXCEPT !["A"] = "M"]
           /\ owner' = "M" /\ started' = started \cup {"M"}
+          /\ bound' = StartSweep(bound, TRUE) \cup {"M"}
+          /\ leaked' = (leaked \/ Leaks(bound', members', departed))
           /\ UNCHANGED <<cleaned, departed, saved, foreignTeardown, earlyTeardown, stale, missedTeardown, declinedSuccessor>>
 StartS == /\ "M" \in members["A"] /\ "S" \notin started
           /\ members' = [members EXCEPT !["A"] = @ \cup {"S"}]
           /\ started' = started \cup {"S"}
+          /\ bound' = StartSweep(bound, FALSE) \cup {"S"}
+          /\ leaked' = (leaked \/ Leaks(bound', members', departed))
           /\ UNCHANGED <<admitted, owner, cleaned, departed, saved, foreignTeardown, earlyTeardown, stale, missedTeardown, declinedSuccessor>>
 \* #4704: M's subagent binds in its own activation C and is declined.
 StartT == /\ "M" \in members["A"] /\ "T" \notin started
           /\ members' = [members EXCEPT !["C"] = @ \cup {"T"}]
           /\ started' = started \cup {"T"}
+          /\ bound' = StartSweep(bound, FALSE) \cup {"T"}
+          /\ leaked' = (leaked \/ Leaks(bound', members', departed))
           /\ UNCHANGED <<admitted, owner, cleaned, departed, saved, foreignTeardown, earlyTeardown, stale, missedTeardown, declinedSuccessor>>
 \* #4704: T's runner disposes its session: pi invalidates T's contexts and
 \* emits no session_shutdown, so T never leaves.
 DisposeT == /\ "T" \in members["C"] /\ "T" \notin stale
             /\ stale' = stale \cup {"T"}
+            \* Detection is lazy: T's key goes at the next process read.
             /\ UNCHANGED <<members, admitted, owner, started, cleaned, departed, saved,
-                           foreignTeardown, earlyTeardown, missedTeardown, declinedSuccessor>>
+                           foreignTeardown, earlyTeardown, missedTeardown, declinedSuccessor,
+                           bound, leaked>>
 \* R is M's successor (`/new`, `/resume`, a reload). `r` is its root: the
 \* registered primary's (`same`) or another (`other`, a cross-root resume).
 \* The start's classifier (`explainSessionStart`) declines R when a
@@ -89,6 +119,8 @@ StartR(a, r) ==
             \* start before and after #4704 alike.
             /\ members' = [members EXCEPT ![a] = @ \cup {"R"}]
             /\ declinedSuccessor' = (declinedSuccessor \/ "M" \in departed)
+            \* R's key is M's: the bind moves it to R.
+            /\ bound' = (StartSweep(bound, FALSE) \ {"M"}) \cup {"R"}
             /\ UNCHANGED <<admitted, owner, earlyTeardown>>
        ELSE /\ members' = [members EXCEPT ![a] =
                     {c \in @ : Role(c) # "primary"} \cup {"R"}]
@@ -97,7 +129,9 @@ StartR(a, r) ==
             \* The full start's LSP reset, with another session truly live.
             /\ earlyTeardown' = (earlyTeardown \/
                     (~StartKeepsLiveFleet /\ TrueLive(members) \ {"M"} # {}))
+            /\ bound' = (StartSweep(bound, TRUE) \ {"M"}) \cup {"R"}
             /\ UNCHANGED declinedSuccessor
+    /\ leaked' = (leaked \/ Leaks(bound', members', departed))
     /\ UNCHANGED <<cleaned, departed, saved, foreignTeardown, stale, missedTeardown>>
 Leave(a,c) ==
     /\ c \in members[a]
@@ -112,7 +146,16 @@ Leave(a,c) ==
            releases == IF SplitRelease
                        THEN c = owner \/ (last /\ owner # "none")
                        ELSE tearsDown
+           \* The activation's own last leave retires the leaver's scope, which
+           \* gives its key back (index.ts `isLast`, a disposed member not live).
+           lastInAct == IF StaleMemberHolds THEN remaining = {}
+                        ELSE remaining \subseteq stale
+           unbinds == UnbindAtLeave \/ lastInAct
+           \* The key c's bind holds: R took M's.
+           keyed == IF c = "M" /\ "R" \in bound THEN {} ELSE {c}
        IN /\ members' = after
+          /\ bound' = Swept(IF unbinds THEN bound \ keyed ELSE bound)
+          /\ leaked' = (leaked \/ Leaks(bound', members', departed \cup {c}))
           /\ owner' = IF releases THEN "none" ELSE owner
           \* #4704: released a registration whose own session is still live.
           /\ foreignTeardown' = (foreignTeardown \/
@@ -141,6 +184,9 @@ LateLeave(a, c) ==
     /\ LET tearsDown == UnmatchedLeaveIsLast
        IN /\ owner' = IF tearsDown THEN "none" ELSE owner
           /\ earlyTeardown' = (earlyTeardown \/ tearsDown)
+    \* Unmatched: no key of its own to give back (R holds M's); its read sweeps.
+    /\ bound' = Swept(bound)
+    /\ leaked' = (leaked \/ Leaks(bound', members, departed \cup {c}))
     /\ UNCHANGED <<members, admitted, started, foreignTeardown, stale, missedTeardown,
                    declinedSuccessor>>
     /\ departed' = departed \cup {c}
@@ -170,4 +216,7 @@ NoMissedTeardown == ~missedTeardown
 NoDeclinedSuccessor == ~declinedSuccessor
 OwnScopeAndCleanup == departed \subseteq cleaned /\
     \A c \in departed : saved[c] = Role(c)
+\* #4965: after every start and every leave, the session-id lookup names no
+\* session that left or that pi disposed (the leak #2442's cap used to bound).
+NoLeakedBinding == ~leaked
 =============================================================================

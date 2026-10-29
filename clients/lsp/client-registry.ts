@@ -26,7 +26,7 @@ import {
 	findLocalBinUpwards,
 	isProjectLocalBinPath,
 } from "../package-manager.js";
-import { isWindowsPath, normalizeMapKey } from "../path-utils.js";
+import { isWithinForm, normalizeMapKey } from "../path-utils.js";
 import {
 	assertInstallAllowed,
 	isLspSpawnAllowedByTrust,
@@ -554,18 +554,11 @@ export class ClientRegistry {
 		])) {
 			if (!key.startsWith(prefix)) continue;
 			const ancestorKey = key.slice(prefix.length);
-			const pathApi =
-				isWindowsPath(ancestorKey) || isWindowsPath(rootKey)
-					? path.win32
-					: path;
-			const relative = pathApi.relative(ancestorKey, rootKey);
-			if (
-				relative === "" ||
-				relative.startsWith("..") ||
-				pathApi.isAbsolute(relative)
-			) {
+			// Both are `normalizeMapKey` identities, so the text comparison is
+			// exact (no filesystem work per hosted client). Strictly below: the
+			// same key is the client itself, not an ancestor.
+			if (ancestorKey === rootKey || !isWithinForm(rootKey, ancestorKey))
 				continue;
-			}
 			if (!nearestAncestor || ancestorKey.length > nearestAncestor.length) {
 				nearestAncestor = ancestorKey;
 			}

@@ -289,15 +289,28 @@ describe("#4943: a concurrent session's write is stamped with its own session id
 				);
 				// The subagent's turn end recorded its blocker. It is the subagent's
 				// record, so the primary's next turn end (and the request after it)
-				// still knows nothing of the subagent's file. The subagent takes one
-				// more request first: its last turn end staged the blocker in the
-				// project's one delivery slot, which the context hook hands to
-				// whichever session asks next (a separate seam from the stamp, named
-				// in the PR body); this case pins the record's owner, not that slot.
-				await secondary.prompt("settled?");
+				// still knows nothing of the subagent's file. The subagent's last
+				// turn end staged that blocker in the project's one delivery slot,
+				// and the primary asks first: the slot is the subagent's (#4943 R1,
+				// the #4940 review F2 end to end), so the primary leaves it and the
+				// subagent's next request takes it.
 				await primary.prompt("last look");
 				await primary.prompt("last look again");
 				expect(userTexts(primary)).not.toContain("theirs.sh");
+				const secondaryBefore = secondary.requests.length;
+				await secondary.prompt("settled?");
+				expect(
+					secondary.requests
+						.slice(secondaryBefore)
+						.flatMap((request) =>
+							request
+								.filter((message) => message.role === "user")
+								.flatMap((message) => textBlocks(message)),
+						)
+						.join("\n"),
+				).toContain(
+					`Unresolved from this turn — ${path.join("src", "theirs.sh")}`,
+				);
 				expect(primary.errors).toEqual([]);
 				expect(secondary.errors).toEqual([]);
 				await secondary.dispose();

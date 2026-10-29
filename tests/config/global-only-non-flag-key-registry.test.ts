@@ -62,6 +62,7 @@ import {
 	resetProjectLensConfigCache,
 } from "../../clients/project-lens-config.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { useConfigPath } from "../support/global-config.js";
 
 // Same sink-forwarding shim `project-lens-config.test.ts` and
 // `lens-config.test.ts` each install — see either file's comment for why.
@@ -120,7 +121,7 @@ const GLOBAL_HONOR_CHECKS: ReadonlyMap<string, GlobalHonorCheck> = new Map([
 
 let tmpDirs: string[] = [];
 let projectDir: string;
-let previousConfigPath: string | undefined;
+const setConfigPath = useConfigPath();
 
 function makeTempHome(): string {
 	const dir = fs.mkdtempSync(
@@ -131,8 +132,7 @@ function makeTempHome(): string {
 }
 
 beforeEach(() => {
-	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
-	delete process.env.PI_LENS_CONFIG_PATH;
+	setConfigPath(undefined);
 	projectDir = fs.mkdtempSync(
 		path.join(os.tmpdir(), "pi-lens-global-only-non-flag-project-"),
 	);
@@ -146,8 +146,6 @@ afterEach(() => {
 	vi.restoreAllMocks();
 	resetGlobalConfigWarnCache();
 	resetProjectLensConfigCache();
-	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	for (const dir of tmpDirs.splice(0)) removeTempDirSync(dir);
 	tmpDirs = [];
 });

@@ -688,15 +688,19 @@ rebuilt the system head, and every test passed. Tier 1,
 `ExtensionRunner`: flags, tools, commands, declared registrations, and no
 `emit`, by design. Tier 2, `tests/support/pi-session.ts`, runs a real
 `AgentSession` with pi-ai's `fauxProvider`: turns, tool round trips, session
-ids, and the request the model sees. Their header comments state the APIs
-and limits. A new tier capability adds a case to `pi-runner.test.ts` or
-`pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
+ids, and the request the model sees. By default it loads the built entry by
+path, so a `vi.mock` or a test-side singleton never reaches the extension; its
+opt-in inline-factory mode (`startPiSession({ inlineFactory })`) hands pi the
+factory the test imported, so the extension runs on the test graph's modules
+and a `vi.mock`, a prototype spy or a module-scope registry the test reads is
+the one it uses. Their header comments state the APIs and limits. A new tier
+capability adds a case to `pi-runner.test.ts` or `pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
 `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`), whose row states the
-class: `process-boundary` (4 rows), `internal-seam` (41: the case interposes on
+class: `process-boundary` (4 rows), `internal-seam` (34: the case interposes on
 a pi-lens `clients/` module either through `vi.mock`, which cannot reach the
 copy pi's loader builds, or through a test-side copy of a process-global
 service the loaded copy does not share, such as `clients/lsp`'s service),
-`unproducible-payload` (5: a payload a scripted provider cannot
+`unproducible-payload` (4: a payload a scripted provider cannot
 produce), `double-subject` (1: the double is the subject), and
 `real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
 in-process tier can produce).
@@ -711,9 +715,10 @@ the in-process `clients/lsp` service object stays `internal-seam`.
 No row carries a `pending slice` marker, and the sweep test refuses that
 label: slice 7 classified the last three with the probe that keeps each on the
 double, and every roadmap slice is closed, so a reopened placeholder reds
-instead of naming work no slice owns. The five classes cover the list's 52
-rows at that recording (slice 7 moved the `index-smells-rollup-wiring` row out
-with its file), and this command reproduces them:
+instead of naming work no slice owns. The five classes cover the list's 44
+rows (52 at the slice 7 recording; the pi-mock L1 and L3 moves took two more out, and slice 7 moved the
+`index-smells-rollup-wiring` row out with its file, and the inline-factory mode
+moved six `internal-seam` files to tier 2), and this command reproduces them:
 `grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
 The double throws at load for a test file not on the list, so a new user fails
 however it imports it. The list only shrinks:
@@ -833,8 +838,9 @@ update their registered-or-fail coverage tests.
 
 Ast-grep rules live under `rules/ast-grep-rules/` and tree-sitter rules under
 `rules/tree-sitter-queries/`; shared user rules use the same layout under
-`<PI_LENS_HOME>/rules/`. Precedence is project > user > bundled, and a
-shadowed rule is excluded from execution. Use AST patterns over regex where
+`<PI_LENS_HOME>/rules/`. The repo-only governance rules, which never ship,
+live under `scripts/governance-rules/rules/`. Precedence is project > user >
+bundled, and a shadowed rule is excluded from execution. Use AST patterns over regex where
 possible. A rule with an unknown post-filter fails closed. Every shipped rule
 has a real behavioral fixture; Java/Kotlin rules use the real CLI path because
 NAPI lacks their grammars. The bundled ast-grep source census is recursive and

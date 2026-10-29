@@ -153,12 +153,12 @@ describe("#1892 witness: pi turn_end → context, scanner freshness", () => {
 
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
-		await pi.emit(
-			"session_start",
-			makeSessionStartEvent(),
-			makeCtx({ cwd: tmpDir, sessionId: SESSION_ID }),
-		);
-		await pi.emit("turn_start", {}, makeCtx({ cwd: tmpDir }));
+		// One ctx for the whole session, as pi hands each event its session's
+		// own ctx. A turn ctx with no session id named a session nobody started,
+		// so its turn-end write was dropped and counted (#4965).
+		const ctx = makeCtx({ cwd: tmpDir, sessionId: SESSION_ID });
+		await pi.emit("session_start", makeSessionStartEvent(), ctx);
+		await pi.emit("turn_start", {}, ctx);
 		await pi.emit(
 			"tool_result",
 			{
@@ -167,13 +167,13 @@ describe("#1892 witness: pi turn_end → context, scanner freshness", () => {
 				details: { diff: "+  1 alpha();" },
 				content: [{ type: "text", text: "base" }],
 			},
-			makeCtx({ cwd: tmpDir }),
+			ctx,
 		);
-		await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
+		await pi.emit("turn_end", {}, ctx);
 		const injected = (await pi.emit(
 			"context_with_system",
 			makeContextWithSystemEvent([{ role: "user", content: "keep working" }]),
-			makeCtx({ cwd: tmpDir }),
+			ctx,
 		)) as { messages?: Array<{ role?: string; content: string }> } | undefined;
 
 		// #4631 round 5 (F2): the transcript leads with the host's system head, so the

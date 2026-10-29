@@ -32,6 +32,7 @@ import {
 	wireUserNotifier,
 } from "../../clients/user-notify.js";
 import { removeTempDirSync } from "./test-utils.js";
+import { useConfigPath } from "../support/global-config.js";
 
 const notices: string[] = [];
 const userNotices: string[] = [];
@@ -82,7 +83,7 @@ function write(file: string, value: unknown): void {
 	fs.writeFileSync(file, JSON.stringify(value, null, 2));
 }
 
-let previousConfigPath: string | undefined;
+const setConfigPath = useConfigPath();
 let previousHome: string | undefined;
 
 beforeEach(() => {
@@ -93,15 +94,12 @@ beforeEach(() => {
 		userNotices.push(message);
 	});
 	ledgerRows.length = 0;
-	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	previousHome = process.env.PI_LENS_HOME;
 	resetIgnoredConfigWarnCache();
 });
 
 afterEach(async () => {
 	resetUserNotifier();
-	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 	else process.env.PI_LENS_HOME = previousHome;
 	resetIgnoredConfigWarnCache();
@@ -129,7 +127,7 @@ describe("F1: a legacy root LSP key in the GLOBAL config is a migration, not a t
 	it("gives all four legacy root keys a migration notice and no typo notice", async () => {
 		const home = tmpRoot("pi-lens-f1-home-");
 		const globalFile = path.join(home, ".pi-lens", "config.json");
-		process.env.PI_LENS_CONFIG_PATH = globalFile;
+		setConfigPath(globalFile);
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
 		write(globalFile, {
 			servers: {},
@@ -420,7 +418,7 @@ describe("#2445: a malformed GLOBAL config is not silent, and is not LSP's", () 
 	it("emits a lens-config notice from the global loader itself", async () => {
 		const home = tmpRoot("pi-lens-2445-home-");
 		const globalFile = path.join(home, ".pi-lens", "config.json");
-		process.env.PI_LENS_CONFIG_PATH = globalFile;
+		setConfigPath(globalFile);
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
 		fs.mkdirSync(path.dirname(globalFile), { recursive: true });
 		fs.writeFileSync(globalFile, '{ "ignore": [ ');
@@ -440,7 +438,7 @@ describe("#2445: a malformed GLOBAL config is not silent, and is not LSP's", () 
 	it("does not let the LSP loader relabel a pi-lens global document as LSP", async () => {
 		const home = tmpRoot("pi-lens-2445b-home-");
 		const globalFile = path.join(home, ".pi-lens", "config.json");
-		process.env.PI_LENS_CONFIG_PATH = globalFile;
+		setConfigPath(globalFile);
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
 		fs.mkdirSync(path.dirname(globalFile), { recursive: true });
 		fs.writeFileSync(globalFile, '{ "ignore": [ ');
@@ -578,7 +576,7 @@ describe("round 5 F-A/F-B/S-A: every record list goes through the one bound", ()
 	it("bounds a legacy file with more RECOGNIZED keys than the bound", async () => {
 		const home = tmpRoot("pi-lens-r5a-home-");
 		process.env.PI_LENS_HOME = tmpRoot("pi-lens-r5a-global-");
-		process.env.PI_LENS_CONFIG_PATH = path.join(home, "absent", "config.json");
+		setConfigPath(path.join(home, "absent", "config.json"));
 		const projectDir = path.join(home, "proj");
 		const legacyFile = path.join(projectDir, "pi-lens.json");
 		write(legacyFile, everyRecognizedKey());
@@ -614,7 +612,7 @@ describe("round 5 F-A/F-B/S-A: every record list goes through the one bound", ()
 	it("bounds five nested legacy files PER FILE, each with its own count", async () => {
 		const home = tmpRoot("pi-lens-r5b-home-");
 		process.env.PI_LENS_HOME = tmpRoot("pi-lens-r5b-global-");
-		process.env.PI_LENS_CONFIG_PATH = path.join(home, "absent", "config.json");
+		setConfigPath(path.join(home, "absent", "config.json"));
 		const dirs = ["root", "root/a", "root/a/b", "root/a/b/c", "root/a/b/c/d"];
 		const legacyFiles = dirs.map((relative) =>
 			path.join(home, ...relative.split("/"), "pi-lens.json"),
@@ -654,7 +652,7 @@ describe("round 5 F-A/F-B/S-A: every record list goes through the one bound", ()
 	it("gives the same file the same notice count through either loader", async () => {
 		const home = tmpRoot("pi-lens-r5c-home-");
 		process.env.PI_LENS_HOME = tmpRoot("pi-lens-r5c-global-");
-		process.env.PI_LENS_CONFIG_PATH = path.join(home, "absent", "config.json");
+		setConfigPath(path.join(home, "absent", "config.json"));
 		const projectDir = path.join(home, "proj");
 		const legacyFile = path.join(projectDir, "pi-lens.json");
 		write(legacyFile, everyRecognizedKey());
@@ -700,7 +698,7 @@ describe("round 5 F-D: a WARM load replays a bounded ledger, not the raw list", 
 	it("keeps a warm load's config-deprecated rows inside the bound", async () => {
 		const home = tmpRoot("pi-lens-r5d-home-");
 		process.env.PI_LENS_HOME = tmpRoot("pi-lens-r5d-global-");
-		process.env.PI_LENS_CONFIG_PATH = path.join(home, "absent", "config.json");
+		setConfigPath(path.join(home, "absent", "config.json"));
 		const projectDir = path.join(home, "proj");
 		write(path.join(projectDir, "pi-lens.json"), everyRecognizedKey());
 

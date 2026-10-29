@@ -601,8 +601,8 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"passes `targetDir` = path.resolve(cwd) from the scan API's own argument; the security clients are driven by the MCP surface, not by dispatch",
 	],
 	[
-		"clients/gitleaks-client.ts#GitleaksClient.runScan:94ae6442~353ea442",
-		"cwd is runScan's own `cwd` parameter, and the scoped gitleaks config is written against it",
+		"clients/gitleaks-client.ts#GitleaksClient.runScan.spawn:937d6f21~353ea442",
+		"cwd is runScan's own `cwd` parameter, captured by the spawn callback it hands the report-scan seam, and the scoped gitleaks config is written against it",
 	],
 	[
 		"clients/govulncheck-client.ts#GovulncheckClient.analyze:c23b1b18~4bd5cc03",
@@ -725,7 +725,7 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"passes `targetDir` = path.resolve(cwd) from the scan API's own argument",
 	],
 	[
-		"clients/trivy-client.ts#TrivyClient.runScan:e9ed392e~353ea442",
+		"clients/trivy-client.ts#TrivyClient.runScan.spawn:89fa15ad~353ea442",
 		"cwd is runScan's own `cwd` parameter, the directory `trivy fs` is pointed at",
 	],
 ];

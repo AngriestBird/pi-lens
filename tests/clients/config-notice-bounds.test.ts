@@ -41,6 +41,7 @@ import {
 	stripSource,
 } from "../support/sweep-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
+import { useConfigPath } from "../support/global-config.js";
 
 const notices: string[] = [];
 const userNotices: string[] = [];
@@ -136,7 +137,7 @@ function everyRecognizedKey(): Record<string, unknown> {
 	return value;
 }
 
-let previousConfigPath: string | undefined;
+const setConfigPath = useConfigPath();
 let previousHome: string | undefined;
 
 beforeEach(() => {
@@ -147,15 +148,12 @@ beforeEach(() => {
 		userNotices.push(message);
 	});
 	ledgerRows.length = 0;
-	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	previousHome = process.env.PI_LENS_HOME;
 	resetIgnoredConfigWarnCache();
 });
 
 afterEach(async () => {
 	resetUserNotifier();
-	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 	else process.env.PI_LENS_HOME = previousHome;
 	resetIgnoredConfigWarnCache();
@@ -171,7 +169,7 @@ describe("F1: the suppression count is the TRUE total, across both bounds", () =
 	it("counts what the core's collector dropped, not only the sink's overflow", async () => {
 		const home = tmpRoot("pi-lens-r6f1-home-");
 		process.env.PI_LENS_HOME = tmpRoot("pi-lens-r6f1-global-");
-		process.env.PI_LENS_CONFIG_PATH = path.join(home, "absent", "config.json");
+		setConfigPath(path.join(home, "absent", "config.json"));
 		const projectDir = path.join(home, "proj");
 		const file = path.join(projectDir, ".pi-lens.json");
 		fs.mkdirSync(projectDir, { recursive: true });
@@ -259,7 +257,7 @@ describe("F2: a suppression notice never reads as an ignored config", () => {
 	it("keeps a legacy file's overflow out of the ignored/invalid vocabulary", async () => {
 		const home = tmpRoot("pi-lens-r6f2-home-");
 		process.env.PI_LENS_HOME = tmpRoot("pi-lens-r6f2-global-");
-		process.env.PI_LENS_CONFIG_PATH = path.join(home, "absent", "config.json");
+		setConfigPath(path.join(home, "absent", "config.json"));
 		const projectDir = path.join(home, "proj");
 		const legacyFile = path.join(projectDir, "pi-lens.json");
 		// Every key is one the canonical schema recognizes, so every one of them
@@ -326,7 +324,7 @@ describe("F3: the GLOBAL loader's unknown-key scan is bounded like every other",
 	it("summarises past the bound instead of one notification per key", async () => {
 		const home = tmpRoot("pi-lens-r6f3-home-");
 		const globalFile = path.join(home, ".pi-lens", "config.json");
-		process.env.PI_LENS_CONFIG_PATH = globalFile;
+		setConfigPath(globalFile);
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
 		const value: Record<string, unknown> = {};
 		for (let index = 0; index < 100; index += 1) {
@@ -358,7 +356,7 @@ describe("F3: the GLOBAL loader's unknown-key scan is bounded like every other",
 	it("still names every unknown key when the file stays inside the bound", async () => {
 		const home = tmpRoot("pi-lens-r6f3b-home-");
 		const globalFile = path.join(home, ".pi-lens", "config.json");
-		process.env.PI_LENS_CONFIG_PATH = globalFile;
+		setConfigPath(globalFile);
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
 		write(globalFile, { lps: true, ignore: ["dist/**"] });
 

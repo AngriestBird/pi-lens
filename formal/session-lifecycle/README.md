@@ -398,6 +398,12 @@ lets a tool_result also leave an inline-blocker record (work kind `blocker`),
 which a `turn_end` re-serves rather than drains; `blockerScoped` is the shipped
 #4921 shape: a `turn_end` delivers only its own session's blocker records
 (`InlineBlockerRecord.session`, `getInlineBlockersSnapshot({ sessionId })`).
+`slotAddressed` is the shipped #4943 shape: a request takes the per-project
+turn-end message (`Stage`, `TakeSlot`) only when its own session's `turn_end`
+staged it (`deliverTo`, `consumeTurnEndFindings(..., sessionId)`).
+`slotHostAddressed` is the shipped #4943 R2 shape: the MCP host (`McpStage`,
+`McpTake`) stages to one address for every server process
+(`MCP_DELIVERY_ADDRESS`) and takes only a message so addressed.
 
 ### #3705's rows, by column
 
@@ -443,6 +449,35 @@ blocker. `Fix4921BlockerScoped` adds `blockerScoped` and passes. Both run at
 `SecondaryTurnEnd`'s bound: the blocker kind added to `SecondaryTurnEndScoped`
 (with `/new` and `/reload`) passed 6.4M distinct states unfinished in 4 min,
 against 398,844 without it, so that config keeps its three kinds.
+
+The composer's message itself is staged in one per-project slot (the
+`turn-end-findings` record) that the next request takes, not the `turn_end`.
+`Stage` replaces the slot's message with the staging session's,
+unconditionally, as the cache write does: a session may stage again after its
+message was taken, and over its own staged message. `TakeSlot` is a live
+session's request taking it. `Pre4943SlotUnaddressed` is master before #4943:
+the slot names no reader, so the subagent's request takes the message the
+primary's `turn_end` staged. `Fix4943SlotAddressed` adds `slotAddressed` and
+passes. The slot lives in one coordinator generation here, since neither
+config takes a replacement transition. An overwrite drops the earlier
+message; a blocker comes back, because its session's next `turn_end`
+re-composes it, but a one-shot advisory does not. `Current` does not take
+`Stage` or `TakeSlot`, so its verdict says nothing about the slot; the
+#4943 configs are the slot's only evidence.
+
+The MCP host is another process on the same project cache, so it is not a
+ticket: `Mcp` (0) names it as a stager and a reader. `McpStage` is an MCP
+server's turn end replacing the slot's message with the host's; `McpTake` is
+an MCP reader taking it (`lens_turn_end`'s consume, or the Stop pass's peek
+with the acknowledge that commits it, as one step). `Pre4943R2McpUnaddressed`
+is master before #4943 R2: the MCP reader names no reader identity, so it
+takes the message a pi session's `turn_end` staged. `Fix4943R2McpAddressed`
+adds `slotHostAddressed` and passes `SecondaryIsolation` and
+`NoCrossSessionState`. One host address stands for every server process, so
+the model has no server restart to tell apart: that a restarted server still
+reads the last one's message, and that an acknowledge leaves a pi message
+staged between the peek and the ack, are pinned by
+`tests/clients/mcp/session-test-findings-retire.test.ts`.
 
 ### Overlap with `formal/turn-end-delivery-holds`
 
@@ -621,6 +656,10 @@ counterexample.
 | `SecondaryTurnEndScoped` | the proposed fix, NOT shipped: a `turn_end` drains its own scope's work, across `/new` and `/reload` | pass | 398844 |
 | `Pre4921BlockerUnscoped` | #4921, master before the fix: the worklist, cascade and runner records are scoped, the inline-blocker map is not; a subagent's `turn_end` delivers the primary's blocker | `violated SecondaryIsolation` | 60 |
 | `Fix4921BlockerScoped` | #4921, shipped: a `turn_end` delivers only its own session's inline-blocker records | pass | 6642 |
+| `Pre4943SlotUnaddressed` | #4943, master before the fix: the per-project turn-end slot names no reader; a subagent's request takes the message the primary's `turn_end` staged | `violated SecondaryIsolation` | 8 |
+| `Fix4943SlotAddressed` | #4943, shipped: a request takes the staged message only when its own session staged it | pass | 16 |
+| `Pre4943R2McpUnaddressed` | #4943 R2, master before the fix: the MCP host reads the slot with no reader identity and takes a pi session's staged message | `violated SecondaryIsolation` | 9 |
+| `Fix4943R2McpAddressed` | #4943 R2, shipped: the MCP host stages to its one address and takes only a message so addressed | pass | 44 |
 
 ## Pre-fix and Mut configs and their issues
 
@@ -687,6 +726,8 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `MutParkNoFence` | #4161, #4168 | design alternative: `settle` without `isCurrentSession` (since 9c8a6f530, owner-fenced by dac19f046) | A turn begins in session 1; `/reload`; its settle parks into session 2's map under the same key; session 2 shows it. |
 | `SecondaryTurnEnd` | #3613 R2, #3758 | master, open: `handleTurnEnd` takes the process runtime for every activation (`onTurnEnd`, `index.ts`) | The primary's tool_result leaves a worklist record; a subagent starts; its `turn_end` drains it. |
 | `Pre4921BlockerUnscoped` | #4921 | pre-#4921 (a6c5c380d): `InlineBlockerRecord` carried no owner and `handleTurnEnd` read `getInlineBlockersSnapshot()` whole | The primary's tool_result records a blocker; a subagent starts; its `turn_end` delivers it. |
+| `Pre4943SlotUnaddressed` | #4943 | pre-#4943 (2af695cd8): `consumeTurnEndFindings` took the `turn-end-findings` record for any reader | A subagent starts; the primary's `turn_end` stages its message; the subagent's request takes it. |
+| `Pre4943R2McpUnaddressed` | #4943 R2 | pre-R2 (23aebcc2c): the MCP host called `peekTurnEndFindings`, `consumeTurnEndFindings` and `acknowledgeTurnEndFindings` with no reader identity | The primary's `turn_end` stages its message; the MCP host's Stop pass takes it. |
 
 Since #3613's turn half, `Current` holds `SecondaryIsolation`, and since
 #4942 `NoCrossSessionState` too (6797 states; it was violated, 257 states, while
@@ -1125,8 +1166,9 @@ Not modelled:
   told apart there; `SessionLifecycleF1`'s two-verb pipeline run (F1 section)
   tells them apart, and the fork row's `carry` from `reset` through the widget's
   rows.
-- **Time**, the cwd-changing resume's re-evaluation, the MCP host, the
-  advisory cap, and more than one subagent.
+- **Time**, the cwd-changing resume's re-evaluation, the MCP host (except
+  as a stager and reader of the turn-end slot, #4943 R2), the advisory cap,
+  and more than one subagent.
 
 ### LastMemberOwnership (#4554 review round 5)
 
@@ -1194,6 +1236,27 @@ does, when a registration is still held and the roots differ (#2129). The
 The model has no disposed holder: only T can be disposed, and T never holds
 the registration. The last leave's release of a held registration whose
 holder pi disposed is pinned by the tier-2 witness instead.
+
+#4965 (verify V1 on #4972) adds the session-id lookup: a process-wide index
+from a session's key to its scope (`clients/session-scope.ts`), so a key
+nobody gives back holds an ended session's scope and cells for the life of
+the process. `bound` is the set of contexts whose key the index names (R's
+bind takes M's shared key), and the `leaked` ghost flags a start or a leave
+after which a context that left and is listed nowhere, or that pi disposed,
+is still bound. `NoLeakedBinding` forbids it. `DisposeT` stays lazy: T's key
+goes at the next process read. Three constants, each as-built `TRUE`, and
+`Pre4965KeysKept` sets all three `FALSE` (#4972 r1) and violates
+`NoLeakedBinding` (S leaves A before M):
+
+- `UnbindAtLeave`: every leave gives its key back. `= FALSE` is r1, where
+  only the activation's last leave did (through its retire); alone it is
+  violated by S leaving A before M.
+- `DisposalUnbinds`: a process read that finds a member pi disposed gives
+  its key back. `= FALSE` only counted it; alone it is violated when T is
+  disposed and M's subagent S starts.
+- `SweepAtStart`: every start reads the process. `= FALSE` read it only at a
+  full start and a leave; alone it is violated on the same schedule: a run
+  of subagent starts never finds the disposed ones.
 
 ### TurnStateOwner (#4751)
 

@@ -54,6 +54,29 @@
   the coordinator's for the coordinator and module stores a secondary
   shares, the activation's for its own scope cell. One store never answers
   to two scopes, and a secondary's end fences only its cell.
+- The project's one turn-end delivery slot (`turn-end-findings`'s
+  `content`) is addressed (#4943): the composer stamps `deliverTo` with its
+  turn's session, a commit-gate rewrite of the content leaves it out so the
+  record's owner (`sessionId`) is the addressee, and the `context` hook
+  consumes only a record addressed to its own session (the composer's id
+  expression); any other request leaves it untouched and writes one
+  `turn-end-delivery-addressed-elsewhere` ledger record per addressee. A
+  record with neither field goes to whoever asks. The sibling
+  `test-runner-findings` slot is read with the same id
+  (`deliveryEligible.sessionId`): a concurrent secondary never pins the
+  coordinator id. The MCP host stages to one address shared by every server
+  process (`MCP_DELIVERY_ADDRESS`) and reads as that address, with its
+  coordinator id, reassigned at each session start, for a record whose rewrite
+  left only the owner: a restarted server still delivers what the last one
+  staged, and neither its Stop pass nor its acknowledge takes a pi session's
+  message. The exception is a record a commit-gate rewrite replaced: it holds
+  only the owner id, so a server whose id was reassigned since (a restart, or
+  a later `pilens_session_start`) skips it and leaves it in place (accepted
+  residual, #4973).
+  A staged message another writer replaces before its owner asks is not
+  kept; the owner's next turn end composes its unresolved blockers again,
+  since the dedupe's last writer was the other session, but a one-shot
+  advisory is not composed again.
 - Every session-scope hand-off decision leaves one `latency.log` row per
   lifecycle event, never one per occurrence in a loop (#3873):
   `session_handoff_slot`, `session_handoff_adopt`, `session_store_action`

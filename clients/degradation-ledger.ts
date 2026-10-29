@@ -1683,6 +1683,12 @@ export type DegradationKind =
 	 * root is rescanned every session and turn.
 	 */
 	| "scan-worktree-exclusion-skipped"
+	/**
+	 * A report-file security scanner (gitleaks, trivy) could not produce a result:
+	 * its CLI failed to spawn, exited non-zero without writing its report, or
+	 * the scan threw. Subject is the tool; counted, with the latest message kept.
+	 */
+	| "security-scan-report-failed"
 	/** A duplicate RPC session start was suppressed after its first full pass. */
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"
@@ -1715,6 +1721,12 @@ export type DegradationKind =
 	 * start reason.
 	 */
 	| "session-scope-handoff-missed"
+	/**
+	 * #4965: a session-state write named a session with no live scope (never
+	 * started here, or already retired), so it was dropped. Subject: the scope
+	 * cell it targeted (`turn-warnings`, `cache-attribution`). Counted.
+	 */
+	| "session-scope-lookup-missed"
 	/**
 	 * #3611 (#3609 F1, decision A + C): a read-guard write was dropped because
 	 * its session scope retired, and its entry is still on its conversation's
@@ -2033,6 +2045,14 @@ export type DegradationKind =
 	 * (`knip` | `dead-code` | `call-graph`), a fixed set.
 	 */
 	| "turn-end-advisory-carry-dropped"
+	/**
+	 * #4943 (#4961 review F4): a request found the per-project turn-end message
+	 * addressed to another session (`deliverTo`, or the owner of a gate
+	 * rewrite) and left it for that session. Once per addressee, so a skip
+	 * reads apart from an empty slot without one row per request. Subject is
+	 * the addressee's session id.
+	 */
+	| "turn-end-delivery-addressed-elsewhere"
 	/**
 	 * A turn_end knip scan did not fit the budget in a root that has linked
 	 * worktrees nested under it (#3872): knip walks them as project files

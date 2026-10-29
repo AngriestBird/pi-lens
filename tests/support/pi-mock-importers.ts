@@ -39,10 +39,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	// double-subject
 	"support/pi-mock.test.ts": "double-subject",
 	// internal-seam
-	"clients/bootstrap-lazy-liveness.test.ts": "internal-seam",
-	"clients/dispatch/lazy-liveness.test.ts": "internal-seam",
-	"clients/formatters-lazy-liveness.test.ts": "internal-seam",
-	"clients/lsp-lazy-liveness.test.ts": "internal-seam",
 	"index-1892-govulncheck-lane-witness.test.ts": "internal-seam",
 	"index-1892-scanner-freshness-witness.test.ts": "internal-seam",
 	"index-1892-secrets-lane-witness.test.ts": "internal-seam",
@@ -66,8 +62,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-lsp-config-root-eviction.test.ts": "internal-seam",
 	"index-mode-awareness.test.ts": "internal-seam",
 	"index-mutation-bridge-recordability.test.ts": "internal-seam",
-	"index-mutation-latency-marker.test.ts": "internal-seam",
-	"index-observed-sweep-no-read-guard.test.ts": "internal-seam",
 	"index-project-trust-wiring.test.ts": "internal-seam",
 	"index-read-bridge-zero-line.test.ts": "internal-seam",
 	"index-vanished-instance-wiring.test.ts": "internal-seam",
@@ -99,9 +93,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	// slice-5 stays (see #4632)
 	"index-4554-last-member-teardown.test.ts": "internal-seam",
 	"index-multi-root-session-start.test.ts": "unproducible-payload",
-	// slice 8 landed (#4699); these two keep the classes it recorded
-	"clients/session-event-guard.test.ts": "unproducible-payload",
-	"index-cascade-resolved-clean-wiring.test.ts": "internal-seam",
 	// process-boundary
 	"clients/handler-verdict-helper.test.ts": "process-boundary",
 	"clients/ndjson-logger.test.ts": "process-boundary",

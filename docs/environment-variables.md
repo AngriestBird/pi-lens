@@ -208,6 +208,20 @@ Unset or `0` preserves the prior local-LSP behavior exactly. Any transport,
 schema, freshness, deadline, or incumbent-liveness failure permanently falls
 back to a local LSP fleet for that session.
 
+## Variables pi-lens sets for its child processes
+
+### `GIT_OPTIONAL_LOCKS`
+
+pi-lens starts the child processes it runs through its spawn seam (its
+background `git status` reads included) with `GIT_OPTIONAL_LOCKS=0`, so a read
+does not refresh the index and cannot leave `.git/index.lock` behind after a
+timeout or a host exit. The value you export in your shell does not change this
+for those children, and your own git commands are unaffected. A caller that
+passes its own environment to a child keeps its value. Language servers are
+launched separately and inherit your environment unchanged. On a checkout whose
+index is stat-dirty, each status read re-hashes the dirty files until one of
+your own git commands refreshes the index.
+
 ## Language-specific
 
 ### Ambient Python environments (`VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_PROJECT_ENVIRONMENT`)

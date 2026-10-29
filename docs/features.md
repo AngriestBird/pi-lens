@@ -22,6 +22,16 @@ pi-lens includes **50 language server definitions** (including four cross-cuttin
 LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rust, Ruby (ruby-lsp + solargraph), PHP, PowerShell, C# (omnisharp), F#, Java (JDT LS, with Lombok javaagent support when a Lombok jar is available), Kotlin, Lean, Swift, Dart, Lua, C/C++, Zig, Haskell, Elixir, Gleam, Typst (tinymist), Markdown (marksman), OCaml, Clojure, CUE (syntax and parse diagnostics; evaluation errors via the cue-vet auxiliary runner), Terraform, Nix, Bash, Shuck (zsh-aware shell language server), Fish, CMake, Docker, YAML, JSON, HTML, TOML, Prisma, Vue, Svelte, CSS.
 
 
+### TypeScript and JavaScript server
+
+pi-lens picks the launch for JS/TS files in this order. The first two steps use only the project's own `node_modules`:
+
+1. **Effect language service** — when the nearest `node_modules/typescript` is version 7 or newer and the same `node_modules` holds `@effect/tsgo`, pi-lens runs the project's `effect-tsgo tsc --lsp --stdio`. Installing the package is the opt-in; there is no pi-lens setting. A malformed `@effect/tsgo` (no readable version, no `bin`) or a failure to start the process falls back to the next step; a server that starts and then fails to initialize does not fall back, and pi-lens never installs `@effect/tsgo`.
+2. **Native TypeScript 7** — the project's `node_modules/.bin/tsc --lsp --stdio`.
+3. **Classic** — `typescript-language-server` with a `tsserver.js`, when the nearest TypeScript is version 6 or older or no step above applies. This step can also use a server and TypeScript found on `PATH` or installed by pi-lens.
+
+The nearest installed `typescript` decides: an ancestor's TypeScript 7 never replaces a nearer, older or malformed install. The project's own compiler and launcher run only when pi has marked the project trusted (see [Configuring pi-lens](configuration.md)); otherwise the launch falls through to the next step.
+
 ### Python: interpreter and syntax level
 
 Python carries two separate declarations, and pi-lens reads both from the project rather than from whichever interpreter happens to run a checker.

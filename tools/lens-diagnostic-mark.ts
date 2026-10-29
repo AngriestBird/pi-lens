@@ -283,9 +283,11 @@ export function createLensDiagnosticMarkTool(
 			params: Record<string, unknown>,
 			_signal: AbortSignal | undefined,
 			_onUpdate: unknown,
-			ctx: { cwd?: string },
+			ctx: { cwd?: string; sessionManager?: { getSessionId?: () => string } },
 		) {
 			const lineage = captureLineage?.();
+			// #4943: the calling session owns the deferred pass of a suppress write.
+			const sessionId = ctx.sessionManager?.getSessionId?.();
 			const cwd = ctx.cwd ?? getCwd();
 			const filePathArg = params.filePath;
 			const line = params.line;
@@ -429,6 +431,7 @@ export function createLensDiagnosticMarkTool(
 					consumer: "lens_diagnostic_mark",
 					provenance: "observed",
 					...(lineage && { lineage }),
+					...(sessionId !== undefined && { sessionId }),
 					// #4187 R4-1: this suppress wrote the file its own `tool_call`
 					// checked, so it may advance that file's authorship. Without
 					// the id the guard cannot tell it from a write no call

@@ -44,11 +44,9 @@
 import type { AnalysedRootSignal } from "./analysed-root.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { mkdtempSync } from "node:fs";
 import { loadPiLensProjectConfig } from "./project-lens-config.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { toPosix } from "./path-utils.js";
-import { scannerReportParentDir } from "./scanner-temp-root.js";
 import {
 	getScratchTreeGlobPatterns,
 	nestedWorktreeOffsets,
@@ -325,94 +323,61 @@ export class TrivyClient extends SecurityScanClient<TrivyResult> {
 		return this.dedupeScan(targetDir, () => this.runScan(targetDir));
 	}
 
-	private async runScan(cwd: string): Promise<TrivyResult> {
-		const scannedAt = new Date().toISOString();
+	private runScan(cwd: string): Promise<TrivyResult> {
 		const bin = this.binaryPath ?? "trivy";
 		const severities = resolveSeverityFloor(cwd);
-		const outDir = mkdtempSync(
-			path.join(scannerReportParentDir(), "pi-lens-trivy-"),
-		);
-		const reportPath = path.join(outDir, "trivy-report.json");
-		try {
-			// One filesystem walk covers all three scanners. `--severity` filters
-			// both the vuln and the license results; secret findings are
-			// severity-independent (trivy always emits them) and collapsed
-			// downstream against gitleaks / ast-grep.
-			//
-			// `--skip-dirs` (#1562 class fix): trivy's `fs` scan walks `cwd`
-			// ITSELF (unlike knip/jscpd, which pi-lens's own `EXCLUDED_DIRS`-aware
-			// walker feeds a pre-filtered file list). Without this, its `secret`
-			// scanner is exactly as exposed to `.pi/greedysearch-sources/`-style
-			// scratch trees as gitleaks was — same doublestar-glob patterns
-			// `scratch-tree-policy.ts` derives from the SAME `EXCLUDED_DIRS` list.
-			const result = await safeSpawnAsync(
-				bin,
-				[
-					"fs",
-					"--scanners",
-					"vuln,secret,license",
-					"--severity",
-					severities.join(","),
-					"--format",
-					"json",
-					"--output",
-					reportPath,
-					"--quiet",
-					"--no-progress",
-					...[
-						...getScratchTreeGlobPatterns(),
-						...worktreeSkipDirs(cwd),
-					].flatMap((glob) => ["--skip-dirs", glob]),
-					cwd,
-				],
-				{ cwd, timeout: SCAN_TIMEOUT_MS },
-			);
-
-			if (result.error) {
-				this.log(`Scan error: ${result.error.message}`);
+		return this.runReportScan({
+			spawn: ({ reportPath }) => {
+				// One filesystem walk covers all three scanners. `--severity` filters
+				// both the vuln and the license results; secret findings are
+				// severity-independent (trivy always emits them) and collapsed
+				// downstream against gitleaks / ast-grep.
+				//
+				// `--skip-dirs` (#1562 class fix): trivy's `fs` scan walks `cwd`
+				// ITSELF (unlike knip/jscpd, which pi-lens's own `EXCLUDED_DIRS`-aware
+				// walker feeds a pre-filtered file list). Without this, its `secret`
+				// scanner is exactly as exposed to `.pi/greedysearch-sources/`-style
+				// scratch trees as gitleaks was — same doublestar-glob patterns
+				// `scratch-tree-policy.ts` derives from the SAME `EXCLUDED_DIRS` list.
+				return safeSpawnAsync(
+					bin,
+					[
+						"fs",
+						"--scanners",
+						"vuln,secret,license",
+						"--severity",
+						severities.join(","),
+						"--format",
+						"json",
+						"--output",
+						reportPath,
+						"--quiet",
+						"--no-progress",
+						...[
+							...getScratchTreeGlobPatterns(),
+							...worktreeSkipDirs(cwd),
+						].flatMap((glob) => ["--skip-dirs", glob]),
+						cwd,
+					],
+					{ cwd, timeout: SCAN_TIMEOUT_MS },
+				);
+			},
+			parse: (raw, scannedAt) => {
+				const findings = parseTrivyReport(raw);
+				const secrets = parseTrivySecrets(raw);
+				const licenses = parseTrivyLicenses(raw);
+				// #2154: the one trivy site that parsed a scan of this root.
 				return {
-					...EMPTY_RESULT,
-					scannedAt,
-					summary: result.error.message.slice(0, 200),
-				};
-			}
-
-			if (!fs.existsSync(reportPath)) {
-				return {
-					...EMPTY_RESULT,
 					success: true,
+					analyzed: true,
+					findings,
+					secrets,
+					licenses,
 					scannedAt,
-					summary:
-						(result.stderr ?? "").trim().split("\n")[0] || "no report produced",
 				};
-			}
-
-			const raw = fs.readFileSync(reportPath, "utf-8");
-			const findings = parseTrivyReport(raw);
-			const secrets = parseTrivySecrets(raw);
-			const licenses = parseTrivyLicenses(raw);
-			// #2154: the one trivy site that parsed a scan of this root.
-			return {
-				success: true,
-				analyzed: true,
-				findings,
-				secrets,
-				licenses,
-				scannedAt,
-			};
-		} catch (err) {
-			return {
-				...EMPTY_RESULT,
-				scannedAt,
-				summary: err instanceof Error ? err.message.slice(0, 200) : String(err),
-			};
-		} finally {
-			try {
-				fs.rmSync(outDir, { recursive: true, force: true });
-			} catch {
-				// non-fatal
-			}
-		}
+			},
+			fail: (failure) => ({ ...EMPTY_RESULT, ...failure }),
+		});
 	}
 }
 

@@ -240,7 +240,14 @@ describe("required CI job p90 against timeout-minutes (#4691)", () => {
 // exits 1 whenever an issue is untriaged (8 of the last 10 scheduled runs), and
 // GitHub skips every step after a failed one: the nightly was silent on the days
 // it ran. The detector now runs last, under `!cancelled()` so a p90 step that
-// fails cannot skip it either, and no step is `continue-on-error`.
+// fails cannot skip it either.
+//
+// #4989 r3 (run 40690133466, job 122822528606): a GitHub 502 from the `gh api`
+// read inside scripts/check-ci-job-p90.mjs exited 1 and, with no
+// `continue-on-error`, redded Daily repo health for a step its own comment
+// called advisory. The p90 step is continue-on-error now; the warning it emits
+// is still read from the run log's annotations, and the DETECTOR below it stays
+// able to red the job, which is the whole point of the ordering above.
 describe("untriaged-issues.yml step order (#4691)", () => {
 	const workflow = yaml.load(
 		readFileSync(
@@ -250,7 +257,14 @@ describe("untriaged-issues.yml step order (#4691)", () => {
 	) as {
 		jobs: Record<
 			string,
-			{ steps: Array<{ name?: string; run?: string; if?: string }> }
+			{
+				steps: Array<{
+					name?: string;
+					run?: string;
+					if?: string;
+					"continue-on-error"?: boolean;
+				}>;
+			}
 		>;
 	};
 	const steps = Object.values(workflow.jobs).flatMap((job) => job.steps);
@@ -263,6 +277,7 @@ describe("untriaged-issues.yml step order (#4691)", () => {
 		expect(p90Step).toBeGreaterThan(-1);
 		expect(detector).toBeGreaterThan(p90Step);
 		expect(steps[detector].if).toBe("${{ !cancelled() }}");
-		expect(JSON.stringify(steps)).not.toContain("continue-on-error");
+		expect(steps[detector]["continue-on-error"]).toBeUndefined();
+		expect(steps[p90Step]["continue-on-error"]).toBe(true);
 	});
 });

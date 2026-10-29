@@ -622,8 +622,15 @@ file-scoped worklist and receives no project-wide scanner output.
     (`tests/clients/interleaving-kit.ts`), which reads a real-clock deadline
     scaled by `PI_LENS_TEST_TIMEOUT_SCALE`, and give the test a timeout above
     that deadline. Screen: does the wait end on the event it waits for or on a
-    real-clock deadline, never on a count? Enforcer: none yet; the detector is
-    tracked in #4865. Instances and dates: `HISTORY.md`.
+    real-clock deadline, never on a count? Enforcer: the governance ast-grep
+    rules `turn-count-wait` and `turn-count-wait-test-hook`
+    (`scripts/governance-rules/`, run by `npm run astgrep:self-scan`), with a
+    reasoned baseline. It does not see a count loop with no exit besides the
+    count (a pure `for (N) await yield` flush), a wait spelled as recursion, a
+    count written as iteration over a generated range
+    (`for (const _ of Array.from({ length: N }))`), or a loop that compares a
+    clock value for some other purpose.
+    Instances and dates: `HISTORY.md`.
 
 </important>
 
@@ -707,7 +714,19 @@ file-scoped worklist and receives no project-wide scanner output.
     session's value for the whole process answers for whichever session wrote
     last, so a second live session overwrites what another one read. Key the
     state by session identity, or decide from live membership. Instances:
-    #4554 (fixed by #4563, still open) and #4564. No guard yet: not scanned.
+    #4554 (fixed by #4563, still open) and #4564. Screen: whose data is the
+    store, not what its key is? Seam: a session's state lives on a scope cell
+    (`scopeCell`, `clients/session-scope.ts`, #3609); a caller that holds only
+    a session id reaches the cell through `sessionCell`, which names live
+    scopes only. Enforcer: the `ownerKey` column of
+    `tests/support/session-state-registry.ts`, audited by
+    `tests/clients/session-state-conformance.test.ts` ("owner key (#4965)"):
+    every entry names `session`, `repository`, `project` or `process-wide:
+    <reason>`, and a `session` owner states `sessionSeamException`, why a scope
+    cell cannot hold it yet. A moved store has no process container and no
+    entry; `scanScopeCellKeys` pins every cell by file and key
+    (`SESSION_CELL_KEYS`). Partial: it reads the registered stores only, so an
+    unregistered module-level field is still not scanned.
 
 87. **Factory-time read of a host value set later:** pi applies an extension flag's command-line value after every factory has run, so a flag read while the factory runs answers the registered default. Screen: does any flag read run while the factory runs, and does the host test apply the value after the factory, as pi does? Read it in a handler, a command or a tool, or once in `session_start`. Enforcer: `tests/config/factory-flag-read-sweep.test.ts` (partial: a reader handed to a callee that invokes it synchronously is not seen). Instances and dates: `HISTORY.md`.
 

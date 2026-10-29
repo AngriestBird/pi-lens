@@ -114,6 +114,24 @@
  *    nothing here holds. That is the `p3` residual documented in the PR body,
  *    NOT a silence.
  *
+ * INLINE-FACTORY MODE (opt-in, #4937 L6). `PiSessionOptions.inlineFactory`
+ * hands pi the factory this test already imported, through pi's
+ * `extensionFactories` resource-loader option, instead of the built entry's
+ * path. The default stays the path load above. The two modes differ on one
+ * axis only: with a path, consequences 1 and 4 hold (jiti, its own module
+ * copies, so a `vi.mock` of a `clients/` module and a test-side singleton never
+ * reach the extension); with a factory, the extension runs against THIS test
+ * graph's modules, so a `vi.mock`/`vi.doMock`, a spy on a prototype and a read
+ * of a process-global registry reach it. Everything else is pi's own and
+ * unchanged: flags applied after the factory, the real `AgentSession`, the
+ * scripted provider, teardown. The loader is called AFTER the env pins of
+ * consequence 2, so a module that reads `PI_LENS_HOME` at its first import
+ * reads the pinned home; a case that mocks a module registers its mock before
+ * `startPiSession` and the loader's import sees it. A file in this mode owns
+ * the shared module state it shares with the extension: it resets what its
+ * cases leave behind (`_resetSessionLifecycleForTests()` and the like), because
+ * the copy no longer isolates it.
+ *
  * LAZY-TOOLS POSTURE (#4687, #4723 F5). Both harnesses start the situational
  * tools INACTIVE by default, because pi-lens's default `tools.lazy` is `true`
  * on every model. The model matters only to a case that opts into
@@ -135,6 +153,7 @@ import type {
 	AgentSessionServices,
 	CreateAgentSessionResult,
 	CreateAgentSessionRuntimeFactory,
+	ExtensionFactory,
 	ExtensionUIContext,
 	ModelRuntime,
 	SessionManager,
@@ -192,13 +211,17 @@ export interface PiFauxContext {
 	readonly messages: readonly PiMessage[];
 }
 
-/** A scripted reply computed from the request pi is answering. */
+/**
+ * A scripted reply computed from the request pi is answering. pi-ai's
+ * `fauxProvider` awaits it, so a reply may wait on another session's prompt:
+ * the way a case runs two concurrent sessions in a fixed order (#4943 R1).
+ */
 export type PiFauxReplyFactory = (
 	context: PiFauxContext,
 	options: unknown,
 	state: unknown,
 	model: unknown,
-) => Record<string, unknown>;
+) => Record<string, unknown> | Promise<Record<string, unknown>>;
 
 /** A scripted provider reply: a message, or a function of the request it answers. */
 export type PiFauxReply = Record<string, unknown> | PiFauxReplyFactory;
@@ -699,6 +722,14 @@ export interface PiSessionOptions {
 	 * met (#4732). Every session of the handle (resume, restart) keeps them.
 	 */
 	customTools?: readonly ToolDefinition[];
+	/**
+	 * Inline-factory mode (see the header): load the extension from the factory
+	 * this resolves, in THIS test graph, instead of from the built entry's path.
+	 * It is called once, after the env pins, so the file's `vi.doMock`s and spies
+	 * are registered before the import it makes. Every session of the handle
+	 * (resume, restart, reload) keeps the factory it resolved.
+	 */
+	inlineFactory?: () => Promise<ExtensionFactory>;
 }
 
 export interface PiSession {
@@ -872,6 +903,8 @@ interface SessionArgs {
 	readonly ui?: UiRecorder;
 	/** {@link PiSessionOptions.customTools}. */
 	readonly customTools?: readonly ToolDefinition[];
+	/** The resolved {@link PiSessionOptions.inlineFactory}; absent in path mode. */
+	readonly inlineFactory?: ExtensionFactory;
 }
 
 /** One pi session before its extensions are bound, with its provider recorder. */
@@ -913,7 +946,9 @@ async function createSession(
 			modelRuntime,
 			extensionFlagValues: new Map(args.flags),
 			resourceLoaderOptions: {
-				additionalExtensionPaths: [EXTENSION_ENTRY],
+				...(args.inlineFactory
+					? { extensionFactories: [args.inlineFactory] }
+					: { additionalExtensionPaths: [EXTENSION_ENTRY] }),
 				// pi discovers skills under `$HOME/.agents/skills` as well as
 				// `agentDir`, so a host's own skills padded every system prompt
 				// (15,144 characters on one dev host, none on a CI runner) and moved
@@ -926,7 +961,7 @@ async function createSession(
 	const loadErrors = services.resourceLoader.getExtensions().errors;
 	if (loadErrors.length > 0) {
 		throw new Error(
-			`pi failed to load ${EXTENSION_ENTRY}: ${JSON.stringify(loadErrors.map((entry) => String(entry.error)))}`,
+			`pi failed to load ${args.inlineFactory ? "the inline factory" : EXTENSION_ENTRY}: ${JSON.stringify(loadErrors.map((entry) => String(entry.error)))}`,
 		);
 	}
 	const result = await hostModule().createAgentSessionFromServices({
@@ -1225,6 +1260,9 @@ export async function startPiSession(
 		modelCompat: options.modelCompat ?? DEFAULT_MODEL_COMPAT,
 		...(options.captureUi ? { ui: createUiRecorder() } : {}),
 		...(options.customTools ? { customTools: options.customTools } : {}),
+		...(options.inlineFactory
+			? { inlineFactory: await options.inlineFactory() }
+			: {}),
 	};
 	return bindSession(
 		args,
