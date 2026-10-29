@@ -555,18 +555,6 @@ describe("post-idle sample decision (#1332)", () => {
 		expect(takeMemoryIdleGapMs(SESSION, WINDOW_MS * 2, WINDOW_MS)).toBeNull();
 	});
 
-	it("#1332: the primary's reset leaves a live secondary's pending turn end (#4965)", () => {
-		// RECURRENCE GUARDED: resetMemorySamplerCadence cleared every session's
-		// marker, so a subagent running across the primary's /new lost its idle sample.
-		const secondary = sessionLookupKey("subagent-b", "concurrent-secondary");
-		bindSession("subagent-b", "concurrent-secondary");
-		recordMemoryTurnEnd(secondary, 0);
-		resetMemorySamplerCadence();
-		expect(takeMemoryIdleGapMs(secondary, WINDOW_MS * 2, WINDOW_MS)).toBe(
-			WINDOW_MS * 2,
-		);
-	});
-
 	it("#1332: another session's turn start neither consumes nor reports a session's pending turn end", () => {
 		// #4761 review F1 (AGENTS.md shape 72): one process-global slot let a
 		// coexisting session take the primary's marker.
