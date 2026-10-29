@@ -96,6 +96,29 @@ describe("RuntimeCoordinator dependency-drift delivery-cap methods (#1950)", () 
 		}
 	});
 
+	it("retireDemotedDriftBlocker retires a genuine self-drift demotion, and refuses it for the other axis", () => {
+		const env = setupTestEnvironment("pi-lens-4990-selfdrift-retire-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const target = path.join(env.tmpDir, "target.ts");
+			fs.writeFileSync(target, "export const a = 1;\n");
+			runtime.recordInlineBlockers(target, "🔴 a blocker", 1, ["ast-grep"]);
+			runtime.setInlineBlockerSelfDriftStale(target, true);
+
+			// Only the axis that made the demotion may retire it (#4990).
+			expect(
+				runtime.retireDemotedDriftBlocker(target, "dependency-drift"),
+			).toBe(false);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+			expect(runtime.retireDemotedDriftBlocker(target, "self-drift")).toBe(
+				true,
+			);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("retireDemotedDriftBlocker retires a genuine dependency-drift demotion", () => {
 		const env = setupTestEnvironment("pi-lens-1950-retire-");
 		try {
