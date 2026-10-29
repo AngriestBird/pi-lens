@@ -370,12 +370,13 @@ export interface InlineBlockerRecord {
 	diagnostics?: readonly Diagnostic[];
 	/**
 	 * #1950: how many turn ends have re-served this record while `stale`.
-	 * Only incremented for the `"dependency-drift"` reason — `"past-eof"`
-	 * retires after its own single delivery (#1944) and never needs a count.
-	 * Caps a recoverable-but-unconfirmed demotion at
-	 * `DEPENDENCY_DRIFT_MAX_DELIVERIES` deliveries
-	 * (`clients/blocker-freshness.ts`) instead of re-serving it for the rest
-	 * of the session.
+	 * Only incremented for the `"dependency-drift"` and `"self-drift"` reasons
+	 * — `"past-eof"` retires after its own single delivery (#1944) and never
+	 * needs a count. Caps a recoverable-but-unconfirmed demotion at its axis's
+	 * cap, `DEPENDENCY_DRIFT_MAX_DELIVERIES` or `SELF_DRIFT_MAX_DELIVERIES`
+	 * (`clients/blocker-freshness.ts`), instead of re-serving it for the rest
+	 * of the session. The count belongs to one demotion episode: healing a
+	 * self-drift demotion drops it (#4990).
 	 */
 	staleDeliveryCount?: number;
 	/**
