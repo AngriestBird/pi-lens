@@ -113,7 +113,7 @@ describe("tool-smoke fails a runner whose tool broke, through dispatch (#4130)",
 		const workspace = fs.mkdtempSync(
 			path.join(repoRoot, ".probe-home", "fault-"),
 		);
-		const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "yamllint-"));
+		const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-yamllint-"));
 		const previousPath = process.env.PATH;
 		const realSpawn = safeSpawn.safeSpawnAsync;
 		const spawn = vi
@@ -178,7 +178,9 @@ describe("tool-smoke cwd-sensitive rows (#2697)", () => {
 		const workspace = fs.mkdtempSync(
 			path.join(repoRoot, ".probe-home", "cwd-"),
 		);
-		const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "yamllint-"));
+		const shimDir = fs.mkdtempSync(
+			path.join(repoRoot, ".probe-home", "yamllint-"),
+		);
 		const previousPath = process.env.PATH;
 		const previousProcessCwd = process.cwd();
 		const spawn = vi.spyOn(safeSpawn, "safeSpawnAsync");
