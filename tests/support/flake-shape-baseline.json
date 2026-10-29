@@ -1125,7 +1125,6 @@
 		"index-mode-awareness.test.ts::clients/runtime-session": 1,
 		"index-mutation-bridge-recordability.test.ts::clients/bootstrap": 1,
 		"index-mutation-bridge-recordability.test.ts::clients/runtime-session": 1,
-		"index-mutation-latency-marker.test.ts::clients/latency-logger": 1,
 		"index-observed-sweep-no-read-guard.test.ts::clients/bootstrap": 1,
 		"index-observed-sweep-no-read-guard.test.ts::clients/observed-mutation-sources": 1,
 		"index-observed-sweep-no-read-guard.test.ts::clients/runtime-agent-end": 1,

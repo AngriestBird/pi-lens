@@ -383,20 +383,28 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 	}
 
 	it("still runs a same-root replacement as the primary", async () => {
-		const pi = createPiMock();
-		extension(pi.asExtensionAPI());
-
-		const first = makeCtx({ cwd: hostRoot, sessionId: "host-session" });
-		await pi.emit("session_start", makeSessionStartEvent(), first);
-		invalidate(first);
-		await pi.emit(
-			"session_start",
-			makeSessionStartEvent(),
-			makeCtx({ cwd: hostRoot, sessionId: "host-session-2" }),
-		);
+		// Tier 2 (#4913 L3): two REAL pi sessions at one project root under this
+		// file's fixture. The first session's ctx is invalidated by pi's own
+		// `extensionRunner.invalidate()` (the dead-prior state the classification
+		// wiring file drives too), so the second start is a same-root replacement.
+		const cwd = path.join(fixture.root, "same-root", "proj");
+		const first = await startPiSession({
+			root: fixture.root,
+			cwd,
+			responses: [fauxAssistantMessage(fauxText("first"))],
+		});
+		first.session.extensionRunner.invalidate();
+		const second = await startPiSession({
+			root: fixture.root,
+			cwd,
+			responses: [fauxAssistantMessage(fauxText("second"))],
+		});
 
 		// Same root: today's behavior is unchanged — the replacement is primary.
 		expect(getSecondarySessionCount()).toBe(0);
-		expect(getActivePrimaryRoot()).toContain(path.basename(hostRoot));
+		expect(realPathOfActivePrimaryRoot()).toBe(fs.realpathSync(cwd));
+		expect(getActiveSessionId()).toBe(
+			second.session.sessionManager.getSessionId(),
+		);
 	}, 30_000);
 });

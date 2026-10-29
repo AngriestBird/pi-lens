@@ -62,7 +62,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-lsp-config-root-eviction.test.ts": "internal-seam",
 	"index-mode-awareness.test.ts": "internal-seam",
 	"index-mutation-bridge-recordability.test.ts": "internal-seam",
-	"index-mutation-latency-marker.test.ts": "internal-seam",
 	"index-project-trust-wiring.test.ts": "internal-seam",
 	"index-read-bridge-zero-line.test.ts": "internal-seam",
 	"index-vanished-instance-wiring.test.ts": "internal-seam",
@@ -94,8 +93,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	// slice-5 stays (see #4632)
 	"index-4554-last-member-teardown.test.ts": "internal-seam",
 	"index-multi-root-session-start.test.ts": "unproducible-payload",
-	// slice 8 landed (#4699); these two keep the classes it recorded
-	"clients/session-event-guard.test.ts": "unproducible-payload",
 	// process-boundary
 	"clients/handler-verdict-helper.test.ts": "process-boundary",
 	"clients/ndjson-logger.test.ts": "process-boundary",
