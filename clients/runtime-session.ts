@@ -603,12 +603,15 @@ async function readSequenceAndHydrateFreshSnapshot(args: {
 	} = args;
 	const sequenceReadStartedAt = Date.now();
 	// `readSequenceWithBudget` races its read against `sequenceReadBudgetMs()`,
-	// an env-overridable knob (`PI_LENS_SEQUENCE_READ_BUDGET_MS`) that is not
-	// capped by the hook's wall budget. `bounded()` is that cap: an abandoned
-	// read is the same cold-start answer the inner race gives, so a stalled
-	// read reaches the `UNKNOWN_PROJECT_SEQ` path either way. `signal` is
-	// `undefined`: `SessionStartDeps` carries none, and `index.ts` awaits this
-	// whole handler under `bounded()` with the hook's `ctx.signal`.
+	// which is capped at the hook's wall budget, so its own timeout arm (the
+	// one that keeps the deferred reseed and the #1785 late hydration attached
+	// to the read) is what ends a stalled wait. `bounded()` at the same budget
+	// is the census backstop for this await: it is created after the inner
+	// timer, so the inner arm fires first and a read that lands later still
+	// recovers; an abandonment here would drop that recovery, so it must not be
+	// the arm that fires. `signal` is `undefined`: `SessionStartDeps` carries
+	// none, and `index.ts` awaits this whole handler under `bounded()` with the
+	// hook's `ctx.signal`.
 	const { latestSeq, timedOut } =
 		(await bounded(
 			readSequenceWithBudget({
@@ -741,9 +744,16 @@ function resolveStartupMode(
 // mirrors the issue's ~250ms figure; overridable for tests (mirrors the
 // `PI_LENS_WARMUP_DELAY_MS` precedent above) so a regression can use a tiny
 // budget instead of racing a real 250ms wall-clock wait.
+//
+// Capped at the hook's wall budget (#4977 review F1): a widened override must
+// not hold `session_start` past the wall, and the cap sits INSIDE the race, so
+// the arm that attaches the deferred reseed and the #1785 late hydration is
+// the one that fires. An outer `bounded()` alone abandons the whole call and
+// drops that recovery.
 function sequenceReadBudgetMs(): number {
 	const raw = Number(process.env.PI_LENS_SEQUENCE_READ_BUDGET_MS ?? 250);
-	return Number.isFinite(raw) && raw > 0 ? raw : 250;
+	const budget = Number.isFinite(raw) && raw > 0 ? raw : 250;
+	return Math.min(budget, HOOK_WALL_BUDGET_MS.session_start);
 }
 
 // #1162 review follow-up (P3): the sentinel used ONLY for the snapshot
@@ -3138,14 +3148,14 @@ export async function handleSessionStart(
 	// between here and the later uses of the same generation).
 	const sessionGeneration = runtime.sessionGeneration;
 	const snapshotRoot = resolveSnapshotRoot(cwd);
-	// #1785: instrumentation only here, deliberately no
-	// `onDeferredSequenceResolved` — unlike quick mode's cold path (which
-	// does nothing when the snapshot isn't trusted), full mode's cold path
-	// actively kicks off a real rescan below to rebuild this same state.
-	// Retroactively hydrating from the on-disk snapshot once the deferred
-	// read lands could overwrite that fresher, actively-computed state with
-	// the stale disk copy — a regression, not a fix. See the PR body for the
-	// full reasoning.
+	// #1785: deliberately no `onDeferredSequenceResolved`. Unlike quick mode's
+	// cold path (which does nothing when the snapshot isn't trusted), full
+	// mode's cold path computes this same state itself with a real rescan
+	// below, so it wants no late fill from the on-disk snapshot (the callee
+	// only fills empty state; it never overwrites, but the fill would still
+	// race what the rescan computes). The absence is pinned by the
+	// full-mode stall cell in
+	// `tests/clients/runtime-session-sequence-read-budget.test.ts`.
 	const freshSnapshot = await readSequenceAndHydrateFreshSnapshot({
 		snapshotRoot,
 		cwd,

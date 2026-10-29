@@ -565,8 +565,13 @@ describe("#1162 — bounded session_start sequence read", () => {
 						() => slow.promise,
 					);
 					const runtime = new RuntimeCoordinator();
+					const dbgLines: string[] = [];
 
-					await handleSessionStart(makeDeps(cwd, runtime));
+					await handleSessionStart(
+						makeDeps(cwd, runtime, {
+							dbg: (msg: string) => dbgLines.push(msg),
+						}),
+					);
 
 					// The seq-0 snapshot would match the cold sentinel; the unknown
 					// freshness seq keeps it from hydrating (#1168 finding 2).
@@ -583,16 +588,27 @@ describe("#1162 — bounded session_start sequence read", () => {
 						)?.count,
 					).toBeGreaterThanOrEqual(1);
 
+					// The late read lands. Only quick mode wires the retroactive
+					// hydration (#1785); full mode passes no hook because its cold path
+					// computes this state itself (the rescan below the shared step), so a
+					// late fill from disk is unwanted there. The absence is observable:
+					// the hook emits the "hydrating ... late" line always, and fills
+					// `cachedExports` whenever the snapshot on disk still carries them
+					// (mutation M4, #4977 review F2: wiring the hook into full mode reds
+					// this cell).
+					slow.resolve({ projectSeq: 0, fileSeqByPath: new Map() });
+					// The session's own `.then` on this promise was registered first,
+					// so this continuation runs after the deferred hydration.
+					await slow.promise;
+					const lateHydrationLine = dbgLines.some((line) =>
+						line.includes("hydrating cachedExports/projectRulesScan late"),
+					);
 					if (mode === "quick") {
-						// Only quick mode wires the retroactive hydration (#1785). Full
-						// mode's omission is not asserted: its own rescan rewrites the
-						// snapshot before the late read lands, so a mutant that wired
-						// the hook into full mode survives this fixture.
-						slow.resolve({ projectSeq: 0, fileSeqByPath: new Map() });
-						// The session's own `.then` on this promise was registered first,
-						// so this continuation runs after the deferred hydration.
-						await slow.promise;
 						expect(runtime.cachedExports.get("x")).toBe(exportedPath(cwd));
+						expect(lateHydrationLine).toBe(true);
+					} else {
+						expect(runtime.cachedExports.get("x")).toBeUndefined();
+						expect(lateHydrationLine).toBe(false);
 					}
 				} finally {
 					env.cleanup();
@@ -603,8 +619,13 @@ describe("#1162 — bounded session_start sequence read", () => {
 			// sat unbounded on a hook path (hook-await-bounds census, #4977 review)
 			// and its own race is capped only by an env-overridable budget, so a
 			// widened budget stalled `session_start` past the hook's wall budget.
-			// The shared step now awaits it under `bounded()`.
-			it("a read the widened sequence budget cannot cut is bounded at the session_start wall budget and takes the unknown-sequence path", async () => {
+			// The race's own budget is now capped at the wall budget, so the arm
+			// that owns the recovery (the deferred reseed and the #1785 late
+			// hydration) is the one that fires. The first fix wrapped the await in
+			// `bounded()` alone, which abandoned the read and silently dropped that
+			// recovery (#4977 review F1: `runtime.projectSeq` stayed 0 once the read
+			// landed with seq 2).
+			it("a read the widened sequence budget cannot cut is capped at the session_start wall budget, takes the unknown-sequence path, and still reseeds when it lands", async () => {
 				process.env.PI_LENS_STARTUP_MODE = mode;
 				// 2e9 ms: far above the 5s hook budget, below the 2^31 timer clamp.
 				process.env.PI_LENS_SEQUENCE_READ_BUDGET_MS = "2000000000";
@@ -614,8 +635,9 @@ describe("#1162 — bounded session_start sequence read", () => {
 				try {
 					const cwd = makeProject(env);
 					saveSeq0Snapshot(cwd);
+					const slow = deferred<ProjectSequenceIndex>();
 					readLatestProjectSequenceAsyncSpy.mockImplementation(
-						() => new Promise<ProjectSequenceIndex>(() => {}),
+						() => slow.promise,
 					);
 					const runtime = new RuntimeCoordinator();
 
@@ -636,17 +658,28 @@ describe("#1162 — bounded session_start sequence read", () => {
 
 					expect(settled).toBe(true);
 					expect(runtime.cachedExports.get("x")).toBeUndefined();
+					expect(runtime.projectSeq).toBe(0);
 					expect(phaseRecord("session_start_sequence_read")?.metadata).toEqual(
 						expect.objectContaining({ timedOut: true, entries: 0 }),
 					);
 					expect(phaseRecord("session_start_snapshot_load")?.metadata).toEqual(
 						expect.objectContaining({ fresh: false, sequenceUnknown: true }),
 					);
+
+					// The read lands after the wall: the recovery still runs.
+					slow.resolve({
+						projectSeq: 2,
+						fileSeqByPath: new Map([["/some/file.ts", 2]]),
+						logEntries: 2,
+					});
+					for (let i = 0; i < 400 && runtime.projectSeq !== 2; i++) {
+						await new Promise((resolve) => setImmediate(resolve));
+					}
+					expect(runtime.projectSeq).toBe(2);
 					expect(
-						getDegradationSummary()
-							.find((group) => group.kind === "hook-await-exceeded")
-							?.latestReasons.map((row) => row.subject),
-					).toContain("session_start:readSequenceWithBudget");
+						phaseRecord("session_start_sequence_read_deferred_reseed")
+							?.metadata,
+					).toEqual(expect.objectContaining({ deferred: true, entries: 1 }));
 				} finally {
 					vi.useRealTimers();
 					env.cleanup();
