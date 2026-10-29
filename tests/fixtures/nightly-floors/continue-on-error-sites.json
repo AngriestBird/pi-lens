@@ -247,10 +247,6 @@
 			"status": "no-floor",
 			"reason": "PR plumbing, not a producer (#4512): it runs only for a refresh the non-continue-on-error 'Refuse a degraded refresh' guard passed and the flip check found flip-free, and a failed arming shows as this step's own outcome with the PR left for a maintainer."
 		},
-		".github/workflows/tool-smoke.yml#tool-smoke-prs#Disarm auto-merge when the refresh has flips": {
-			"status": "no-floor",
-			"reason": "PR plumbing, not a producer (#4512): it undoes a previous night's arming on a refresh that has flips, and a failed disarm shows as this step's own outcome."
-		},
 		".github/workflows/tool-smoke.yml#tool-smoke-prs#Mint the refresh App token (starts CI on the refresh PR)": {
 			"status": "no-floor",
 			"reason": "Token plumbing, not a producer (#4512): when the App is absent or the mint fails the refresh PR falls back to the repository token, which the PR body states, and a failed mint shows as this step's own outcome."

@@ -860,14 +860,22 @@ jobs:
           PR_NUMBER: ${{ steps.refresh_pr.outputs.pull-request-number }}
         run: gh pr merge "$PR_NUMBER" --auto --merge
 
+      # Disarms with whichever token updated the PR above, and is not
+      # `continue-on-error`: a refresh with flips whose disarm could not run
+      # (the App token failed to mint tonight, so the PR was updated with
+      # GITHUB_TOKEN) must red the job, not leave last night's arming carrying
+      # tonight's flips. It reads the PR first, so a PR nothing armed is not an
+      # error and a failed read or disable is.
       - name: Disarm auto-merge when the refresh has flips
-        if: steps.refresh_pr.outputs.pull-request-number != '' && steps.landing.outputs.flip_free != 'true' && steps.app_token.outputs.token != ''
-        continue-on-error: true
+        if: steps.refresh_pr.outputs.pull-request-number != '' && steps.landing.outputs.flip_free != 'true'
         env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.refresh_pr.outputs.pull-request-number }}
-        run: gh pr merge "$PR_NUMBER" --disable-auto
+        run: |
+          set -euo pipefail
+          armed="$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+          if [ "$armed" = true ]; then gh pr merge "$PR_NUMBER" --disable-auto; fi
 
       # #3989: ONE draft bot PR (own branch, never `bot/lsp-docs-refresh`, whose
       # body promises no policy change) carrying the promotion edit. The

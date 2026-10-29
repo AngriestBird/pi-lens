@@ -170,10 +170,15 @@ export interface RefreshState {
 		{ pendingBehavior: string; pendingTier: string; runs: number }
 	>;
 	"idle-eviction"?: Record<string, { nights: IdleEvictionNight[] }>;
-	/** #4512: consecutive-night misses behind the `stale` column. */
+	/** #4512: consecutive-night misses per lang and axis behind the `stale` column. */
 	"missed-probe"?: Record<
 		string,
-		{ since: string; last: string; misses: number }
+		Partial<
+			Record<
+				"clean-behavior" | "first-publish",
+				{ since: string; last: string; misses: number }
+			>
+		>
 	>;
 }
 

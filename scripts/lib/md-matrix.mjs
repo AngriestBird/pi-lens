@@ -700,23 +700,36 @@ export function parseRefreshState(text) {
 export const MISSED_PROBE_KEY = "missed-probe";
 
 /**
- * #4512: keep only well-formed missed-probe streaks. An entry is
- * `{ since, last, misses }`: `since` the UTC day of the first miss, `last` the
- * UTC day the streak was last advanced, `misses` the count of distinct nightly
- * misses. A hand-edited or old block cannot carry garbage into the section.
+ * #4512: the axes a measured cell can be missed on. One streak per lang and
+ * axis, so a clean-behavior miss on one night and a first-publish miss on the
+ * next are two first misses, never one consecutive pair.
+ */
+const MISSED_PROBE_AXES = ["clean-behavior", "first-publish"];
+
+/**
+ * #4512: keep only well-formed missed-probe streaks, `{ [lang]: { [axis]:
+ * { since, last, misses } } }`: `since` the UTC day of the axis's first miss,
+ * `last` the UTC day the streak was last advanced, `misses` the count of
+ * distinct nightly misses. A hand-edited or old block (the single per-lang
+ * streak this key briefly held before it shipped) cannot carry garbage into the
+ * section: a lang with no well-formed axis is dropped.
  */
 function sanitizeMissedProbeState(map) {
 	const out = {};
 	if (!map || typeof map !== "object") return out;
 	for (const lang of Object.keys(map).sort(compareStableStrings)) {
-		const e = map[lang];
-		if (
-			isUtcDay(e?.since) &&
-			isUtcDay(e?.last) &&
-			Number.isInteger(e?.misses) &&
-			e.misses > 0
-		)
-			out[lang] = { since: e.since, last: e.last, misses: e.misses };
+		const axes = {};
+		for (const axis of MISSED_PROBE_AXES) {
+			const e = map[lang]?.[axis];
+			if (
+				isUtcDay(e?.since) &&
+				isUtcDay(e?.last) &&
+				Number.isInteger(e?.misses) &&
+				e.misses > 0
+			)
+				axes[axis] = { since: e.since, last: e.last, misses: e.misses };
+		}
+		if (Object.keys(axes).length) out[lang] = axes;
 	}
 	return out;
 }
@@ -1016,23 +1029,30 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 		// #4512: a measured cell the probe did not re-observe tonight is STALE.
 		// The streak counts distinct nightly misses (a same-day rerun does not
 		// advance it) and ends the night an axis is observed again.
-		const cbMissed =
-			MEASURED_CLEAN_BEHAVIORS.has(cbIdx >= 0 ? cells[cbIdx] : "") &&
-			!observed?.cleanBehavior;
-		const fpMissed = MEASURED_FIRST_PUBLISHES.has(currentFp) && !fpObserved;
-		if (cbMissed || fpMissed) {
-			const held = priorMissed[lang];
-			const streak = held
+		const missedAxes = {
+			"clean-behavior":
+				MEASURED_CLEAN_BEHAVIORS.has(cbIdx >= 0 ? cells[cbIdx] : "") &&
+				!observed?.cleanBehavior,
+			"first-publish": MEASURED_FIRST_PUBLISHES.has(currentFp) && !fpObserved,
+		};
+		const streaks = {};
+		for (const axis of MISSED_PROBE_AXES) {
+			if (!missedAxes[axis]) continue;
+			const held = priorMissed[lang]?.[axis];
+			streaks[axis] = held
 				? {
 						since: held.since,
 						last: today,
 						misses: held.last === today ? held.misses : held.misses + 1,
 					}
 				: { since: today, last: today, misses: 1 };
-			nextState[MISSED_PROBE_KEY][lang] = streak;
-			cell.stale = `since ${streak.since}`;
+		}
+		const missed = Object.values(streaks);
+		if (missed.length) {
+			nextState[MISSED_PROBE_KEY][lang] = streaks;
+			cell.stale = `since ${missed.map((x) => x.since).sort(compareStableStrings)[0]}`;
 			staleLangs.push(lang);
-			if (streak.misses >= raiseRuns) raisedLangs.push(lang);
+			if (missed.some((x) => x.misses >= raiseRuns)) raisedLangs.push(lang);
 		} else if (staleIdx >= 0 && cells[staleIdx] !== MATRIX_EMPTY_CELL) {
 			cell.stale = MATRIX_EMPTY_CELL;
 		}
@@ -1087,7 +1107,10 @@ export function describeRaisedCells(
 	const out = [];
 	for (const lang of raisedLangs) {
 		const cells = tbl.rows.find((c) => c[col("lang")] === lang);
-		const streak = streaks[lang];
+		// The axis missed the most nights in a row is the one that raised the lang.
+		const streak = Object.values(streaks[lang] ?? {}).sort(
+			(a, b) => b.misses - a.misses,
+		)[0];
 		if (!cells || !streak) continue;
 		out.push({
 			lang,

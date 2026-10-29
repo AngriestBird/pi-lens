@@ -358,14 +358,19 @@ describe("#3401 subset probe", () => {
 		expect(parseRefreshState(subset.text)["first-publish"]?.vue).toEqual({
 			firstMissed: day(0),
 		});
-		expect(parseRefreshState(subset.text)["missed-probe"]?.vue).toEqual({
+		expect(
+			parseRefreshState(subset.text)["missed-probe"]?.vue?.["first-publish"],
+		).toEqual({
 			since: day(0),
 			last: day(0),
 			misses: 1,
 		});
 		// The bookkeeping survived intact: the next FULL run is its second miss.
 		const full = nightly(subset.text, 31);
-		expect(parseRefreshState(full.text)["missed-probe"]?.vue?.misses).toBe(2);
+		expect(
+			parseRefreshState(full.text)["missed-probe"]?.vue?.["first-publish"]
+				?.misses,
+		).toBe(2);
 		expect(full.raisedLangs).toContain("vue");
 	});
 
@@ -382,7 +387,10 @@ describe("#3401 subset probe", () => {
 		const subset = nightly(first, 30, [], { probedLangs: ["vue"] });
 		expect(subset.staleLangs).toEqual(["vue"]);
 		expect(cellOf(subset.text, "vue", "stale")).toBe(`since ${day(0)}`);
-		expect(parseRefreshState(subset.text)["missed-probe"]?.vue?.misses).toBe(2);
+		expect(
+			parseRefreshState(subset.text)["missed-probe"]?.vue?.["first-publish"]
+				?.misses,
+		).toBe(2);
 		// ast-grep was not probed: still direct, clock kept.
 		expect(cellOf(subset.text, "ast-grep", "first-publish")).toBe("direct");
 		expect(
@@ -934,15 +942,48 @@ describe("#4512 a missed probe keeps the last known value and marks it stale", (
 		r = nightly(r.text, 1, seen);
 		r = nightly(r.text, 2, miss);
 		expect(
-			parseRefreshState(r.text)["missed-probe"]?.["ast-grep"]?.misses,
+			parseRefreshState(r.text)["missed-probe"]?.["ast-grep"]?.["first-publish"]
+				?.misses,
 		).toBe(1);
 		expect(r.raisedLangs).not.toContain("ast-grep");
+	});
+
+	it("does not raise a lang whose misses alternate between the two axes", () => {
+		// Recurrence (PR #4980 thread on md-matrix.mjs): one streak per lang counted
+		// a clean-behavior miss on night 0 and a first-publish miss on night 1 as two
+		// consecutive misses, though neither axis was missed two nights running.
+		const doc = ensureMatrixColumns(FIXTURE).replace(
+			"| vue | @vue/language-server | push-only | unknown |",
+			"| vue | @vue/language-server | push-only | silent |",
+		);
+		const cbOnly = [observation("vue", { firstPublish: "direct" })];
+		const fpOnly = [
+			observation("vue", { cleanBehavior: "silent", tier: "2/3?" }),
+		];
+		// Scoped to vue so the fixture's other measured rows do not mix in.
+		const only = { probedLangs: ["vue"] };
+		let r = nightly(doc, 0, cbOnly, only);
+		expect(r.staleLangs).toEqual(["vue"]);
+		r = nightly(r.text, 1, fpOnly, only);
+		expect(r.staleLangs).toEqual(["vue"]);
+		expect(r.raisedLangs).toEqual([]);
+		// The clean-behavior streak ended the night it was observed.
+		r = nightly(r.text, 2, cbOnly, only);
+		expect(r.raisedLangs).toEqual([]);
+		const streaks = parseRefreshState(r.text)["missed-probe"]?.vue;
+		expect(streaks?.["clean-behavior"]?.misses).toBe(1);
+		expect(streaks?.["first-publish"]).toBeUndefined();
+		// The same axis two nights running still raises.
+		r = nightly(r.text, 3, cbOnly, only);
+		expect(r.raisedLangs).toEqual(["vue"]);
 	});
 
 	it("does not count a second run on the same day as a second miss", () => {
 		let r = nightly(FIXTURE, 4);
 		r = nightly(r.text, 4);
-		expect(parseRefreshState(r.text)["missed-probe"]?.vue?.misses).toBe(1);
+		expect(
+			parseRefreshState(r.text)["missed-probe"]?.vue?.["first-publish"]?.misses,
+		).toBe(1);
 		expect(r.raisedLangs).toEqual([]);
 	});
 
@@ -975,18 +1016,27 @@ describe("#4512 a missed probe keeps the last known value and marks it stale", (
 		).toEqual(["version", "install", "stale"]);
 	});
 
-	it("drops a malformed missed-probe streak from the state block", () => {
+	it("drops a malformed or pre-per-axis missed-probe streak from the state block", () => {
+		// `vue` is the single per-lang streak shape this key held before it shipped
+		// (no axis level): an old block must restart, never raise on a guessed axis.
 		const doc = `${ensureMatrixColumns(FIXTURE)}\n## Capability matrix refresh state (nightly-generated)\n\n\`\`\`json\n${JSON.stringify(
 			{
 				"missed-probe": {
-					vue: { since: "not-a-date", last: day(0), misses: 5 },
-					php: { since: day(0), last: day(0), misses: 0 },
+					vue: { since: day(0), last: day(2), misses: 5 },
+					php: {
+						"first-publish": { since: "not-a-date", last: day(0), misses: 5 },
+					},
+					"ast-grep": {
+						"first-publish": { since: day(0), last: day(0), misses: 0 },
+					},
 				},
 			},
 		)}\n\`\`\`\n`;
 		const r = nightly(doc, 3);
 		// Garbage restarts the streak at one miss rather than raising on bad data.
-		expect(parseRefreshState(r.text)["missed-probe"]?.vue).toEqual({
+		expect(
+			parseRefreshState(r.text)["missed-probe"]?.vue?.["first-publish"],
+		).toEqual({
 			since: day(3),
 			last: day(3),
 			misses: 1,

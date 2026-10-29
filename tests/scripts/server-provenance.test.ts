@@ -16,6 +16,8 @@
  * tests/scripts/lsp-matrix-refresh-expiry.test.ts through
  * `mergeCharacterization`.
  */
+import * as fs from "node:fs";
+import * as os from "node:os";
 import { describe, expect, it } from "vitest";
 import * as installer from "../../clients/installer/index.js";
 import { getAllToolStatuses } from "../../clients/installer/index.js";
@@ -156,15 +158,44 @@ describe("#4512 reading the binary and the installer filter", () => {
 	});
 
 	it("getAllToolStatuses(ids) reports only the named tools, in registry order", async () => {
-		const statuses = await getAllToolStatuses([
-			"pyright",
-			"typescript-language-server",
-		]);
-		expect(statuses.map((s) => s.id).sort()).toEqual([
-			"pyright",
-			"typescript-language-server",
-		]);
+		// Recurrence (PR #4980 thread): a `.sort()` on the result erased the order
+		// the title claims. The request names the later registry entry first, so a
+		// reader that followed request order would return it first.
+		const registry = installer.TOOLS.map((t) => t.id);
+		const early = "typescript-language-server";
+		const late = "pyright";
+		expect(registry.indexOf(early)).toBeLessThan(registry.indexOf(late));
+		const statuses = await getAllToolStatuses([late, early]);
+		expect(statuses.map((s) => s.id)).toEqual([early, late]);
 		expect(await getAllToolStatuses(["no-such-tool-4512"])).toEqual([]);
+	});
+
+	// Recurrence (PR #4980 thread on server-provenance.mjs): a fixed 5 s read
+	// lost the versions of the slow servers whose installer verification allows
+	// 20 s (bash-language-server, vscode-json-language-server).
+	it("waits as long as the caller's timeout and no longer", () => {
+		const slow = ["-e", "setTimeout(() => console.log('1.2.3'), 1200)"];
+		expect(readVersionFromBinary(process.execPath, slow, 300)).toBeUndefined();
+		expect(
+			versionToken(readVersionFromBinary(process.execPath, slow, 8000)),
+		).toBe("1.2.3");
+	});
+
+	// Recurrence (PR #4980 CodeRabbit thread): `npm --version` writes
+	// `$HOME/.npm/_logs`, and the nightly's job-level PI_LENS_HOME makes
+	// `withScratchHome()` return before pinning HOME, so the probe child
+	// inherited the runner's (or the maintainer's) real home.
+	it("runs the version command under a scratch home, removed afterwards", () => {
+		const report = readVersionFromBinary(process.execPath, [
+			"-p",
+			"JSON.stringify([process.env.HOME, process.env.USERPROFILE, process.env.XDG_CONFIG_HOME, process.env.XDG_CACHE_HOME, process.env.XDG_DATA_HOME])",
+		]);
+		const [home, profile, ...xdg] = JSON.parse(String(report).trim());
+		expect(home).not.toBe(process.env.HOME);
+		expect(home.startsWith(os.tmpdir())).toBe(true);
+		expect(profile).toBe(home);
+		for (const dir of xdg) expect(dir.startsWith(home)).toBe(true);
+		expect(fs.existsSync(home)).toBe(false);
 	});
 });
 
@@ -182,6 +213,7 @@ describe("#4512 resolveFixtureProvenance over the real installer registry", () =
 		const asked: Array<string | undefined> = [];
 		const fakeInstaller = {
 			TOOLS: installer.TOOLS,
+			getToolVerificationTimeout: installer.getToolVerificationTimeout,
 			getAllToolStatuses: async (ids: string[]) =>
 				ids.map((id) => ({
 					id,
@@ -221,6 +253,7 @@ describe("#4512 resolveFixtureProvenance over the real installer registry", () =
 			],
 			{
 				TOOLS: installer.TOOLS,
+				getToolVerificationTimeout: installer.getToolVerificationTimeout,
 				getAllToolStatuses: async (ids: string[]) =>
 					ids.map((id) => ({
 						id,
@@ -245,12 +278,45 @@ describe("#4512 resolveFixtureProvenance over the real installer registry", () =
 		});
 	});
 
+	// Recurrence (PR #4980 thread): the reader was handed no timeout, so every
+	// server got the same 5 s. Each tool is read within its registered
+	// verification timeout, whatever its size (bash-language-server: 20 s).
+	it("reads each tool within its registered verification timeout", async () => {
+		const asked: Array<[string | undefined, number]> = [];
+		await resolveFixtureProvenance(
+			[
+				{ lang: "bash", tools: ["bash-language-server"] },
+				{ lang: "yaml", tools: ["yamllint"] },
+			],
+			{
+				TOOLS: installer.TOOLS,
+				getToolVerificationTimeout: installer.getToolVerificationTimeout,
+				getAllToolStatuses: async (ids: string[]) =>
+					ids.map((id) => ({
+						id,
+						installed: true,
+						source: "pi-lens-auto",
+						path: `/bin/${id}`,
+					})),
+			},
+			(binPath, _args, timeoutMs) => {
+				asked.push([binPath, timeoutMs]);
+				return undefined;
+			},
+		);
+		expect(asked).toEqual([
+			["/bin/bash-language-server", 20_000],
+			["/bin/yamllint", 10_000],
+		]);
+	});
+
 	it("asks the installer only for the fixtures' own tools", async () => {
 		const requested: string[][] = [];
 		await resolveFixtureProvenance(
 			[...FIXTURES, { lang: "none", tools: [] }],
 			{
 				TOOLS: installer.TOOLS,
+				getToolVerificationTimeout: installer.getToolVerificationTimeout,
 				getAllToolStatuses: async (ids: string[]) => {
 					requested.push(ids);
 					return [];

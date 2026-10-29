@@ -251,12 +251,27 @@ describe("nightly LSP refresh landing and stale-cell notifier (#4512)", () => {
 	it("disarms auto-merge on a refresh that has flips, so last night's arming cannot carry them", () => {
 		// Recurrence shape: the branch is force-rebuilt every night, and an armed
 		// auto-merge survives the push.
-		const disarm = stepByName(prSteps(), "Disarm auto-merge");
+		const steps = prSteps();
+		const disarm = stepByName(steps, "Disarm auto-merge");
 		expect(disarm.if).toContain("steps.landing.outputs.flip_free != 'true'");
 		expect(disarm.if).toContain(
 			"steps.refresh_pr.outputs.pull-request-number != ''",
 		);
-		expect(disarm.run).toBe('gh pr merge "$PR_NUMBER" --disable-auto');
+		expect(disarm.run).toContain("--disable-auto");
+		expect(String(disarm.run)).toContain("set -euo pipefail");
+	});
+
+	it("disarms with the token that updated the PR, and a disarm that cannot run reds the job", () => {
+		// Recurrence (PR #4980 thread): the App token failed to mint on a night
+		// with flips, `refresh_pr` still updated the PR with GITHUB_TOKEN, and the
+		// disarm was gated on the App token, so it was skipped and last night's
+		// auto-merge stayed armed over tonight's flips.
+		const steps = prSteps();
+		const refresh = steps.find((step: any) => step.id === "refresh_pr");
+		const disarm = stepByName(steps, "Disarm auto-merge");
+		expect(disarm.env.GH_TOKEN).toBe(refresh.with.token);
+		expect(disarm.if).not.toContain("steps.app_token");
+		expect(disarm["continue-on-error"]).toBeUndefined();
 	});
 
 	it("files the stale-cell issue under the title the body builder and the issue text agree on", () => {

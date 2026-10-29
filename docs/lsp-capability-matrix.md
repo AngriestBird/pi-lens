@@ -164,7 +164,9 @@ probe does not re-observe keeps its last known value and is marked in the
 never rewrites it to `unknown`: before #4512 a `direct` cell degraded to
 `unknown` after five days, which erased five measured values in the #4338
 refresh with nothing raised. The streak of consecutive nightly misses is kept
-in the refresh state below; a cell that has missed two consecutive nights is
+per lang and per axis in the refresh state below, so a `clean-behavior` miss one
+night and a `first-publish` miss the next are two first misses; a cell whose
+axis has missed two consecutive nights is
 raised on one tracking issue (`nightly: LSP capability probe missed (stale
 matrix cells)`), and an observation clears both the mark and the streak.
 `empty-first` cells back the live `emptyFirstPublish` markers and are stamped
@@ -188,8 +190,9 @@ since). Closing the bot PR unmerged does not reset the bookkeeping: the branch
 is kept and keeps seeding, so only deleting `bot/lsp-docs-refresh` resets it.
 
 The `version` and `install` columns (#4512) record what the nightly ran: the
-first version token of the server's own `--version` answer and the installer
-route that resolved it (`global-path`, `npm-global`, `pip-user`, `pi-lens-auto`,
+first version token of the server's own version command (the `checkArgs` its
+installer entry registers, `--version` by default, read within that entry's
+verification timeout) and the installer route that resolved it (`global-path`, `npm-global`, `pip-user`, `pi-lens-auto`,
 `github-release`, `maven-jar`, `archive-dist`). `characterize-lsp.mjs` writes
 them from the installer's resolution for the one tool a fixture names; a fixture
 that names none or several, a server the installer cannot find, or a launcher

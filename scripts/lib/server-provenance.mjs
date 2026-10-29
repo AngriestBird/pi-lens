@@ -7,6 +7,10 @@
 // recorded-run tests need no spawn; `readVersionFromBinary` is the one place
 // that runs the server's own `--version`.
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { scratchHomeEnv } from "./scratch-home-env.mjs";
 
 const VERSION_RE = /\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?/;
 
@@ -26,30 +30,48 @@ export function serverToolId(fixture) {
 	return tools.length === 1 ? tools[0] : undefined;
 }
 
+/** The wait for a version read when the caller names none, in ms. */
+const DEFAULT_VERSION_TIMEOUT_MS = 5000;
+
 /**
- * Run the resolved binary's `--version`, bounded. A server that does not know
- * the flag and starts speaking LSP is closed by EOF on stdin; a hang is killed
- * by the timeout. Anything but a clean read is `undefined`, never a guess.
- * `args` is the tool's registered `checkArgs` (`cue` answers `version`, not
- * `--version`).
+ * Run the resolved binary's version command, bounded. A server that does not
+ * know the flag and starts speaking LSP is closed by EOF on stdin; a hang is
+ * killed by the timeout. Anything but a clean read is `undefined`, never a
+ * guess. `args` is the tool's registered `checkArgs` (`cue` answers `version`,
+ * not `--version`); `timeoutMs` is its registered verification timeout (a slow
+ * server such as `bash-language-server` is allowed 20 s to answer).
+ *
+ * The child runs under a scratch home (the whole set, AGENTS.md shape 82):
+ * `npm --version` writes `$HOME/.npm/_logs`, and the nightly's job-level
+ * `PI_LENS_HOME` makes `withScratchHome()` return before pinning HOME.
  *
  * @param {string | undefined} binPath
  * @param {readonly string[]} [args]
+ * @param {number} [timeoutMs]
  */
-export function readVersionFromBinary(binPath, args = ["--version"]) {
+export function readVersionFromBinary(
+	binPath,
+	args = ["--version"],
+	timeoutMs = DEFAULT_VERSION_TIMEOUT_MS,
+) {
 	if (!binPath) return undefined;
+	let home;
 	try {
+		home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-version-probe-"));
 		const run = spawnSync(binPath, [...args], {
 			input: "",
 			encoding: "utf8",
-			timeout: 5000,
+			timeout: timeoutMs,
 			killSignal: "SIGKILL",
 			stdio: ["pipe", "pipe", "pipe"],
+			env: { ...process.env, ...scratchHomeEnv(home) },
 		});
 		if (run.error || run.status !== 0) return undefined;
 		return `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
 	} catch {
 		return undefined;
+	} finally {
+		if (home) fs.rmSync(home, { recursive: true, force: true });
 	}
 }
 
@@ -84,8 +106,8 @@ export function collectServerProvenance(fixtures, facts) {
  * no probe there and its row records the install source alone.
  *
  * @param {Array<{ lang: string, tools?: string[] }>} fixtures
- * @param {{ TOOLS: Array<{ id: string, verification?: string, checkArgs?: string[] }>, getAllToolStatuses: (ids: string[]) => Promise<Array<{ id: string, installed: boolean, source: string, path?: string }>> }} installer
- * @param {(binPath: string | undefined, args: readonly string[]) => string | undefined} [readVersion]
+ * @param {{ TOOLS: Array<{ id: string, verification?: string, checkArgs?: string[] }>, getToolVerificationTimeout: (tool: object) => number, getAllToolStatuses: (ids: string[]) => Promise<Array<{ id: string, installed: boolean, source: string, path?: string }>> }} installer
+ * @param {(binPath: string | undefined, args: readonly string[], timeoutMs: number) => string | undefined} [readVersion]
  */
 export async function resolveFixtureProvenance(
 	fixtures,
@@ -100,7 +122,13 @@ export async function resolveFixtureProvenance(
 		readVersion: (status) => {
 			const tool = toolById.get(status.id);
 			if (tool?.verification === "tree-manifest") return undefined;
-			return readVersion(status.path, tool?.checkArgs ?? ["--version"]);
+			return readVersion(
+				status.path,
+				tool?.checkArgs ?? ["--version"],
+				tool
+					? installer.getToolVerificationTimeout(tool)
+					: DEFAULT_VERSION_TIMEOUT_MS,
+			);
 		},
 	});
 }

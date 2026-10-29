@@ -250,7 +250,8 @@ describe("#3401 the nightly clock with an unmerged bot PR", () => {
 		return working;
 	}
 
-	const streak = (text: string) => parseRefreshState(text)["missed-probe"]?.vue;
+	const streak = (text: string) =>
+		parseRefreshState(text)["missed-probe"]?.vue?.["first-publish"];
 
 	it("carries the missed-probe streak across nights although no bot PR ever merged (#4512)", () => {
 		// Recurrence: without the seed each night restarts from master's doc, so a
