@@ -42,12 +42,20 @@ export function landRefresh({ root, landing, issuesUrl, git = defaultGit }) {
 	try {
 		const headDocs = {};
 		const newDocs = {};
+		// `ls-tree` answers a path HEAD lacks with exit 0 and no line, so a doc
+		// not at HEAD is a flip by name and a nonzero exit is a git failure that
+		// reaches the catch below. Only a listed name counts as at HEAD.
+		const atHead = new Set(
+			git(["ls-tree", "--name-only", "HEAD", "--", ...GENERATED_LSP_DOCS], {
+				cwd: root,
+			})
+				.split("\n")
+				.filter(Boolean),
+		);
 		for (const doc of GENERATED_LSP_DOCS) {
-			try {
-				headDocs[doc] = git(["show", `HEAD:${doc}`], { cwd: root });
-			} catch {
-				headDocs[doc] = null; // not at HEAD: a flip by name
-			}
+			headDocs[doc] = atHead.has(doc)
+				? git(["show", `HEAD:${doc}`], { cwd: root })
+				: null;
 			const file = path.join(root, doc);
 			newDocs[doc] = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
 		}

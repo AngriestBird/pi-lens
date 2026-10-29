@@ -264,7 +264,15 @@ describe("#4512 landRefresh: the PR body and the verdict the workflow reads", ()
 			fs.mkdirSync(path.dirname(path.join(root, doc)), { recursive: true });
 			fs.writeFileSync(path.join(root, doc), text);
 		}
+		// The two argv shapes the landing script uses, with real git's contract:
+		// `ls-tree` exits 0 and prints only the paths HEAD has (a missing path is
+		// an empty answer, not an error); any other argv is a git failure.
 		const git = (args: string[]) => {
+			if (args[0] === "ls-tree")
+				return args
+					.slice(args.indexOf("--") + 1)
+					.filter((doc) => typeof headDocs[doc] === "string")
+					.join("\n");
 			const doc = args[1]?.replace(/^HEAD:/, "") ?? "";
 			const text = headDocs[doc];
 			if (args[0] !== "show" || typeof text !== "string")
@@ -305,20 +313,55 @@ describe("#4512 landRefresh: the PR body and the verdict the workflow reads", ()
 		expect(result.body).not.toContain("auto-merge is armed");
 	});
 
-	it("is not flip-free when HEAD's docs cannot be read: each is a doc not at HEAD", () => {
+	it("a doc HEAD does not have is a flip by name, not a failed check", () => {
+		const { root, git } = scratch(withDocs(replayed(2)), {
+			...HEAD,
+			[CAPS]: null,
+		});
+		const result = landRefresh({ root, git, landing: "automerge" });
+		expect(result.flipFree).toBe(false);
+		expect(result.checkFailed).toBe(false);
+		expect(result.flips).toEqual([`${CAPS}: not at HEAD`]);
+	});
+
+	// Recurrence (#4980 F2): a git failure was caught per doc and reported as
+	// "<doc>: not at HEAD", so the refresh PR said "N changed lines" when the
+	// check never ran. `git ls-tree` answers a missing path with exit 0 and
+	// empty output, so a nonzero exit (here 128, not a repository) is a failure
+	// and never a flip.
+	it("is not flip-free when git fails: the check could not run, not a doc missing from HEAD", () => {
 		const { root } = scratch(withDocs(replayed(2)), HEAD);
 		const result = landRefresh({
 			root,
 			landing: "automerge",
 			git: () => {
-				throw new Error("fatal: not a git repository");
+				throw Object.assign(new Error("fatal: not a git repository"), {
+					status: 128,
+				});
 			},
 		});
 		expect(result.flipFree).toBe(false);
-		expect(result.checkFailed).toBe(false);
-		expect(result.flips).toEqual(
-			GENERATED_LSP_DOCS.map((d) => `${d}: not at HEAD`),
+		expect(result.checkFailed).toBe(true);
+		expect(result.flips).toEqual([]);
+		expect(result.body).toContain(
+			"The flip check could not run, so this refresh is treated as having flips",
 		);
+		expect(result.body).not.toContain("not at HEAD");
+		expect(result.body).not.toContain("auto-merge is armed");
+	});
+
+	it("is not flip-free when reading a doc HEAD has fails", () => {
+		const { root, git } = scratch(withDocs(replayed(2)), HEAD);
+		const result = landRefresh({
+			root,
+			landing: "automerge",
+			git: (args) => {
+				if (args[0] === "show") throw new Error("fatal: bad object HEAD");
+				return git(args);
+			},
+		});
+		expect(result.flipFree).toBe(false);
+		expect(result.checkFailed).toBe(true);
 	});
 
 	it("is not flip-free when the check itself cannot run (an unreadable regenerated doc)", () => {
