@@ -1,3 +1,4 @@
+// flake-shape: in-process-mock — the inline_blocker_policy row goes through logLatency, turn_end logs more phases after it than the five the getRecentLoggedPhases ring keeps, and test mode skips the file sink, so a passed-through spy is the only reader (#4990)
 /**
  * #4990 gaps 2 and 3 — the DEMOTED (self-drift) blocker channel.
  *

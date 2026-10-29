@@ -579,6 +579,11 @@ export const wallClockBudgetInclude = [
 	"tests/clients/cascade-graph-occupancy.test.ts",
 	"tests/clients/cascade-turn-merge.test.ts",
 	"tests/clients/config-diagnostic-codes.test.ts",
+	// #4990: the inline_blocker_policy row goes through logLatency; turn_end logs
+	// more phases after it than the five-phase ring keeps, and test mode skips the
+	// file sink, so the passed-through spy is the only reader (flake-shape
+	// admission). Serialized with the other clock-sensitive files.
+	"tests/clients/demoted-finding-4990.test.ts",
 	// #4535 slice 2: the HEAD look and the bash write path drive a real git
 	// repository through their real entry points (flake-shape admission).
 	"tests/clients/disk-change-detectors-4535.test.ts",
