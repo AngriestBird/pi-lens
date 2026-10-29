@@ -3,7 +3,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPiMock, makeCtx } from "../../support/pi-mock.js";
-import { useGlobalConfig } from "../../support/global-config.js";
 import { installLspServiceDouble } from "../../support/lsp-service-seam.js";
 
 const dispatchResult = {
@@ -17,8 +16,6 @@ const dispatchResult = {
 	blockerOutput: "",
 	hasBlockers: false,
 };
-
-const setGlobalConfig = useGlobalConfig();
 
 describe("dispatch session warm/first-use liveness (#1394)", () => {
 	afterEach(() => vi.resetModules());
@@ -71,7 +68,6 @@ describe("dispatch session warm/first-use liveness (#1394)", () => {
 			getAliveServerIds: () => [],
 		});
 		const { default: registerExtension } = await import("../../../index.js");
-		setGlobalConfig({ lsp: { enabled: false }, format: { enabled: false } });
 		const pi = createPiMock();
 		registerExtension(pi.asExtensionAPI());
 		const cwd = fs.mkdtempSync(

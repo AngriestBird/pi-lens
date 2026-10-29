@@ -119,11 +119,8 @@ import {
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
-import { useGlobalConfig } from "./support/global-config.js";
 
 const TMP_PREFIX = "pi-lens-3917-scope-";
-
-const setGlobalConfig = useGlobalConfig();
 
 describe("#3917 the default scope keeps the orphan sweep off the host process table", () => {
 	let env: ReturnType<typeof setupTestEnvironment>;
@@ -152,7 +149,6 @@ describe("#3917 the default scope keeps the orphan sweep off the host process ta
 	});
 
 	it("a real session_start's sweep runs to its end without reaching the process table", async () => {
-		setGlobalConfig({ lsp: { enabled: false } });
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		await pi.emit(

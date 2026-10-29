@@ -17,7 +17,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
-import { useGlobalConfig } from "../support/global-config.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 /** Every demand made on the bootstrap seam, in order, with its stated reason. */
@@ -120,7 +119,6 @@ async function activateWithSpiedBootstrap(): Promise<
 		await import("../../clients/session-lifecycle.js");
 	_resetSessionLifecycleForTests();
 	const { default: registerExtension } = await import("../../index.js");
-	setGlobalConfig({ format: { enabled: false }, lsp: { enabled: false } });
 	const pi = createPiMock();
 	registerExtension(pi.asExtensionAPI());
 	return pi;
@@ -132,8 +130,6 @@ afterEach(() => {
 	vi.doUnmock("../../clients/bootstrap.js");
 	vi.resetModules();
 });
-
-const setGlobalConfig = useGlobalConfig();
 
 describe("#2467 — activation never loads the analyzer bootstrap", () => {
 	it("registers every host surface without one demand on the seam", async () => {

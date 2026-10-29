@@ -49,7 +49,6 @@ import {
 } from "../clients/instance-registry.js";
 import { _resetProcessSingletonsForTests } from "../clients/process-singletons.js";
 import { createPiMock, makeCtx, STALE_CTX_MESSAGE } from "./support/pi-mock.js";
-import { useGlobalConfig } from "./support/global-config.js";
 import { makeLspServiceDouble } from "./support/lsp-service-double.js";
 import { aliveServerHolder } from "./support/lsp-status-repaint.js";
 import {
@@ -57,14 +56,6 @@ import {
 	drainBackgroundWritesForTests,
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
-
-const FLAG_CONFIG = {
-	opengrep: { enabled: false },
-	autofix: { enabled: false },
-	format: { enabled: false },
-	tests: { enabled: false },
-	delta: { enabled: false },
-} as const;
 
 /** The phase record the last-member teardown leaves when it runs for a
  *  session whose own classification is secondary (#4554). */
@@ -98,7 +89,6 @@ async function bootActivation(): Promise<{
 		resetLSPService,
 	}));
 	const { default: registerExtension } = await import("../index.js");
-	setGlobalConfig(FLAG_CONFIG);
 	const pi = createPiMock();
 	registerExtension(pi.asExtensionAPI());
 	return { pi, resetLSPService };
@@ -297,8 +287,6 @@ afterEach(async () => {
 afterAll(async () => {
 	await cleanupTestEnvironmentsDrained(TMP_PREFIX);
 });
-
-const setGlobalConfig = useGlobalConfig();
 
 describe("#4554 one activation, four live sessions", () => {
 	it("r5 reconciles the superseded primary on sequential admission", async () => {
