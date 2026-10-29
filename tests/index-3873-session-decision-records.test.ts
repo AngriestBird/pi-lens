@@ -89,6 +89,7 @@ import {
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
 import { waitFor } from "./clients/interleaving-kit.js";
+import { scaledTestTimeout } from "./support/test-timeout-scale.js";
 
 const FLAGS = new Map<string, boolean>([
 	["no-lsp", true],
@@ -1075,6 +1076,12 @@ describe("#3873 round 2: the agent_nudge row's bounds and producers", () => {
 
 	// Each turn emits a context event and reads the nudge rows; the wait is
 	// bounded by waitFor's real-clock deadline, not a turn count (#4865).
+	//
+	// Both callers pass `scaledTestTimeout(30_000)` as their per-test timeout,
+	// above the helper's own `10_000 * PI_LENS_TEST_TIMEOUT_SCALE` budget: a
+	// drain that never completes must fail with waitFor's diagnostic (budget,
+	// caller frame, last value) instead of Vitest's bare 5 s default, which
+	// fires first at every supported scale.
 	async function drainedNudge(runtime: AgentSessionRuntime): Promise<Row> {
 		let nudge: Row | undefined;
 		const row = await waitFor(() => nudge, Boolean, {
@@ -1089,30 +1096,38 @@ describe("#3873 round 2: the agent_nudge row's bounds and producers", () => {
 		return row as Row;
 	}
 
-	it("session_start passes a writer's session id from the shared touch record", async () => {
-		otherProcessTouched("writer-at-start");
+	it(
+		"session_start passes a writer's session id from the shared touch record",
+		async () => {
+			otherProcessTouched("writer-at-start");
 
-		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+			const runtime = await startRuntime(SessionManager.inMemory(cwd));
 
-		expect((await drainedNudge(runtime)).originSessionIds).toEqual([
-			"writer-at-start",
-		]);
-	});
+			expect((await drainedNudge(runtime)).originSessionIds).toEqual([
+				"writer-at-start",
+			]);
+		},
+		scaledTestTimeout(30_000),
+	);
 
-	it("turn_start passes a writer's session id from the shared touch record", async () => {
-		const runtime = await startRuntime(SessionManager.inMemory(cwd));
-		otherProcessTouched("writer-at-turn");
+	it(
+		"turn_start passes a writer's session id from the shared touch record",
+		async () => {
+			const runtime = await startRuntime(SessionManager.inMemory(cwd));
+			otherProcessTouched("writer-at-turn");
 
-		await runtime.session.extensionRunner.emit({
-			type: "turn_start",
-			turnIndex: 1,
-			timestamp: Date.now(),
-		} as never);
+			await runtime.session.extensionRunner.emit({
+				type: "turn_start",
+				turnIndex: 1,
+				timestamp: Date.now(),
+			} as never);
 
-		expect((await drainedNudge(runtime)).originSessionIds).toEqual([
-			"writer-at-turn",
-		]);
-	});
+			expect((await drainedNudge(runtime)).originSessionIds).toEqual([
+				"writer-at-turn",
+			]);
+		},
+		scaledTestTimeout(30_000),
+	);
 });
 
 describe("#3873 round 2: decision rows do not take over stall attribution", () => {
