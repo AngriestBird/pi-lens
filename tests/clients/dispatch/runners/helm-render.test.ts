@@ -729,9 +729,12 @@ describe("helm-render rendered-manifest checks", () => {
 		expect(chartContentFingerprint(chart)).toEqual(before);
 		const scratch = stub.renderedIn();
 		expect(scratch).toBeTruthy();
-		// Realpath BOTH sides: the runner builds the dir from a raw `os.tmpdir()`,
-		// which is a symlink on macOS (/var/folders -> /private/var/folders), so
-		// comparing a raw prefix against a realpath'd one is host-dependent.
+		// Realpath BOTH sides: the runner builds the dir from
+		// `scannerReportParentDir()`, which answers `os.tmpdir()` unless a harness
+		// sets the override, and `os.tmpdir()` is a symlink on macOS
+		// (/var/folders -> /private/var/folders), so a raw-prefix comparison is
+		// host-dependent. The expected side stays `os.tmpdir()` on purpose: it is an
+		// independent reading of the host, and the cell below pins the override.
 		expect(fs.realpathSync(path.dirname(scratch as string))).toBe(
 			fs.realpathSync(os.tmpdir()),
 		);
