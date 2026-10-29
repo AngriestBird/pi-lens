@@ -412,10 +412,7 @@ describe("loadLSPConfig — the deny union spans key spellings (#2427 round 2)",
 		const { loadLSPConfig, resetLSPConfigWarnCache } =
 			await import("../../../clients/lsp/config.js");
 		resetLSPConfigWarnCache();
-		try {
-			return (await loadLSPConfig(projectDir, home)) as never;
-		} finally {
-		}
+		return (await loadLSPConfig(projectDir, home)) as never;
 	}
 
 	// Fixture paths, assembled rather than spelled: the layout keys are
