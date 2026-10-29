@@ -2107,13 +2107,13 @@ function hashSystemMessages(messages: ReadonlyArray<ContextMessageLike>): {
  *     benign session boundary logs a spurious `cache_prefix_break`, and a
  *     concurrent subagent + its parent stomp each other's baseline, each
  *     emitting a false positive — fatal for a signal whose value is trust);
- *   - an IN-PROCESS reload / resume reuses the SAME id → the baseline is still in
- *     this map, so a genuine break is caught (no blinding reset). NOTE: a full
- *     process restart (quit → `pi --session <id>`) starts a NEW process with an
- *     empty map, so the first post-restart `context` re-anchors a fresh baseline
- *     rather than comparing across the restart. That's acceptable here — this is a
- *     pure observability signal (at worst a missed `cache_prefix_break` log on the
- *     first post-restart turn, never a user-facing action) — unlike genuine
+ *   - an IN-PROCESS reload / resume reuses the SAME id but starts a new
+ *     session scope (the old one's shutdown clears and retires its own), so
+ *     the first `context` after it re-anchors a fresh baseline rather than
+ *     comparing across the restart, as a full process restart (quit →
+ *     `pi --session <id>`) does. That's acceptable here — this is a pure
+ *     observability signal (at worst a missed `cache_prefix_break` log on the
+ *     first turn after a restart, never a user-facing action) — unlike genuine
  *     session state (read guard #1041, widget #190) which IS rehydrated from the
  *     sidecar.
  *
@@ -2342,17 +2342,4 @@ export function emitCacheUsageSummaryAtSessionEnd(
 		},
 	});
 	cell.attribution = undefined;
-}
-
-export function resetCacheFindingIdentitiesSession(
-	sessionId?: string,
-	sessionRole?: "primary" | "concurrent-secondary",
-): void {
-	const state = cacheCellOf(
-		sessionLookupKey(sessionId, sessionRole),
-		false,
-	)?.attribution;
-	if (!state) return;
-	state.findingIdentities.clear();
-	state.findingIdentityCapRecorded = false;
 }

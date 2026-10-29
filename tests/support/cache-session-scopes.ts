@@ -41,10 +41,3 @@ export function recordToolResultDelivery(
 	bindSession(args.sessionId, args.sessionRole);
 	cacheObservability.recordToolResultDelivery(args);
 }
-
-export function recordTurnEndAdvisoryBytes(
-	...args: Parameters<typeof cacheObservability.recordTurnEndAdvisoryBytes>
-): void {
-	bindSession(args[0], args[2] ?? "primary");
-	cacheObservability.recordTurnEndAdvisoryBytes(...args);
-}

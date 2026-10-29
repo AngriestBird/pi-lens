@@ -16,7 +16,6 @@ import {
 	MAX_ROLLING_DIGEST_MESSAGES,
 	rollingDigestAt,
 	rollingMessageDigests,
-	resetCacheFindingIdentitiesSession,
 } from "../../clients/cache-observability.js";
 import {
 	logCacheUsage,
@@ -2330,6 +2329,9 @@ describe("cache-observability — per-source injection attribution (#1071)", () 
 		});
 	});
 
+	// #2841 via #4965: the identities live on the session's scope, so the
+	// session's end (its scope retires) is the reset; a same-id restart binds a
+	// new scope and counts nothing it saw before as repeated.
 	it("resets repeated-finding identities at a session_start boundary", () => {
 		const finding = "src/reset.ts:7 rule=E1";
 		const observe = (turnIndex: number) =>
@@ -2347,7 +2349,7 @@ describe("cache-observability — per-source injection attribution (#1071)", () 
 
 		observe(1);
 		logCacheUsage(assistantMessage(), undefined, { sessionId: "reset" });
-		resetCacheFindingIdentitiesSession("reset", "primary");
+		resetCachePrefixObservation();
 		observe(2);
 		logCacheUsage(assistantMessage(), undefined, { sessionId: "reset" });
 
