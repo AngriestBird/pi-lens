@@ -266,6 +266,7 @@ const files = {};
 for (const pattern of patterns) {
 	const match = /^(.*):(\d+)-(\d+)$/.exec(pattern);
 	if (!match) continue;
+	if ((control.density || {})[pattern] === 0) continue;
 	const file = match[1];
 	const start = Number(match[2]);
 	if (!files[file]) files[file] = { mutants: [] };
@@ -1310,6 +1311,72 @@ describe("driver Stryker stage, spawned for real (#3856 F3)", () => {
 			expect(real.patterns).toHaveLength(1);
 			expect(output).toContain(
 				`sampled mutants ${held} of ${allowance} allowed`,
+			);
+		} finally {
+			fixture.cleanup();
+		}
+	}, 60_000);
+	// Recurrence this guards (#4171): the resample retry after a zero-mutant sample
+	// kept `keepRangeCount` untried ranges with no mutant bound, so it could
+	// overshoot the allowance the first sample was held to.
+	it("holds the resample retry to the mutant allowance too (#4171)", () => {
+		const fixture = buildDriverFixture({
+			covering: true,
+			includeCompiled: false,
+			manyRanges: 12,
+		});
+		try {
+			const head = String(fixture.git(["rev-parse", "HEAD"])).trim();
+			const ranges = [
+				"scripts/thing.mjs:5-6",
+				...Array.from(
+					{ length: 12 },
+					(_, i) => `scripts/many.mjs:${2 * i + 1}-${2 * i + 1}`,
+				),
+			];
+			const allowance = 10;
+			const binary = join(fixture.root, "node_modules", ".bin", "stryker");
+			writeFileSync(
+				binary,
+				readFileSync(binary, "utf8").replace(
+					"in 1 seconds (net 12 ms",
+					"in 220 seconds (net 220000 ms",
+				),
+			);
+			// The 2 best-ranked ranges hold no mutants, so the first sample runs
+			// empty and the driver retries. The retry ranks the untried ranges under
+			// its own seed; its 2 best hold 8 each, so its uniform estimate (2
+			// ranges, 16 mutants) overshoots 10. Every other range holds 4.
+			const empty = sampleRangesDeterministically(ranges, 2, head).selected;
+			const untried = ranges.filter((range) => !empty.includes(range));
+			const heavy = sampleRangesDeterministically(
+				untried,
+				2,
+				`${head}:retry0`,
+			).selected;
+			const density = Object.fromEntries(
+				ranges.map((range) => [
+					range,
+					empty.includes(range) ? 0 : heavy.includes(range) ? 8 : 4,
+				]),
+			);
+			const total = Object.values(density).reduce((a, b) => a + b, 0);
+			expect(Math.floor((ranges.length * allowance) / total)).toBe(2);
+			mkdirSync(join(fixture.root, ".fake-stryker"), { recursive: true });
+			writeFileSync(
+				join(fixture.root, ".fake-stryker", "control.json"),
+				JSON.stringify({ density }),
+			);
+			const output = runDriver(fixture.root, ["--base", "main"], 120_000);
+			const realRuns = fakeStrykerInvocations(fixture.root).filter(
+				(call) => !call.dryRun,
+			);
+			expect(realRuns[0].patterns.slice().sort()).toEqual(empty.slice().sort());
+			const retry = realRuns[1];
+			expect(retry.patterns).toHaveLength(1);
+			expect(density[retry.patterns[0]]).toBeLessThanOrEqual(allowance);
+			expect(output).toContain(
+				"retry sample of 1 range(s); sampled mutants 8 of 10 allowed",
 			);
 		} finally {
 			fixture.cleanup();
