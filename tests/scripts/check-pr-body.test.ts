@@ -231,8 +231,25 @@ function shellRows(rows: string[]): string {
 
 // One shared `git init` call site keeps the file's pinned real-spawn count
 // while several fixture tests each need a fresh repository.
+function fixtureGit(args: string[], options?: Record<string, unknown>): string {
+	return String(gitExecFileSync(args, options));
+}
+
 function initFixtureRepo(fixtureRepo: string) {
-	gitExecFileSync(["init", "-q"], { cwd: fixtureRepo });
+	fixtureGit(["init", "-q"], { cwd: fixtureRepo });
+}
+
+// `lintLocalPrBody` hands its git to every lint rule (#3902), so a stub that
+// answers each call with the diff also answers `check-ignore` and `ls-files`.
+// A case that needs the checkout's real answer for those two keeps the stub
+// for everything else.
+function stubWithRealCheckIgnoreAndLsFiles(
+	stub: (args: string[]) => string,
+): (args: string[], options?: Record<string, unknown>) => string {
+	return (args, options) =>
+		args[0] === "check-ignore" || args[0] === "ls-files"
+			? fixtureGit(args, options)
+			: stub(args);
 }
 
 function createOriginMasterFixture(
@@ -741,7 +758,7 @@ describe("test-reference shape and placement", () => {
 				lintLocalPrBody(
 					`${body}\nThe helper is at \`${file}:1\`.`,
 					fixtureRepo,
-					() => "",
+					stubWithRealCheckIgnoreAndLsFiles(() => ""),
 				).errors.filter((error) => error.includes("citation"));
 			expect(citing("vendor/lib.js")).toEqual([
 				"PR body citation vendor/lib.js:1 names a git-ignored path; CI resolves citations with `git show HEAD:<file>`, so it can never pass there.",
@@ -2784,7 +2801,7 @@ describe("PR body lint (#1844)", () => {
 				"clients/new-path.ts",
 			),
 			process.cwd(),
-			() => NEW_PATH_RUNTIME_DIFF,
+			stubWithRealCheckIgnoreAndLsFiles(() => NEW_PATH_RUNTIME_DIFF),
 			{ headFiles: NEW_PATH_HEAD_FILES },
 		);
 		expect(result.valid).toBe(true);
@@ -2803,7 +2820,7 @@ describe("PR body lint (#1844)", () => {
 				"clients/new-path.ts",
 			),
 			process.cwd(),
-			() => NEW_PATH_RUNTIME_DIFF,
+			stubWithRealCheckIgnoreAndLsFiles(() => NEW_PATH_RUNTIME_DIFF),
 			{ headFiles: NEW_PATH_HEAD_FILES },
 		);
 		expect(result).toEqual({

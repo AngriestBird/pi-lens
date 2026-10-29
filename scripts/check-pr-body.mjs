@@ -23,6 +23,7 @@ import {
 	loadCoverageMap,
 	matchGlob,
 	parseChangedFiles,
+	withoutDeclaredFamilies,
 } from "./lib/tla-coverage.mjs";
 import { evaluateWorkflowRunEvidence } from "./lib/workflow-run-evidence.mjs";
 import {
@@ -2538,7 +2539,8 @@ function globToRegExp(pattern, { directory }) {
 
 /** The record-shaped mentions of a section, in the order the body makes them. */
 function recordMentions(content) {
-	const source = String(content ?? "");
+	// A `TLA+ unaffected: <family>` line names a family, not a record (#3902).
+	const source = withoutDeclaredFamilies(content ?? "");
 	const mentioned = new Map();
 	for (const match of source.matchAll(/`([^`\n]+)`/g)) {
 		const span = match[1].trim();
@@ -4772,6 +4774,7 @@ export function lintLocalPrBody(
 		workingTree: true,
 		ref: options.ref,
 		headFiles: options.headFiles,
+		git,
 		proseMode: options.proseMode,
 		title: options.title,
 	});

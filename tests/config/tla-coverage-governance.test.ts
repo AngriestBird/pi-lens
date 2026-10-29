@@ -11,6 +11,7 @@ import {
 	matchGlob,
 	parseChangedFiles,
 	validateCoverageMap,
+	withoutDeclaredFamilies,
 } from "../../scripts/lib/tla-coverage.mjs";
 import {
 	lintLocalPrBody,
@@ -438,23 +439,56 @@ describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 		expect(realGit.calls).toEqual([]);
 	});
 
+	// #3902: the declarations end the body, under "## Observability". Their
+	// family names are not record mentions, so no runtime-tree `git grep` and
+	// lex runs for them.
+	const DECLARATIONS =
+		"TLA+ unaffected: read-guard — only a local helper moved.\nTLA+ unaffected: session-lifecycle — the change does not touch session state.";
+
+	const spyGit = (calls: string[][]) => (args: string[]) => {
+		calls.push(args);
+		return args.includes("--name-only")
+			? "clients/read-guard.ts\n"
+			: READ_GUARD_DIFF;
+	};
+
 	it("passes the same diff when the body carries the unaffected line", () => {
-		const git = (args: string[]) =>
-			args.includes("--name-only")
-				? "clients/read-guard.ts\n"
-				: READ_GUARD_DIFF;
-		// Before "## Class sweep", not at the end: a family name under
-		// "## Observability" reads as a record mention and starts a runtime-tree
-		// `git grep` and lex (#3902).
-		const body = BASE_BODY.replace(
-			"## Class sweep",
-			"TLA+ unaffected: read-guard — only a local helper moved.\nTLA+ unaffected: session-lifecycle — the change does not touch session state.\n\n## Class sweep",
-		);
-		const result = lintLocalPrBody(body, REPO_ROOT, git as never, {
+		const calls: string[][] = [];
+		const body = `${BASE_BODY}\n\n${DECLARATIONS}`;
+		const result = lintLocalPrBody(body, REPO_ROOT, spyGit(calls) as never, {
 			headFiles: READ_GUARD_HEAD_FILES,
 		});
 		expect(result.valid).toBe(true);
+		expect(calls.filter((args) => args[0] === "grep")).toEqual([]);
 		expect(realGit.calls).toEqual([]);
+	});
+
+	it("still harvests a real record named in the same section", () => {
+		const calls: string[][] = [];
+		const body = `${BASE_BODY}\n\nSee \`tool-cwd-resolution\`.\n${DECLARATIONS}`;
+		lintLocalPrBody(body, REPO_ROOT, spyGit(calls) as never, {
+			headFiles: READ_GUARD_HEAD_FILES,
+		});
+		const grep = calls.find((args) => args[0] === "grep") ?? [];
+		expect(grep).toContain("tool-cwd-resolution");
+		expect(grep).not.toContain("read-guard");
+		expect(grep).not.toContain("session-lifecycle");
+		expect(realGit.calls).toEqual([]);
+	});
+});
+
+describe("withoutDeclaredFamilies (#3902)", () => {
+	it("drops the family token of a declaration and keeps its reason", () => {
+		expect(
+			withoutDeclaredFamilies(
+				"- **TLA+ unaffected: read-guard — emits `tool-cwd-resolution`.",
+			),
+		).toBe("- **TLA+ unaffected:  — emits `tool-cwd-resolution`.");
+		expect(
+			withoutDeclaredFamilies(
+				"TLA+ unaffected: read-guard — a.\nSee read-guard and `kind-one`.",
+			),
+		).toBe("TLA+ unaffected:  — a.\nSee read-guard and `kind-one`.");
 	});
 });
 
