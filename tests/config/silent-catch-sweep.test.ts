@@ -1388,7 +1388,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
  * the launcher's PATH walk and metrics-history's git probe through the spawn
  * seam, and the merged tree's population is 1,175. Folding gitleaks's and trivy's
  * report-scan bodies onto `SecurityScanClient.runReportScan` removed four
- * silent handlers and spent two `none:` lines in the one copy, so it is 1,171.
+ * silent handlers and spent one `none:` line in the one copy, so it is 1,171.
  * It moves only downward from here.
  */
 const PINNED_TOTAL = 1171;
