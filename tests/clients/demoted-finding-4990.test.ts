@@ -187,10 +187,19 @@ function turnEndText(
 	);
 }
 
-function inlinePolicyRows(): Array<Record<string, unknown>> {
+interface InlinePolicyTally {
+	stale?: number;
+	candidates?: number;
+	kept?: number;
+	dispositionSuppressed?: number;
+}
+
+function inlinePolicyRows(): Array<{ metadata?: InlinePolicyTally }> {
 	return logLatency.mock.calls
 		.map(([entry]) => entry)
-		.filter((entry) => entry?.phase === "inline_blocker_policy");
+		.filter(
+			(entry: { phase?: string }) => entry?.phase === "inline_blocker_policy",
+		) as Array<{ metadata?: InlinePolicyTally }>;
 }
 
 function demotedRetirementReasons(): string[] {
@@ -266,10 +275,10 @@ describe("#4990 gap 2 — the demoted channel honours stored dispositions", () =
 			// names the stale record and the two findings the marks removed.
 			const rows = inlinePolicyRows();
 			expect(rows.length).toBeGreaterThan(0);
-			const last = rows.at(-1) as Record<string, any>;
-			expect(last.metadata.stale).toBe(1);
-			expect(last.metadata.candidates).toBe(2);
-			expect(last.metadata.dispositionSuppressed).toBe(2);
+			const last = rows.at(-1);
+			expect(last?.metadata?.stale).toBe(1);
+			expect(last?.metadata?.candidates).toBe(2);
+			expect(last?.metadata?.dispositionSuppressed).toBe(2);
 			// A demoted record whose every finding is marked is no longer a blocker
 			// the commit gate may quote: the same survivor set decides both (#3248).
 			expect(runtime.gitGuardHasBlockers).toBe(false);
@@ -310,11 +319,11 @@ describe("#4990 gap 2 — the demoted channel honours stored dispositions", () =
 			// "must be fixed" imperative (#1944).
 			expect(text).not.toContain("must be fixed");
 
-			const last = inlinePolicyRows().at(-1) as Record<string, any>;
-			expect(last.metadata.stale).toBe(1);
-			expect(last.metadata.candidates).toBe(2);
-			expect(last.metadata.kept).toBe(1);
-			expect(last.metadata.dispositionSuppressed).toBe(1);
+			const last = inlinePolicyRows().at(-1);
+			expect(last?.metadata?.stale).toBe(1);
+			expect(last?.metadata?.candidates).toBe(2);
+			expect(last?.metadata?.kept).toBe(1);
+			expect(last?.metadata?.dispositionSuppressed).toBe(1);
 		} finally {
 			env.cleanup();
 		}
