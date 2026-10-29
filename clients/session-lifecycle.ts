@@ -211,9 +211,14 @@ export function hasLiveSessionInProcess(except?: LiveSessionMember): boolean {
 	const lists = liveSessionLists();
 	let live = false;
 	for (const members of lists) {
-		const others = members.filter((member) => member !== except);
-		const disposed = others.filter((member) => !isLiveSessionMember(member));
-		if (disposed.length < others.length) live = true;
+		let otherLive = false;
+		const disposed: LiveSessionMember[] = [];
+		for (const member of members) {
+			if (member === except) continue;
+			if (isLiveSessionMember(member)) otherLive = true;
+			else disposed.push(member);
+		}
+		if (otherLive) live = true;
 		else if (!members.some((member) => member === except)) {
 			lists.delete(members);
 			// Each member still listed never left: pi disposed it without a
