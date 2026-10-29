@@ -192,13 +192,17 @@ export interface PiFauxContext {
 	readonly messages: readonly PiMessage[];
 }
 
-/** A scripted reply computed from the request pi is answering. */
+/**
+ * A scripted reply computed from the request pi is answering. pi-ai's
+ * `fauxProvider` awaits it, so a reply may wait on another session's prompt:
+ * the way a case runs two concurrent sessions in a fixed order (#4943 R1).
+ */
 export type PiFauxReplyFactory = (
 	context: PiFauxContext,
 	options: unknown,
 	state: unknown,
 	model: unknown,
-) => Record<string, unknown>;
+) => Record<string, unknown> | Promise<Record<string, unknown>>;
 
 /** A scripted provider reply: a message, or a function of the request it answers. */
 export type PiFauxReply = Record<string, unknown> | PiFauxReplyFactory;

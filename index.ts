@@ -4812,10 +4812,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 			const contributeBase = () =>
 				base === existingMessages ? undefined : { messages: base };
 
+			// #4943: the turn end's own expression for its session
+			// (`deliverySessionId`), so this request takes only what its own
+			// session's turn end staged.
 			const turnEndFindings = consumeTurnEndFindings(
 				cacheManager,
 				cwd,
 				runtime,
+				prefixSessionId ?? runtime.telemetrySessionId,
 			);
 			const sessionGuidance = consumeSessionStartGuidance(cacheManager, cwd);
 			const testFindings = consumeStagedTestRunnerFindings({

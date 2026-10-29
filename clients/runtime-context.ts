@@ -113,16 +113,31 @@ export function peekTurnEndFindings(
 	};
 }
 
+/**
+ * #4943: `sessionId` is the reading request's session. A message another
+ * session's turn end composed (`deliverTo`), or the blocker text of a record
+ * another session owns, is that session's: the read leaves it untouched for
+ * that session's next request. Omitted (the MCP host, whose coordinator id is
+ * per process), every message is the reader's.
+ */
 export function consumeTurnEndFindings(
 	cacheManager: CacheManager,
 	cwd: string,
 	runtime?: RuntimeCoordinator,
+	sessionId?: string,
 ): ContextResult | undefined {
 	const findings = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
 		"turn-end-findings",
 		cwd,
 	);
 	if (!findings?.data?.content || findings.data.consumed === true) return;
+	const addressee = findings.data.deliverTo ?? findings.data.sessionId;
+	if (
+		sessionId !== undefined &&
+		addressee !== undefined &&
+		addressee !== sessionId
+	)
+		return;
 	const validation = validateAdvisoryProvenance(findings.data, cwd, runtime);
 	logProvenanceDecision(validation, findings.data.provenance, "turn-end", cwd);
 

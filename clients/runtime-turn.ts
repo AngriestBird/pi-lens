@@ -6236,6 +6236,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// matched), so the rewrite keeps the record current for the gate
 						// without handing the same text to the model again.
 						consumed: true,
+						// #4943: the content is this turn's session's message.
+						deliverTo: deliverySessionId,
 					});
 					// #4750: the write, not the read, records what it left out.
 					logCarriedDrops(cwd, dropped);
@@ -6346,6 +6348,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				affectedFiles,
 				provenance: stampProvenance(affectedFiles),
 				sessionId: blockers.owner ?? deliverySessionId,
+				// #4943: only this turn's session's next request takes the message,
+				// whoever owns the blocker sections the record leads with.
+				deliverTo: deliverySessionId,
 				projectSeqStart: runtime.turnStartProjectSeq,
 				projectSeqEnd: runtime.projectSeq,
 				fileSeqByPath,
@@ -6377,6 +6382,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					affectedFiles,
 					affectedFilesTruncated,
 					provenance: stampProvenance(affectedFiles, affectedFilesTruncated),
+					// #4943: only this turn's session's next request takes it.
+					deliverTo: deliverySessionId,
 				},
 				cwd,
 			);

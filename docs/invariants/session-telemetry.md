@@ -54,6 +54,17 @@
   the coordinator's for the coordinator and module stores a secondary
   shares, the activation's for its own scope cell. One store never answers
   to two scopes, and a secondary's end fences only its cell.
+- The project's one turn-end delivery slot (`turn-end-findings`'s
+  `content`) is addressed (#4943): the composer stamps `deliverTo` with its
+  turn's session, a commit-gate rewrite of the content leaves it out so the
+  record's owner (`sessionId`) is the addressee, and the `context` hook
+  consumes only a record addressed to its own session (the composer's id
+  expression); any other request leaves it untouched. A record with neither
+  field goes to whoever asks. The MCP host reads unaddressed: its
+  coordinator id is per process, and a restarted server still delivers what
+  the last one staged. A staged message another writer replaces before its
+  owner asks is not kept; the owner's next turn end composes its unresolved
+  blockers again, since the dedupe's last writer was the other session.
 - Every session-scope hand-off decision leaves one `latency.log` row per
   lifecycle event, never one per occurrence in a loop (#3873):
   `session_handoff_slot`, `session_handoff_adopt`, `session_store_action`
