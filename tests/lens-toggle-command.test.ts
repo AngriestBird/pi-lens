@@ -6,6 +6,8 @@ import piLens from "../index.js";
 import { type PiRunner, startPiRunner } from "./support/pi-runner.js";
 import { createPiMock, makeCtx, type PiMock } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+import { useConfigPath } from "./support/global-config.js";
+const setConfigPath = useConfigPath();
 
 // Template for #171: a command test driven through the shared harnesses — no
 // bespoke ExtensionAPI mock. Run the real entry, then invoke the registered
@@ -27,7 +29,6 @@ import { removeTempDirSync } from "./clients/test-utils.js";
 // than a slice that would move it (review F4 on #4702).
 
 const tmpDirs: string[] = [];
-let previousConfigPath: string | undefined;
 let runner: PiRunner;
 
 beforeAll(async () => {
@@ -35,15 +36,12 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-toggle-config-"));
 	tmpDirs.push(dir);
-	process.env.PI_LENS_CONFIG_PATH = path.join(dir, "missing-config.json");
+	setConfigPath(path.join(dir, "missing-config.json"));
 });
 
 afterEach(() => {
-	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	for (const dir of tmpDirs.splice(0)) {
 		removeTempDirSync(dir);
 	}
