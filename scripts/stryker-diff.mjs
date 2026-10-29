@@ -20,8 +20,10 @@ import {
 	DEFAULT_MAX_FILES,
 	DEFAULT_MAX_RANGES,
 	describePartialMutationOutcome,
+	describeSampledMutants,
 	describeStrykerFailure,
 	estimateAffordableMutants,
+	fitSampleToMutantAllowance,
 	formatCapNotice,
 	collectChangedRanges,
 	isCompiledMutationSource,
@@ -277,17 +279,19 @@ function shellQuote(value) {
 	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function writeRunConfig(testFiles, { reuse = false } = {}) {
+function writeRunConfig(testFiles, { reuse = false, command: override } = {}) {
 	mkdirSync(".stryker", { recursive: true });
-	const command = [
-		"node_modules/.bin/vitest",
-		"run",
-		"--configLoader",
-		"runner",
-		"--testTimeout",
-		String(MUTATION_TEST_TIMEOUT_MS),
-		...testFiles.map(shellQuote),
-	].join(" ");
+	const command =
+		override ??
+		[
+			"node_modules/.bin/vitest",
+			"run",
+			"--configLoader",
+			"runner",
+			"--testTimeout",
+			String(MUTATION_TEST_TIMEOUT_MS),
+			...testFiles.map(shellQuote),
+		].join(" ");
 	const config = buildRunConfig(base, { command, reuse });
 	const file = ".stryker/diff.config.mjs";
 	// A plain object with no functions (verified: every stryker.config.mjs
@@ -744,6 +748,35 @@ console.log(measureOutput);
 let patterns = allPatterns;
 let sampled = false;
 
+// #4171: Stryker prints a mutant TOTAL only, so the mutants a sample holds are
+// counted by instrumenting it under a command that runs no tests: ~3 s a pass
+// (measured locally and in run 40847865852's instrument step), against the
+// minutes a run spends on every mutant the sample is wrong about.
+function countSampleMutants(selection) {
+	const countResult = spawnSync(
+		"node_modules/.bin/stryker",
+		[
+			"run",
+			"--mutate",
+			selection.join(","),
+			"--dryRunOnly",
+			writeRunConfig([], { command: 'node -e ""' }),
+		],
+		{
+			stdio: ["ignore", "pipe", "pipe"],
+			encoding: "utf8",
+			timeout: remainingBudgetMs(),
+			killSignal: "SIGTERM",
+		},
+	);
+	rmSync(STRYKER_LOG_PATH, { force: true });
+	if (countResult.error || countResult.status !== 0) return null;
+	return (
+		parseDryRunCost(`${countResult.stdout ?? ""}${countResult.stderr ?? ""}`)
+			?.totalMutants ?? null
+	);
+}
+
 if (measureResult.error || measureResult.status !== 0) {
 	// The measurement dry run IS the real run's own dry run (same tests, same
 	// code): if it fails here, the real run would fail identically, so report
@@ -835,15 +868,17 @@ if (!cost) {
 				Math.floor((allPatterns.length * allowedMutants) / cost.totalMutants),
 			),
 		);
-		const resampled = sampleRangesDeterministically(
-			allPatterns,
-			keepRangeCount,
-			sha,
-		);
-		patterns = resampled.selected;
+		const fit = fitSampleToMutantAllowance({
+			patterns: allPatterns,
+			startCount: keepRangeCount,
+			allowedMutants,
+			seed: sha,
+			countMutants: countSampleMutants,
+		});
+		patterns = fit.selected;
 		sampled = true;
 		console.log(
-			`mutation diff: measured ${cost.totalMutants} mutant(s) at ${cost.dryRunMs}ms/dry-run; the remaining budget affords ~${allowedMutants}; sampled ${patterns.length} of ${allPatterns.length} ranges deterministically (seed ${sha})`,
+			`mutation diff: measured ${cost.totalMutants} mutant(s) at ${cost.dryRunMs}ms/dry-run; the remaining budget affords ~${allowedMutants}; sampled ${patterns.length} of ${allPatterns.length} ranges deterministically (seed ${sha}); ${describeSampledMutants(fit, allowedMutants)}`,
 		);
 	} else {
 		console.log(
@@ -1182,6 +1217,29 @@ for (;;) {
 				seed: sha,
 				attemptsSoFar: attempt,
 				maxAttempts: MAX_RESAMPLE_ATTEMPTS,
+				// #4171: a retry holds the same mutant allowance the first sample did,
+				// from the budget that is left now. Without a parsed cost there is no
+				// allowance, and the first sample was the plain range-cap fallback.
+				sample: !costEstimate
+					? undefined
+					: (pool, limit, retrySeed) => {
+							const retryAllowance = estimateAffordableMutants({
+								remainingMs: remainingBudgetMs(),
+								dryRunMs: costEstimate.dryRunMs,
+								fixedOverheadMs: DEFAULT_MUTATION_FIXED_OVERHEAD_MS,
+							});
+							const fit = fitSampleToMutantAllowance({
+								patterns: pool,
+								startCount: limit,
+								allowedMutants: retryAllowance,
+								seed: retrySeed,
+								countMutants: countSampleMutants,
+							});
+							console.log(
+								`mutation diff: retry sample of ${fit.selected.length} range(s); ${describeSampledMutants(fit, retryAllowance)}`,
+							);
+							return fit;
+						},
 			})
 		: { retry: false };
 	attempt += 1;
