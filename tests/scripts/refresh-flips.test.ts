@@ -231,8 +231,7 @@ describe("#4512 every other difference is a flip (fail closed)", () => {
 					? `${line} applied |`
 					: line,
 			)
-			.join("\n")
-			.replace(/ \|\n/g, " |\n");
+			.join("\n");
 		expect(listRefreshFlips(HEAD, withDocs(widened)).length).toBeGreaterThan(0);
 	});
 
