@@ -50,6 +50,8 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { RUNTIME_CONFIG } from "../../clients/runtime-config.js";
 import { installLspService } from "../support/lsp-service-seam.js";
+import { useConfigPath } from "../support/global-config.js";
+const setConfigPath = useConfigPath();
 
 /**
  * The mocked LSP service every case reads through `mocked.service`. #4397: it
@@ -671,8 +673,7 @@ describe("lsp_diagnostics tool", () => {
 		// Anchor the ignore matcher's git root at tmpDir + isolate from any global
 		// ~/.pi-lens/config.json on the host so the scan is hermetic.
 		fs.mkdirSync(path.join(tmpDir, ".git"));
-		const prevConfig = process.env.PI_LENS_CONFIG_PATH;
-		process.env.PI_LENS_CONFIG_PATH = path.join(tmpDir, "no-global.json");
+		setConfigPath(path.join(tmpDir, "no-global.json"));
 		resetProjectLensConfigCache();
 		const write = (rel: string, body = "const value = 1;\n") => {
 			const full = path.join(tmpDir, rel);
@@ -708,8 +709,6 @@ describe("lsp_diagnostics tool", () => {
 			);
 			expect(opened).toEqual(["src/good.ts"]);
 		} finally {
-			if (prevConfig === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = prevConfig;
 			resetProjectLensConfigCache();
 			removeTempDirSync(tmpDir);
 		}

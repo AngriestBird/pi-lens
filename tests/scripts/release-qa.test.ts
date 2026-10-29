@@ -95,6 +95,7 @@ import {
 	summarizeToolEnds,
 } from "../../scripts/release-qa.mjs";
 import { effectiveConfig } from "../../clients/effective-config.js";
+import { withGlobalConfig } from "../support/global-config.js";
 import { renderToolText } from "../../tools/render-compact.js";
 import {
 	cleanupTestEnvironmentsDrained,
@@ -1665,11 +1666,7 @@ describe("release-QA global-config-location witnesses application (#3446 F1)", (
 			"extensions",
 			"pi-lens.json",
 		);
-		fs.mkdirSync(path.dirname(agentConfigPath), { recursive: true });
-		fs.writeFileSync(agentConfigPath, `${JSON.stringify(globalConfig)}\n`);
-		const previous = process.env.PI_LENS_CONFIG_PATH;
-		process.env.PI_LENS_CONFIG_PATH = agentConfigPath;
-		try {
+		return withGlobalConfig(agentConfigPath, globalConfig, async () => {
 			const view = await effectiveConfig({
 				cwd: projectDir,
 				file: "a.ts",
@@ -1679,10 +1676,7 @@ describe("release-QA global-config-location witnesses application (#3446 F1)", (
 			});
 			const { content } = renderToolText("Config: …", view);
 			return { text: content[0].text, agentConfigPath, view };
-		} finally {
-			if (previous === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = previous;
-		}
+		});
 	}
 
 	it("passes when the global file's setting decides the server", async () => {

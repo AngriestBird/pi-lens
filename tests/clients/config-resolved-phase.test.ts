@@ -190,12 +190,10 @@ async function configResolutionLinesSince(offset: number): Promise<string[]> {
 
 let previousTestMode: string | undefined;
 let previousHome: string | undefined;
-let previousConfigPath: string | undefined;
 
 beforeEach(async () => {
 	previousTestMode = process.env.PI_LENS_TEST_MODE;
 	previousHome = process.env.PI_LENS_HOME;
-	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	process.env.PI_LENS_TEST_MODE = "0";
 	resetIgnoredConfigWarnCache();
 	clearLatencyLog();
@@ -208,8 +206,6 @@ afterEach(async () => {
 	else process.env.PI_LENS_TEST_MODE = previousTestMode;
 	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 	else process.env.PI_LENS_HOME = previousHome;
-	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	resetIgnoredConfigWarnCache();
 	const { resetLSPConfigStateForTests } =
 		await import("../../clients/lsp/config.js");
