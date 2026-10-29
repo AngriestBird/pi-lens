@@ -21,7 +21,9 @@
 //   diagnostic-neutral byte edit plus a save, the production shape).
 // - MERGE. A run that could not reach a server keeps that row verbatim (#390):
 //   an unreachable toolchain must never blank a measured cell, so `refresh`
-//   rewrites only the rows this run measured.
+//   rewrites only the rows this run measured, and a row whose run hit a failure
+//   (`install`, `setup`, a thrown arm) produces NO cell at all rather than a
+//   verdict read off the arm that failed (#4999 F8).
 //
 // Dependency-free on purpose (only `md-matrix.mjs`, itself dependency-free, for
 // the markdown table primitives): the nightly writes this doc on a checkout where
@@ -52,22 +54,29 @@ export const SAVE_VERDICT_VALUES = new Set([
 	"cannot measure",
 ]);
 
-/** The `src` token the nightly writes; a developer probe writes `dev`. */
+/**
+ * The command a measured cell names as its provenance. The `src` token that says
+ * whether a run happened on CI or a dev box is NOT committed here: it and every
+ * arm's elapsed time live in the run's log and summary, so a re-measurement that
+ * changes only those is not a capability flip (#4999 F7).
+ */
 export const SAVE_VERDICT_COMMAND = "node scripts/probe-save-verdict.mjs";
 
-/** An arm with no observation at all (the driver ran it and saw nothing). */
-export const SILENT_ARM = Object.freeze({ nonEmpty: 0, ms: null });
+/** Written for one run: the verdicts a probe run settled, so re-measuring one is a refresh (#4999 F3). */
+const SAVE_VERDICT_SETTLED = new Set([
+	"no",
+	"no (pull)",
+	"yes",
+	"yes (saved write)",
+]);
 
 function countOf(arm) {
 	const n = Number(arm?.nonEmpty ?? 0);
 	return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
 
-function msOf(arm) {
-	const ms = Number(arm?.ms);
-	return arm?.nonEmpty > 0 && Number.isFinite(ms) && ms >= 0
-		? Math.round(ms)
-		: null;
+function isCause(cause) {
+	return typeof cause === "string" && cause.trim() !== "";
 }
 
 /**
@@ -77,10 +86,16 @@ function msOf(arm) {
  * `textDocument/diagnostic`, otherwise a push mode). A pull server never
  * publishes, so its no-save arm is the request's own answer; the verdict is
  * still `no`-family, marked `(pull)` so a reader does not go looking for a
- * publish that never existed.
+ * publish that never existed. A pull server whose no-save arm saw nothing is
+ * `inconclusive`, NEVER `yes` (#4999 F2): every one of its arms is a repeated
+ * `textDocument/diagnostic` request, so no arm has a save as its only new
+ * input, and the previous rule credited such a server with a publish it
+ * cannot make.
  *
  * An arm missing from the input (the driver skipped it) is silent: every rule
  * below is positive-evidence-only, so an absent arm can never turn into a `yes`.
+ * A row whose RUN failed is not classified at all — `saveVerdictCells` returns
+ * no cell for it (#4999 F8).
  *
  * @param {{
  *   mode?: string,
@@ -105,6 +120,15 @@ export function classifySaveVerdict(input) {
 				mode === "pull"
 					? "the diagnostics request answered the seeded finding with no save, so the save is not the trigger"
 					: "the seeded finding published without a save, so the save is not the trigger",
+		};
+	}
+	// #4999 F2: a pull server's every arm is a request. Nothing it answers can be
+	// attributed to a save, so the positive branches below never apply to it.
+	if (mode === "pull") {
+		return {
+			verdict: "inconclusive",
+			reason:
+				"pull mode: every arm is a textDocument/diagnostic request, so no arm has the save as its only new input",
 		};
 	}
 	// A publish in the untriggered window is a late answer from an earlier arm.
@@ -137,12 +161,27 @@ export function classifySaveVerdict(input) {
 	};
 }
 
-/** `3 findings at 97 ms`, or `silent`. */
-export function describeArm(arm, waitMs) {
+/**
+ * `3 publish events`, or `silent (6000 ms)`.
+ *
+ * Not the arm's elapsed time (#4999 F7): it moves on every run, so a
+ * timing-only difference would arrive as a capability flip and disarm the
+ * refresh PR's auto-merge. Every arm's elapsed time goes to the run log; only
+ * the window survives in the cell, and it is a flag the nightly passes once for
+ * every arm of a run, not an observation.
+ *
+ * `unit` is the arm's singular noun — `finding` (the default), `publish event`,
+ * `diagnostic` — and is pluralised here so a cell cannot report publish events
+ * as findings (#4999 F9).
+ *
+ * @param {{ nonEmpty?: number, ms?: number | null } | undefined} arm
+ * @param {number} waitMs
+ * @param {string} [unit]
+ */
+export function describeArm(arm, waitMs, unit = "finding") {
 	const n = countOf(arm);
 	if (n === 0) return `silent (${waitMs} ms)`;
-	const ms = msOf(arm);
-	return `${n} finding${n === 1 ? "" : "s"} at ${ms ?? "?"} ms`;
+	return `${n} ${unit}${n === 1 ? "" : "s"}`;
 }
 
 /**
@@ -171,23 +210,36 @@ export function fixturePolicy(fixture) {
  *   fixture: { lang: string, auxiliaryServerIds?: string[], lspGate?: boolean, lspGateExempt?: string },
  *   arms: Parameters<typeof classifySaveVerdict>[0],
  *   waitMs: number,
- *   src: string,
+ *   failures?: string[],
  * }} row
- * @returns {Record<string, string>} cell values keyed by column name
+ * @returns {Record<string, string> | undefined} cell values keyed by column name,
+ *   or `undefined` when the run could not complete an arm the row needs (the
+ *   caller then leaves the row unmeasured, so the merge guard keeps it)
  */
 export function saveVerdictCells(row) {
+	// #4999 F8: an arm that threw, or an install/setup that failed, leaves a hole
+	// no arm can fill. The zeroed arms it produces read as silence, and a
+	// publishing save-alone arm would then mint a `yes` for a comparison that
+	// never happened — so this row gets NO cell and the merge guard keeps the
+	// prior one (#390). The cause reaches the run log through the driver.
+	if ((row?.failures ?? []).some(isCause)) return undefined;
 	const { verdict, reason } = classifySaveVerdict({
 		mode: row.mode,
 		...row.arms,
 	});
-	const noSave = describeArm(row.arms?.noSave, row.waitMs);
-	const saveAlone = describeArm(row.arms?.saveAlone, row.waitMs);
-	const savedWrite = describeArm(row.arms?.savedWrite, row.waitMs);
+	// A push arm counts publish EVENTS (one event may carry several findings); a
+	// pull arm counts the diagnostics a request answered. Naming the unit is
+	// what keeps the cell from reporting publishes as findings (#4999 F9).
+	const unit = row.mode === "pull" ? "diagnostic" : "publish event";
+	const noSave = describeArm(row.arms?.noSave, row.waitMs, unit);
+	const saveAlone = describeArm(row.arms?.saveAlone, row.waitMs, unit);
+	const savedWrite = describeArm(row.arms?.savedWrite, row.waitMs, unit);
 	const observation = {
-		no: `Measured: ${verdict === "no (pull)" ? "pull mode — the diagnostics request answered the seeded finding with no save" : `answers without a save (${noSave} on didOpen); a later save alone: ${saveAlone}`}.`,
+		no: `Measured: answers without a save (${noSave} on didOpen); a later save alone: ${saveAlone}.`,
 		"no (pull)": `Measured: pull mode — no save needed; a later save alone: ${saveAlone}.`,
 		yes: `Measured: only the save published — silent on didOpen (${row.waitMs} ms), then ${saveAlone} after the save alone.`,
 		"yes (saved write)": `Measured: only a saved write published — silent on didOpen and on the save alone, then ${savedWrite} on a diagnostic-neutral edit plus a save.`,
+		"cannot measure": `Measured: cannot measure: ${reason}.`,
 	}[verdict];
 	const policy = fixturePolicy(row.fixture);
 	const verdictCell =
@@ -200,7 +252,7 @@ export function saveVerdictCells(row) {
 		"save as declared": `\`${row.save}\``,
 		[SAVE_VERDICT_COLUMN]: verdict,
 		verdict: policy ? `${verdictCell} ${policy}` : verdictCell,
-		evidence: `\`${SAVE_VERDICT_COMMAND}\` (src=${row.src}, fixture ${row.fixture?.lang ?? row.server})`,
+		evidence: `\`${SAVE_VERDICT_COMMAND}\` (fixture ${row.fixture?.lang ?? row.server})`,
 	};
 }
 
@@ -279,14 +331,17 @@ export function refreshSaveVerdictTable(text, measured, opts = {}) {
 }
 
 /**
- * The rows the doc currently holds, as `{ server, save, verdict }`. The driver
- * reads the verdict back to probe the rows nobody has measured FIRST, so a
- * bounded nightly converges on the unmeasured population instead of re-spending
- * its budget on rows that already have a measured verdict.
+ * The rows the doc currently holds, as `{ server, save, verdict, evidence }`.
+ *
+ * `evidence` is part of the row because PROVENANCE is what decides whether a
+ * row is worth re-measuring (#4999 F3): a source-read `no` and a probe-measured
+ * `no` hold the same verdict and mean different things, and inferring which one
+ * a row is from the verdict alone left the source claims last in the queue,
+ * exactly where a bounded run never reaches them.
  *
  * @param {string} text
  * @param {{ marker?: string }} [opts]
- * @returns {Array<{ server: string, save: string, verdict: string }>}
+ * @returns {Array<{ server: string, save: string, verdict: string, evidence: string }>}
  */
 export function parseSaveVerdictRows(text, opts = {}) {
 	const table = parseTable(text, opts.marker ?? SAVE_VERDICT_MARKER);
@@ -295,52 +350,60 @@ export function parseSaveVerdictRows(text, opts = {}) {
 	const server = idx("server");
 	const save = idx("save as declared");
 	const verdict = idx(SAVE_VERDICT_COLUMN);
+	const evidence = idx("evidence");
 	return table.rows.map((cells) => ({
 		server: cells[server],
 		save: cells[save],
 		verdict: cells[verdict],
+		evidence: cells[evidence],
 	}));
 }
 
 /**
- * Order the probe's fixtures: rows the doc has NOT measured first, then the rest.
+ * Order the probe's fixtures by what a bounded run can still improve (#3405).
  *
- * Without this a bounded run spends its budget in fixture order and can starve
- * exactly the rows the table needs (#3405: nine unverified servers sat behind
- * twelve source-read ones). Ties keep fixture order, so a run over already
- * measured rows is still deterministic.
+ * Without this a run spends its budget in fixture order and starves exactly the
+ * rows the table needs. The first version of this function ranked by verdict
+ * alone, and that was wrong in two directions (#4999 F3): the 33 tool-smoke
+ * fixtures with no table row (a launch variant under an id the inventory
+ * records as declaring no save) ranked as "unmeasured" and came FIRST, and the
+ * source-read rows ranked as "measured" and came last, so a short budget never
+ * replaced a source claim with a measurement.
+ *
+ * Four tiers, keyed on the doc row's provenance:
+ *
+ * 1. no row, or a row whose evidence does not name the probe — a source read, a
+ *    prior run, a hand edit: this run can replace a claim nobody measured;
+ * 2. a row the probe measured that is still unsettled (`unknown`,
+ *    `inconclusive`, `cannot measure`): worth another try;
+ * 3. a row the probe measured and settled: re-measuring is a refresh;
+ * 4. a fixture with no table row at all, which can never write one: last,
+ *    because budget spent on it starves every row above.
+ *
+ * Ties keep fixture order, so a run over the same doc is deterministic.
  *
  * @template {{ lang: string }} F
  * @param {F[]} fixtures
- * @param {Array<{ server: string, verdict: string }>} rows
+ * @param {Array<{ server: string, verdict: string, evidence?: string }>} rows
  * @param {(fixture: F) => string} serverOf
- * @param {Iterable<string>} [alreadyMeasured] values that count as measured
  * @returns {F[]}
  */
-export function orderByNeed(
-	fixtures,
-	rows,
-	serverOf,
-	alreadyMeasured = [
-		"no",
-		"no (pull)",
-		"yes",
-		"yes (saved write)",
-		"cannot measure",
-	],
-) {
-	const measuredVerdicts = new Set(alreadyMeasured);
-	const measuredServers = new Set(
-		(rows ?? [])
-			.filter((row) => measuredVerdicts.has(row.verdict))
-			.map((row) => row.server),
-	);
-	const unmeasured = [];
-	const measured = [];
+export function orderByNeed(fixtures, rows, serverOf) {
+	const byServer = new Map((rows ?? []).map((row) => [row.server, row]));
+	const UNPROVEN = 0;
+	const UNSETTLED = 1;
+	const SETTLED = 2;
+	const NO_ROW = 3;
+	const tiers = [[], [], [], []];
 	for (const fixture of fixtures ?? []) {
-		(measuredServers.has(serverOf(fixture)) ? measured : unmeasured).push(
-			fixture,
-		);
+		const row = byServer.get(serverOf(fixture));
+		let tier = NO_ROW;
+		if (row) {
+			if (!String(row.evidence ?? "").includes(SAVE_VERDICT_COMMAND))
+				tier = UNPROVEN;
+			else tier = SAVE_VERDICT_SETTLED.has(row.verdict) ? SETTLED : UNSETTLED;
+		}
+		tiers[tier].push(fixture);
 	}
-	return [...unmeasured, ...measured];
+	return tiers.flat();
 }

@@ -15,6 +15,8 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { GENERATED_LSP_DOCS } from "../../scripts/lib/md-matrix.mjs";
+import { listRefreshFlips } from "../../scripts/lib/refresh-flips.mjs";
 import {
 	classifySaveVerdict,
 	describeArm,
@@ -23,10 +25,13 @@ import {
 	parseSaveVerdictRows,
 	refreshSaveVerdictTable,
 	SAVE_VERDICT_COLUMN,
+	SAVE_VERDICT_COMMAND,
 	SAVE_VERDICT_MARKER,
 	SAVE_VERDICT_VALUES,
 	saveVerdictCells,
 } from "../../scripts/lib/save-verdict.mjs";
+
+const MATRIX_DOC = GENERATED_LSP_DOCS[0];
 
 const arm = (nonEmpty: number, ms: number | null = nonEmpty ? 100 : null) => ({
 	nonEmpty,
@@ -50,6 +55,19 @@ const DOC = [
 	"",
 ].join("\n");
 
+/** A doc with one row per ordering tier (provenance, unsettled, settled, no row). */
+const TIERED_DOC = [
+	"# LSP capability matrix",
+	"",
+	"| server | save as declared | publishes after save only | verdict | evidence |",
+	"|---|---|---|---|---|",
+	"| gopls | `save` | no | Source: DidSave calls didModifyFiles. | golang/tools `02c9e4c` |",
+	"| cpp | `save` | no | Measured: answers without a save. | `node scripts/probe-save-verdict.mjs` (fixture cpp) |",
+	"| cmake | `save` | inconclusive | Measured: inconclusive. | `node scripts/probe-save-verdict.mjs` (fixture cmake) |",
+	"| fish | `save+text` | unknown | Unverified: not measured. | none |",
+	"",
+].join("\n");
+
 describe("classifySaveVerdict: which arm owns the answer (#3405)", () => {
 	it("answers no when the seeded error publishes with no save", () => {
 		const verdict = classifySaveVerdict({
@@ -66,6 +84,23 @@ describe("classifySaveVerdict: which arm owns the answer (#3405)", () => {
 		expect(
 			classifySaveVerdict({ mode: "pull", noSave: arm(1, 210) }).verdict,
 		).toBe("no (pull)");
+	});
+
+	it("never credits a pull server with a save-triggered answer", () => {
+		// #4999 F2: rust-analyzer is `mode=pull`, and the nightly measured
+		// save-alone=1 over this doc's `inconclusive`. That "finding" is the answer
+		// to a repeated `textDocument/diagnostic` request: no arm of a pull server
+		// has the save as its only new input, so the positive branches cannot
+		// apply. The old rule credited it and wrote a `yes` no publish backed.
+		for (const arms of [
+			{ noSave: arm(0), saveAlone: arm(2, 54) },
+			{ noSave: arm(0), saveAlone: arm(0), savedWrite: arm(1, 900) },
+		]) {
+			const verdict = classifySaveVerdict({ mode: "pull", ...arms });
+			expect(verdict.verdict).toBe("inconclusive");
+			expect(verdict.verdict).not.toBe("yes");
+			expect(verdict.reason).toContain("textDocument/diagnostic");
+		}
 	});
 
 	it("answers yes only when the same bytes published after the save alone", () => {
@@ -124,10 +159,21 @@ describe("classifySaveVerdict: which arm owns the answer (#3405)", () => {
 });
 
 describe("describeArm: the quoted observation", () => {
-	it("names the finding count and the window length when silent", () => {
-		expect(describeArm(arm(2, 97), 8000)).toBe("2 findings at 97 ms");
-		expect(describeArm(arm(1, 40), 8000)).toBe("1 finding at 40 ms");
+	it("names the count and the window length when silent", () => {
+		expect(describeArm(arm(2, 97), 8000)).toBe("2 findings");
+		expect(describeArm(arm(1, 40), 8000)).toBe("1 finding");
 		expect(describeArm(arm(0), 8000)).toBe("silent (8000 ms)");
+	});
+
+	it("names the unit the arm counted, pluralised", () => {
+		// #4999 F9: a push arm counts publish EVENTS (one event may carry several
+		// findings) and a pull arm counts the diagnostics a request answered. The
+		// committed cpp cell read "1 finding at 459 ms" while #4768 measured three
+		// diagnostics per publish — a unit no arm ever counted.
+		expect(describeArm(arm(1), 6000, "publish event")).toBe("1 publish event");
+		expect(describeArm(arm(3), 6000, "publish event")).toBe("3 publish events");
+		expect(describeArm(arm(2), 6000, "diagnostic")).toBe("2 diagnostics");
+		expect(describeArm(arm(0), 6000, "publish event")).toBe("silent (6000 ms)");
 	});
 });
 
@@ -144,27 +190,51 @@ describe("fixturePolicy: the clean-gate token comes from the fixture", () => {
 	});
 });
 
-describe("saveVerdictCells: the three columns a run owns", () => {
-	const measured = (overrides = {}) =>
-		saveVerdictCells({
-			server: "cpp",
-			save: "save",
-			mode: "push-only",
-			fixture: { lang: "cpp", lspGate: true },
-			arms: { noSave: arm(3, 97), saveAlone: arm(0) },
-			waitMs: 6000,
-			src: "ci",
-			...overrides,
-		});
+/** One measured row's cells; throws when the run produced none (a failed arm). */
+const measure = (overrides: Record<string, unknown> = {}) => {
+	const cells = saveVerdictCells({
+		server: "cpp",
+		save: "save",
+		mode: "push-only",
+		fixture: { lang: "cpp", lspGate: true },
+		arms: { noSave: arm(3, 97), saveAlone: arm(0) },
+		waitMs: 6000,
+		...overrides,
+	});
+	if (!cells) throw new Error("expected a measured row, got no cells");
+	return cells;
+};
 
+describe("saveVerdictCells: the three columns a run owns", () => {
 	it("writes the verdict value, the evidence command and the policy", () => {
-		const cells = measured();
+		const cells = measure();
 		expect(cells[SAVE_VERDICT_COLUMN]).toBe("no");
 		expect(cells[SAVE_VERDICT_COLUMN]).not.toBe("unknown");
-		expect(cells.verdict).toContain("3 findings at 97 ms");
+		expect(cells.verdict).toContain("3 publish events");
 		expect(cells.verdict).toContain("Gated.");
-		expect(cells.evidence).toContain("node scripts/probe-save-verdict.mjs");
-		expect(cells.evidence).toContain("src=ci");
+		expect(cells.evidence).toContain(SAVE_VERDICT_COMMAND);
+		expect(cells.evidence).toContain("fixture cpp");
+	});
+
+	it("writes nothing a re-measurement of the same behaviour would move", () => {
+		// #4999 F7: the elapsed time of each arm and the run's `src` token used to
+		// live in the committed cells, so a night that changed only those arrived
+		// as a capability flip and disarmed the refresh PR's auto-merge (the run on
+		// the reviewed head rewrote 20 of 21 rows). Both now go to the run log.
+		const first = measure({ arms: { noSave: arm(1, 459), saveAlone: arm(0) } });
+		const second = measure({
+			arms: { noSave: arm(1, 777), saveAlone: arm(0) },
+		});
+		expect(second).toEqual(first);
+		expect(first.verdict).not.toContain("459");
+		expect(first.evidence).not.toMatch(/src=/);
+
+		const head = refreshSaveVerdictTable(DOC, [first]).text;
+		const next = refreshSaveVerdictTable(DOC, [second]).text;
+		expect(next).toBe(head);
+		expect(
+			listRefreshFlips({ [MATRIX_DOC]: head }, { [MATRIX_DOC]: next }),
+		).toEqual([]);
 	});
 
 	it("keeps `unknown` out of a measured row entirely", () => {
@@ -175,30 +245,48 @@ describe("saveVerdictCells: the three columns a run owns", () => {
 			{ noSave: arm(0), saveAlone: arm(0) },
 		]) {
 			expect(
-				SAVE_VERDICT_VALUES.has(measured({ arms })[SAVE_VERDICT_COLUMN]),
+				SAVE_VERDICT_VALUES.has(measure({ arms })[SAVE_VERDICT_COLUMN]),
 			).toBe(true);
-			expect(measured({ arms })[SAVE_VERDICT_COLUMN]).not.toBe("unknown");
+			expect(measure({ arms })[SAVE_VERDICT_COLUMN]).not.toBe("unknown");
 		}
 	});
 
 	it("states the arms in an inconclusive row", () => {
-		const cells = measured({ arms: { noSave: arm(0), saveAlone: arm(0) } });
+		const cells = measure({ arms: { noSave: arm(0), saveAlone: arm(0) } });
 		expect(cells[SAVE_VERDICT_COLUMN]).toBe("inconclusive");
 		expect(cells.verdict).toContain("no arm published");
+	});
+
+	it("writes NO cell when the run failed an arm, so the prior cell survives", () => {
+		// #4999 F8, both anchor sites: a failed `touchFile` returned zero
+		// observations, the classifier read that zero as silence, and a publishing
+		// save-alone arm minted a `yes` for a comparison that never happened. The
+		// same hole opens when `ensureTool` fails. The row then keeps its last
+		// measured cell (#390) instead of gaining a verdict read off a failure.
+		for (const failures of [
+			["no-save arm failed: touch timed out"],
+			["install failed for clangd: getaddrinfo EAI_AGAIN"],
+			[""],
+		]) {
+			const cells = saveVerdictCells({
+				server: "cpp",
+				save: "save",
+				mode: "push-only",
+				fixture: { lang: "cpp", lspGate: true },
+				arms: { noSave: arm(0), saveAlone: arm(2, 54) },
+				waitMs: 6000,
+				failures,
+			});
+			// Only a real cause suppresses the cell; an empty string is not one.
+			if (failures[0] === "") expect(cells).toBeDefined();
+			else expect(cells).toBeUndefined();
+		}
 	});
 });
 
 describe("refreshSaveVerdictTable: the merge guard (#390)", () => {
 	it("rewrites measured rows and copies unreached ones verbatim", () => {
-		const cells = saveVerdictCells({
-			server: "cpp",
-			save: "save",
-			mode: "push-only",
-			fixture: { lang: "cpp", lspGate: true },
-			arms: { noSave: arm(3, 97), saveAlone: arm(0) },
-			waitMs: 6000,
-			src: "ci",
-		});
+		const cells = measure();
 		const { text, changed, measured, kept } = refreshSaveVerdictTable(DOC, [
 			cells,
 		]);
@@ -227,14 +315,11 @@ describe("refreshSaveVerdictTable: the merge guard (#390)", () => {
 		// row per registry id. A launch VARIANT that declares `save` under an id the
 		// inventory records as declaring none (typescript's TS7 variants) must not
 		// add a row contradicting the inventory — it is reported instead.
-		const cells = saveVerdictCells({
+		const cells = measure({
 			server: "typescript",
 			save: "save+text",
-			mode: "push-only",
 			fixture: { lang: "typescript7" },
 			arms: { noSave: arm(1, 12) },
-			waitMs: 6000,
-			src: "ci",
 		});
 		const result = refreshSaveVerdictTable(DOC, [cells]);
 		expect(result.notInTable).toEqual(["typescript"]);
@@ -259,50 +344,84 @@ describe("refreshSaveVerdictTable: the merge guard (#390)", () => {
 });
 
 describe("parseSaveVerdictRows / orderByNeed: a bounded run converges", () => {
-	it("reads the three columns back", () => {
+	it("reads the three columns back, with the provenance", () => {
 		expect(parseSaveVerdictRows(DOC)).toEqual([
-			{ server: "cpp", save: "`save`", verdict: "unknown" },
-			{ server: "cmake", save: "`save`", verdict: "unknown" },
-			{ server: "gopls", save: "`save`", verdict: "no" },
+			{ server: "cpp", save: "`save`", verdict: "unknown", evidence: "none" },
+			{
+				server: "cmake",
+				save: "`save`",
+				verdict: "unknown",
+				evidence: "none",
+			},
+			{
+				server: "gopls",
+				save: "`save`",
+				verdict: "no",
+				evidence: "golang/tools `02c9e4c`",
+			},
 		]);
 	});
 
-	it("orders unmeasured rows first so a short budget cannot starve them", () => {
+	it("orders unmeasured and source-read rows first so a short budget reaches them", () => {
 		const fixtures = [
 			{ lang: "cpp" },
 			{ lang: "cmake" },
 			{ lang: "gopls" },
 			{ lang: "clojure" },
 		];
-		// `go` already has a measured verdict; `cpp`, `cmake` and `clojure` do not.
+		// `clojure` has no row at all and can never write one; `gopls` holds a
+		// SOURCE claim nobody measured. Both are ahead of a queue slot a measured
+		// row would take, and the fixture with no row is last.
 		expect(
 			orderByNeed(fixtures, parseSaveVerdictRows(DOC), (fx) => fx.lang).map(
 				(fx) => fx.lang,
 			),
-		).toEqual(["cpp", "cmake", "clojure", "gopls"]);
+		).toEqual(["cpp", "cmake", "gopls", "clojure"]);
 	});
 
-	it("keeps fixture order among equals and admits the measured vocabulary", () => {
+	it("orders the four tiers by the row's provenance, not by its verdict", () => {
+		// #4999 F3: the first version ranked a source-read `no` as "measured" and a
+		// fixture with no row as "unmeasured", so 33 fixtures that can never write a
+		// cell came first and the four source claims came last — exactly where the
+		// 600 s budget never reached them.
+		const fixtures = [
+			{ lang: "cpp", serverId: "cpp" },
+			{ lang: "cmake", serverId: "cmake" },
+			{ lang: "gopls", serverId: "gopls" },
+			{ lang: "fish", serverId: "fish" },
+			{ lang: "typescript7", serverId: "typescript" },
+		];
+		expect(
+			orderByNeed(
+				fixtures,
+				parseSaveVerdictRows(TIERED_DOC),
+				(fx) => fx.serverId ?? fx.lang,
+			).map((fx) => fx.lang),
+		).toEqual(["gopls", "fish", "cmake", "cpp", "typescript7"]);
+	});
+
+	it("keeps fixture order among equals", () => {
 		const fixtures = [{ lang: "b" }, { lang: "a" }];
 		expect(
 			orderByNeed(fixtures, [], (fx) => fx.lang).map((fx) => fx.lang),
 		).toEqual(["b", "a"]);
-		expect(
-			orderByNeed(
-				fixtures,
-				[{ server: "b", verdict: "cannot measure" }],
-				(fx) => fx.lang,
-			).map((fx) => fx.lang),
-		).toEqual(["a", "b"]);
 	});
 
-	it("probes a row marked inconclusive again", () => {
+	it("probes a row marked inconclusive again, before a settled one", () => {
 		expect(
 			orderByNeed(
 				[{ lang: "cmake" }, { lang: "go" }],
 				[
-					{ server: "cmake", verdict: "inconclusive" },
-					{ server: "go", verdict: "yes" },
+					{
+						server: "cmake",
+						verdict: "inconclusive",
+						evidence: `\`${SAVE_VERDICT_COMMAND}\` (fixture cmake)`,
+					},
+					{
+						server: "go",
+						verdict: "yes",
+						evidence: `\`${SAVE_VERDICT_COMMAND}\` (fixture go)`,
+					},
 				],
 				(fx) => fx.lang,
 			).map((fx) => fx.lang),

@@ -10,8 +10,6 @@ export interface SaveArm {
 	ms?: number | null;
 }
 
-export const SILENT_ARM: Readonly<Required<SaveArm>>;
-
 export interface SaveVerdictArms {
 	mode?: string;
 	noSave?: SaveArm;
@@ -27,7 +25,11 @@ export interface SaveVerdict {
 
 export function classifySaveVerdict(input: SaveVerdictArms): SaveVerdict;
 
-export function describeArm(arm: SaveArm | undefined, waitMs: number): string;
+export function describeArm(
+	arm: SaveArm | undefined,
+	waitMs: number,
+	unit?: string,
+): string;
 
 export function fixturePolicy(fixture: {
 	auxiliaryServerIds?: string[];
@@ -47,8 +49,8 @@ export function saveVerdictCells(row: {
 	};
 	arms: SaveVerdictArms;
 	waitMs: number;
-	src: string;
-}): Record<string, string>;
+	failures?: string[];
+}): Record<string, string> | undefined;
 
 export function refreshSaveVerdictTable(
 	text: string,
@@ -67,6 +69,7 @@ export interface SaveVerdictRow {
 	server: string;
 	save: string;
 	verdict: string;
+	evidence: string;
 }
 
 export function parseSaveVerdictRows(
@@ -76,7 +79,6 @@ export function parseSaveVerdictRows(
 
 export function orderByNeed<F extends { lang: string }>(
 	fixtures: F[],
-	rows: Array<{ server: string; verdict: string }>,
+	rows: Array<{ server: string; verdict: string; evidence?: string }>,
 	serverOf: (fixture: F) => string,
-	alreadyMeasured?: Iterable<string>,
 ): F[];

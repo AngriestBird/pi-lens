@@ -34,14 +34,19 @@
  *       [--doc <path>] [--summary <path>] [--budget-seconds <n>] [--wait-ms <n>]
  *
  * Requires `npm run build:dist`. Exits 0 for any measurement outcome; it exits 1
- * only when the run measured NOTHING (no save-declaring server reached), so a
- * dead instrument cannot read green for six days (#4514's shape).
+ * only when the run measured NO row at all (no save-declaring server was
+ * reached), so a dead instrument cannot read green for six days (#4514's shape).
+ * A run that stops on its own budget is a disclosed partial run and does NOT
+ * exit 1: it measured something, and reporting that as instrument death reds the
+ * nightly for a healthy instrument (#4999 F4).
  *
  * Attribution limit, stated because it decides `inconclusive` vs `yes`: an
  * answer that arrives after an arm's window closed lands in the NEXT arm's
  * window. The untriggered `silence` window covers exactly that case for the
  * first arm, and any publish in it makes the row `inconclusive` rather than
- * crediting the save.
+ * crediting the save. A PULL server has no such window to give: every arm it
+ * sees is a `textDocument/diagnostic` request, so it is never credited `yes`
+ * (#4999 F2).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -228,12 +233,19 @@ for (const fx of fixtures) {
 		save: undefined,
 		mode: undefined,
 		cells: undefined,
+		failures: [],
 		detail: "",
 	};
+	const running = probeFixture(fx, row);
 	try {
-		await withTimeout(probeFixture(fx, row), PER_SERVER_TIMEOUT_MS, row);
+		await withTimeout(running, PER_SERVER_TIMEOUT_MS, row);
 	} catch (e) {
 		row.detail = `error: ${e?.message ?? e}`;
+		// The race does not cancel the probe, and a still-running probe resets the
+		// SHARED publish-trace cursor at the start of its next arm, which would
+		// truncate the next fixture's window. Await it: every arm carries its own
+		// deadline, so this is bounded. The row stays unmeasured either way.
+		await running.catch(() => undefined);
 	}
 	if (row.cells) rows.push(row);
 	else
@@ -251,13 +263,21 @@ async function probeFixture(fx, row) {
 	});
 	try {
 		if (install && ensureTool) {
-			for (const tool of fx.tools ?? [])
-				await ensureTool(tool).catch(() => undefined);
+			for (const tool of fx.tools ?? []) {
+				try {
+					await ensureTool(tool);
+				} catch (e) {
+					// Recorded, never dropped: the arms below would otherwise read a
+					// toolchain that never installed as a server that stayed silent.
+					row.failures.push(`install failed for ${tool}: ${e?.message ?? e}`);
+				}
+			}
 		}
 		if (fx.setup) {
 			const setup = runFixtureSetup(fx.setup, workspace, false);
 			if (!setup.ok) {
-				row.detail = `setup failed: ${setup.detail}`;
+				row.failures.push(`setup failed: ${setup.detail}`);
+				row.detail = row.failures.join("; ");
 				return;
 			}
 		}
@@ -288,7 +308,9 @@ async function probeFixture(fx, row) {
 					saved,
 				});
 			} catch (e) {
-				row.detail = `${label}: ${e?.message ?? e}`;
+				// A thrown touch is a HOLE, not silence: its zero must never be compared
+				// against the next arm's publish (#4999 F8).
+				row.failures.push(`${label} arm failed: ${e?.message ?? e}`);
 			}
 			const elapsed = Date.now() - armStartedAt;
 			drainPublishTrace(publishes, row.server, absFile);
@@ -386,11 +408,22 @@ async function probeFixture(fx, row) {
 				savedWrite,
 			},
 			waitMs,
-			src,
+			failures: row.failures,
 		});
-		row.detail =
-			`mode=${row.mode} no-save=${shape(noSave).nonEmpty} silence=${silence.nonEmpty}` +
-			` save-alone=${shape(saveAlone).nonEmpty} saved-write=${savedWrite.nonEmpty}`;
+		// The arms' elapsed times live HERE, in the log, and not in the cell: a
+		// timing-only difference must never reach the generated table (#4999 F7).
+		const armLine = (name, a) =>
+			`${name}=${a.nonEmpty}${a.ms != null ? `@${a.ms}ms` : ""}`;
+		const summary = [
+			`mode=${row.mode}`,
+			armLine("no-save", shape(noSave)),
+			armLine("silence", silence),
+			armLine("save-alone", shape(saveAlone)),
+			armLine("saved-write", savedWrite),
+		].join(" ");
+		// Every cause survives to the line: the reviewer's #4999 F8 probe was a
+		// failure whose only record was overwritten by the arm summary below.
+		row.detail = [...row.failures, summary].join(" — ");
 	} finally {
 		cleanup();
 	}
@@ -456,12 +489,27 @@ try {
 	await resetLSPService?.({ fast: true });
 } catch {}
 
-// A night that wrote nothing is the #4514 shape: the instrument died and the
-// table kept its old cells, so the step must red instead of reporting success.
-if (refreshed.measured.length === 0) {
+// The floor (#4514's shape, corrected by #4999 F4): a night that measured nothing
+// reached no save-declaring server, so the step must red instead of reporting
+// success over a table it never touched. The floor is keyed on rows MEASURED, not
+// on rows WRITTEN: budget exhaustion and a doc without the table both leave rows
+// written 0 while the instrument works, and calling either "the instrument is
+// dead" reds a healthy nightly (shape 75).
+const measuredCount = rows.length;
+const wroteCount = refreshed.measured.length;
+if (measuredCount === 0) {
 	console.error(
-		"save-verdict: wrote NO row — the instrument is dead, or no save-declaring server was reached",
+		`save-verdict: measured NO row — ${budgetExhausted ? `the ${Math.round(budgetMs / 1000)} s budget ran out before any save-declaring server was reached` : "no save-declaring server was reached (population gate, a failed install, or a server that never spawned)"}; nothing was written, so this run proved nothing`,
 	);
 	process.exit(1);
+}
+if (budgetExhausted) {
+	console.error(
+		`save-verdict: partial run — budget exhausted with ${notMeasured.length} fixture(s) not reached; the doc keeps their rows verbatim`,
+	);
+} else if (wroteCount === 0 && !refreshed.reason) {
+	console.error(
+		`save-verdict: measured ${measuredCount} row(s), none has a table row${refreshed.notInTable.length ? ` (not in table: ${refreshed.notInTable.join(", ")})` : ""}; no doc written`,
+	);
 }
 process.exit(0);

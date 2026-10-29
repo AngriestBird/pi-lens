@@ -77,6 +77,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			FORMAT_LAYER_LOG: writeLog(dir, "format-layer.log", ""),
 			EVALUATED_FLOOR_OUTCOME: "skipped",
 			EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+			SAVE_VERDICT_OUTCOME: "skipped",
+			SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 			RESOLUTION_LAYER_OUTCOME: "skipped",
 			RESOLUTION_LAYER_LOG: writeLog(dir, "resolution.log", ""),
 		});
@@ -115,6 +117,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 				"floor.log",
 				"✗  characterize-lsp  evaluated floor  21  evaluated 21, below the floor of 35\n",
 			),
+			SAVE_VERDICT_OUTCOME: "success",
+			SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 		});
 		expect(out).toContain("action=file-or-refresh");
 		expect(out).toContain("Failing layer: **LSP evaluated floor**");
@@ -123,7 +127,41 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 		);
 	});
 
-	it("plans a close when all six gating layers succeeded", () => {
+	// #3405/#4999 F5: the save-verdict probe is the eighth step outside
+	// `continue-on-error`. Before it was a tracked layer, a night where only it
+	// failed filed "Failing layer: (outside the tracked layers)" and attached no
+	// log, exactly as #2723 recorded for the other layers.
+	it("files a tracker naming the LSP save verdict when only that step failed (#3405)", () => {
+		const dir = mkTempDir("pi-lens-tool-smoke-save-verdict-");
+		const ok = (name: string) => ({
+			[`${name}_OUTCOME`]: "success",
+			[`${name}_LOG`]: writeLog(
+				dir,
+				`${name}.log`,
+				"40 passed · 0 failed · 0 setup-failed · 0 skipped (tool/config unavailable)\n",
+			),
+		});
+		const out = runDryRun({
+			...ok("TOOL_LAYER"),
+			...ok("LSP_HANDSHAKE"),
+			...ok("LSP_GATE"),
+			...ok("LENS_FULL"),
+			...ok("FORMAT_LAYER"),
+			...ok("RESOLUTION_LAYER"),
+			...ok("EVALUATED_FLOOR"),
+			SAVE_VERDICT_OUTCOME: "failure",
+			SAVE_VERDICT_LOG: writeLog(
+				dir,
+				"save-verdict.log",
+				"save-verdict: measured NO row — no save-declaring server was reached; nothing was written\n",
+			),
+		});
+		expect(out).toContain("action=file-or-refresh");
+		expect(out).toContain("Failing layer: **LSP save verdict**");
+		expect(out).not.toContain("outside the tracked layers");
+	});
+
+	it("plans a close when all eight gating layers succeeded", () => {
 		const dir = mkTempDir("pi-lens-tool-smoke-clean-");
 		const out = runDryRun({
 			TOOL_LAYER_OUTCOME: "success",
@@ -158,6 +196,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			),
 			EVALUATED_FLOOR_OUTCOME: "success",
 			EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+			SAVE_VERDICT_OUTCOME: "success",
+			SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 			RESOLUTION_LAYER_OUTCOME: "success",
 			RESOLUTION_LAYER_LOG: writeLog(
 				dir,
@@ -195,6 +235,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ""),
 			EVALUATED_FLOOR_OUTCOME: "skipped",
 			EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+			SAVE_VERDICT_OUTCOME: "skipped",
+			SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 			RESOLUTION_LAYER_OUTCOME: "skipped",
 			RESOLUTION_LAYER_LOG: writeLog(dir, "resolution.log", ""),
 		});
@@ -237,6 +279,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			),
 			EVALUATED_FLOOR_OUTCOME: "success",
 			EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+			SAVE_VERDICT_OUTCOME: "success",
+			SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 			RESOLUTION_LAYER_OUTCOME: "success",
 			RESOLUTION_LAYER_LOG: writeLog(
 				dir,
@@ -268,6 +312,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ok),
 			EVALUATED_FLOOR_OUTCOME: "skipped",
 			EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+			SAVE_VERDICT_OUTCOME: "skipped",
+			SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 			RESOLUTION_LAYER_OUTCOME: "failure",
 			RESOLUTION_LAYER_LOG: writeLog(
 				dir,
@@ -303,6 +349,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ""),
 			EVALUATED_FLOOR_OUTCOME: "skipped",
 			EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+			SAVE_VERDICT_OUTCOME: "skipped",
+			SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 			RESOLUTION_LAYER_OUTCOME: "skipped",
 			RESOLUTION_LAYER_LOG: writeLog(dir, "resolution.log", ""),
 		});
@@ -334,6 +382,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ""),
 			EVALUATED_FLOOR_OUTCOME: "skipped",
 			EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+			SAVE_VERDICT_OUTCOME: "skipped",
+			SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 			RESOLUTION_LAYER_OUTCOME: "skipped",
 			RESOLUTION_LAYER_LOG: writeLog(dir, "resolution.log", ""),
 		});
@@ -441,6 +491,8 @@ const RED_ENV = (dir: string) => ({
 	FORMAT_LAYER_LOG: writeLog(dir, "fmt.log", ""),
 	EVALUATED_FLOOR_OUTCOME: "skipped",
 	EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+	SAVE_VERDICT_OUTCOME: "skipped",
+	SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 	RESOLUTION_LAYER_OUTCOME: "skipped",
 	RESOLUTION_LAYER_LOG: writeLog(dir, "resolution.log", ""),
 });
@@ -478,6 +530,8 @@ const GREEN_ENV = (dir: string) => ({
 	),
 	EVALUATED_FLOOR_OUTCOME: "success",
 	EVALUATED_FLOOR_LOG: writeLog(dir, "evaluated-floor.log", ""),
+	SAVE_VERDICT_OUTCOME: "success",
+	SAVE_VERDICT_LOG: writeLog(dir, "save-verdict.log", ""),
 	RESOLUTION_LAYER_OUTCOME: "success",
 	RESOLUTION_LAYER_LOG: writeLog(
 		dir,

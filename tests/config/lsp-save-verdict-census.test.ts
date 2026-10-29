@@ -30,7 +30,9 @@ import {
  *
  * - every server the capability inventory says declares `textDocumentSync.save`
  *   has a row here, so a newly registered save-declaring server cannot go
- *   missing;
+ *   missing — and every row here is one of those servers, or the one named
+ *   dynamic exception, so an invented or duplicated row cannot enter either;
+ *   its `save as declared` cell must agree with the inventory's declaration;
  * - `publishes after save only` holds only a value the classifier can produce — a
  *   new spelling reds instead of entering the vocabulary by hand;
  * - an unmeasured row says it is unverified, and a row with a verdict names where
@@ -45,9 +47,65 @@ const ROOT = resolve(import.meta.dirname, "../..");
 const MATRIX = resolve(ROOT, "docs/lsp-capability-matrix.md");
 const INVENTORY = resolve(ROOT, "docs/servercapabilities.md");
 
+/**
+ * The servers this table may carry that the capability inventory does not list
+ * as save-declaring. Exactly one, named: zizmor registers
+ * `textDocument/didSave` dynamically in its `initialized` handler, which pi-lens
+ * does not map, so no save ever reaches it and its row is a source claim rather
+ * than a capability the inventory records (see the section's Population note).
+ * This list is the ONLY admission; every other extra row reds (#4999 F6).
+ */
+const DYNAMIC_SAVE_EXCEPTIONS = new Set(["zizmor"]);
+
+const SECTION_HEADING = "## Save-triggered servers";
+
 const matrixText = readFileSync(MATRIX, "utf8");
 const rows = parseSaveVerdictRows(matrixText);
 const byServer = new Map(rows.map((row) => [row.server, row]));
+
+/** The save-verdict section alone, heading to the next level-two heading. */
+function saveSection(text: string = matrixText): string {
+	const start = text
+		.split("\n")
+		.findIndex((l) => l.startsWith(SECTION_HEADING));
+	if (start < 0)
+		throw new Error(`no "${SECTION_HEADING}" section in ${MATRIX}`);
+	const lines = text.split("\n");
+	const end = lines.findIndex((line, i) => i > start && line.startsWith("## "));
+	return (end < 0 ? lines.slice(start) : lines.slice(start, end)).join("\n");
+}
+
+/**
+ * The section's PROSE — the section with the table itself removed.
+ *
+ * Every measured row's `evidence` cell names the probe command, so searching the
+ * section as-is keeps a reproducibility rule green after the section loses the
+ * block that tells a reader how to regenerate a cell (#4999 F10). What the rule
+ * is about is the instruction, not the cells.
+ */
+function saveSectionProse(): string {
+	const lines = saveSection().split("\n");
+	const table = parseTable(lines.join("\n"), SAVE_VERDICT_MARKER);
+	if (!table) throw new Error("no save-verdict table inside its own section");
+	return [...lines.slice(0, table.start), ...lines.slice(table.end)].join("\n");
+}
+
+/**
+ * The lines inside the section's fenced code blocks: the copy-pasteable
+ * commands, as opposed to prose that merely names one.
+ */
+function sectionFencedLines(): string[] {
+	const out: string[] = [];
+	let fenced = false;
+	for (const line of saveSectionProse().split("\n")) {
+		if (line.trim().startsWith("```")) {
+			fenced = !fenced;
+			continue;
+		}
+		if (fenced) out.push(line.trim());
+	}
+	return out;
+}
 
 /** The save-verdict table, or a failure — a missing table is not a clean census. */
 function saveTable(): ParsedTable {
@@ -82,11 +140,38 @@ describe("save verdict census (#3405)", () => {
 		expect(inventorySaveDeclarations().size).toBeGreaterThan(15);
 	});
 
-	it("gives every save-declaring server its own row", () => {
-		const missing = [...inventorySaveDeclarations().keys()].filter(
+	it("gives every save-declaring server its own row, and no other row", () => {
+		const inventory = inventorySaveDeclarations();
+		const missing = [...inventory.keys()].filter(
 			(server) => !byServer.has(server),
 		);
 		expect(missing).toEqual([]);
+		// #4999 F6: the reverse direction. Before this case the census only checked
+		// `inventory - table`, so an invented row for a server that declares no save
+		// (a planted `pyright`) passed all seven cases, and `byServer` collapsed a
+		// duplicated row instead of refusing it.
+		const extra = [...byServer.keys()].filter(
+			(server) =>
+				!inventory.has(server) && !DYNAMIC_SAVE_EXCEPTIONS.has(server),
+		);
+		expect(extra).toEqual([]);
+		expect(rows.length).toBe(byServer.size);
+	});
+
+	it("declares the same save capability the inventory records", () => {
+		// A row that says `save` for a server the inventory records as `save+text`
+		// (or the reverse) is a second, hand-maintained copy of the capability — the
+		// shape the census exists to retire.
+		const mismatched = [...inventorySaveDeclarations()]
+			.filter(
+				([server, declared]) =>
+					byServer.get(server)?.save !== `\`${declared}\``,
+			)
+			.map(
+				([server, declared]) =>
+					`${server}: ${byServer.get(server)?.save} != ${declared}`,
+			);
+		expect(mismatched).toEqual([]);
 	});
 
 	it("keeps every verdict inside the classifier's vocabulary", () => {
@@ -135,8 +220,16 @@ describe("save verdict census (#3405)", () => {
 
 	it("names the regeneration command in the section, so the table is reproducible", () => {
 		// The issue's done-when: a tree file with the probe that produced it. A
-		// reader must be able to regenerate a cell, not only trust it.
-		expect(matrixText).toContain(SAVE_VERDICT_COMMAND);
+		// reader must be able to regenerate a cell, not only trust it — and the
+		// command must be in the SECTION's prose, inside a code block: every measured
+		// evidence cell names it too, so searching the whole document (or the section
+		// with its table in it) kept this green after the section lost the block that
+		// says how to regenerate a cell (#4999 F10).
+		expect(
+			sectionFencedLines().some((line) =>
+				line.startsWith(SAVE_VERDICT_COMMAND),
+			),
+		).toBe(true);
 	});
 
 	it("keeps a reason on a `cannot measure` row", () => {

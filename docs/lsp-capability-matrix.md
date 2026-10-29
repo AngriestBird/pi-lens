@@ -364,6 +364,16 @@ and the merge guard; a run rewrites the three measurement columns of the rows it
 reached and copies every other row verbatim, so a runner that could not install a
 server never blanks a measured cell.
 
+A pull-mode server answers a `textDocument/diagnostic` request rather than
+publishing, so no arm of its run has the save as its only new input: it reads
+`no (pull)` when the request answered without a save and `inconclusive`
+otherwise, never `yes`.
+
+The cells carry what a run OBSERVED, never when or where: each arm's elapsed time
+and the `src` token that says CI or a dev box go to the run log, so a
+re-measurement that changes only those is not a capability flip and the refresh PR
+stays armed for auto-merge (#4512).
+
 A row whose evidence names this command is a measurement by it. A row that names
 a prior probe, a workflow run or a source commit instead is provenance from
 before the command existed (or from a server no local run could reach), and the
@@ -372,26 +382,26 @@ dispatched nightly replaces it on the first night that reaches the server.
 | server | save as declared | publishes after save only | verdict | evidence |
 |---|---|---|---|---|
 | expert | `save` | no | Prior measurement: answers with no `didSave` once the seed is under `lib/`. Gated. | #4768 arms A, B, C; nightly run 39852672584 (answered on call 6, 10955 ms); `tests/fixtures/nightly-floors/expert-readiness.json` |
-| cpp | `save` | no | Measured: answers without a save (1 finding at 459 ms on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture cpp) |
-| lua | `save` | no | Measured: answers without a save (2 findings at 1013 ms on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture lua) |
-| python-jedi | `save` | no | Measured: answers without a save (1 finding at 1569 ms on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture jedi) |
-| opengrep | `save` | no | Measured: answers without a save (1 finding at 1470 ms on didOpen); a later save alone: silent (6000 ms). Auxiliary, not gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture opengrep) |
-| gleam | `save` | no | Measured: answers without a save (1 finding at 601 ms on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture gleam) |
+| cpp | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture cpp) |
+| lua | `save` | no | Measured: answers without a save (2 publish events on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture lua) |
+| python-jedi | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture jedi) |
+| opengrep | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Auxiliary, not gated. | `node scripts/probe-save-verdict.mjs` (fixture opengrep) |
+| gleam | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture gleam) |
 | go | `save` | no | Source: `DidSave` calls `didModifyFiles`, the path a change takes. Gated. | golang/tools `02c9e4cb4c2f`, `gopls/internal/server/text_synchronization.go` |
-| zig | `save` | no | Measured: answers without a save (1 finding at 477 ms on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture zig) |
-| rust | `save` | inconclusive | Measured: inconclusive — no arm published, so this fixture does not distinguish a save-triggered server from one that never diagnoses it (arms: no-save silent (6000 ms), save alone silent (6000 ms), saved write silent (6000 ms)). Exempt from the clean gate. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture rust) |
-| terraform | `save` | no | Measured: answers without a save (1 finding at 477 ms on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture terraform) |
+| zig | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture zig) |
+| rust | `save` | inconclusive | Measured: inconclusive — pull mode: every arm is a textDocument/diagnostic request, so no arm has the save as its only new input (arms: no-save silent (6000 ms), save alone silent (6000 ms), saved write silent (6000 ms)). Exempt from the clean gate. | `node scripts/probe-save-verdict.mjs` (fixture rust) |
+| terraform | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture terraform) |
 | fsharp | `save+text` | no | Source: a save holds the source and refreshes code lenses; diagnostics come from open and change checks. Exempt: 0 findings in every run. | ionide/FsAutoComplete `8f011f1395a4`, `src/FsAutoComplete/LspServers/AdaptiveFSharpLspServer.fs` (`TextDocumentDidSave`); nightly run 39845687189 |
 | zizmor | · (registered dynamically) | no | Source: `didSave` is registered dynamically and pi-lens does not map that registration, so no save is sent. Auxiliary, not gated. | zizmor `crates/zizmor/src/lsp.rs` (`initialized`); `clients/lsp/wait-policy/strategies.ts:400-410` (#3548) |
-| clojure | `save+text` | no | Measured: answers without a save (1 finding at 748 ms on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture clojure) |
+| clojure | `save+text` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture clojure) |
 | fish | `save+text` | unknown | Unverified: not measured. Gated. | none |
-| tinymist | `save` | no | Measured: answers without a save (1 finding at 500 ms on didOpen); a later save alone: 1 finding at 60 ms. Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture typst) |
-| cue | `save` | no | Measured: answers without a save (1 finding at 997 ms on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture cue) |
+| tinymist | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: 1 publish event. Gated. | `node scripts/probe-save-verdict.mjs` (fixture typst) |
+| cue | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture cue) |
 | csharp | `save+text` | unknown | Unverified: not measured. Pull mode, so diagnostics are requested and a save is unlikely to be the only trigger. Gated. | none |
-| deno | `save` | no (pull) | Measured: pull mode — no save needed; a later save alone: 1 finding at 54 ms. Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture deno) |
-| svelte | `save` | no (pull) | Measured: pull mode — no save needed; a later save alone: 2 findings at 63 ms. Gated. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture svelte) |
+| deno | `save` | no (pull) | Measured: pull mode — no save needed; a later save alone: 1 diagnostic. Gated. | `node scripts/probe-save-verdict.mjs` (fixture deno) |
+| svelte | `save` | no (pull) | Measured: pull mode — no save needed; a later save alone: 2 diagnostics. Gated. | `node scripts/probe-save-verdict.mjs` (fixture svelte) |
 | powershell | `save+text` | unknown | Unverified: not measured. Exempt: intermittent. | none |
-| cmake | `save` | inconclusive | Measured: inconclusive — no arm published, so this fixture does not distinguish a save-triggered server from one that never diagnoses it (arms: no-save silent (6000 ms), save alone silent (6000 ms), saved write silent (6000 ms)). Exempt from the clean gate. | `node scripts/probe-save-verdict.mjs` (src=dev, fixture cmake) |
+| cmake | `save` | inconclusive | Measured: inconclusive — no arm published, so this fixture does not distinguish a save-triggered server from one that never diagnoses it (arms: no-save silent (6000 ms), save alone silent (6000 ms), saved write silent (6000 ms)). Exempt from the clean gate. | `node scripts/probe-save-verdict.mjs` (fixture cmake) |
 
 Notes.
 
