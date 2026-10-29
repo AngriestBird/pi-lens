@@ -136,6 +136,7 @@ import {
 } from "./advisory-provenance.js";
 import {
 	DEPENDENCY_DRIFT_MAX_DELIVERIES,
+	SELF_DRIFT_MAX_DELIVERIES,
 	sweepInlineBlockerFreshness,
 } from "./blocker-freshness.js";
 import { sweepInlineBlockerPastEof } from "./blocker-past-eof.js";
@@ -1061,11 +1062,13 @@ function formatWriteOrdinal(n: number): string {
  *
  * What it reads, and what it deliberately does not:
  * - `record.stale` is the freshness sweep's OWN demotion. A demoted record is
- *   rendered as a `[stale — re-run to confirm]` advisory and stays out of the
- *   authoritative blocker channel by design (`clients/blocker-freshness.ts`
- *   says the commit gate is unaffected either way), and the edit turn's pass
- *   does not judge it — so neither does this one, and the latch keeps counting
- *   it. Demote-not-drop is not demote-to-open (AGENTS.md shape 10).
+ *   rendered as a `[stale — re-run to confirm]` advisory, and since #4990 the
+ *   edit turn's policy pass judges it exactly like a live record (the mark is
+ *   the agent's decision about the finding, not a claim that the bytes are
+ *   clean). This pass therefore judges it the same way, so a mark made on a
+ *   file-less turn reaches the demoted arm and the latch without waiting for an
+ *   edit turn. A file whose bytes moved OUTSIDE dispatch is still caught by the
+ *   gate's own content check below, which is what keeps demote-not-open.
  * - Bytes that move OUTSIDE dispatch after a suppression verdict are the
  *   commit gate's own check (`firstExpiredSuppressionVerdict`, #3248 round 2),
  *   which is the one place a verdict may OPEN a commit. This pass re-derives
@@ -1105,12 +1108,12 @@ function resyncCommitGateForReadOnlyTurn(args: {
 			displayPath: toRunnerDisplayPath(args.cwd, entry.filePath),
 			sources: entry.sources,
 		};
-		if (entry.stale) {
-			inlinePolicyEntries.push({ ...tally, stale: true });
-			continue;
-		}
 		const policy = applyInlineBlockerPolicy(entry, args.cwd);
-		inlinePolicyEntries.push({ ...tally, stale: false, outcome: policy });
+		inlinePolicyEntries.push({
+			...tally,
+			stale: entry.stale === true,
+			outcome: policy,
+		});
 		if (policy.body === undefined) policySuppressedPaths.push(entry.filePath);
 	}
 	// No live record is a population this pass has no verdict about (#3248's
@@ -1722,7 +1725,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	/**
 	 * The two inline-blocker commits a hold runs once its advisory reached the
 	 * message. The past-EOF retire is #1944's "after this ONE delivery"; the
-	 * drift count is #1950's `DEPENDENCY_DRIFT_MAX_DELIVERIES` cap.
+	 * drift count is the cap for the demotion's own axis (#1950's
+	 * `DEPENDENCY_DRIFT_MAX_DELIVERIES`, #4990's `SELF_DRIFT_MAX_DELIVERIES`).
 	 */
 	const retirePastEofOnDelivery =
 		(bPath: string, deadLines: readonly number[], displayPath: string) =>
@@ -1741,16 +1745,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			});
 		};
 	const countDriftDeliveryOnDelivery =
-		(bPath: string, displayPath: string) => (): void => {
+		(
+			bPath: string,
+			displayPath: string,
+			reason: "dependency-drift" | "self-drift",
+			cap: number,
+		) =>
+		(): void => {
 			const deliveryCount = runtime.incrementInlineBlockerStaleDelivery(bPath);
-			if (deliveryCount < DEPENDENCY_DRIFT_MAX_DELIVERIES) return;
-			if (!runtime.retireDemotedDependencyDriftBlocker(bPath)) return;
+			if (deliveryCount < cap) return;
+			if (!runtime.retireDemotedDriftBlocker(bPath, reason)) return;
 			runtime.updateGitGuardStatus(false, "");
 			demotedFindingsRetired += 1;
 			incrementDegradationCount({
 				kind: "demoted-finding-retired",
 				subject: `inline-blocker:${displayPath}`,
-				reason: `capped after ${deliveryCount} deliveries with no re-run; re-run can still confirm`,
+				reason: `capped after ${deliveryCount} deliveries of a ${reason} advisory with no re-run; re-run can still confirm`,
 			});
 		};
 
@@ -1809,11 +1819,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const policySuppressedPaths: string[] = [];
 	const inlinePolicyStart = Date.now();
 	for (const record of unresolvedBlockers) {
-		const { filePath: bPath, summary, stale, staleReason } = record;
+		const { filePath: bPath, stale, staleReason } = record;
 		const displayPath = toRunnerDisplayPath(cwd, bPath);
 		const tally = { displayPath, sources: record.sources };
 		if (stale) {
-			inlinePolicyEntries.push({ ...tally, stale: true });
 			// #1631: demoted — out of the authoritative blocker channel and into the
 			// advisory channel with a stale marker, so the agent is told to re-run
 			// rather than pressured by a verdict that may already be resolved.
@@ -1825,24 +1834,52 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// cited lines, so no re-run can ever confirm it — retire the record
 			// after this ONE delivery instead of re-serving it for the rest of the
 			// session.
+			//
+			// #4990 gap 2: a demotion is a CHANNEL change, never an exemption from
+			// the agent's own dispositions. This branch used to push the record's
+			// already-rendered `summary` verbatim, so a finding marked
+			// `false-positive` (or suppressed) while the record was live came back
+			// here on every turn end — the one PUSH surface the marks could not
+			// reach. Run the SAME stack the live branch uses (#3246), then render
+			// the survivors through the demoted-body renderer. An empty survivor
+			// set is the mark working: drop the part, and hand the file to the
+			// per-turn policy tally and the commit-gate resync exactly as the live
+			// branch does.
+			const policy = applyInlineBlockerPolicy(record, cwd);
+			inlinePolicyEntries.push({ ...tally, stale: true, outcome: policy });
+			if (policy.body === undefined) {
+				policySuppressedPaths.push(bPath);
+				continue;
+			}
 			const deadLines = blockerPastEof.deadLinesByPath.get(bPath) ?? [];
-			const degraded = degradeDemotedFindingBody(summary, { deadLines });
+			const degraded = degradeDemotedFindingBody(policy.body, { deadLines });
 			// #3813: asked, not retired. The retire runs once the cap has let
 			// this part through (the hold below); a cut part leaves it pending.
 			const retires = runtime.wouldRetireDemotedPastEofBlocker(
 				bPath,
 				deadLines,
 			);
+			// #1950/#4990: which axis's delivery cap applies, if this demotion has
+			// one. `past-eof` retires after its own single delivery (#1944) and has
+			// no count.
+			const driftAxis =
+				staleReason === "self-drift" || staleReason === "dependency-drift"
+					? staleReason
+					: undefined;
+			const driftCap =
+				driftAxis === "self-drift"
+					? SELF_DRIFT_MAX_DELIVERIES
+					: DEPENDENCY_DRIFT_MAX_DELIVERIES;
 			let retirementNote: string | undefined;
 			if (retires) {
 				retirementNote = formatRetirementNote(deadLines);
-			} else if (staleReason === "dependency-drift") {
-				// #1950: a dependency-drift demotion is recoverable (its coordinates
-				// are still in bounds), so it does NOT retire after one delivery like
-				// the past-EOF case above — but nothing capped how many times the
-				// SAME demoted-but-unconfirmed record re-serves, and incident data
-				// showed repeat deliveries carrying near-zero information after the
-				// first. Cap it at DEPENDENCY_DRIFT_MAX_DELIVERIES instead.
+			} else if (driftAxis !== undefined) {
+				// #1950/#4990: a drift demotion is recoverable (a fresh dispatch can
+				// confirm or clear it), so it does NOT retire after one delivery like
+				// past-EOF — but nothing capped how many times the SAME demoted-but-
+				// unconfirmed record re-serves. #1950 capped the import axis; #4990
+				// caps the self axis, whose re-arm covers only a file whose bytes
+				// COME BACK, not the ordinary case of an agent rewrite that does not.
 				//
 				// The count driving THIS render is a peek (fix-round F1): the actual
 				// increment is the hold's `onDelivered`, committed only once this
@@ -1851,7 +1888,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				// advances the stored count.
 				const tentativeCount =
 					runtime.peekInlineBlockerStaleDeliveryCount(bPath) + 1;
-				if (tentativeCount >= DEPENDENCY_DRIFT_MAX_DELIVERIES) {
+				if (tentativeCount >= driftCap) {
 					retirementNote = formatDeliveryCapNote(tentativeCount);
 				}
 			}
@@ -1865,10 +1902,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					part: advisoryPart,
 					onDelivered: retirePastEofOnDelivery(bPath, deadLines, displayPath),
 				});
-			} else if (staleReason === "dependency-drift") {
+			} else if (driftAxis !== undefined) {
 				deliveryHolds.push({
 					part: advisoryPart,
-					onDelivered: countDriftDeliveryOnDelivery(bPath, displayPath),
+					onDelivered: countDriftDeliveryOnDelivery(
+						bPath,
+						displayPath,
+						driftAxis,
+						driftCap,
+					),
 					skipOnSuppressed: true,
 				});
 			}

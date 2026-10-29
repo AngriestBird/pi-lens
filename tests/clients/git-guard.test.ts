@@ -717,6 +717,91 @@ describe("git-guard", () => {
 		}
 	});
 
+	it("#4990 gap 1: a partial clean narrows the record and the remaining row still gates", () => {
+		// The live shape: one server's clean verdict for a record that also holds
+		// another tool's row. Before #4990 the whole record survived, so the dead
+		// server coordinates kept gating and re-serving. After it, the covered
+		// rows leave and the gate answers for the row nobody re-checked.
+		const env = setupTestEnvironment("pi-lens-4990-git-guard-partial-");
+		try {
+			const file = path.join(env.tmpDir, "upstreams.ts");
+			fs.writeFileSync(file, "const x = 1;\nconst y = 2;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			const diagnostics: Diagnostic[] = [
+				{
+					id: "lsp:1",
+					message: "Cannot find name 'setCached'.",
+					filePath: file,
+					line: 1,
+					severity: "error",
+					semantic: "blocking",
+					tool: "lsp",
+					rule: "typescript:2304",
+				},
+				{
+					id: "oxlint:2",
+					message: "no-eval is banned",
+					filePath: file,
+					line: 2,
+					severity: "error",
+					semantic: "blocking",
+					tool: "oxlint",
+					rule: "no-eval",
+				},
+			];
+			runtime.recordInlineBlockers(
+				file,
+				formatDiagnostics(diagnostics, "blocking").trim(),
+				1,
+				["lsp", "oxlint"],
+				[1, 2],
+				undefined,
+				diagnostics,
+			);
+			runtime.updateGitGuardStatus(true, "blockers");
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+
+			expect(
+				retireInlineBlockerAndResyncGuard({
+					runtime,
+					cacheManager: cache,
+					cwd: env.tmpDir,
+					filePath: file,
+					writeIndex: 2,
+					coveredSources: ["lsp"],
+					lensGuardEnabled: true,
+				}),
+			).toBe(true);
+			// The lsp row is retired, the oxlint row is not, and the gate still
+			// refuses the commit for it.
+			const narrowed = runtime.getInlineBlockersSnapshot();
+			expect(narrowed).toHaveLength(1);
+			expect(narrowed[0]?.sources).toEqual(["oxlint"]);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+
+			// The all-source clean retires the rest.
+			expect(
+				retireInlineBlockerAndResyncGuard({
+					runtime,
+					cacheManager: cache,
+					cwd: env.tmpDir,
+					filePath: file,
+					writeIndex: 3,
+					coveredSources: ["lsp", "oxlint"],
+					lensGuardEnabled: true,
+				}),
+			).toBe(true);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("still enforces a blocker for another file during per-file recovery", () => {
 		const env = setupTestEnvironment("pi-lens-git-guard-stale-sibling-");
 		try {

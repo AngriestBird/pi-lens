@@ -2013,7 +2013,9 @@ function unknown(
  * Colocated with the gate rather than inlined at the wiring site so the claim
  * is testable without booting the extension.
  *
- * @returns true when an entry was retired (the caller logs it — #1432 Gap 1).
+ * @returns true when the record was retired OR narrowed (at least one source
+ * row left it; #4990 gap 1). Either way the caller records it — #1432 Gap 1 —
+ * and the latch recompute below keeps a non-covered row gating the commit.
  */
 export function retireInlineBlockerAndResyncGuard(args: {
 	runtime: RuntimeCoordinator;
@@ -2446,9 +2448,12 @@ export function clearGitGuardTestFailure(
  * is therefore only true while those bytes are still there. Everything that
  * changes a file THROUGH pi-lens re-establishes the verdict on its own — a
  * dispatch replaces the record wholesale, and the turn-end freshness sweep
- * demotes a self-drifted record before the policy loop can suppress it, which
- * clears the verdict. Bytes that move OUTSIDE dispatch (an external formatter, a
- * `git checkout`, an editor write) trigger neither, and the commit gate can be
+ * demotes a self-drifted record. Since #4990 the demoted channel runs the same
+ * policy pass, so a demoted record CAN be stamped suppressed; what keeps that
+ * from opening the gate is the content check below, because a demoted record's
+ * bytes no longer match the `recordedHash` its verdict was computed against.
+ * Bytes that move OUTSIDE dispatch (an external formatter, a `git checkout`, an
+ * editor write) trigger neither, and the commit gate can be
  * reached with no turn end in between at all — so the gate, the one reader that
  * can let a verdict OPEN a commit, confirms it here instead of trusting the
  * latch memo.
