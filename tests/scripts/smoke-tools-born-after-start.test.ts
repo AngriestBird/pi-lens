@@ -114,6 +114,7 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 	let service: {
 		shutdown: () => Promise<void>;
 		touchFile: (...args: never[]) => Promise<unknown>;
+		livePrimaryClientRoots?: () => Array<{ root: string }>;
 	};
 
 	beforeAll(async () => {
@@ -340,6 +341,13 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 					ctx,
 				),
 			look,
+			// #4532 gap 14: the row names the live primary roots, so a cell can assert
+			// the subdirectory hosts its own client and not only that the finding
+			// cleared.
+			clientRoots: () =>
+				(service.livePrimaryClientRoots?.() ?? []).map(
+					(entry) => path.relative(workspace, entry.root) || ".",
+				),
 			deadlineMs: 10_000,
 			intervalMs: 100,
 		});
@@ -372,6 +380,9 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 				"pass",
 			],
 		]);
+		// The row's evidence, not only its verdict: the subdirectory hosts its own
+		// client by the time the importer reads clean.
+		expect(String(rows[2].detail)).toContain("witness_sub_");
 	}, 60_000);
 
 	// #4532 gap 5: the ANSWER route forwards the late config for itself. The
