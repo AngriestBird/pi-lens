@@ -838,8 +838,9 @@ update their registered-or-fail coverage tests.
 
 Ast-grep rules live under `rules/ast-grep-rules/` and tree-sitter rules under
 `rules/tree-sitter-queries/`; shared user rules use the same layout under
-`<PI_LENS_HOME>/rules/`. Precedence is project > user > bundled, and a
-shadowed rule is excluded from execution. Use AST patterns over regex where
+`<PI_LENS_HOME>/rules/`. The repo-only governance rules, which never ship,
+live under `scripts/governance-rules/rules/`. Precedence is project > user >
+bundled, and a shadowed rule is excluded from execution. Use AST patterns over regex where
 possible. A rule with an unknown post-filter fails closed. Every shipped rule
 has a real behavioral fixture; Java/Kotlin rules use the real CLI path because
 NAPI lacks their grammars. The bundled ast-grep source census is recursive and
