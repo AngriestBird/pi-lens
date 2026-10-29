@@ -61,6 +61,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { writeFileAtomicAsync } from "../atomic-write.js";
+import { registerBackgroundWriteDrain } from "../background-write-drains.js";
 import { BoundedLruCache } from "../bounded-cache.js";
 import { logExtension } from "../extension-log.js";
 import {
@@ -2473,6 +2474,12 @@ export async function flushProbeCache(): Promise<ProbeCacheFlushResult> {
 		if (_probeCacheWriteInFlight === write) _probeCacheWriteInFlight = null;
 	}
 }
+
+// #4937: the debounced flush timer above lives in this evaluation of the module;
+// the tier-2 harness's loaded extension copy owns one the test's own import
+// cannot reach, so its write lands after the fixture root is removed. The
+// harness joins it through the registry (`clients/background-write-drains.ts`).
+registerBackgroundWriteDrain(flushProbeCache);
 
 function isAstGrepVersionOutput(output: string): boolean {
 	return /\bast[- ]grep\b/i.test(output);

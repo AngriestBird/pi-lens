@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { writeFileAtomic } from "./atomic-write.js";
+import { registerBackgroundWriteDrain } from "./background-write-drains.js";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import { getProjectDataDir } from "./file-utils.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
@@ -2287,6 +2288,11 @@ export async function waitForProjectSnapshotPersistsForTests(): Promise<void> {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 }
+
+// #4937: the loaded extension copy's in-flight worker write is invisible to a
+// test's own import of this module; the tier-2 harness joins it through the
+// registry (`clients/background-write-drains.ts`).
+registerBackgroundWriteDrain(waitForProjectSnapshotPersistsForTests);
 
 /** Test-only: force any in-flight worker body write to the sync main-thread path. */
 export function flushProjectSnapshotPersistsForTests(): void {
