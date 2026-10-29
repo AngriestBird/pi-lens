@@ -99,6 +99,65 @@ describe("RuntimeCoordinator", () => {
 		}).toEqual({ kept: ["own"], sub: [] });
 	});
 
+	/** #4965: one actionable record; the actionable store is the seam's other tenant. */
+	const actionable = (name: string) => ({
+		id: `act:${name}`,
+		filePath: path.resolve("src/actionable.ts"),
+		displayPath: "src/actionable.ts",
+		line: 1,
+		severity: "warning" as const,
+		tool: "ast-grep",
+		rule: name,
+		message: name,
+		actions: [],
+		suppressed: false,
+		origin: "dispatch" as const,
+	});
+
+	it("the actionable-warning partitions follow the same session rules as the code-quality ones (#4965)", () => {
+		// RECURRENCE GUARDED: #4965 moved both stores onto SessionKeyedStore. A
+		// retire that dropped every session's partition, or none, would only show
+		// on the half a test exercised: the first cut covered code-quality alone.
+		const runtime = new RuntimeCoordinator();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
+		const peek = (sessionId?: string) =>
+			rules(runtime.peekActionableWarnings(sessionId));
+
+		runtime.recordActionableWarnings([actionable("own")]);
+		runtime.recordActionableWarnings([actionable("sub-a")], "sub-a");
+		runtime.recordActionableWarnings([actionable("sub-b")], "sub-b");
+		runtime.recordActionableWarnings([actionable("sub-b2")], "sub-b");
+		expect({ own: peek(), a: peek("sub-a"), b: peek("sub-b") }).toEqual({
+			own: ["own"],
+			a: ["sub-a"],
+			b: ["sub-b", "sub-b2"],
+		});
+
+		runtime.forgetTurnSession("sub-a");
+		expect({ own: peek(), a: peek("sub-a"), b: peek("sub-b") }).toEqual({
+			own: ["own"],
+			a: [],
+			b: ["sub-b", "sub-b2"],
+		});
+
+		runtime.beginTurn("sub-b");
+		expect({ own: peek(), b: peek("sub-b") }).toEqual({
+			own: ["own"],
+			b: [],
+		});
+
+		runtime.recordActionableWarnings([actionable("sub-c")], "sub-c");
+		runtime.resetForSession();
+		runtime.setSessionLifecycle({ sessionId: "primary-session" });
+		expect({ own: peek(), c: peek("sub-c") }).toEqual({
+			own: [],
+			c: ["sub-c"],
+		});
+
+		runtime.clearActionableWarnings("sub-c");
+		expect(peek("sub-c")).toEqual([]);
+	});
+
 	it("readGuardFor keys one guard per owner and answers the coordinator's own for its turns (#4942)", () => {
 		// RECURRENCE GUARDED: #4942. One guard for every session of the process
 		// let a subagent's read license the primary's edit. A turn with no

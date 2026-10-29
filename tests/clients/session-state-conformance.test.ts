@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	EXEMPT_SESSION_STATE_FILES,
+	SESSION_KEYED_STORE_SITES,
 	SESSION_STATE_REGISTRY,
 	SESSION_STATE_SYMBOL_COUNTS,
 	_resetRegistryProbeState,
@@ -31,10 +32,12 @@ import {
 import {
 	SWEEP_HEURISTIC_LIMITS,
 	auditContainerClassExclusions,
+	auditOwnerKeys,
 	callsWithinFunction,
 	callsWithinSessionStartClosure,
 	clientSourceFiles,
 	resetNameDefinitions,
+	scanSessionKeyedStoreSites,
 	scanSessionStateCandidates,
 	sessionStartClosureResetNames,
 	sessionStartResetNames,
@@ -1175,5 +1178,188 @@ describe("session-state scan — CONTAINER_CLASS_EXCLUSIONS guards (#2455 fix ro
 				expect(problems).toEqual([]);
 			},
 		);
+	});
+});
+
+// #4965 (defect shape 72): seven bug fixes in one week (#4961, #4955, #4952,
+// #4940, #4762, #4749, #4753) were stores that answered for the process when a
+// session owned the data. No check asked who owns a store; this one does.
+describe("session-state registry — owner key (#4965)", () => {
+	const OK_SESSION = {
+		id: "x:session",
+		module: "x.ts",
+		ownerKey: "session",
+		sessionSeamException:
+			"one process Set keyed by file path with no session in the key",
+	};
+
+	it("every registry entry declares an admitted owner key", () => {
+		expect(
+			auditOwnerKeys(SESSION_STATE_REGISTRY, scanSessionKeyedStoreSites()),
+		).toEqual([]);
+	});
+
+	it("an entry with the column removed is refused", () => {
+		const { ownerKey: _dropped, ...withoutColumn } = OK_SESSION;
+		expect(auditOwnerKeys([withoutColumn], {})).toEqual([
+			expect.stringContaining("x:session: ownerKey undefined is not"),
+		]);
+	});
+
+	it("fails closed: only the known values are admitted", () => {
+		const refused = [
+			"global",
+			"Session",
+			" session",
+			"session ",
+			"",
+			"process-wide",
+			"process-wide:",
+			"process-wide: ",
+			"process-wide: machine",
+			"process wide: a fact about this machine",
+			"cwd",
+			42,
+			null,
+			undefined,
+			["session"],
+		];
+		for (const ownerKey of refused)
+			expect(
+				auditOwnerKeys([{ id: "x", module: "x.ts", ownerKey }], {}),
+				`${JSON.stringify(ownerKey)} must be refused`,
+			).toHaveLength(1);
+		for (const ownerKey of [
+			"repository",
+			"project",
+			"process-wide: shared LSP pool: one service for every session",
+		])
+			expect(
+				auditOwnerKeys([{ id: "x", module: "x.ts", ownerKey }], {}),
+				`${ownerKey} must be admitted`,
+			).toEqual([]);
+	});
+
+	it("a session owner is on the seam or states why it is not", () => {
+		expect(auditOwnerKeys([OK_SESSION], {})).toEqual([]);
+		const bare = { id: "x", module: "x.ts", ownerKey: "session" };
+		expect(auditOwnerKeys([bare], {})).toEqual([
+			expect.stringContaining("build it on SessionKeyedStore"),
+		]);
+		expect(
+			auditOwnerKeys([{ ...bare, sessionSeamException: "because" }], {}),
+		).toHaveLength(1);
+	});
+
+	it("a seam claim needs a pinned SessionKeyedStore construction in its module", () => {
+		const onSeam = {
+			id: "x",
+			module: "x.ts",
+			ownerKey: "session",
+			sessionSeam: true,
+		};
+		expect(auditOwnerKeys([onSeam], {})).toEqual([
+			expect.stringContaining("constructs no SessionKeyedStore"),
+		]);
+		expect(auditOwnerKeys([onSeam], { "clients/x.ts": 0 })).toHaveLength(1);
+		expect(auditOwnerKeys([onSeam], { "clients/x.ts": 1 })).toEqual([]);
+		expect(
+			auditOwnerKeys(
+				[{ ...onSeam, sessionSeamException: OK_SESSION.sessionSeamException }],
+				{ "clients/x.ts": 1 },
+			),
+		).toHaveLength(1);
+		expect(
+			auditOwnerKeys([{ ...onSeam, sessionSeam: "yes" }], {
+				"clients/x.ts": 1,
+			}),
+		).toHaveLength(1);
+	});
+
+	it("a seam claim or exception does not ride a non-session owner", () => {
+		for (const ownerKey of [
+			"project",
+			"repository",
+			"process-wide: a fact about this machine",
+		]) {
+			expect(
+				auditOwnerKeys(
+					[{ id: "x", module: "x.ts", ownerKey, sessionSeam: true }],
+					{ "clients/x.ts": 1 },
+				),
+			).toHaveLength(1);
+			expect(
+				auditOwnerKeys(
+					[
+						{
+							id: "x",
+							module: "x.ts",
+							ownerKey,
+							sessionSeamException: OK_SESSION.sessionSeamException,
+						},
+					],
+					{},
+				),
+			).toHaveLength(1);
+		}
+	});
+
+	it("every shipped SessionKeyedStore site is pinned, and every pin is a live site", () => {
+		expect(scanSessionKeyedStoreSites()).toEqual(SESSION_KEYED_STORE_SITES);
+	});
+
+	describe("the site scan reads code, not prose, and not one spelling", () => {
+		let root: string | undefined;
+		afterEach(() => {
+			if (root) fs.rmSync(root, { recursive: true, force: true });
+			root = undefined;
+		});
+		const scanPlanted = (files: Record<string, string>) => {
+			root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-seam-scan-"));
+			for (const [name, text] of Object.entries(files))
+				fs.writeFileSync(path.join(root, name), text);
+			return Object.fromEntries(
+				Object.entries(scanSessionKeyedStoreSites([root])).map(
+					([file, count]) => [path.basename(file), count],
+				),
+			);
+		};
+
+		it("counts a direct construction and a subclass", () => {
+			expect(
+				scanPlanted({
+					"direct.ts": "new SessionKeyedStore<number>({ maxSessions: 4 });",
+					"sub.ts": "class Mine extends SessionKeyedStore<string> {}",
+				}),
+			).toEqual({ "direct.ts": 1, "sub.ts": 1 });
+		});
+
+		it("lists an aliased import, a namespace member and a re-export instead of missing them", () => {
+			const sites = scanPlanted({
+				"alias.ts":
+					'import { SessionKeyedStore as K } from "./k.js";\nnew K();',
+				"ns.ts":
+					'import * as seam from "./k.js";\nnew seam.SessionKeyedStore();',
+				"reexport.ts": 'export { SessionKeyedStore } from "./k.js";',
+				"binding.ts":
+					'import { SessionKeyedStore } from "./k.js";\nconst Make = SessionKeyedStore;\nnew Make();',
+			});
+			expect(Object.keys(sites).sort()).toEqual([
+				"alias.ts",
+				"binding.ts",
+				"ns.ts",
+				"reexport.ts",
+			]);
+			expect(sites["ns.ts"]).toBe(1);
+		});
+
+		it("ignores a name that only a comment or a string carries", () => {
+			expect(
+				scanPlanted({
+					"prose.ts":
+						'// new SessionKeyedStore()\nconst note = "new SessionKeyedStore()";',
+				}),
+			).toEqual({});
+		});
 	});
 });

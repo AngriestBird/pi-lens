@@ -766,3 +766,108 @@ export function shippedContainerSourceRoots(): string[] {
 		.map((root) => path.join(repoRoot, root))
 		.concat(path.join(repoRoot, "index.ts"));
 }
+
+// ── 3. Who owns the state: the owner-key column (#4965, shape 72) ────────────
+
+/** The owner keys that name no free text. `process-wide` always carries a reason. */
+export const SESSION_OWNER_KEYS = ["session", "repository", "project"] as const;
+
+const PROCESS_WIDE_PREFIX = "process-wide: ";
+const MIN_PROCESS_WIDE_REASON = 16;
+const MIN_SEAM_EXCEPTION = 30;
+
+/** The shape {@link auditOwnerKeys} reads; the registry entry satisfies it. */
+export interface OwnerKeyAuditEntry {
+	id: string;
+	module: string;
+	ownerKey?: unknown;
+	sessionSeam?: unknown;
+	sessionSeamException?: unknown;
+}
+
+/**
+ * `SessionKeyedStore` (clients/session-keyed-store.ts) sites by repo-relative
+ * file: every file that names the class outside its own module, with the count
+ * of `new SessionKeyedStore` and `extends SessionKeyedStore` in comment- and
+ * string-blanked source. A file that names the class any other way (an alias,
+ * a namespace member, a re-export) is still in the map, so it reds the pin
+ * until it is read; the census cannot be dodged by spelling.
+ */
+export function scanSessionKeyedStoreSites(
+	roots: readonly string[] = shippedContainerSourceRoots(),
+): Record<string, number> {
+	const sites: Record<string, number> = {};
+	for (const root of roots) {
+		const files = fs.statSync(root).isDirectory()
+			? listSourceFiles(root, { extensions: [".ts"], skipTests: true })
+			: [root];
+		for (const absolute of files) {
+			const relative = relativePosix(repoRoot, absolute);
+			if (relative === "clients/session-keyed-store.ts") continue;
+			const text = stripCommentsAndStrings(fs.readFileSync(absolute, "utf8"));
+			if (!/\bSessionKeyedStore\b/.test(text)) continue;
+			sites[relative] = [
+				...text.matchAll(
+					/\bnew\s+(?:[A-Za-z_$][\w$]*\.)?SessionKeyedStore\b|\bextends\s+SessionKeyedStore\b/g,
+				),
+			].length;
+		}
+	}
+	return sites;
+}
+
+/**
+ * Fail closed on the owner-key column: a known value is admitted and every
+ * other value is refused, including a missing column. A `session` owner is
+ * built on `SessionKeyedStore` (`sessionSeam: true`, and its module is a pinned
+ * site) or states why it is not (`sessionSeamException`); the two never
+ * co-occur, and neither rides a non-session owner.
+ */
+export function auditOwnerKeys(
+	entries: readonly OwnerKeyAuditEntry[],
+	seamSites: Readonly<Record<string, number>>,
+): string[] {
+	const problems: string[] = [];
+	for (const entry of entries) {
+		const { ownerKey } = entry;
+		const where = `${entry.id}:`;
+		const known =
+			typeof ownerKey === "string" &&
+			((SESSION_OWNER_KEYS as readonly string[]).includes(ownerKey) ||
+				(ownerKey.startsWith(PROCESS_WIDE_PREFIX) &&
+					ownerKey.slice(PROCESS_WIDE_PREFIX.length).trim().length >=
+						MIN_PROCESS_WIDE_REASON));
+		if (!known) {
+			problems.push(
+				`${where} ownerKey ${JSON.stringify(ownerKey)} is not "session", "repository", "project" or "process-wide: <reason of ${MIN_PROCESS_WIDE_REASON}+ chars>"`,
+			);
+			continue;
+		}
+		const exception = entry.sessionSeamException;
+		if (ownerKey !== "session") {
+			if (entry.sessionSeam !== undefined || exception !== undefined)
+				problems.push(
+					`${where} sessionSeam/sessionSeamException belong to a "session" owner, not ${JSON.stringify(ownerKey)}`,
+				);
+			continue;
+		}
+		const onSeam = entry.sessionSeam === true;
+		const hasException =
+			typeof exception === "string" &&
+			exception.trim().length >= MIN_SEAM_EXCEPTION;
+		if (entry.sessionSeam !== undefined && !onSeam)
+			problems.push(`${where} sessionSeam must be true or absent`);
+		else if (onSeam && exception !== undefined)
+			problems.push(`${where} is on the seam and also states an exception`);
+		else if (onSeam) {
+			if (!((seamSites[`clients/${entry.module}`] ?? 0) > 0))
+				problems.push(
+					`${where} claims sessionSeam but clients/${entry.module} constructs no SessionKeyedStore`,
+				);
+		} else if (!hasException)
+			problems.push(
+				`${where} is session-owned: build it on SessionKeyedStore (sessionSeam: true) or state sessionSeamException (${MIN_SEAM_EXCEPTION}+ chars)`,
+			);
+	}
+	return problems;
+}

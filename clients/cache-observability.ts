@@ -53,7 +53,7 @@
  * event handlers.
  */
 import { createHash } from "node:crypto";
-import { BoundedFifoMap, BoundedLruCache } from "./bounded-cache.js";
+import { SessionKeyedStore } from "./session-keyed-store.js";
 import {
 	recordDegradation,
 	recordDegradationOnce,
@@ -376,10 +376,10 @@ function newCacheUsageSummary(): CacheUsageSessionSummary {
 // `prefixHashBySession` below) — a long-lived process cycling through many
 // sessions cannot grow any of them without limit.
 export const MAX_TRACKED_SESSIONS = 32;
-const attributionBySession = new BoundedLruCache<
-	string,
-	SessionAttributionState
->(MAX_TRACKED_SESSIONS);
+const attributionBySession = new SessionKeyedStore<SessionAttributionState>({
+	maxSessions: MAX_TRACKED_SESSIONS,
+	recency: "lru",
+});
 
 function newAttributionState(): SessionAttributionState {
 	return {
@@ -449,12 +449,9 @@ function findingIdentities(text: string): string[] {
  * cannot grow this map without limit.
  */
 function attributionFor(key: string): SessionAttributionState {
-	const existing = attributionBySession.get(key);
-	const state = existing ?? newAttributionState();
-	// `get` above already moved an existing entry to MRU; `set` below also
-	// refreshes recency on a create, so every fetch counts as a touch.
-	attributionBySession.set(key, state);
-	return state;
+	// Every fetch is a touch: an existing entry moves to MRU on `get`, a
+	// created one is inserted at MRU.
+	return attributionBySession.getOrCreate(key, newAttributionState);
 }
 
 /**
@@ -2119,9 +2116,9 @@ function hashSystemMessages(messages: ReadonlyArray<ContextMessageLike>): {
  * sessions can't grow this unbounded. Shares {@link MAX_TRACKED_SESSIONS}
  * with `attributionBySession` above.
  */
-const prefixHashBySession = new BoundedFifoMap<string, string>(
-	MAX_TRACKED_SESSIONS,
-);
+const prefixHashBySession = new SessionKeyedStore<string>({
+	maxSessions: MAX_TRACKED_SESSIONS,
+});
 
 /**
  * Reported key used when no session id is available (undefined/empty). Internal
@@ -2137,7 +2134,7 @@ const NO_SESSION_KEY = "<no-session>";
  * oldest-inserted entries once the cap is exceeded.
  */
 function recordSessionHash(key: string, hash: string): void {
-	prefixHashBySession.delete(key);
+	prefixHashBySession.retire(key);
 	prefixHashBySession.set(key, hash);
 }
 
@@ -2275,11 +2272,11 @@ export function clearCachePrefixSession(
 	sessionRole?: "primary" | "concurrent-secondary",
 ): void {
 	const key = attributionKey(sessionId, sessionRole);
-	prefixHashBySession.delete(key);
+	prefixHashBySession.retire(key);
 	// The miss-attribution state has the same lifetime and the same reason to be
 	// reclaimed at session end; leaving it would let a reused session id inherit
 	// a stale gap baseline and a stale prefix-break flag.
-	attributionBySession.delete(key);
+	attributionBySession.retire(key);
 }
 
 /** Record the exact quiet-window summary content handed to pi.sendMessage. */
@@ -2353,7 +2350,7 @@ export function emitCacheUsageSummaryAtSessionEnd(
 			},
 		},
 	});
-	attributionBySession.delete(key);
+	attributionBySession.retire(key);
 }
 
 /**
