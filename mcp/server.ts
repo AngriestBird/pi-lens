@@ -90,6 +90,7 @@ import {
 } from "../tools/ast-grep-search.js";
 import { createLensDiagnosticsTool } from "../tools/lens-diagnostics.js";
 import { peekMcpSessionRuntime } from "../clients/mcp/session.js";
+import { isUnderDir } from "../clients/path-utils.js";
 import { loadPiLensGlobalConfig } from "../clients/lens-config.js";
 import { loadPiLensProjectConfig } from "../clients/project-lens-config.js";
 import {
@@ -333,15 +334,11 @@ function rejectForeignTurnCwd(route: string, cwd: string): string {
 }
 
 function isWithinServerWorkspace(cwd: string): boolean {
-	const target = path.resolve(cwd);
-	// `path.relative` applies the platform's own path semantics (including
-	// win32 case-insensitivity), which is what "inside the workspace" means
-	// here — do NOT hand-roll a case fold. An empty result means `target`
-	// IS `DEFAULT_CWD` (win32 can reach that via a pure case/drive-letter
-	// difference, since path.relative there is case-insensitive) and must
-	// be accepted, not rejected — do NOT reintroduce a `rel !== ""` guard.
-	const rel = path.relative(DEFAULT_CWD, target);
-	return !rel.startsWith("..") && !path.isAbsolute(rel);
+	// `isUnderDir` owns containment (whole segments, win32 case folding), and
+	// the workspace root itself is inside it — a win32 cwd that differs from
+	// `DEFAULT_CWD` only in case names the root and must be accepted. Do NOT
+	// hand-roll a case fold or reintroduce a `rel !== ""` guard.
+	return isUnderDir(path.resolve(cwd), DEFAULT_CWD);
 }
 
 function startIpcServer(): void {

@@ -203,32 +203,26 @@ const SEAM_ADMISSIONS: Readonly<Record<string, string>> = {
  * #4882 review F2 measured; a `tests/` row is an assertion about a fixture's
  * own prefix, not a containment decision the product acts on, and says so.
  *
- * 42 rows plus the seam's one admission make the 43 sites this census prints.
+ * 42 rows plus the seam's one admission made the 43 sites this census printed
+ * on the authoring head. #2556's `..`-name fold then routed ten runtime
+ * `..`-prefix rows through `isUnderDir`/`isWithinForm`/`toProjectRelativePath`
+ * and deleted them: 32 rows plus the admission make the 33 sites printed now.
  */
 const BASELINE: Readonly<Record<string, string>> = {
 	"clients/actionable-warnings.ts#legacyActionableWarningId": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree file, so a legacy finding id keeps a relative component for a path outside the project; it fails toward a duplicate id, never toward a dropped finding.`,
 	"clients/cache-manager.ts#CacheManager.toTurnStateKey": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree key, so the turn-state key for a file outside cwd stays relative instead of falling back to the absolute form.`,
-	"clients/dependency-checker.ts#isWithin": `${DOTDOT_NAME} A directory named \`..foo\` reads as outside \`target\`'s tree, so a check target under it is treated as out-of-tree. This is the \`isWithin\` duplicate that #2556's own acceptance deletes in favour of \`isUnderDir\`.`,
 	"clients/dispatch/rule-ignores.ts#isRuleIgnoredForPath": `${SEAM_COPY} Here \`outsideRoot\` decides whether the display path is the absolute spelling, which is the question \`toProjectRelativePath\` owns; the template-literal spelling is what the hand census did not see.`,
 	"clients/dispatch/runner-context.ts#toRunnerDisplayPath": `${CROSS_DRIVE} A cross-drive relative reads as a display path, so a runner diagnostic for a file on another drive keeps an absolute form in a relative slot.`,
 	"clients/dispatch/runners/go-vet.ts#run": `${CROSS_DRIVE} A cross-drive \`fileRel\` reads as under the module root, so \`./\` is prefixed to an absolute path and go vet's package argument names no package. The callee is a named \`relative\` import, which the hand census's \`path.relative\` grep did not reach.`,
 	"clients/dispatch/runners/helm-lint.ts#isWithin": `${SEAM_COPY} Here it decides whether a helm diagnostic's file is mapped onto a chart-relative path, and it gates the file at \`diagnosticLocation\`.`,
 	"clients/dispatch/runners/helm-render.ts#isWithin": `${SEAM_COPY} Here it gates the rendered-to-source mapping, and it is the second member of the shape inside this file.`,
-	"clients/dispatch/runners/helm-render.ts#mapRenderedToSource": `${CROSS_DRIVE} A cross-drive relative reads as inside \`outputDir\`, so a rendered file outside it is mapped onto a chart path that does not exist instead of falling back to source mapping.`,
 	"clients/finding-identity.ts#relativeFile": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree file, so a finding id carries an absolute path where a relative component is expected: two ids for one file rather than a lost one.`,
 	"clients/gitleaks-client.ts#isInsideNestedGitRepository": `${SEAM_COPY} Here it decides whether a finding is classified \`nested-repository\`, and the walk above it runs only when the answer is inside.`,
-	"clients/knip-client.ts#classifyKnipBinary": `${DOTDOT_NAME} A binary under a directory named \`..foo\` reads as outside the project, so a project-local shim is classified \`global\` instead of \`project\`.`,
-	"clients/lsp/client-registry.ts#ClientRegistry.resolveServerRoot": `${DOTDOT_NAME} A root under a directory named \`..foo\` reads as outside its ancestor key, so the root chain stops one level early. Paired with \`pathApi.isAbsolute\` in the same expression.`,
-	"clients/lsp/server.ts#cargoWorkspaceDeclaresMember": `${CROSS_DRIVE} A cross-drive relative reads as inside the manifest dir, so a cargo workspace member outside it is accepted and its crates are swept into the wrong root.`,
-	"clients/lsp/server.ts#isSameOrWithin": `${DOTDOT_NAME} A candidate under a directory named \`..foo\` reads as outside the root, so an in-root workspace member is not grouped with its workspace. Paired with \`pathApi.isAbsolute\` in the same expression.`,
 	"clients/lsp/workspace-diagnostics-cache.ts#clearWorkspaceDiagnosticsCacheAtAndAbove": `${SEAM_COPY} Here it stops the ancestor prune at the workspace ceiling, so a wrong answer would prune above the ceiling rather than at it.`,
 	"clients/path-utils.ts#inside": `${SEAM_COPY} A third containment predicate inside the seam's own module (\`toProjectRelativePath\`), baselined rather than folded because this lane changes no production site; moving it onto \`isWithinForm\` is #2556's remainder.`,
-	"clients/project-lens-config.ts#findNestedProjectMutationValue": `${DOTDOT_NAME} A directory whose name starts with \`..\` reads as outside the project root, so a nested config section under it is not read.`,
 	"clients/python-environment.ts#isUvWorkspaceMember": `${SEAM_COPY} Here it decides whether a project inherits the uv workspace's settings, and the \`toPosix\` fold above it makes the separator match on both arms.`,
 	"clients/python-environment.ts#isWithinProjectRoot": `${SEAM_COPY} Here it decides whether an ambient environment root is borrowed for the project, and the template-literal separator spelling is what the hand census missed.`,
 	"clients/test-runner-client.ts#isExcludedTestTarget": `${SEAM_COPY} Here a lexical inside answer is the fast path and an outside answer falls through to the canonical \`isUnderDir\` check, so the copy already defers to the seam for the hard cases.`,
-	"clients/test-runner-client.ts#TestRunnerClient.relativeSourceDir": `${DOTDOT_NAME} A source directory whose name starts with \`..\` reads as outside cwd, so the mirrored test-tree candidate is not computed for it.`,
-	"mcp/server.ts#isWithinServerWorkspace": `${DOTDOT_NAME} A cwd under a directory named \`..foo\` reads as outside the server's workspace, so an in-workspace route is rejected. Outside the roots the issue's hand census grepped.`,
 	"scripts/hooks/guard-bash.mjs#hasNodeModulesSymlinkOutside": `${SEAM_COPY} It cannot fold because the hook is a bare-Node \`.mjs\` that Claude Code runs before any build, so it may not import a TypeScript seam. Baselined as the record that the copy was read.`,
 	"scripts/hooks/guard-bash.mjs#isUnderTmpRoot": `${SEAM_COPY} The same bare-Node boundary (no build step, so no TypeScript seam import) is why it stays a copy.`,
 	"scripts/lib/pr-worktree.mjs#nestedDestinationError": `${SEAM_COPY} It runs on the same bare-Node boundary as the git guard: a \`.mjs\` script that cannot import the TypeScript seam.`,
@@ -247,7 +241,6 @@ const BASELINE: Readonly<Record<string, string>> = {
 	"tests/scripts/exec-isolation.test.ts#creates a fresh directory under the OS temp dir on every call": `${CROSS_DRIVE} Asserts the helper's own output is outside the tmp root by the primitive's answer; a wrong containment fails the cell instead of acting on it.`,
 	"tests/scripts/exec-isolation.test.ts#returns a fresh, empty directory that is neither the project root, an ancestor of it, nor a descendant of it": `${CROSS_DRIVE} Asserts the created prefix is outside the project root in both directions (\`fromRoot\` and \`toRoot\`), by the primitive's own answer.`,
 	"tests/scripts/exec-isolation.test.ts#returns a fresh, empty directory that is neither the project root, an ancestor of it, nor a descendant of it#2": `${CROSS_DRIVE} The ordinal row for the second arm in the same cell (\`toRoot\`), which the census keys separately so one row never excuses two sites.`,
-	"tools/lens-diagnostics.ts#runnerRetirementDecision": `${DOTDOT_NAME} A file under a directory named \`..foo\` reads as outside a runner's coverage root, so its covered entry is skipped and the finding is retired by the id-only arm instead.`,
 };
 
 interface Occurrence {
@@ -353,7 +346,7 @@ describe("path containment sweep (#2556)", () => {
 				// A DEAD-SCAN floor, not a population pin: a detector that stopped
 				// matching reads here, while the population itself is held by the
 				// shrink-only audit below (a lost site reds as a stale row, which is
-				// exact where a floor is only a lower bound). Live: 43 sites.
+				// exact where a floor is only a lower bound). Live: 33 sites.
 				minFlagged: 21,
 				minReasonLength: 80,
 				remediation:
