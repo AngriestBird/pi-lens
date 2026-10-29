@@ -117,8 +117,12 @@ async function ci(text: string, labels: string[] = []) {
 	errors.mockClear();
 	return { result, printed };
 }
+// The label of a referenced issue is not this file's subject (#4968): the
+// cut is, so the reference label read is pinned at its process boundary.
 const localResult = (text: string) =>
-	lintLocalPrBody(text, process.cwd(), (() => "") as never);
+	lintLocalPrBody(text, process.cwd(), (() => "") as never, {
+		bugReferenced: false,
+	});
 const local = (text: string) => localResult(text).errors.join("\n");
 
 describe("a bot block appended to the body never counts (#4774)", () => {

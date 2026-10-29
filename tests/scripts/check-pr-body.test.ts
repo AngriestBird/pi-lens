@@ -6622,9 +6622,49 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 		},
 	);
 
-	posix("never calls gh for a body that closes nothing", () => {
-		const run = runLint(`${body}\n\nRefs #4321.`, "bug");
+	posix("never calls gh for a body that names no issue", () => {
+		const run = runLint(body, "bug");
 		expect(run.calls).toBe("");
+		expect(run.status).toBe(0);
+	});
+
+	// #4968: a body that only references an issue reads its label like a closing
+	// one, and a bug or nightly-drift label owes the Detection section. Before
+	// #4968 this body linted green for a bug (the audit's 24 `Refs` PRs).
+	const referencing = `${body}\n\nRefs #4321.`;
+
+	posix("requires the section for a referenced bug-labelled issue", () => {
+		const run = runLint(referencing, "bug");
+		expect(run.calls).toBe("api repos/{owner}/{repo}/issues/4321");
+		expect(run.output).toContain('missing "## Detection"');
+		expect(run.status).toBe(1);
+	});
+
+	posix("passes a referenced bug with a complete section", () => {
+		const run = runLint(referencing + detection("external user"), "bug");
+		expect(run.output).not.toContain("Detection");
+		expect(run.status).toBe(0);
+	});
+
+	posix("does not require the section for a referenced non-bug issue", () => {
+		const run = runLint(referencing, "feature");
+		expect(run.calls).toBe("api repos/{owner}/{repo}/issues/4321");
+		expect(run.status).toBe(0);
+	});
+
+	posix("refuses a reference whose label gh cannot read", () => {
+		const run = runLint(referencing, "fail");
+		expect(run.output).toContain("#4321");
+		expect(run.output).toContain("could not be read");
+		expect(run.status).toBe(1);
+	});
+
+	posix("reads a closed and a referenced issue once each", () => {
+		const run = runLint(`${body}\n\nCloses #4321. Refs #4322.`, "feature");
+		expect(run.calls.split("\n")).toEqual([
+			"api repos/{owner}/{repo}/issues/4321",
+			"api repos/{owner}/{repo}/issues/4322",
+		]);
 		expect(run.status).toBe(0);
 	});
 
