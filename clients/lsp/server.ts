@@ -37,15 +37,18 @@ import { extensionsForLanguage } from "../language-registry.js";
 import {
 	CARGO_WORKSPACE_MEMBER_DIALECT,
 	direntsHaveMarkerGlobMatch,
+	isAbsoluteFilePath,
 	isAtOrAboveHomeDir,
 	isFullyQualified,
 	isUnderDir,
 	isWindowsPath,
+	isWithinForm,
 	matchesWorkspaceMemberPattern,
 	normalizeEphemeralMapKey,
 	pathsEqual,
 	realpathOrResolve,
 	toPosix,
+	toProjectRelativePath,
 } from "../path-utils.js";
 import {
 	ensureTool,
@@ -425,14 +428,15 @@ export function isSameOrWithin(
 			caseInsensitive = posixFilesystemIsCaseInsensitive(resolvedAncestor);
 		}
 	}
-	const relative = pathApi.relative(
-		caseInsensitive ? resolvedAncestor.toLowerCase() : resolvedAncestor,
-		caseInsensitive ? resolvedCandidate.toLowerCase() : resolvedCandidate,
-	);
-	return (
-		relative === "" ||
-		(!relative.startsWith("..") && !pathApi.isAbsolute(relative))
-	);
+	// Win32 path semantics are case-insensitive; a POSIX path is folded only
+	// when the probe says its filesystem is. Both operands reach the shared text
+	// predicate in one form, which compares whole segments.
+	const fold = windowsShaped || caseInsensitive;
+	const form = (resolved: string): string => {
+		const slashed = windowsShaped ? toPosix(resolved) : resolved;
+		return fold ? slashed.toLowerCase() : slashed;
+	};
+	return isWithinForm(form(resolvedCandidate), form(resolvedAncestor));
 }
 
 /** Enforce the session cwd as the hard boundary for LSP client root selection. */
@@ -3498,11 +3502,10 @@ function cargoWorkspaceDeclaresMember(
 	parentDir: string,
 	childDir: string,
 ): boolean {
-	const relativePath = path
-		.relative(parentDir, childDir)
-		.split(path.sep)
-		.join("/");
-	if (relativePath === "" || relativePath.startsWith("..")) return false;
+	// Relative (slash-joined) only when the child is strictly below the parent;
+	// the parent itself and an outside path come back absolute.
+	const relativePath = toProjectRelativePath(childDir, parentDir);
+	if (isAbsoluteFilePath(relativePath)) return false;
 	// Reuse the shared, `[workspace]`-scoped readers (review round 2, F4)
 	// instead of hand-composing `extractTomlTableSection` +
 	// `parseTomlStringArray` here — that hand-composition duplicated exactly

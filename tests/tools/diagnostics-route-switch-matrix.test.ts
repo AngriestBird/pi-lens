@@ -61,6 +61,8 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { useConfigPath } from "../support/global-config.js";
+const setConfigPath = useConfigPath();
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -760,11 +762,10 @@ type ToolLike = {
 async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 	const fx = makeFixture(column);
 	const observed = {} as Record<RouteId, Cell>;
-	const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
 	// The harness points PI_LENS_CONFIG_PATH at a missing file
 	// (tests/support/vitest-setup.ts); this column's global config replaces it.
-	process.env.PI_LENS_CONFIG_PATH = fx.configPath;
+	setConfigPath(fx.configPath);
 	// Never fetch a real vscode-json-language-server for the missing primary.
 	process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
 	try {
@@ -973,8 +974,6 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 			? { started: "n/a", verdict: "n/a", lines: "n/a" }
 			: await runMcpCell(fx);
 	} finally {
-		if (savedConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-		else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
 		if (savedInstall === undefined)
 			delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
 		else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
@@ -1809,9 +1808,8 @@ describe("navigation operations on a file no primary answers for (#4403 N4, V5)"
 		const column = COLUMNS.find((entry) => entry.id === columnId);
 		if (!column) throw new Error(`no ${columnId} column`);
 		const fx = makeFixture(column);
-		const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
 		const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
-		process.env.PI_LENS_CONFIG_PATH = fx.configPath;
+		setConfigPath(fx.configPath);
 		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
 		const config = await import("../../clients/lsp/config.js");
 		const { default: extension } = await import("../../index.js");
@@ -1862,8 +1860,6 @@ describe("navigation operations on a file no primary answers for (#4403 N4, V5)"
 			if (started) await pi.emit("session_shutdown", { reason: "quit" }, ctx);
 			await getLSPService().shutdown();
 			resetLSPService();
-			if (savedConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
 			if (savedInstall === undefined)
 				delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
 			else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;

@@ -38,6 +38,7 @@ import {
 	type PiProviderRequest,
 	type PiSession,
 } from "./support/pi-session.js";
+import { withGlobalConfig } from "./support/global-config.js";
 
 const fixture = piSessionFixture();
 
@@ -108,30 +109,6 @@ async function phaseRows(
 	);
 }
 
-/**
- * Run `body` with `PI_LENS_CONFIG_PATH` naming a global config file under the
- * fixture. The loaded copy reads the global config at its own factory run, so
- * the session must start inside `body`; the same-function `finally` restores
- * the variable.
- */
-async function withGlobalConfig(
-	slug: string,
-	config: Record<string, unknown>,
-	body: () => Promise<void>,
-): Promise<void> {
-	const configPath = path.join(fixture.root, "global", slug, "config.json");
-	fs.mkdirSync(path.dirname(configPath), { recursive: true });
-	fs.writeFileSync(configPath, JSON.stringify(config));
-	const previous = process.env.PI_LENS_CONFIG_PATH;
-	process.env.PI_LENS_CONFIG_PATH = configPath;
-	try {
-		await body();
-	} finally {
-		if (previous === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-		else process.env.PI_LENS_CONFIG_PATH = previous;
-	}
-}
-
 /** {@link withGlobalConfig} with `tools.lazy: "auto"` and `extra` beside it. */
 function withAuto(
 	slug: string,
@@ -139,7 +116,7 @@ function withAuto(
 	extra: Record<string, unknown> = {},
 ): Promise<void> {
 	return withGlobalConfig(
-		`auto-${slug}`,
+		path.join(fixture.root, "global", `auto-${slug}`, "config.json"),
 		{ tools: { lazy: "auto", ...extra } },
 		body,
 	);
@@ -379,26 +356,30 @@ describe("tools.lazy decides the lazy posture per model (#4687 item 7)", () => {
 
 	it("tools.lazy=true keeps the lazy posture on a collapsing model", async () => {
 		const decisionsBefore = rowsBefore("tool_set_decision");
-		await withGlobalConfig("lazy-true", { tools: { lazy: true } }, async () => {
-			const handle = await startPiSession({
-				root: fixture.root,
-				cwd: projectRoot("lazy-true"),
-				modelCompat: COLLAPSING,
-				responses: [READY],
-			});
-			for (const tool of LAZY_TOOLS)
-				expect(activeTools(handle), tool).not.toContain(tool);
-			expect(
-				await rowsSince(handle, "tool_set_decision", decisionsBefore),
-			).toEqual([
-				{
-					trigger: "session_start",
-					mode: "on",
-					lazy: true,
-					supportsMidConvoSystemMessages: false,
-				},
-			]);
-		});
+		await withGlobalConfig(
+			path.join(fixture.root, "global", "lazy-true", "config.json"),
+			{ tools: { lazy: true } },
+			async () => {
+				const handle = await startPiSession({
+					root: fixture.root,
+					cwd: projectRoot("lazy-true"),
+					modelCompat: COLLAPSING,
+					responses: [READY],
+				});
+				for (const tool of LAZY_TOOLS)
+					expect(activeTools(handle), tool).not.toContain(tool);
+				expect(
+					await rowsSince(handle, "tool_set_decision", decisionsBefore),
+				).toEqual([
+					{
+						trigger: "session_start",
+						mode: "on",
+						lazy: true,
+						supportsMidConvoSystemMessages: false,
+					},
+				]);
+			},
+		);
 	});
 
 	it("--no-lazy-tools keeps every tool active on a mid-conversation model, across a model switch", async () => {

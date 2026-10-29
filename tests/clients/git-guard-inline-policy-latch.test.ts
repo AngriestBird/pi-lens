@@ -1148,9 +1148,15 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 			// (`isTurnEndFindingsCache` at v4.2.1) checks named fields only, so an
 			// extra key leaves the record a record to it.
 			const V4750_KEYS = ["blockerWrittenAt"];
+			// #4943 adds one: the session the composer addressed `content` to.
+			// The same reader rule holds, and the gate never reads it.
+			const V4943_KEYS = ["deliverTo"];
 			expect(
 				Object.keys(after).filter(
-					(key) => !V4_2_1_KEYS.includes(key) && !V4750_KEYS.includes(key),
+					(key) =>
+						!V4_2_1_KEYS.includes(key) &&
+						!V4750_KEYS.includes(key) &&
+						!V4943_KEYS.includes(key),
 				),
 			).toEqual([]);
 		} finally {

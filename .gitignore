@@ -73,6 +73,10 @@ migrate-*.js
 !tests/fixtures/ci-pr-bodies/*.md
 !CLAUDE.md
 !tests/fixtures/changelog-entries/*.md
+# #4512: the recorded pre-#4338 matrix is a test input. The global *.md ignore
+# hid it from the first commit, so two test files failed to load on a fresh
+# clone (#4980 F1; the #4522 F1 shape).
+!tests/fixtures/lsp-nightly/*.md
 !tests/support/scheduler-properties.md
 !.changelog/*.md
 !AGENTS.md

@@ -8,7 +8,11 @@ import {
 } from "../../clients/cascade-format.js";
 import { MAX_ADVISORY_AFFECTED_FILES } from "../../clients/advisory-provenance.js";
 import type { CascadeRun } from "../../clients/cascade-types.js";
-import type { Diagnostic } from "../../clients/dispatch/types.js";
+import {
+	deferRunnerFindings,
+	resetPendingRunnerFindings,
+} from "../../clients/dispatch/pending-runner-findings.js";
+import type { Diagnostic, RunnerResult } from "../../clients/dispatch/types.js";
 import {
 	markPendingAuxiliaryCoverage,
 	resetPendingAuxiliaryCoverage,
@@ -40,6 +44,7 @@ afterEach(() => {
 	resetCascadePendingNeighbors();
 	resetCascadeUnansweredPrimariesDelivered();
 	resetPendingAuxiliaryCoverage();
+	resetPendingRunnerFindings();
 });
 
 function neighborError(filePath: string): Diagnostic {
@@ -298,6 +303,483 @@ describe.each([false, true])(
 					h.runtime.appendCascadeRun(silentRun(primary));
 					const view = await h.turnEnd({ flags });
 					expect(view.text).toContain("late scanner finding");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4617 item 2): a bash-only turn delivered a late runner's
+		// advisory whose file the turn neither wrote nor resolved, so the stamp
+		// named no file and the live findings read as historical.
+		it("keeps a late runner finding current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-${guard}`,
+				incident: "A late runner part cites a file the turn did not edit",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = h.write("src/late.sh", "echo hi\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(runnerFile, past, past);
+					deferRunnerFindings({
+						filePath: runnerFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "blocking_diagnostics",
+							semantic: "warning",
+							diagnostics: [
+								{
+									id: "late-runner-1",
+									message: "late runner finding",
+									filePath: runnerFile,
+									line: 1,
+									column: 1,
+									severity: "warning",
+									semantic: "warning",
+									tool: "shellcheck",
+									rule: "SC2086",
+								},
+							],
+						} as RunnerResult),
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Late runner diagnostics");
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4617 item 2): the stamp for a late runner's file must still
+		// go historical once that file changes after the turn end; citing it must
+		// bind the message, not silence the label.
+		it("labels a late runner finding historical when its file changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-older-${guard}`,
+				incident:
+					"A stamped late runner part from an older turn stays labelled",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = h.write("src/late.sh", "echo hi\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(runnerFile, past, past);
+					deferRunnerFindings({
+						filePath: runnerFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "blocking_diagnostics",
+							semantic: "warning",
+							diagnostics: [
+								{
+									id: "late-runner-2",
+									message: "late runner finding",
+									filePath: runnerFile,
+									line: 1,
+									column: 1,
+									severity: "warning",
+									semantic: "warning",
+									tool: "shellcheck",
+									rule: "SC2086",
+								},
+							],
+						} as RunnerResult),
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runnerFile, "echo changed\n");
+						},
+					});
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4962 r5, CodeRabbit outside-diff): a late runner's kept
+		// advisory can name a file other than the one the run was deferred for
+		// (the freshness gate and the line text read each finding's own
+		// `filePath`). The part cited only the deferred file, so a change to the
+		// named file after the turn end left the message current.
+		it("labels a late runner finding historical when the file it names changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-cross-file-${guard}`,
+				incident:
+					"A late runner advisory names a file other than its deferred one",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = h.write("src/late.sh", "echo hi\n");
+					const namedFile = h.write("src/named.sh", "echo named\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(runnerFile, past, past);
+					fs.utimesSync(namedFile, past, past);
+					deferRunnerFindings({
+						filePath: runnerFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "blocking_diagnostics",
+							semantic: "warning",
+							diagnostics: [
+								{
+									id: "late-runner-cross-1",
+									message: "late runner finding",
+									filePath: namedFile,
+									line: 1,
+									column: 1,
+									severity: "warning",
+									semantic: "warning",
+									tool: "shellcheck",
+									rule: "SC2086",
+								},
+							],
+						} as RunnerResult),
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(namedFile, "echo changed\n");
+						},
+					});
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4617 item 2, round 2): a late runner whose surviving
+		// findings are all blocking leaves the advisory and is delivered by the
+		// blocker replay ("Unresolved from this turn"), a second producer of the
+		// same file-less part. The stamp named no file, so a STOP blocker the
+		// same message called historical of unknown provenance.
+		const deferBlockingLateRunner = (
+			h: { write: (rel: string, body: string) => string; cwd: string },
+			id: string,
+		): string => {
+			const runnerFile = h.write("src/late.sh", "echo hi\n");
+			const past = new Date(Date.now() - 10_000);
+			fs.utimesSync(runnerFile, past, past);
+			deferRunnerFindings({
+				filePath: runnerFile,
+				cwd: h.cwd,
+				projectRoot: h.cwd,
+				runnerId: "shellcheck",
+				markedAtMs: Date.now() - 2000,
+				promise: Promise.resolve({
+					status: "failed",
+					failureKind: "blocking_diagnostics",
+					semantic: "blocking",
+					diagnostics: [
+						{
+							id,
+							message: "late runner finding",
+							filePath: runnerFile,
+							line: 1,
+							column: 1,
+							severity: "error",
+							semantic: "blocking",
+							tool: "shellcheck",
+							rule: "SC2086",
+						},
+					],
+				} as RunnerResult),
+			});
+			return runnerFile;
+		};
+
+		it("keeps a blocking-only late runner finding current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-blocking-${guard}`,
+				incident:
+					"A blocker replayed from a late runner cites no file the turn edited",
+				issue: "#4617",
+				async run(h) {
+					deferBlockingLateRunner(h, "late-runner-blocking-1");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Unresolved from this turn");
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Negative direction of the cell above: citing the blocker's file binds
+		// the message, it does not silence the label once the file moves on.
+		it("labels a blocking-only late runner finding historical when its file changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-late-runner-blocking-older-${guard}`,
+				incident:
+					"A stamped replayed blocker from an older turn stays labelled",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = deferBlockingLateRunner(
+						h,
+						"late-runner-blocking-2",
+					);
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runnerFile, "echo changed\n");
+						},
+					});
+					expect(view.text).toContain("late runner finding");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4962 r3, CodeRabbit thread): one cited part made a
+		// no-write turn's stamp well-formed, so it spoke for the whole message.
+		// A part beside it that cited nothing read current although the file it
+		// reports changed after the turn end. Before the citations that message
+		// was historical; a stamp missing a part's files must not read current.
+		it("labels a message historical when one of its parts cites no file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-${guard}`,
+				incident:
+					"A cited replay vouched for an uncited secrets blocker in the same message",
+				issue: "#4617",
+				async run(h) {
+					deferBlockingLateRunner(h, "late-runner-mixed-1");
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
+						},
+					});
+					expect(view.text).toContain("Unresolved from this turn");
+					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Recurrence (#4962 r4 verify N1): the completeness rule also flips two
+		// cited producers from current to historical beside an uncited part, a
+		// #4954 coverage advisory and a confirmed-clean resolution. The mixed cell
+		// above pins only the late-runner citation, so a rule narrowed to that
+		// citation would drop both flips without a red.
+		it("labels a coverage advisory historical beside a part that cites no file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-advisory-${guard}`,
+				incident:
+					"A cited coverage advisory vouched for an uncited secrets blocker in the same message",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(indeterminateRun(primary));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
+						},
+					});
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("labels a resolution historical beside a part that cites no file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-resolution-${guard}`,
+				incident:
+					"A confirmed-clean resolution vouched for an uncited secrets blocker in the same message",
+				issue: "#4617",
+				async run(h) {
+					const file = h.write("src/value.ts", "export const value = 1;\n");
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					h.blocker("src/value.ts", "L1: type mismatch");
+					expect(
+						h.runtime.retireInlineBlockerOnConfirmedClean(
+							file,
+							h.runtime.nextWriteOrderToken(),
+							["lsp"],
+						),
+					).toBe(true);
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
+						},
+					});
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The excluded default (#4962 r3): a write turn's stamp binds its edits,
+		// as it did before #4617, so a part beside them that cites no file
+		// leaves it current. Applying the completeness rule there would label
+		// every write turn with such a part historical.
+		it("keeps a write turn current beside a part that cites no file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-write-uncited-${guard}`,
+				incident:
+					"The completeness rule must not reach a stamp that binds edits",
+				issue: "#4617",
+				async run(h) {
+					h.edit("src/app.ts", "export const app = 1;\n");
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The cap's direction (#4962 r3): only a part the message carries can
+		// leave the stamp incomplete. An uncited part the cap cut is not text
+		// the model reads, so it must not label the delivered part historical.
+		it("keeps a message current when the cap cut its only uncited part", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-cut-uncited-${guard}`,
+				incident: "An uncited part the cap cut labelled the kept part",
+				issue: "#4617",
+				async run(h) {
+					const warnings = 25;
+					const runnerFile = h.write(
+						"src/late.sh",
+						Array.from({ length: warnings }, () => "echo hi").join("\n") + "\n",
+					);
+					const failedFile = h.write("src/other.sh", "echo other\n");
+					const past = new Date(Date.now() - 10_000);
+					fs.utimesSync(runnerFile, past, past);
+					fs.utimesSync(failedFile, past, past);
+					deferRunnerFindings({
+						filePath: runnerFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "blocking_diagnostics",
+							semantic: "warning",
+							diagnostics: Array.from({ length: warnings }, (_, i) => ({
+								id: `late-runner-cut-${i}`,
+								message: "late runner finding",
+								filePath: runnerFile,
+								line: i + 1,
+								column: 1,
+								severity: "warning" as const,
+								semantic: "warning" as const,
+								tool: "shellcheck",
+								rule: "SC2086",
+							})),
+						} as RunnerResult),
+					});
+					deferRunnerFindings({
+						filePath: failedFile,
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "slow-runner",
+						markedAtMs: Date.now() - 2000,
+						promise: Promise.resolve({
+							status: "failed",
+							failureKind: "timeout",
+							semantic: "warning",
+							diagnostics: [],
+						} as RunnerResult),
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Late runner diagnostics");
+					expect(view.text).not.toContain("Deferred runner slow-runner failed");
 					expect(view.text).not.toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},

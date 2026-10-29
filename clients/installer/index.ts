@@ -3071,12 +3071,17 @@ export interface ToolStatus {
 }
 
 /**
- * Get detailed status for all tools
+ * Get detailed status for all tools, or for the tool ids named in `toolIds`
+ * (the nightly's per-row provenance reads only the servers it drives, #4512).
  */
-export async function getAllToolStatuses(): Promise<ToolStatus[]> {
+export async function getAllToolStatuses(
+	toolIds?: readonly string[],
+): Promise<ToolStatus[]> {
 	const statuses: ToolStatus[] = [];
 
+	const only = toolIds ? new Set(toolIds) : undefined;
 	for (const tool of TOOLS) {
+		if (only && !only.has(tool.id)) continue;
 		const status: ToolStatus = {
 			id: tool.id,
 			name: tool.name,

@@ -152,12 +152,10 @@ const ACTIVATION_STATE: Readonly<Record<string, string>> = {
  * that stops being reset (or starts) reds too. `kept` fields carry a reason.
  */
 const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
-	_actionableWarningsThisTurn: "reset",
 	_autofixDemotedThisTurn: "reset",
 	_cachedExports: "reset",
 	_cascadeRuns: "reset",
 	_cascadeSessionStats: "reset",
-	_codeQualityWarningsThisTurn: "reset",
 	_complexityBaselines: "reset",
 	_coordinatorId:
 		"kept: the construction scope's ticket names this coordinator on every session_scope_transition row (#3611)",

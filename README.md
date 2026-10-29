@@ -136,7 +136,7 @@ flowchart TD
 Architecture-level view, updated when a lane changes. Per-tool inventories live
 in [features](docs/features.md) and
 [language coverage](docs/language-coverage.md). Today the edit-time lane carries
-45+ runner modules over 35+ file kinds, and the LSP lane speaks to 47
+45+ runner modules over 35+ file kinds, and the LSP lane speaks to 50
 language server definitions.
 
 The gating box is an abstraction, not a call order. Freshness covers several
@@ -537,6 +537,10 @@ Thanks goes to these wonderful people:
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/rcdailey"><img src="https://avatars.githubusercontent.com/u/1768054?v=4" width="100px;" alt=""/><br /><sub><b>Robert Dailey</b></sub></a><br /><a href="#bug-rcdailey" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://twitter.com/letwir"><img src="https://avatars.githubusercontent.com/u/16576177?v=4" width="100px;" alt=""/><br /><sub><b>letwir</b></sub></a><br /><a href="#doc-letwir" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="http://www.erikdarling.com/"><img src="https://avatars.githubusercontent.com/u/2136037?v=4" width="100px;" alt=""/><br /><sub><b>Erik Darling</b></sub></a><br /><a href="#bug-erikdarlingdata" title="Bug reports">🐛</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Silvio-Re"><img src="https://avatars.githubusercontent.com/u/5860449?v=4" width="100px;" alt=""/><br /><sub><b>Silvio</b></sub></a><br /><a href="#bug-Silvio-Re" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/forge18"><img src="https://avatars.githubusercontent.com/u/31629847?v=4" width="100px;" alt=""/><br /><sub><b>forge18</b></sub></a><br /><a href="#ideas-forge18" title="Ideas & Planning">🤔</a></td>
     </tr>
   </tbody>
 </table>

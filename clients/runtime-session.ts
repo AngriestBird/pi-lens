@@ -6,6 +6,7 @@ import { resetBoundedTelemetry } from "./bounded-telemetry.js";
 import { rotateMessageEndAttribution } from "./message-end-attribution.js";
 import type { CacheManager } from "./cache-manager.js";
 import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
+import { bounded } from "./deadline-utils.js";
 import type { DeadCodeResult } from "./dead-code-client.js";
 import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
@@ -38,6 +39,7 @@ import {
 	GovulncheckClient,
 	type GovulncheckResult,
 } from "./govulncheck-client.js";
+import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import { realIsPidAlive, sweepAtomicWriteStages } from "./instance-reaper.js";
 import type { JscpdClient } from "./jscpd-client.js";
 import type { KnipResult } from "./knip-client.js";
@@ -570,6 +572,153 @@ function logProjectSnapshotProbe(args: {
 	}
 }
 
+/**
+ * The sequence-then-snapshot step both session_start modes run (quick and
+ * full): read the project sequence under its budget, decide whether the
+ * on-disk snapshot is fresh against it, emit the `session_start_sequence_read`
+ * and `session_start_snapshot_load` records and the snapshot probe, and
+ * hydrate the runtime from a fresh snapshot. Returns that fresh snapshot, or
+ * `null` when it was missing, stale or untrusted (full mode reads its startup
+ * scan and language profile from it).
+ *
+ * `onDeferredSequenceResolved` is the one place the modes differ on purpose:
+ * quick mode passes the retroactive hydration (#1785); full mode passes none
+ * (its call site says why).
+ */
+async function readSequenceAndHydrateFreshSnapshot(args: {
+	snapshotRoot: string;
+	cwd: string;
+	runtime: RuntimeCoordinator;
+	sessionGeneration: number;
+	dbg: (msg: string) => void;
+	onDeferredSequenceResolved?: (latestSeq: ProjectSequenceIndex) => void;
+}): Promise<ProjectSnapshot | null> {
+	const {
+		snapshotRoot,
+		cwd,
+		runtime,
+		sessionGeneration,
+		dbg,
+		onDeferredSequenceResolved,
+	} = args;
+	const sequenceReadStartedAt = Date.now();
+	// `readSequenceWithBudget` races its read against `sequenceReadBudgetMs()`,
+	// which is capped at the hook's wall budget, so its own timeout arm (the
+	// one that keeps the deferred reseed and the #1785 late hydration attached
+	// to the read) is what ends a stalled wait. `bounded()` at the same budget
+	// is the census backstop for this await: it is created after the inner
+	// timer, so the inner arm fires first and a read that lands later still
+	// recovers; an abandonment here would drop that recovery, so it must not be
+	// the arm that fires. `signal` is `undefined`: `SessionStartDeps` carries
+	// none, and `index.ts` awaits this whole handler under `bounded()` with the
+	// hook's `ctx.signal`.
+	const { latestSeq, timedOut } =
+		(await bounded(
+			readSequenceWithBudget({
+				snapshotRoot,
+				base: snapshotSequenceBase(snapshotRoot),
+				cwd,
+				runtime,
+				sessionGeneration,
+				dbg,
+				onDeferredSequenceResolved,
+			}),
+			{
+				ms: HOOK_WALL_BUDGET_MS.session_start,
+				signal: undefined,
+				hook: "session_start",
+				label: "readSequenceWithBudget",
+			},
+		)) ?? coldSequenceRead();
+	logLatency({
+		type: "phase",
+		phase: "session_start_sequence_read",
+		filePath: cwd,
+		startedAt: new Date(sequenceReadStartedAt).toISOString(),
+		durationMs: Date.now() - sequenceReadStartedAt,
+		metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
+	});
+	if (timedOut) {
+		recordSnapshotSequenceTimeout({
+			snapshotRoot,
+			snapshotPath: getProjectSnapshotPath(snapshotRoot),
+		});
+	}
+	runtime.seedProjectSequence?.(
+		latestSeq.projectSeq,
+		latestSeq.fileSeqByPath,
+		latestSeq.logEntries,
+	);
+	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
+	dbg(
+		`session_start sequence: projectSeq=${effectiveSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
+	);
+	// #1162 review follow-up (P3): a timed-out read's cold sentinel
+	// (`projectSeq: 0`) must never satisfy the freshness check, or a project's
+	// real first-ever snapshot (persisted at `seq === 0`) would hydrate as
+	// fresh despite the on-disk log having moved past it. `runtime.projectSeq`
+	// itself is left at 0, which Fix 1's advancement guard in
+	// `readSequenceWithBudget` depends on.
+	const freshnessSeq = timedOut ? UNKNOWN_PROJECT_SEQ : effectiveSeq;
+
+	const snapshotLoadStartedAt = Date.now();
+	const snapshotPath = getProjectSnapshotPath(snapshotRoot);
+	let snapshotBytes = 0;
+	try {
+		snapshotBytes = nodeFs.statSync(snapshotPath).size;
+	} catch {
+		// Missing snapshots are the normal cold-start case.
+	}
+	const snapshotBodyPresent =
+		nodeFs.existsSync(snapshotPath) ||
+		nodeFs.existsSync(getProjectSnapshotLegacyPath(snapshotRoot));
+	const snapshotGate = loadSnapshotBodyUnlessStale({
+		root: snapshotRoot,
+		currentProjectSeq: freshnessSeq,
+		unlockedThrough: latestSeq.unlockedThrough ?? 0,
+		dbg,
+	});
+	const snapshot = snapshotGate.snapshot;
+	const snapshotFresh = isProjectSnapshotFresh(
+		snapshot,
+		freshnessSeq,
+		latestSeq.unlockedThrough,
+	);
+	const snapshotMissReason = describeSnapshotMiss(snapshot, freshnessSeq, {
+		skippedStale: snapshotGate.skippedStale,
+		bodyPresent: snapshotBodyPresent,
+		unlockedThrough: latestSeq.unlockedThrough ?? 0,
+	});
+	logLatency({
+		type: "phase",
+		phase: "session_start_snapshot_load",
+		filePath: cwd,
+		startedAt: new Date(snapshotLoadStartedAt).toISOString(),
+		durationMs: Date.now() - snapshotLoadStartedAt,
+		metadata: {
+			bytes: snapshotBytes,
+			fresh: snapshotFresh,
+			seq: snapshot?.seq ?? null,
+			reason: snapshotFresh ? undefined : snapshotMissReason,
+			...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
+			...(timedOut ? { sequenceUnknown: true } : {}),
+		},
+	});
+	logProjectSnapshotProbe({
+		dbg,
+		root: snapshotRoot,
+		currentProjectSeq: freshnessSeq,
+		unlockedThrough: latestSeq.unlockedThrough ?? 0,
+		snapshot,
+		missReason: snapshotMissReason,
+	});
+	const freshSnapshot = snapshotFresh ? snapshot : null;
+	if (freshSnapshot) {
+		hydrateRuntimeFromProjectSnapshot(runtime, freshSnapshot);
+	}
+	return freshSnapshot;
+}
+
 function resolveStartupMode(
 	projectConfig?: PiLensProjectConfig,
 	globalConfig?: PiLensGlobalConfig,
@@ -595,9 +744,16 @@ function resolveStartupMode(
 // mirrors the issue's ~250ms figure; overridable for tests (mirrors the
 // `PI_LENS_WARMUP_DELAY_MS` precedent above) so a regression can use a tiny
 // budget instead of racing a real 250ms wall-clock wait.
+//
+// Capped at the hook's wall budget (#4977 review F1): a widened override must
+// not hold `session_start` past the wall, and the cap sits INSIDE the race, so
+// the arm that attaches the deferred reseed and the #1785 late hydration is
+// the one that fires. An outer `bounded()` alone abandons the whole call and
+// drops that recovery.
 function sequenceReadBudgetMs(): number {
 	const raw = Number(process.env.PI_LENS_SEQUENCE_READ_BUDGET_MS ?? 250);
-	return Number.isFinite(raw) && raw > 0 ? raw : 250;
+	const budget = Number.isFinite(raw) && raw > 0 ? raw : 250;
+	return Math.min(budget, HOOK_WALL_BUDGET_MS.session_start);
 }
 
 // #1162 review follow-up (P3): the sentinel used ONLY for the snapshot
@@ -775,6 +931,14 @@ async function readSequenceWithBudget(args: {
 			});
 	}
 
+	return coldSequenceRead();
+}
+
+/** The cold-start answer for a sequence read that did not land in its bound. */
+function coldSequenceRead(): {
+	latestSeq: ProjectSequenceIndex;
+	timedOut: true;
+} {
 	return {
 		latestSeq: { projectSeq: 0, fileSeqByPath: new Map<string, number>() },
 		timedOut: true,
@@ -2878,7 +3042,6 @@ export async function handleSessionStart(
 	});
 	if (quickMode) {
 		runtime.projectRoot = cwd;
-		const sequenceReadStartedAt = Date.now();
 		const snapshotRoot = resolveSnapshotRoot(cwd);
 		// #1785 F5 (round 4): the getter closes over `warmupOwnSnapshotRead`
 		// directly (a `let` in this same `handleSessionStart` invocation's
@@ -2886,9 +3049,8 @@ export async function handleSessionStart(
 		// TIME — not whatever it was at this wiring instant. See
 		// `retroactivelyHydrateAfterDeferredSequence`'s doc comment for the
 		// full design.
-		const { latestSeq, timedOut } = await readSequenceWithBudget({
+		await readSequenceAndHydrateFreshSnapshot({
 			snapshotRoot,
-			base: snapshotSequenceBase(snapshotRoot),
 			cwd,
 			runtime,
 			sessionGeneration: runtime.sessionGeneration,
@@ -2900,94 +3062,6 @@ export async function handleSessionStart(
 				dbg,
 			}),
 		});
-		logLatency({
-			type: "phase",
-			phase: "session_start_sequence_read",
-			filePath: cwd,
-			startedAt: new Date(sequenceReadStartedAt).toISOString(),
-			durationMs: Date.now() - sequenceReadStartedAt,
-			metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
-		});
-		if (timedOut) {
-			recordSnapshotSequenceTimeout({
-				snapshotRoot,
-				snapshotPath: getProjectSnapshotPath(snapshotRoot),
-			});
-		}
-		runtime.seedProjectSequence?.(
-			latestSeq.projectSeq,
-			latestSeq.fileSeqByPath,
-			latestSeq.logEntries,
-		);
-		const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
-		dbg(
-			`session_start sequence: projectSeq=${effectiveSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
-		);
-		// #1162 review follow-up (P3): a timed-out read's cold sentinel is
-		// `projectSeq: 0`, which is indistinguishable from a project's real
-		// first-ever snapshot (persisted with `seq === 0` before any change was
-		// logged). Feeding `effectiveSeq` (0) straight into the freshness check
-		// would let that legit seq-0 snapshot match and hydrate as FRESH even
-		// though the on-disk log has since moved past it. Use a value the
-		// freshness check can never match (`snapshot.seq` is always >= 0) ONLY
-		// for this gate when the read timed out — `runtime.projectSeq` itself
-		// stays 0 (untouched), which is what Fix 1's advancement guard above
-		// relies on to detect an in-window bump.
-		const freshnessSeq = timedOut ? UNKNOWN_PROJECT_SEQ : effectiveSeq;
-		const snapshotLoadStartedAt = Date.now();
-		const snapshotPath = getProjectSnapshotPath(snapshotRoot);
-		let snapshotBytes = 0;
-		try {
-			snapshotBytes = nodeFs.statSync(snapshotPath).size;
-		} catch {
-			// Missing snapshots are the normal cold-start case.
-		}
-		const snapshotBodyPresent =
-			nodeFs.existsSync(snapshotPath) ||
-			nodeFs.existsSync(getProjectSnapshotLegacyPath(snapshotRoot));
-		const snapshotGate = loadSnapshotBodyUnlessStale({
-			root: snapshotRoot,
-			currentProjectSeq: freshnessSeq,
-			unlockedThrough: latestSeq.unlockedThrough ?? 0,
-			dbg,
-		});
-		const snapshot = snapshotGate.snapshot;
-		const snapshotFresh = isProjectSnapshotFresh(
-			snapshot,
-			freshnessSeq,
-			latestSeq.unlockedThrough,
-		);
-		const snapshotMissReason = describeSnapshotMiss(snapshot, freshnessSeq, {
-			skippedStale: snapshotGate.skippedStale,
-			bodyPresent: snapshotBodyPresent,
-			unlockedThrough: latestSeq.unlockedThrough ?? 0,
-		});
-		logLatency({
-			type: "phase",
-			phase: "session_start_snapshot_load",
-			filePath: cwd,
-			startedAt: new Date(snapshotLoadStartedAt).toISOString(),
-			durationMs: Date.now() - snapshotLoadStartedAt,
-			metadata: {
-				bytes: snapshotBytes,
-				fresh: snapshotFresh,
-				seq: snapshot?.seq ?? null,
-				reason: snapshotFresh ? undefined : snapshotMissReason,
-				...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
-				...(timedOut ? { sequenceUnknown: true } : {}),
-			},
-		});
-		logProjectSnapshotProbe({
-			dbg,
-			root: snapshotRoot,
-			currentProjectSeq: freshnessSeq,
-			unlockedThrough: latestSeq.unlockedThrough ?? 0,
-			snapshot,
-			missReason: snapshotMissReason,
-		});
-		if (snapshotFresh) {
-			hydrateRuntimeFromProjectSnapshot(runtime, snapshot);
-		}
 		const quickTools: string[] = [];
 		if (!getFlag("no-lsp")) {
 			quickTools.push("LSP Service");
@@ -3073,110 +3147,22 @@ export async function handleSessionStart(
 	// it's stable for the rest of this call (no further `resetForSession`
 	// between here and the later uses of the same generation).
 	const sessionGeneration = runtime.sessionGeneration;
-	const sequenceReadStartedAt = Date.now();
 	const snapshotRoot = resolveSnapshotRoot(cwd);
-	const { latestSeq, timedOut } = await readSequenceWithBudget({
+	// #1785: deliberately no `onDeferredSequenceResolved`. Unlike quick mode's
+	// cold path (which does nothing when the snapshot isn't trusted), full
+	// mode's cold path computes this same state itself with a real rescan
+	// below, so it wants no late fill from the on-disk snapshot (the callee
+	// only fills empty state; it never overwrites, but the fill would still
+	// race what the rescan computes). The absence is pinned by the
+	// full-mode stall cell in
+	// `tests/clients/runtime-session-sequence-read-budget.test.ts`.
+	const freshSnapshot = await readSequenceAndHydrateFreshSnapshot({
 		snapshotRoot,
-		base: snapshotSequenceBase(snapshotRoot),
 		cwd,
 		runtime,
 		sessionGeneration,
 		dbg,
 	});
-	logLatency({
-		type: "phase",
-		phase: "session_start_sequence_read",
-		filePath: cwd,
-		startedAt: new Date(sequenceReadStartedAt).toISOString(),
-		durationMs: Date.now() - sequenceReadStartedAt,
-		metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
-	});
-	if (timedOut) {
-		// #1785: instrumentation only here, deliberately no
-		// `onDeferredSequenceResolved` — unlike quick mode's cold path (which
-		// does nothing when the snapshot isn't trusted), full mode's cold path
-		// actively kicks off a real rescan below to rebuild this same state.
-		// Retroactively hydrating from the on-disk snapshot once the deferred
-		// read lands could overwrite that fresher, actively-computed state with
-		// the stale disk copy — a regression, not a fix. See the PR body for the
-		// full reasoning.
-		recordSnapshotSequenceTimeout({
-			snapshotRoot,
-			snapshotPath: getProjectSnapshotPath(snapshotRoot),
-		});
-	}
-	runtime.seedProjectSequence?.(
-		latestSeq.projectSeq,
-		latestSeq.fileSeqByPath,
-		latestSeq.logEntries,
-	);
-	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
-	dbg(
-		`session_start sequence: projectSeq=${effectiveSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
-	);
-	// #1162 review follow-up (P3) — see the matching comment in the quick-mode
-	// path above: a timed-out read's cold sentinel (`projectSeq: 0`) must
-	// never satisfy the freshness check, or a project's real first-ever
-	// snapshot (persisted at `seq === 0`) would hydrate as fresh despite the
-	// on-disk log having moved past it. `runtime.projectSeq` itself is left
-	// at 0, which Fix 1's advancement guard above depends on.
-	const freshnessSeq = timedOut ? UNKNOWN_PROJECT_SEQ : effectiveSeq;
-
-	const snapshotLoadStartedAt = Date.now();
-	const snapshotPath = getProjectSnapshotPath(snapshotRoot);
-	let snapshotBytes = 0;
-	try {
-		snapshotBytes = nodeFs.statSync(snapshotPath).size;
-	} catch {
-		// Missing snapshots are the normal cold-start case.
-	}
-	const snapshotBodyPresent =
-		nodeFs.existsSync(snapshotPath) ||
-		nodeFs.existsSync(getProjectSnapshotLegacyPath(snapshotRoot));
-	const snapshotGate = loadSnapshotBodyUnlessStale({
-		root: snapshotRoot,
-		currentProjectSeq: freshnessSeq,
-		unlockedThrough: latestSeq.unlockedThrough ?? 0,
-		dbg,
-	});
-	const snapshot = snapshotGate.snapshot;
-	const snapshotFresh = isProjectSnapshotFresh(
-		snapshot,
-		freshnessSeq,
-		latestSeq.unlockedThrough,
-	);
-	const snapshotMissReason = describeSnapshotMiss(snapshot, freshnessSeq, {
-		skippedStale: snapshotGate.skippedStale,
-		bodyPresent: snapshotBodyPresent,
-		unlockedThrough: latestSeq.unlockedThrough ?? 0,
-	});
-	logLatency({
-		type: "phase",
-		phase: "session_start_snapshot_load",
-		filePath: cwd,
-		startedAt: new Date(snapshotLoadStartedAt).toISOString(),
-		durationMs: Date.now() - snapshotLoadStartedAt,
-		metadata: {
-			bytes: snapshotBytes,
-			fresh: snapshotFresh,
-			seq: snapshot?.seq ?? null,
-			reason: snapshotFresh ? undefined : snapshotMissReason,
-			...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
-			...(timedOut ? { sequenceUnknown: true } : {}),
-		},
-	});
-	logProjectSnapshotProbe({
-		dbg,
-		root: snapshotRoot,
-		currentProjectSeq: freshnessSeq,
-		unlockedThrough: latestSeq.unlockedThrough ?? 0,
-		snapshot,
-		missReason: snapshotMissReason,
-	});
-	const freshSnapshot = snapshotFresh ? snapshot : null;
-	if (freshSnapshot) {
-		hydrateRuntimeFromProjectSnapshot(runtime, freshSnapshot);
-	}
 
 	// #699: a persisted `too-many-source-files` verdict is only reused while
 	// still within its TTL (isStartupScanVerdictFresh) — the seq-based

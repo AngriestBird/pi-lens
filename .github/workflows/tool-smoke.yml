@@ -727,6 +727,11 @@ jobs:
           cp -f "$RUNNER_TEMP/lsp-capability-census.log" "$stage/" 2>/dev/null || true
           summary="$(node --input-type=module -e "import { DRIFT_SUMMARY_PATH } from './scripts/lib/clean-signal.mjs'; process.stdout.write(DRIFT_SUMMARY_PATH)")"
           cp -f "$summary" "$stage/pilens-clean-signal-drift-summary.json" 2>/dev/null || true
+          # #4512: the stale-cells verdict and body the probe wrote.
+          stale_body="$(node --input-type=module -e "import { STALE_CELLS_BODY_PATH } from './scripts/lib/clean-signal.mjs'; process.stdout.write(STALE_CELLS_BODY_PATH)")"
+          stale_state="$(node --input-type=module -e "import { STALE_CELLS_STATE_PATH } from './scripts/lib/clean-signal.mjs'; process.stdout.write(STALE_CELLS_STATE_PATH)")"
+          cp -f "$stale_body" "$stage/pilens-stale-cells-body.md" 2>/dev/null || true
+          cp -f "$stale_state" "$stage/pilens-stale-cells-state" 2>/dev/null || true
           echo "staged by ${GITHUB_JOB}" > "$stage/staged.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
@@ -777,17 +782,56 @@ jobs:
         id: refresh_guard
         run: node scripts/assert-evaluated.mjs --docs
 
+      # #4512: a PR opened with the repository GITHUB_TOKEN never starts CI (a
+      # token-pushed commit triggers no workflow), so every refresh waited for a
+      # maintainer's close and reopen (#4338 sat open from 2026-10-13). A GitHub
+      # App installation token has no such limit: the docs-refresh PR below is
+      # opened with it when the repository has the App configured, and falls
+      # back to GITHUB_TOKEN (manual close and reopen, as before) when it does
+      # not. The names `LSP_REFRESH_APP_ID` (variable) and
+      # `LSP_REFRESH_APP_PRIVATE_KEY` (secret) are the maintainer's to confirm.
+      # The token is scoped to this PR's two writes and lives for the job.
+      - name: Mint the refresh App token (starts CI on the refresh PR)
+        id: app_token
+        if: vars.LSP_REFRESH_APP_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.LSP_REFRESH_APP_ID }}
+          private-key: ${{ secrets.LSP_REFRESH_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # #4512: write the refresh PR body (it lists the capability flips against
+      # HEAD) and decide whether the refresh is flip-free. Fail closed: only the
+      # columns and sections named in scripts/lib/refresh-flips.mjs are benign.
+      - name: Compose the refresh PR body (capability flips against HEAD)
+        id: landing
+        if: needs.tool-smoke.outputs.docs_changed == 'true' && needs.tool-smoke.outputs.census == 'success'
+        env:
+          APP_TOKEN_MINTED: ${{ steps.app_token.outputs.token != '' }}
+          AUTOMERGE_OPT_IN: ${{ vars.LSP_REFRESH_AUTOMERGE == 'true' }}
+        run: |
+          set -euo pipefail
+          landing=manual
+          if [ "$APP_TOKEN_MINTED" = true ]; then
+            landing=ci-only
+            if [ "$AUTOMERGE_OPT_IN" = true ]; then landing=automerge; fi
+          fi
+          node scripts/lsp-refresh-landing.mjs --body "$RUNNER_TEMP/lsp-refresh-pr-body.md" --landing "$landing" --issues-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/issues?q=is%3Aopen+label%3Anightly-drift"
+
       # Commit-back (#390 item 2): the three steps above regenerate the LSP docs
       # in-place. master has required checks the schedule's GITHUB_TOKEN can't
       # bypass, so we open/UPDATE a single auto-PR (fixed branch, force-pushed each
       # run) instead of pushing to master. Docs change rarely (only when a server's
       # caps/tier change), so this is low-noise. No-ops when nothing changed.
       - name: Open/update LSP-docs refresh PR
+        id: refresh_pr
         if: needs.tool-smoke.outputs.docs_changed == 'true' && needs.tool-smoke.outputs.census == 'success'
         continue-on-error: true
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app_token.outputs.token || secrets.GITHUB_TOKEN }}
           branch: bot/lsp-docs-refresh
           base: master
           add-paths: |
@@ -796,30 +840,49 @@ jobs:
             docs/lsp-idle-eviction.md
           commit-message: 'docs(nightly): refresh LSP capability docs'
           title: 'docs(nightly): refresh LSP capability docs (refs #3217)'
-          body: |
-            Automated refresh of the LSP capability docs from the nightly tool-smoke run.
-
-            - `docs/lsp-capability-matrix.md` — `mode` (characterize-lsp) + `clean-behavior` (probe-clean-signal, Tier 2 vs 3) columns (#460) + a `## silentOnClean drift` footnote (#529, telemetry only — never a gate)
-            - `docs/servercapabilities.md` — advertised capability inventory incl. ws-pull (#389)
-            - `docs/lsp-idle-eviction.md` — per-server idle-eviction safety (#3645): stable columns only (result, reason, respawn, coverage; timings live in the run log). Unlike the two docs above it is regenerated in full each night, not merged: a server the runner cannot spawn reads `unavailable`. A declared-versus-measured finding there is for a maintainer to act on in a follow-up; this refresh changes no policy
-
-            The two matrix docs above are **merged**, never blind-overwritten: a
-            server this ubuntu host couldn't spawn keeps its prior (dev-box)
-            classification, so the nightly can't regress a richer run (#390).
-            `docs/lsp-idle-eviction.md` is the exception: it is regenerated in
-            full, so a server this host cannot spawn reads `unavailable`.
-
-            Refs #460, #390, #529.
-
-            This PR is created with the repository `GITHUB_TOKEN`, which cannot
-            trigger workflow runs. After the bot opens or updates it, a
-            maintainer must close and reopen the PR to arm CI.
+          body-path: ${{ runner.temp }}/lsp-refresh-pr-body.md
           delete-branch: false
 
+      # #4512: a refresh with no capability flips lands without a manual step.
+      # Auto-merge is armed only for a flip-free refresh, only with the App
+      # token (so CI runs on the PR), and only when the repository opted in with
+      # `LSP_REFRESH_AUTOMERGE=true`: docs/pi-lens-merge-policy.md arms merges
+      # after a review verdict, so a bot merge is the maintainer's call. A
+      # refresh WITH flips disarms any auto-merge the previous night armed on
+      # the same branch, because the branch is force-rebuilt every night and
+      # armed auto-merge would otherwise carry tonight's flips to master.
+      - name: Arm auto-merge for a flip-free refresh
+        if: steps.refresh_pr.outputs.pull-request-number != '' && steps.landing.outputs.flip_free == 'true' && steps.app_token.outputs.token != '' && vars.LSP_REFRESH_AUTOMERGE == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.refresh_pr.outputs.pull-request-number }}
+        run: gh pr merge "$PR_NUMBER" --auto --merge
+
+      # Disarms with whichever token updated the PR above, and is not
+      # `continue-on-error`: a refresh with flips whose disarm could not run
+      # (the App token failed to mint tonight, so the PR was updated with
+      # GITHUB_TOKEN) must red the job, not leave last night's arming carrying
+      # tonight's flips. It reads the PR first, so a PR nothing armed is not an
+      # error and a failed read or disable is.
+      - name: Disarm auto-merge when the refresh has flips
+        if: steps.refresh_pr.outputs.pull-request-number != '' && steps.landing.outputs.flip_free != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.refresh_pr.outputs.pull-request-number }}
+        run: |
+          set -euo pipefail
+          armed="$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+          if [ "$armed" = true ]; then gh pr merge "$PR_NUMBER" --disable-auto; fi
+
       # #3989: ONE draft bot PR (own branch, never `bot/lsp-docs-refresh`, whose
-      # body promises no policy change) carrying the promotion edit. Same token
-      # and job permissions as the docs-refresh PR above; nothing widened. Never
-      # auto-merged: the bot cannot arm CI, and a maintainer reviews the table.
+      # body promises no policy change) carrying the promotion edit. The
+      # repository token and the job permissions the docs-refresh PR above falls
+      # back to; the App token (#4512) is for the docs refresh only, so nothing
+      # is widened. Never auto-merged: this PR is opened with the repository
+      # token, which cannot arm CI, and a maintainer reviews the table.
       - name: Open/update idle-eviction promotion PR
         if: needs.tool-smoke.outputs.promoted == 'true'
         continue-on-error: true
@@ -900,6 +963,26 @@ jobs:
           if [ "$STATE" = drift ]; then
             gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
             node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --body-file "$RUNNER_TEMP/lsp-idle-eviction-drift.md"
+          elif [ "$STATE" = clean ]; then
+            node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --clean --close-when-clean
+          fi
+
+      # #4512: a matrix cell the probe has not re-observed for two consecutive
+      # nights keeps its last known value and is marked stale (never rewritten
+      # to `unknown`, which erased five measured values in #4338). This raises
+      # the raised set on ONE tracking issue, refreshed while the cells stay
+      # stale and closed once none has missed two nights in a row. A missing
+      # verdict (the probe or the matrix refresh did not run) leaves the issue
+      # as it is, like the idle-eviction notifier above.
+      - name: Notify on stale matrix cells (file/update/close tracking issue)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          TITLE='nightly: LSP capability probe missed (stale matrix cells)'
+          STATE=$(cat "$RUNNER_TEMP/pilens-stale-cells-state" 2>/dev/null || echo missing)
+          if [ "$STATE" = drift ]; then
+            gh label create nightly-drift --color B60205 --description 'Nightly automated drift finding' || true
+            node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --body-file "$RUNNER_TEMP/pilens-stale-cells-body.md"
           elif [ "$STATE" = clean ]; then
             node scripts/upsert-tracking-issue.mjs --title "$TITLE" --label nightly-drift --clean --close-when-clean
           fi

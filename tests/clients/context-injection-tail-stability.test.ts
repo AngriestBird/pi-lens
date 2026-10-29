@@ -374,9 +374,15 @@ describe("request N+1 keeps the exact prefix request N sent", () => {
 
 /**
  * Seed the commit gate's blocker record the way a turn end writes it, so the
- * consume marks it consumed and KEEPS it (`consumeTurnEndFindings`).
+ * consume marks it consumed and KEEPS it (`consumeTurnEndFindings`). A turn
+ * end names its own session, and only that session's request takes the
+ * record (#4943), so the seed names the session that reads it.
  */
-function seedBlockerRecord(cwd: string, content: string): void {
+function seedBlockerRecord(
+	cwd: string,
+	content: string,
+	sessionId: string,
+): void {
 	const file = path.join(cwd, "unchanged.ts");
 	fs.writeFileSync(file, "export const unchanged = true;\n");
 	const provenance = snapshotAdvisoryProvenance({
@@ -387,7 +393,7 @@ function seedBlockerRecord(cwd: string, content: string): void {
 	});
 	new CacheManager().writeCache(
 		"turn-end-findings",
-		{ content, provenance, hasBlockers: true, sessionId: "seeded-session" },
+		{ content, provenance, hasBlockers: true, sessionId },
 		cwd,
 	);
 }
@@ -401,7 +407,11 @@ describe("the ledger keeps rendered text only (acceptance 5)", () => {
 			fauxAssistantMessage("first answer"),
 			fauxAssistantMessage("second answer"),
 		]);
-		seedBlockerRecord(handle.cwd, `${FIRST} blocking finding`);
+		seedBlockerRecord(
+			handle.cwd,
+			`${FIRST} blocking finding`,
+			handle.session.sessionManager.getSessionId(),
+		);
 		await handle.prompt("first question");
 		const n = handle.requests[0];
 		expect(count(n, FIRST)).toBe(1);

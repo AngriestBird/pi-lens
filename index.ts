@@ -75,6 +75,7 @@ import {
 	adoptHandoff,
 	asManager,
 	beginScope,
+	bindSessionId,
 	discardHandoff,
 	forwardHandoff,
 	type LineageHandle,
@@ -83,9 +84,11 @@ import {
 	reserveSessionStart,
 	type SessionScope,
 	scopeCell,
+	sessionLookupKey,
 	startKey,
 	stashHandoff,
 	successorStartKey,
+	unbindScope,
 } from "./clients/session-scope.js";
 import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
 import {
@@ -343,7 +346,6 @@ import {
 	observeCacheContext,
 	observeCachePrefix,
 	recordToolResultDelivery,
-	resetCacheFindingIdentitiesSession,
 	recordTurnEndAdvisoryBytes,
 } from "./clients/cache-observability.js";
 import {
@@ -847,6 +849,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		role: "primary" | "concurrent-secondary";
 		ctx: unknown;
 		scope?: SessionScope;
+		onDisposed: () => void;
 	}> = [];
 	// Whether this activation ever ran a full admission (#4106: an activation
 	// that admitted none keeps the classifier's answer for an unmatched leave).
@@ -867,11 +870,31 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// The registration is keyed by the context its admission used, so a
 			// re-admission's context is the one this member's leave must hold.
 			known.ctx = ctx;
-			return known;
 		}
-		const member = { sessionId, role, ctx };
-		liveSessionMembers.push(member);
+		const member = known ?? {
+			sessionId,
+			role,
+			ctx,
+			onDisposed: () => endDisposedMember(member),
+		};
+		if (!known) liveSessionMembers.push(member);
+		// #4965: every start reads the process, so a member pi disposed with no
+		// shutdown ends by the next start, not only at a primary start or a leave.
+		hasLiveSessionInProcess(member);
 		return member;
+	};
+	/**
+	 * #4965: a member pi disposed with no shutdown (#4704) gives its session
+	 * id back to the lookup, as its leave would have. Its scope retires only
+	 * when no member of this activation is live, the last leave's rule: the
+	 * coordinator's scope is every member's, and `scope` may name this one.
+	 */
+	const endDisposedMember = (
+		member: (typeof liveSessionMembers)[number],
+	): void => {
+		if (!member.scope) return;
+		if (liveSessionMembers.some(isLiveSessionMember)) unbindScope(member.scope);
+		else retireScope(member.scope, "disposed");
 	};
 	/**
 	 * End this leave's membership, answering whether it was the activation's
@@ -2711,6 +2734,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// primary's generation, stays untouched (#473).
 						scope = beginScope({ role: "secondary" });
 						startingMember.scope = scope;
+						// #4965: a caller holding only this session's id reaches its scope.
+						bindSessionId(
+							scope,
+							sessionLookupKey(stableSessionId, ownedSessionRole),
+						);
 						logScopeTransition(scope, {
 							transition: "start",
 							reason: sessionReason,
@@ -2757,7 +2785,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// accepted cost on the other side (a torn-down secondary's own
 					// bracket goes stale until the next full session start).
 					resetCurrentPhaseForSession();
-					resetCacheFindingIdentitiesSession(stableSessionId, ownedSessionRole);
 					// #2526 review round 2, F1: the once-per-session phase claims
 					// (`config_resolved`) and the session record identity they are
 					// stamped with are re-armed HERE, not inside handleSessionStart.
@@ -2937,6 +2964,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
 					startingMember.scope = scope;
+					// #4965: a caller holding only this session's id reaches its scope.
+					bindSessionId(
+						scope,
+						sessionLookupKey(stableSessionId, ownedSessionRole),
+					);
 					registerPrimaryBridges(scope);
 					_turnSummaryEmitCtxGetter = rebindableProcessBridgeDeps(
 						"turn-summary-emit-context",
@@ -3351,7 +3383,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		runtime.beginTurn(getStableSessionId(ctx));
 		// #1332: post-idle heap reading. Bounded by this session's turn-end marker:
 		// at most one idle sample per idle period.
-		const idleGapMs = takeMemoryIdleGapMs(getStableSessionId(ctx), Date.now());
+		const idleGapMs = takeMemoryIdleGapMs(
+			sessionLookupKey(getStableSessionId(ctx), ownedSessionRole),
+			Date.now(),
+		);
 		if (idleGapMs !== null) emitMemorySample(idleGapMs);
 		// Capture before any awaited turn-end work can let a sibling session start.
 		turnStartScope = scope ?? runtime.sessionScope;
@@ -3515,10 +3550,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		const cwd = ctx.cwd ?? runtime.projectRoot;
 		// #4942: the files THIS settling session read or wrote are the ones to
 		// sweep; the coordinator's guard holds only the primary's. The replay
-		// below still stamps the coordinator's guard (the mutation bridge
-		// carries no session id), which only ever tightens it: settled-sweep
+		// below still stamps the coordinator's guard (the mutation bridge's
+		// stamp reads no session), which only ever tightens it: settled-sweep
 		// drift never creates an authorship (#4210).
-		const settleGuard = runtime.readGuardFor(getStableSessionId(ctx));
+		const settleSessionId = getStableSessionId(ctx);
+		const settleGuard = runtime.readGuardFor(settleSessionId);
 		try {
 			const result = await runObservedSettledSweep({
 				turnIndex: runtime.turnIndex,
@@ -3531,11 +3567,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// #3521: a /tree can land while the sweep awaits; the replayed
 				// write then must not vouch for a file the new branch never showed.
 				// #3620: nor, after `/new`, for one the new session never read.
+				// #4943: the settling session owns what its sweep found, so the
+				// drain right after this sweep formats it.
 				record: (entry) =>
 					replayThroughMutationBridge({
 						...entry,
 						readGuardBranchEpoch,
 						lineage,
+						...(settleSessionId !== undefined && {
+							sessionId: settleSessionId,
+						}),
 					}),
 				getStoredLineHashes: (candidate) =>
 					storedLineHashesFor(settleGuard, candidate),
@@ -3611,23 +3652,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 		ctx: DeferredDrainCtx,
 	): Promise<void> {
 		const currentSessionId = getStableSessionId(ctx);
-		// #791 defense-in-depth: mirrors how session_start already skips
-		// handleSessionStart for a concurrent in-process secondary
-		// (subagent) — if THIS firing is positively identified as belonging
-		// to a live sibling secondary session rather than the registered
-		// primary, skip the deferred-format flush entirely rather than
-		// relying only on the per-record ownership filter inside
-		// handleAgentEnd. Fail-safe: any inconclusive signal classifies
-		// "primary" and runs as before.
-		const emission = classifyOwnedSessionEmission(ctx, currentSessionId);
-		if (emission === "concurrent-secondary") {
-			// #4942: the backstop for read captures a dead run left (see the top of
-			// `handleAgentEnd`) is per session now. The coordinator's settle no
-			// longer reaches a secondary's guard, and this arm returns before
-			// `handleAgentEnd`, so the secondary releases its own here.
-			runtime.readGuardFor(currentSessionId).dropProvisionalReads();
+		// #791, #4943: a firing positively identified as a live sibling
+		// secondary's (an in-process subagent, or a start declined for another
+		// root) drains only the records its own session owns, and skips the
+		// primary-only parts: the ownerless and stale-orphan claims and the
+		// actionable-warning quick fixes. Fail-safe: any inconclusive signal
+		// classifies "primary" and runs as before.
+		const sessionRole = classifyOwnedSessionEmission(ctx, currentSessionId);
+		if (sessionRole === "concurrent-secondary") {
 			dbg(
-				`deferred_mutation_drain: concurrent secondary session detected — skipping (sessionId=${currentSessionId})`,
+				`deferred_mutation_drain: concurrent secondary session detected — draining its own records only (sessionId=${currentSessionId})`,
 			);
 			logLatency({
 				type: "phase",
@@ -3636,7 +3670,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 				durationMs: 0,
 				metadata: { sessionId: currentSessionId },
 			});
-			return;
 		}
 		await handleAgentEnd({
 			signal: ctx.signal,
@@ -3648,6 +3681,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 			dbg,
 			runtime,
 			cacheManager,
+			// The process has one format service; a secondary's id would replace
+			// the primary's, so every drain asks for the coordinator's.
 			getFormatService: () =>
 				getFormatService(runtime.telemetrySessionId, true),
 			getAutofixClients: async () => {
@@ -3655,6 +3690,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return { biomeClient, ruffClient };
 			},
 			currentSessionId,
+			sessionRole,
 		});
 		if (ctx.ui?.setStatus && ctx.ui.theme) {
 			updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
@@ -3701,7 +3737,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		if (!lensEnabled) return;
 		// #1332: the idle gap is measured from here to this session's next turn
 		// start; another session's turn never reads it (#4761 review F1).
-		recordMemoryTurnEnd(getStableSessionId(ctx), Date.now());
+		recordMemoryTurnEnd(
+			sessionLookupKey(getStableSessionId(ctx), ownedSessionRole),
+			Date.now(),
+		);
 		// Esc/abort during the turn-end flush (knip/madge/tests + debounced
 		// dispatch) kills in-flight children instead of waiting out their timeout.
 		try {
@@ -4571,9 +4610,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 			dumpActiveHandles("session_shutdown");
 			return ndjsonDrain;
 		} finally {
-			// A non-last leave keeps the activation current for its siblings.
+			// A non-last leave keeps the activation current for its siblings,
+			// and gives its session id back to the lookup (#4965).
 			if (isLastLiveMember)
 				retireOwnScope(shutdownReason, stableSessionId, shutdownScope);
+			else if (leave.scope) unbindScope(leave.scope);
 		}
 	});
 
@@ -4812,15 +4853,23 @@ function activateExtension(hostPi: ExtensionAPI) {
 			const contributeBase = () =>
 				base === existingMessages ? undefined : { messages: base };
 
+			// #4943: the turn end's own expression for its session
+			// (`deliverySessionId`), so this request takes only what its own
+			// session's turn end staged. The test-runner slot is keyed the same
+			// way (`firedSessionId`): a concurrent secondary never pins
+			// `telemetrySessionId`, so that id would read its own delivery as
+			// another session's (#4961 review F1).
+			const readerSessionId = prefixSessionId ?? runtime.telemetrySessionId;
 			const turnEndFindings = consumeTurnEndFindings(
 				cacheManager,
 				cwd,
 				runtime,
+				readerSessionId,
 			);
 			const sessionGuidance = consumeSessionStartGuidance(cacheManager, cwd);
 			const testFindings = consumeStagedTestRunnerFindings({
 				cwd,
-				sessionId: runtime.telemetrySessionId,
+				sessionId: readerSessionId,
 				ownerId: testRunnerDeliveryOwnerId,
 				cacheManager,
 				runtime,

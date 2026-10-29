@@ -406,11 +406,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/biome-check.ts": 4,
 		"clients/dispatch/runners/cpp-check.ts": 1,
 		"clients/dispatch/runners/cue-vet.ts": 9,
-		"clients/dispatch/runners/gleam-check.ts": 1,
 		"clients/dispatch/runners/helm-lint.ts": 2,
 		"clients/dispatch/runners/helm-render.ts": 7,
 		"clients/dispatch/runners/oxlint.ts": 3,
-		"clients/dispatch/runners/prisma-validate.ts": 1,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 3,
 		"clients/dispatch/runners/rust-clippy.ts": 1,
 		"clients/dispatch/runners/pyright.ts": 1,
@@ -438,7 +436,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/formatters.ts": 26,
 		"clients/generation-lock.ts": 7,
 		"clients/git-tracked-ignore.ts": 2,
-		"clients/gitleaks-client.ts": 3,
 		"clients/govulncheck-client.ts": 6,
 		// 2 -> 4 (#4402): the worker loop's catch answers with an `error`, and
 		// readGzipStageWorkerResult reads the wire field `error` (the worker
@@ -491,7 +488,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-turn.ts": 10,
 		// 52 -> 53 (#4530): a lookup refusal builds its SpawnResult's `error`.
 		"clients/safe-spawn.ts": 53,
-		"clients/security-scan-client.ts": 2,
+		// 2 -> 6: the report-scan seam (`runReportScan`) carries the `result.error` reads
+		// gitleaks (3) and trivy (3) each had, plus the failure record; net 8 -> 6.
+		"clients/security-scan-client.ts": 6,
 		"clients/sg-runner.ts": 32,
 		"clients/shared-checkout-guard.ts": 1,
 		"clients/single-flight.ts": 3,
@@ -505,7 +504,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-client.ts": 6,
 		"clients/tree-sitter-logger.ts": 1,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
-		"clients/trivy-client.ts": 3,
 		"clients/warm-attach.ts": 14,
 		"clients/word-index-logger.ts": 1,
 		"clients/word-index.ts": 2,
@@ -870,7 +868,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/types.ts": 1,
 		"clients/disposition-logger.ts": 1,
 		"clients/extension-log.ts": 1,
-		"clients/gitleaks-client.ts": 1,
 		"clients/go-client.ts": 4,
 		"clients/govulncheck-client.ts": 12,
 		"clients/host-ports.ts": 2,
@@ -889,12 +886,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/ruff-client.ts": 4,
 		"clients/runtime-session.ts": 4,
 		"clients/rust-client.ts": 4,
-		"clients/security-scan-client.ts": 8,
+		"clients/security-scan-client.ts": 9,
 		"clients/sg-runner.ts": 5,
 		"clients/test-runner-client.ts": 17,
 		"clients/tool-cwd.ts": 2,
 		"clients/tree-sitter-logger.ts": 1,
-		"clients/trivy-client.ts": 1,
 		"clients/word-index-logger.ts": 1,
 		"clients/word-index.ts": 2,
 		"mcp/analyze-cli.ts": 1,
@@ -968,7 +964,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 29 -> 30 (#3435): the single-file lane now derives its base with
 		// `path.dirname(target)` instead of passing `projectRoot` through — one
 		// more `path` use, same sense (a path operation).
-		"clients/dependency-checker.ts": 30,
+		"clients/dependency-checker.ts": 28,
 		"clients/diagnostic-dispositions.ts": 10,
 		"clients/diagnostic-logger.ts": 3,
 		"clients/diagnostics-publish.ts": 6,
@@ -996,7 +992,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/golangci-lint.ts": 3,
 		"clients/dispatch/runners/hadolint.ts": 4,
 		"clients/dispatch/runners/helm-lint.ts": 11,
-		"clients/dispatch/runners/helm-render.ts": 16,
+		"clients/dispatch/runners/helm-render.ts": 15,
 		"clients/dispatch/runners/htmlhint.ts": 4,
 		"clients/dispatch/runners/javac.ts": 5,
 		"clients/dispatch/runners/ktlint.ts": 4,
@@ -1077,7 +1073,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
 		"clients/git-tracked-ignore.ts": 3,
-		"clients/gitleaks-client.ts": 25,
+		"clients/gitleaks-client.ts": 23,
 		"clients/go-client.ts": 2,
 		"clients/govulncheck-client.ts": 7,
 		"clients/gradle-ktfmt-style.ts": 5,
@@ -1096,7 +1092,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/instance-registry.ts": 2,
 		"clients/jscpd-client.ts": 8,
 		"clients/json-cache-read.ts": 4,
-		"clients/knip-client.ts": 26,
+		"clients/knip-client.ts": 24,
 		// 14 -> 12 (#4689 r2): the language-root clamp asks `isUnderDir`
 		// instead of taking a `path.relative` of two spellings.
 		"clients/language-profile.ts": 12,
@@ -1107,7 +1103,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lens-map.ts": 14,
 		"clients/log-cleanup.ts": 9,
 		"clients/lsp-mutation.ts": 3,
-		"clients/lsp/client-registry.ts": 4,
+		"clients/lsp/client-registry.ts": 2,
 		// 0 -> 1 (#4615): the `[lsp-pub]` debug row's `path` member carries the
 		// client's own normalized document key into extension.log. One more
 		// `path` use, same sense (a path value written to a sink), and it is an
@@ -1167,7 +1163,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 121 -> 124 (#4914): `findEffectTsgoLsp` joins the `@effect/tsgo` manifest
 		// path, the `.bin/effect-tsgo` path, and `findNativeTypeScriptLsp` hands
 		// back its `node_modules` directory: three `path.join` filesystem calls.
-		"clients/lsp/server.ts": 124,
+		"clients/lsp/server.ts": 122,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
@@ -1260,7 +1256,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/runner-adapters/runner-findings.ts": 4,
 		"clients/project-diagnostics/runner-adapters/trivy.ts": 5,
 		"clients/project-diagnostics/scanner.ts": 4,
-		"clients/project-lens-config.ts": 19,
+		"clients/project-lens-config.ts": 17,
 		"clients/project-report.ts": 5,
 		"clients/project-snapshot.ts": 15,
 		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
@@ -1346,7 +1342,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.delimiter` and resolve each entry with `path` namespace calls.
 		"clients/safe-spawn.ts": 32,
 		"clients/search-read-registration.ts": 3,
-		"clients/security-scan-client.ts": 4,
+		"clients/security-scan-client.ts": 6,
 		// #4530: the bin layouts moved here from package-manager.ts.
 		"clients/session-repository.ts": 9,
 		"clients/session-state-store.ts": 3,
@@ -1374,7 +1370,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// for pytest, PHPUnit, Mix, and generic runner locations.
 		// 74 -> 72 (#4689 batch 2): two `path.resolve` locals dropped from the root and
 		// failed-target keys.
-		"clients/test-runner-client.ts": 72,
+		"clients/test-runner-client.ts": 70,
 		"clients/todo-scanner.ts": 3,
 		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
 		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,
@@ -1393,7 +1389,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-query-loader.ts": 18,
 		"clients/tree-sitter-shared.ts": 2,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
-		"clients/trivy-client.ts": 6,
+		"clients/trivy-client.ts": 4,
 		"clients/warm-attach.ts": 3,
 		"clients/widget-state.ts": 7,
 		"clients/word-index-logger.ts": 2,
@@ -1418,7 +1414,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `toProjectRelativePath` too.
 		// 25 -> 19 (#4689 batch 4): mode=full's merge keys its Sets, dedup key and
 		// per-file map by `normalizeMapKey`, dropping six `path.resolve` calls.
-		"tools/lens-diagnostics.ts": 19,
+		"tools/lens-diagnostics.ts": 17,
 		// 10 -> 8 (#4577 M2): the scalar and batch `path`/`paths` arguments fold
 		// onto `resolveHostToolPath`, dropping one `path.resolve` each.
 		"tools/lsp-diagnostics.ts": 8,
@@ -1442,7 +1438,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/symbol-search.ts": 5,
 		"mcp/analyze-cli.ts": 4,
 		"mcp/cli.ts": 2,
-		"mcp/server.ts": 33,
+		"mcp/server.ts": 31,
 		"index.ts": 20,
 	},
 	record: {
@@ -1495,7 +1491,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// record and returns its ownership fields.
 		// 29 -> 31 (#4921): `noteResolvedBlockerFile` carries the removed
 		// record's owning session onto its Resolved note.
-		"clients/runtime-coordinator.ts": 31,
+		// 31 -> 33 (#4943): a secondary's owned-only claim reads the queued
+		// record's owner and leaves another session's record queued.
+		"clients/runtime-coordinator.ts": 33,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
 		// 6 -> 8 (#3218): the resolved-blocker filter keys each current blocker
@@ -1537,7 +1535,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/read-guard-tool-lines.ts": 3,
 		"clients/read-guard.ts": 2,
 		"clients/reverse-deps.ts": 14,
-		"clients/runtime-session.ts": 45,
+		"clients/runtime-session.ts": 38,
 		"clients/runtime-tool-call.ts": 2,
 		"clients/runtime-tool-result.ts": 2,
 		"clients/session-scope.ts": 2,
@@ -1572,10 +1570,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/pending-runner-findings.ts": 1,
 		"clients/dispatch/runners/actionlint.ts": 2,
 		"clients/dispatch/runners/ast-grep-napi.ts": 11,
-		"clients/dispatch/runners/biome-check.ts": 9,
+		"clients/dispatch/runners/biome-check.ts": 8,
 		"clients/dispatch/runners/cpp-check.ts": 3,
 		"clients/dispatch/runners/credo.ts": 2,
-		"clients/dispatch/runners/cue-vet.ts": 7,
+		"clients/dispatch/runners/cue-vet.ts": 6,
 		"clients/dispatch/runners/dart-analyze.ts": 1,
 		"clients/dispatch/runners/detekt.ts": 6,
 		"clients/dispatch/runners/dotnet-build.ts": 4,
@@ -1585,7 +1583,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #4309: folded unavailable/absent-command exits remove one status use.
 		// 5 -> 6 (#4522): the exitless-run guard reads the exit status once.
 		"clients/dispatch/runners/fish-indent.ts": 6,
-		"clients/dispatch/runners/gleam-check.ts": 6,
+		"clients/dispatch/runners/gleam-check.ts": 5,
 		"clients/dispatch/runners/go-vet.ts": 5,
 		"clients/dispatch/runners/golangci-lint.ts": 4,
 		"clients/dispatch/runners/hadolint.ts": 3,
@@ -1600,9 +1598,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/oxlint.ts": 11,
 		"clients/dispatch/runners/php-lint.ts": 2,
 		"clients/dispatch/runners/phpstan.ts": 4,
-		"clients/dispatch/runners/prisma-validate.ts": 5,
+		"clients/dispatch/runners/prisma-validate.ts": 4,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 14,
-		"clients/dispatch/runners/pyright.ts": 4,
+		"clients/dispatch/runners/pyright.ts": 3,
 		"clients/dispatch/runners/rubocop.ts": 2,
 		"clients/dispatch/runners/ruff.ts": 2,
 		"clients/dispatch/runners/rust-clippy.ts": 10,
@@ -1621,20 +1619,23 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 14 -> 15 (#4226): the early-return runner result preserves the existing
 		// status field while disclosing a fully path-excluded query set.
 		"clients/dispatch/runners/tree-sitter.ts": 15,
-		"clients/dispatch/runners/trivy-config.ts": 10,
+		// 10 -> 9 (#4130 r2): the shared classifier replaces a status test.
+		"clients/dispatch/runners/trivy-config.ts": 9,
 		"clients/dispatch/runners/utils/availability-policy.ts": 5,
 		"clients/dispatch/runners/utils/candidate-probe.ts": 1,
 		"clients/dispatch/runners/utils/lazy-installer.ts": 3,
 		"clients/dispatch/runners/utils/runner-helpers.ts": 8,
-		"clients/dispatch/runners/utils/spawn-outcome.ts": 9,
+		// 9 -> 10 (#4130 r2): `processCutShort` reads the exit status once.
+		"clients/dispatch/runners/utils/spawn-outcome.ts": 10,
+		// 19 -> 20 (#4130 r2): `faultIfCutShort` builds the one partial-findings `failed` result.
 		"clients/dispatch/runners/utils/tool-failure.ts": 20,
 		"clients/dispatch/runners/vale.ts": 4,
 		"clients/dispatch/runners/yamllint.ts": 2,
-		"clients/dispatch/runners/zig-check.ts": 3,
+		"clients/dispatch/runners/zig-check.ts": 2,
 		// 5 -> 6 (#4484 r2): `reachedNoVerdict` reads the runner result's status.
 		// 6 -> 7 (#4733 r2): `checkedWholeFile` reads each latency row's status.
 		// 7 -> 8 (#4130): `faultResult` builds the one `failed` runner result.
-		"clients/dispatch/types.ts": 8,
+		"clients/dispatch/types.ts": 9,
 		"clients/file-utils.ts": 2,
 		"clients/finding-delivery-gate.ts": 3,
 		"clients/formatters.ts": 8,
@@ -1686,7 +1687,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-coordinator.ts": 4,
 		"clients/runtime-turn.ts": 6,
 		"clients/safe-spawn.ts": 25,
-		"clients/security-scan-client.ts": 2,
+		"clients/security-scan-client.ts": 5,
 		"clients/sg-runner.ts": 32,
 		"clients/shared-checkout-guard.ts": 2,
 		"clients/skills-resolver.ts": 6,

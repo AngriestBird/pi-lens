@@ -110,6 +110,12 @@ interface AgentEndDeps {
 	 * fall back to today's "claim everything" behavior.
 	 */
 	currentSessionId?: string;
+	/**
+	 * #4943: a concurrent in-process secondary drains only the records its own
+	 * session owns, and leaves the per-cwd actionable-warning quickfix to the
+	 * primary. Omitted: the primary's drain.
+	 */
+	sessionRole?: "primary" | "concurrent-secondary";
 	/** Test/override hook for {@link DEFERRED_FORMAT_STALE_AFTER_MS}. */
 	staleAfterMs?: number;
 }
@@ -136,6 +142,8 @@ function recordProjectChange(args: {
 	filePath: string;
 	source: ProjectChangeSource;
 	dbg: (msg: string) => void;
+	/** #4943: the draining session, which owns every record it claimed. */
+	sessionId: string | undefined;
 }): void {
 	// One mutation seam (#2000 phase 1): bump + receipt + change-log live in
 	// RuntimeCoordinator.recordProjectMutation; this wrapper only carries the
@@ -144,6 +152,7 @@ function recordProjectChange(args: {
 		filePath: args.filePath,
 		source: args.source,
 		cwd: args.cwd,
+		sessionId: args.sessionId,
 		onAppendError: (err) =>
 			args.dbg(`project change log append failed for ${args.filePath}: ${err}`),
 	});
@@ -184,6 +193,7 @@ export async function handleAgentEnd({
 	ruffClient,
 	getAutofixClients,
 	currentSessionId,
+	sessionRole = "primary",
 	staleAfterMs = DEFERRED_FORMAT_STALE_AFTER_MS,
 }: AgentEndDeps): Promise<AgentEndFormatSummary | undefined> {
 	// Backstop for read captures (#4185 R2-3, round 4). A call's capture is
@@ -240,6 +250,8 @@ export async function handleAgentEnd({
 			Date.now(),
 			staleAfterMs,
 			ctxCwd ?? runtime.projectRoot,
+			// #4943: a secondary takes its own records and nothing else.
+			sessionRole === "concurrent-secondary",
 		);
 	const records = [...claimed, ...staleClaimed];
 	const scheduledTurnId = records[0]?.queuedTurnId;
@@ -307,7 +319,10 @@ export async function handleAgentEnd({
 	// A path-aware source resolver signals that nested configs may re-enable
 	// actionable autofix even when the root default is off. Legacy/test hosts
 	// without that resolver keep the old fast exit and avoid a cache read.
+	// #4943: the report is per cwd, not any session's own record, so only the
+	// primary's drain applies its quick fixes.
 	const inspectActionableReport =
+		sessionRole === "primary" &&
 		actionableWarningsWriterEnabled &&
 		typeof cacheManager.readCache === "function" &&
 		(rootActionableAutofixEnabled || getFlagSource !== undefined);
@@ -601,6 +616,7 @@ export async function handleAgentEnd({
 						filePath: changedPath,
 						source: "autofix",
 						dbg,
+						sessionId: currentSessionId,
 					});
 					// #3525: bytes the agent never saw; authorship, not FileTime.
 					if (!getFlag("no-read-guard"))
@@ -1057,6 +1073,7 @@ export async function handleAgentEnd({
 						filePath,
 						source: "format",
 						dbg,
+						sessionId: currentSessionId,
 					});
 					// #3525: bytes the agent never saw; authorship, not FileTime.
 					if (!getFlag("no-read-guard")) {

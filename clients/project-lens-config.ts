@@ -105,6 +105,7 @@ import {
 } from "./config-core/records.js";
 import {
 	homeRelativePath,
+	isUnderDir,
 	realpathOrResolve,
 	walkUpDirs,
 } from "./path-utils.js";
@@ -442,8 +443,7 @@ export function findNestedProjectMutationValue(
 	const root = realpathOrResolve(projectRoot);
 	const start = path.dirname(realpathOrResolve(editedFilePath));
 	for (const dir of walkUpDirs(start, { homeDir })) {
-		const rel = path.relative(root, dir);
-		if (rel.startsWith("..") || path.isAbsolute(rel)) break;
+		if (!isUnderDir(dir, root)) break;
 		const config = loadPiLensConfigInDir(dir);
 		const enabled = readFlagConfigValue(config, spec.configKey);
 		if (enabled !== undefined) return { value: enabled, dir };

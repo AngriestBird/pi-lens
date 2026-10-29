@@ -23,7 +23,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { faultResult } from "../types.js";
+import { faultResult, faultSkip } from "../types.js";
 
 import {
 	resolveRunnerCwd,
@@ -316,7 +316,7 @@ const biomeCheckJsonRunner: RunnerDefinition = {
 
 		// Handle spawn errors (e.g., binary not found)
 		if (checkResult.error) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return faultSkip("did-not-run");
 		}
 
 		let fixKindByRule: Map<string, BiomeFixKind> | undefined;

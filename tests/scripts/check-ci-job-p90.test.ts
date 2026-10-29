@@ -112,10 +112,22 @@ describe.skipIf(process.platform === "win32")(
 			);
 		});
 
-		it("refuses --runs outside 1..100 with exit 1", () => {
-			const result = run(["--runs", "0"], RECORDED);
-			expect(result.status).toBe(1);
-			expect(result.stderr).toContain("--runs must be an integer 1..100");
+		// Recurrence prevented: only the lower bound was probed, so dropping the
+		// `runs > MAX_RUNS` clause (an unbounded `gh api` fan-out from one typo)
+		// or moving either edge by one passed.
+		it.each(["0", "101", "1.5", "abc"])(
+			"refuses --runs %s with exit 1",
+			(value) => {
+				const result = run(["--runs", value], RECORDED);
+				expect(result.status).toBe(1);
+				expect(result.stderr).toContain("--runs must be an integer 1..100");
+			},
+		);
+
+		it.each(["1", "100"])("accepts --runs %s, the edge of 1..100", (value) => {
+			const result = run(["--runs", value], RECORDED);
+			expect(result.status).toBe(0);
+			expect(result.stderr).not.toContain("--runs must be");
 		});
 
 		it("exits 1 and names the failed read when gh cannot read the runs", () => {

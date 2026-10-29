@@ -49,8 +49,10 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,
+	isAbsoluteFilePath,
 	realpathOrResolve,
 	toPosix,
+	toProjectRelativePath,
 } from "./path-utils.js";
 import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
 import { isMeasuredDuration, toMeasuredDurationMs } from "./run-duration.js";
@@ -1269,16 +1271,11 @@ export class TestRunnerClient {
 		cwd: string,
 	): string | null {
 		const dir = path.dirname(sourceFilePath);
-		const relDir = path.relative(cwd, path.resolve(cwd, dir));
-		if (
-			!relDir ||
-			relDir === "." ||
-			relDir.startsWith("..") ||
-			path.isAbsolute(relDir)
-		) {
-			return null;
-		}
-		return relDir;
+		// The shared project-relative display path: relative when `dir` is
+		// strictly inside `cwd`, otherwise the absolute spelling (the root itself
+		// and an outside directory both land there).
+		const relDir = toProjectRelativePath(path.resolve(cwd, dir), cwd);
+		return isAbsoluteFilePath(relDir) ? null : relDir;
 	}
 
 	/**

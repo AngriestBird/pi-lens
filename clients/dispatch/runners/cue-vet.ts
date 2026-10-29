@@ -118,7 +118,8 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { faultResult, findingsResult } from "../types.js";
+import { faultResult, faultSkip, findingsResult } from "../types.js";
+import { faultIfCutShort } from "./utils/tool-failure.js";
 import { PRIORITY } from "../priorities.js";
 
 const cue = createAvailabilityChecker("cue", ".exe", ["version"]);
@@ -433,7 +434,7 @@ const cueVetRunner: RunnerDefinition = {
 		}
 
 		if (spawnFailedWithNoOutput(result, `${result.stdout}${result.stderr}`)) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return faultSkip("did-not-run");
 		}
 
 		// `cue vet` is silent on success (empty stdout, exit 0) — that IS the
@@ -453,6 +454,10 @@ const cueVetRunner: RunnerDefinition = {
 		// that somehow fails with no location at all still gets the same
 		// never-silently-clean `undefined` fallback as the directory path.
 		const filtered = filterToTouchedFile(errors, fileName, fileDir);
+
+		// #4130: a vet cut short after it printed is a fault whatever it printed.
+		const cutShort = faultIfCutShort(result, filtered ?? []);
+		if (cutShort) return cutShort;
 
 		if (filtered === undefined) {
 			// Nonzero exit, some output, but nothing in it could be attributed to

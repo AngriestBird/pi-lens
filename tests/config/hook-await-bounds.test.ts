@@ -328,7 +328,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"`handleTurnEnd` sits beneath it.",
 		owner: "#2523 slice 2",
 	},
-	"clients/mcp/session.ts#runTurnEndForIpcNow:fceb216b~09a23787": {
+	"clients/mcp/session.ts#runTurnEndForIpcNow:fceb216b~1d78168d": {
 		family: "hook-await",
 		site: "turn_end",
 		reason:
@@ -545,22 +545,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"session_start scan goes through.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-session.ts#handleSessionStart:07098027~195e8353": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`readSequenceWithBudget` from the snapshot-root path: same " +
-			"real budget, same missing abort arm.",
-		owner: "#2523 slice 2",
-	},
-	"clients/runtime-session.ts#handleSessionStart:07098027~a42f4a7e": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`readSequenceWithBudget` from the sequence fast path (#451): " +
-			"the budget is real (250ms default) but carries no abort arm.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-session.ts#handleSessionStart:2a60d0e5~dbbbc4f4": {
 		family: "hook-await",
 		site: "session_start",
@@ -657,6 +641,27 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"Session-start summary: go and rust availability probes, 3000ms " +
 			"each and sequential, re-armed on every full session_start " +
 			"(#2523's `bounded but no abort race` list).",
+		owner: "#2523 slice 2",
+	},
+	"clients/runtime-session.ts#handleSessionStart:cd0c710f~652f281b": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`readSequenceAndHydrateFreshSnapshot` from the full-mode path: its " +
+			"only await, of `readSequenceWithBudget`, runs under `bounded()` " +
+			"inside the helper (registered in BOUNDED_CALL_SITES); a wrapper " +
+			"one level down reads as unbounded to this line scan.",
+		owner: "#2523 slice 2",
+	},
+	"clients/runtime-session.ts#handleSessionStart:d7493ff5~a42f4a7e": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`readSequenceAndHydrateFreshSnapshot` from the quick-mode " +
+			"snapshot-root path: its only await, of `readSequenceWithBudget`, " +
+			"runs under `bounded()` inside the helper (registered in " +
+			"BOUNDED_CALL_SITES); a wrapper one level down reads as unbounded " +
+			"to this line scan.",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-session.ts#handleSessionStart:e20461cb~6148cbdf": {
@@ -2452,7 +2457,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// inside the format service's own `bounded()` call, and the formatter seam
 	// carries no `AbortSignal` until #2523 AC4 threads it through.
 	"clients/formatters.ts": 118,
-	"clients/gitleaks-client.ts": 4,
+	// 4 -> 3 and 2 -> 1 (#4984): not a bound. The two `await safeSpawnAsync`
+	// calls moved into `SecurityScanClient.runReportScan`, which the one-hop set
+	// does not walk, so the hook path's unbounded awaits are unchanged.
+	"clients/gitleaks-client.ts": 3,
 	// #1892: the turn-end secrets LANE, extracted out of `runtime-turn.ts` with
 	// no behaviour change. Its one unbounded await is `collect`'s
 	// `await blockingGitleaksFindings(...)`, whose own inner await IS the
@@ -2736,7 +2744,8 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// removed), never rise.
 	"clients/tool-definition.ts": 1,
 	"clients/tree-sitter-shared.ts": 1,
-	"clients/trivy-client.ts": 2,
+	// 2 -> 1 (#4984): moved into `runReportScan`, not bounded; see gitleaks above.
+	"clients/trivy-client.ts": 1,
 	// #4645: 9 -> 10. The incumbent awaits its own membership probe (the
 	// existing non-spawning read-only probe channel) and sends the answer beside
 	// the raw rows. The probe runs under `withinRemaining(…, req.deadlineAt -
@@ -2927,6 +2936,16 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-agent-end.ts#handleAgentEnd:fc644b89~93eae0ad":
 		"The deferred formatter drain receives AgentEndDeps.signal, or the " +
 		"ambient signal in a standalone harness; agent_settled bounds the wait.",
+	"call:clients/runtime-session.ts#readSequenceAndHydrateFreshSnapshot:8d9498e9~c78f4265":
+		"No signal: `SessionStartDeps` carries none, so the key is written as " +
+		"`undefined` and this await runs on the wall clock alone, capped at " +
+		"`HOOK_WALL_BUDGET_MS.session_start`. The signal half is held one frame up: " +
+		"index.ts awaits the whole `handleSessionStart` under `bounded()` with the " +
+		"hook's `ctx.signal`, so Escape releases the handler there. This bound is " +
+		"the registered census site for this await and the backstop if the inner " +
+		"cap regresses: `sequenceReadBudgetMs()` caps the inner race at the same " +
+		"wall budget and its timer is armed first, so the inner arm ends the wait " +
+		"and owns the recovery (the deferred reseed and the #1785 hydration).",
 	"call:clients/runtime-tool-call.ts#handleToolCallImpl:2dc2d1e2~ce33f035":
 		"The pre-edit linter capture (#4483) uses the tool_call's ctx.signal, " +
 		"absent only in a harness. #2523 gives tool_call no budget of its own, " +

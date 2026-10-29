@@ -153,6 +153,13 @@ export function isPrimarySessionOwner(ctx: unknown): boolean {
 /** One live-session record as `index.ts` keeps it: its start's context. */
 interface LiveSessionMember {
 	readonly ctx: unknown;
+	/**
+	 * #4965: called by every process read that finds this member disposed
+	 * (pi invalidated its context and will send no `session_shutdown`), so the
+	 * owning activation ends what the member's own leave would have ended.
+	 * Called again by later reads while the member stays listed: idempotent.
+	 */
+	readonly onDisposed?: () => void;
 }
 
 const LIVE_SESSION_LISTS_FAMILY = "session-lifecycle.live-session-lists";
@@ -198,16 +205,20 @@ export function trackLiveSessionMembers(
  *
  * `except` is a starting session asking whether ANOTHER session is live: it
  * is not counted, and its own list is kept even when it is that list's only
- * member.
+ * member. Every member the read finds disposed gets its `onDisposed` (#4965).
  */
 export function hasLiveSessionInProcess(except?: LiveSessionMember): boolean {
 	const lists = liveSessionLists();
 	let live = false;
 	for (const members of lists) {
-		if (
-			members.some((member) => member !== except && isLiveSessionMember(member))
-		)
-			live = true;
+		let otherLive = false;
+		const disposed: LiveSessionMember[] = [];
+		for (const member of members) {
+			if (member === except) continue;
+			if (isLiveSessionMember(member)) otherLive = true;
+			else disposed.push(member);
+		}
+		if (otherLive) live = true;
 		else if (!members.some((member) => member === except)) {
 			lists.delete(members);
 			// Each member still listed never left: pi disposed it without a
@@ -221,6 +232,7 @@ export function hasLiveSessionInProcess(except?: LiveSessionMember): boolean {
 						"a live session's context was invalidated with no session_shutdown (pi's AgentSession.dispose); it no longer holds the shared teardown, and its own end-of-session work did not run",
 				});
 		}
+		for (const member of disposed) member.onDisposed?.();
 	}
 	return live;
 }
