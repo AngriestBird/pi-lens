@@ -26,7 +26,7 @@ LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rus
 
 pi-lens picks the launch for JS/TS files in this order. The first two steps use only the project's own `node_modules`:
 
-1. **Effect language service** — when the nearest `node_modules/typescript` is version 7 or newer and the same `node_modules` holds `@effect/tsgo`, pi-lens runs the project's `effect-tsgo tsc --lsp --stdio`. Installing the package is the opt-in; there is no pi-lens setting. A malformed `@effect/tsgo` (no readable version, no `bin`) or a launch failure falls back to the next step, and pi-lens never installs `@effect/tsgo`.
+1. **Effect language service** — when the nearest `node_modules/typescript` is version 7 or newer and the same `node_modules` holds `@effect/tsgo`, pi-lens runs the project's `effect-tsgo tsc --lsp --stdio`. Installing the package is the opt-in; there is no pi-lens setting. A malformed `@effect/tsgo` (no readable version, no `bin`) or a failure to start the process falls back to the next step; a server that starts and then fails to initialize does not fall back, and pi-lens never installs `@effect/tsgo`.
 2. **Native TypeScript 7** — the project's `node_modules/.bin/tsc --lsp --stdio`.
 3. **Classic** — `typescript-language-server` with a `tsserver.js`, when the nearest TypeScript is version 6 or older or no step above applies. This step can also use a server and TypeScript found on `PATH` or installed by pi-lens.
 
