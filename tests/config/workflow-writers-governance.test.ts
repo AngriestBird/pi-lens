@@ -194,6 +194,8 @@ const SCRIPT_NON_WRITERS: Record<string, string> = {
 	"scripts/npm-retry.mjs":
 		"imports only NET_PATTERN (a regex) from the classifier; it runs npm",
 	"scripts/release-qa.mjs": "its only `publish` is `npm publish --dry-run`",
+	"scripts/lib/save-verdict.mjs":
+		"its only `push` literal is the diagnostic mode ('pull' | 'push'); it imports no fs, spawns nothing, and writes no GitHub state",
 };
 
 const SCRIPT_WRITER_BASENAMES = new Set(
