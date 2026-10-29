@@ -330,7 +330,7 @@ export function loadBaseline(root = repoRoot(), suite = DEFAULT_SUITE) {
 }
 
 /** Regenerates the baseline from a live scan. Run via
- * `npm run astgrep:self-scan -- --update-baseline` after triaging every new
+ * `npm run astgrep:<suite>:update-baseline` (one suite each) after triaging every new
  * hit (fix it, or confirm it's legitimate and belongs here) -- never as a
  * way to make a real finding disappear unexamined. */
 export function writeBaseline(
@@ -344,7 +344,7 @@ export function writeBaseline(
 	const sorted = [...new Set(signatures)].sort();
 	const payload = {
 		_comment:
-			"Regenerate with `npm run astgrep:self-scan -- --update-baseline` AFTER triaging every new entry (fix the underlying finding, or confirm it's a legitimate exception and document why in the same PR). Never regenerate to silently swallow an unreviewed hit.",
+			"Regenerate with `npm run astgrep:self-scan:update-baseline` (this suite only; the governance suite has `npm run astgrep:governance:update-baseline`) AFTER triaging every new entry (fix the underlying finding, or confirm it's a legitimate exception and document why in the same PR). Never regenerate to silently swallow an unreviewed hit.",
 		generatedAt: new Date().toISOString(),
 		allowed: sorted,
 	};

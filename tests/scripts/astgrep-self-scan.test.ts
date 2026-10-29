@@ -31,8 +31,10 @@ import {
 	runRuleTests,
 	runSelfScan,
 	selfScanRuleIds,
+	SUITES,
 	suiteByName,
 	trackedSelfScanFileSet,
+	writeBaseline,
 } from "../../scripts/lib/astgrep-self-scan.mjs";
 import { setProjectTrustState } from "../../clients/project-trust.js";
 
@@ -802,4 +804,44 @@ d("governance suite: turn-count-wait (#4865)", () => {
 			removeTempDirSync(root);
 		}
 	});
+});
+
+// #4983 r2: the self-scan baseline told people to run
+// `npm run astgrep:self-scan -- --update-baseline`, but that script chains two
+// commands and npm appends the extra args to the last one only, so it rewrote
+// the governance baseline and left the self-scan one stale. Every regenerate
+// command a baseline names must be one npm script that updates that suite.
+describe("baseline regenerate commands (#4983)", () => {
+	const scripts: Record<string, string> = JSON.parse(
+		fs.readFileSync(path.join(repoRoot(), "package.json"), "utf-8"),
+	).scripts;
+
+	for (const name of Object.keys(SUITES)) {
+		it(`the ${name} baseline names a script that updates the ${name} suite`, () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-regen-"));
+			try {
+				const suite = suiteByName(name);
+				fs.mkdirSync(path.join(root, ...suite.dir), { recursive: true });
+				const written = writeBaseline([], root, suite);
+				const comment: string = JSON.parse(
+					fs.readFileSync(written, "utf-8"),
+				)._comment;
+				const named = [...comment.matchAll(/`npm run ([^`]+)`/g)].map(
+					(m) => m[1],
+				);
+				expect(named.length, comment).toBeGreaterThan(0);
+				// The first command named is the one that regenerates this suite.
+				const [scriptName, ...extra] = named[0].split(/\s+/);
+				expect(extra, `${named[0]}: no appended args`).toEqual([]);
+				const command = scripts[scriptName];
+				expect(command, `package.json script ${scriptName}`).toBeDefined();
+				expect(command).not.toMatch(/&&|;|\|\|/);
+				expect(command).toMatch(/ --update-baseline\b/);
+				const suiteArg = command.match(/--suite[ =](\S+)/)?.[1] ?? "self-scan";
+				expect(suiteArg).toBe(name);
+			} finally {
+				removeTempDirSync(root);
+			}
+		});
+	}
 });

@@ -67,11 +67,22 @@ rule:
               - kind: break_statement
               - kind: return_statement
               - kind: throw_statement
-    # Admitted: a real-clock deadline.
+    # Admitted: a real-clock DEADLINE. The clock must be compared (`<`, `<=`,
+    # `>`, `>=`) inside the loop; a clock merely read (a timestamp in a
+    # payload or a log line) does not bound the wait and admits nothing.
+    # Residuals (live 0 at #4865 r2): a comparison of clock values that does
+    # not bound the loop still admits it, and a count bound written as
+    # iteration over a generated range (`for (const _ of
+    # Array.from({ length: N }))`) has no counter step and is not seen.
     - not:
         has:
           stopBy: { matches: fn-boundary }
-          kind: call_expression
-          has:
-            field: function
-            regex: '^(Date\.now|performance\.now|process\.hrtime|process\.hrtime\.bigint)$'
+          kind: binary_expression
+          all:
+            - has: { field: operator, regex: '^[<>]=?$' }
+            - has:
+                stopBy: end
+                kind: call_expression
+                has:
+                  field: function
+                  regex: '^(Date\.now|performance\.now|process\.hrtime|process\.hrtime\.bigint)$'

@@ -14,6 +14,6 @@ languageGlobs:
   typescript: ["*.mjs", "*.cjs", "*.js"]
 # Rule tests: planted members and admitted forms, run by
 # `ast-grep test -c scripts/governance-rules/sgconfig.yml --skip-snapshot-tests`
-# (tests/scripts/astgrep-governance.test.ts).
+# (tests/scripts/astgrep-self-scan.test.ts).
 testConfigs:
   - testDir: ./rule-tests

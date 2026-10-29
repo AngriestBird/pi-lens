@@ -626,7 +626,10 @@ file-scoped worklist and receives no project-wide scanner output.
     rules `turn-count-wait` and `turn-count-wait-test-hook`
     (`scripts/governance-rules/`, run by `npm run astgrep:self-scan`), with a
     reasoned baseline. It does not see a count loop with no exit besides the
-    count (a pure `for (N) await yield` flush) or a wait spelled as recursion.
+    count (a pure `for (N) await yield` flush), a wait spelled as recursion, a
+    count written as iteration over a generated range
+    (`for (const _ of Array.from({ length: N }))`), or a loop that compares a
+    clock value for some other purpose.
     Instances and dates: `HISTORY.md`.
 
 </important>

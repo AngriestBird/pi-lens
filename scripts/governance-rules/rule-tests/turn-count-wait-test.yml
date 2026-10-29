@@ -48,6 +48,9 @@ valid:
     for (let i = 0; i < 5 && !done; i++) {
       queue.push(async () => { await tick(); });
     }
+  # A deadline on elapsed time: the clock sits inside the compared operand.
+  - |
+    for (let i = 0; !done && performance.now() - started < budgetMs; i++) await tick();
 invalid:
   # The #4830 cell (pre-#4852): a for loop of setImmediate turns.
   - |
@@ -131,7 +134,17 @@ invalid:
   - |
     for (let i = 0; i < 5000 && (await rows(late)).length === 0; i += 1)
       await new Promise<void>((resolve) => setImmediate(resolve));
-  # An ignore with no reason does not exempt (ast-grep-ignore-reason reds it).
+  # A clock read but never compared (#4983 r2, the drainedNudge shape): a
+  # timestamp in a payload or an elapsed-time log line does not bound the wait.
+  - |
+    for (let i = 0; i < 5000; i += 1) {
+      await emit([{ role: "user", timestamp: Date.now() }]);
+      log(`turn ${i} at ${Date.now() - started} ms`);
+      const [row] = await rows("agent_nudge");
+      if (row) return row;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  # An ignore with no reason does not exempt (the runner's reasoned-ignore check reds it).
   - |
     // ast-grep-ignore: some-other-rule
     for (let i = 0; i < 50 && pending.length === 0; i++) await tick();

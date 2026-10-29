@@ -1073,16 +1073,20 @@ describe("#3873 round 2: the agent_nudge row's bounds and producers", () => {
 		return file;
 	}
 
+	// Each turn emits a context event and reads the nudge rows; the wait is
+	// bounded by waitFor's real-clock deadline, not a turn count (#4865).
 	async function drainedNudge(runtime: AgentSessionRuntime): Promise<Row> {
-		for (let i = 0; i < 5000; i += 1) {
-			await runtime.session.extensionRunner.emitContext([
-				{ role: "user", content: "keep working", timestamp: Date.now() },
-			] as never);
-			const [row] = await rows("agent_nudge");
-			if (row) return row;
-			await new Promise<void>((resolve) => setImmediate(resolve));
-		}
-		throw new Error("no agent_nudge row");
+		let nudge: Row | undefined;
+		const row = await waitFor(() => nudge, Boolean, {
+			yieldControl: async () => {
+				await runtime.session.extensionRunner.emitContext([
+					{ role: "user", content: "keep working", timestamp: Date.now() },
+				] as never);
+				[nudge] = await rows("agent_nudge");
+				await new Promise<void>((resolve) => setImmediate(resolve));
+			},
+		});
+		return row as Row;
 	}
 
 	it("session_start passes a writer's session id from the shared touch record", async () => {

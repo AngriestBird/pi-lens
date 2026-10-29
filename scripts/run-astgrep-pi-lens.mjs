@@ -111,7 +111,7 @@ function main() {
 		suite = suiteByName(suiteName);
 		ruleIds = selfScanRuleIds(undefined, suite);
 	} catch (e) {
-		console.error(`[astgrep-self-scan] ${e?.message ?? e}`);
+		console.error(String(e?.message ?? e));
 		process.exit(1);
 	}
 	console.log(
