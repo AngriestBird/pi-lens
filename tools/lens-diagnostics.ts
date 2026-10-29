@@ -58,10 +58,12 @@ import {
 } from "../clients/dispatch/rule-policy.js";
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
-import { getProjectIgnoreMatcher } from "../clients/file-utils.js";
+import {
+	getProjectIgnoreMatcher,
+	isWithinPathForm,
+} from "../clients/file-utils.js";
 import {
 	isAtOrAboveHomeDir,
-	isUnderDir,
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
 	normalizeMapKey,
@@ -1830,7 +1832,16 @@ export function runnerRetirementDecision(
 	}
 	const realFilePath = realpathOrResolve(filePath);
 	for (const entry of coverage) {
-		if (!isUnderDir(realFilePath, entry.root)) continue;
+		// #4993 review: both operands are ALREADY kernel-real identities —
+		// `record()` (fresh-fetch.ts) stores `realpathOrResolve(analysisRoot)` as
+		// the root and `realpathOrResolve(file)` in `entry.files`, and
+		// `realFilePath` above is that same call. Comparing one form here is
+		// `isUnderDir`'s identity disjunct without its two `normalizeFilePath`
+		// lookups (and its two spelling lookups) per finding x coverage-root
+		// miss on the mode=full path: `isWithinPathForm` folds separators and
+		// case exactly as the `path.relative` copy it replaced did, and touches
+		// no filesystem.
+		if (!isWithinPathForm(realFilePath, entry.root)) continue;
 		if (entry.files.has(realFilePath)) {
 			return "retire";
 		}

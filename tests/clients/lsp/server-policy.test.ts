@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MTIME_DRIFT_TOLERANCE_MS } from "../../../clients/freshness.js";
-import { removeTempDirSync } from "../test-utils.js";
+import { removeTempDirSync, setupTestEnvironment } from "../test-utils.js";
 
 const toolNotFound = (message = "ENOENT: command not found") =>
 	Object.assign(new Error(message), { kind: "tool-not-found" as const });
@@ -2785,25 +2785,31 @@ describe("monorepo root hoisting (#1671)", () => {
 	// #2556 RECURRENCE GUARDED: the member test read `path.relative(parent,
 	// child).startsWith("..")`, so a workspace member directory named `..crate`
 	// (inside the workspace) was read as outside it and kept a root of its own.
+	// #4993 review: the fixture carries `setupTestEnvironment`'s shared `.git`
+	// marker, so it is its own project root and root discovery cannot adopt a
+	// marker above the tmp root (AGENTS.md shape 73).
 	it("RustServer.root hoists a member directory with a ..-prefixed name (#2556)", async () => {
 		const { RustServer } = await import("../../../clients/lsp/server.js");
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-dots-"));
-		dirs.push(tmp);
+		const env = setupTestEnvironment("pi-lens-cargo-dots-");
+		try {
+			const tmp = env.tmpDir;
+			fs.writeFileSync(
+				path.join(tmp, "Cargo.toml"),
+				'[workspace]\nmembers = ["..crate"]\n',
+			);
+			const crateDir = path.join(tmp, "..crate");
+			fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+			fs.writeFileSync(
+				path.join(crateDir, "Cargo.toml"),
+				'[package]\nname = "dots"\n',
+			);
+			const file = path.join(crateDir, "src", "lib.rs");
+			fs.writeFileSync(file, "pub fn x() {}\n");
 
-		fs.writeFileSync(
-			path.join(tmp, "Cargo.toml"),
-			'[workspace]\nmembers = ["..crate"]\n',
-		);
-		const crateDir = path.join(tmp, "..crate");
-		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
-		fs.writeFileSync(
-			path.join(crateDir, "Cargo.toml"),
-			'[package]\nname = "dots"\n',
-		);
-		const file = path.join(crateDir, "src", "lib.rs");
-		fs.writeFileSync(file, "pub fn x() {}\n");
-
-		await expect(RustServer.root(file)).resolves.toBe(tmp);
+			await expect(RustServer.root(file)).resolves.toBe(tmp);
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("records a capped member glob through the Cargo consumer", async () => {

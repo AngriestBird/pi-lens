@@ -279,27 +279,34 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 	// #2556 RECURRENCE GUARDED: the ancestor scan read `path.relative(ancestor,
 	// root).startsWith("..")`, so a nested directory named `..docs` (inside the
 	// hosted project) was not seen as below it and got a client of its own.
+	// #4993 review: the fixture carries `setupTestEnvironment`'s shared `.git`
+	// marker, so it is its own project root and root discovery cannot adopt a
+	// marker above the tmp root (AGENTS.md shape 73).
 	it("attaches a nested marker directory with a ..-prefixed name to the ancestor client (#2556)", async () => {
-		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-coalesce-"));
-		dirs.push(project);
-		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(project);
-		const nested = path.join(project, "..docs", "workflows");
-		fs.mkdirSync(nested, { recursive: true });
+		const env = setupTestEnvironment("pi-lens-coalesce-");
+		try {
+			const project = env.tmpDir;
+			const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(project);
+			const nested = path.join(project, "..docs", "workflows");
+			fs.mkdirSync(nested, { recursive: true });
 
-		const service = new LSPService() as unknown as RootPolicyHarness;
-		const server = markerServer("yaml");
-		service.state.clients.set(
-			`yaml:${normalizeMapKey(project)}`,
-			fakeClient(project),
-		);
+			const service = new LSPService() as unknown as RootPolicyHarness;
+			const server = markerServer("yaml");
+			service.state.clients.set(
+				`yaml:${normalizeMapKey(project)}`,
+				fakeClient(project),
+			);
 
-		await expect(
-			service.clientRegistry.resolveServerRoot(
-				server,
-				path.join(nested, "ci.yml"),
-			),
-		).resolves.toBe(project);
-		cwdSpy.mockRestore();
+			await expect(
+				service.clientRegistry.resolveServerRoot(
+					server,
+					path.join(nested, "ci.yml"),
+				),
+			).resolves.toBe(project);
+			cwdSpy.mockRestore();
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("preserves a true nested project with its own manifest", async () => {
