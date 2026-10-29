@@ -3,6 +3,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
+import { useConfigPath } from "../../support/global-config.js";
+const setConfigPath = useConfigPath();
 
 // #1333: these config/telemetry warnings no longer reach the terminal — pi owns
 // it — they go to the ndjson sink in `clients/extension-log.ts`. The sink mock
@@ -406,21 +408,13 @@ describe("loadLSPConfig — the deny union spans key spellings (#2427 round 2)",
 		const projectDir = path.join(home, "proj");
 		fs.mkdirSync(projectDir, { recursive: true });
 		process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
-		const previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
-		process.env.PI_LENS_CONFIG_PATH = path.join(
-			home,
-			".pi-lens",
-			"config.json",
-		);
+		setConfigPath(path.join(home, ".pi-lens", "config.json"));
 		const { loadLSPConfig, resetLSPConfigWarnCache } =
 			await import("../../../clients/lsp/config.js");
 		resetLSPConfigWarnCache();
 		try {
 			return (await loadLSPConfig(projectDir, home)) as never;
 		} finally {
-			if (previousConfigPath === undefined)
-				delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 		}
 	}
 
