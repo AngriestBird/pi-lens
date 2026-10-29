@@ -76,11 +76,28 @@ vi.mock("../clients/bootstrap.js", async () => {
 		},
 	}));
 });
+// The stub keeps the two per-session re-arms of production's
+// `handleSessionStart` that a second session in this file depends on.
+// `index.ts` holds ONE module-level `RuntimeCoordinator`, and every session
+// here ends with `session_shutdown`, which retires its session scope and shuts
+// the analyzer bootstrap's gate. Production's `handleSessionStart` begins the
+// next scope (`runtime.resetForSession()`, #3611) and re-arms the gate
+// (#2467); `index.ts` then binds the process bridges to that new scope. Without
+// them the next case's session ran on the retired scope: the bridge answered
+// "no live primary", the settled sweep's replay recorded nothing, and no turn
+// state was written. Recurrence: the #2465 case failed when it ran after the
+// #4535 case (CI shuffle seed 202).
 vi.mock("../clients/runtime-session.js", () => ({
 	handleSessionStart: async (deps: {
-		runtime: { projectRoot: string };
+		runtime: { projectRoot: string; resetForSession: () => void };
 		ctxCwd?: string;
 	}) => {
+		// Synchronous, before the first await: `index.ts` takes
+		// `runtime.sessionScope` right after this call returns its promise and
+		// binds the process bridges to it (#3611, #3612), exactly as production's
+		// `resetForSession` runs before its own first await.
+		deps.runtime.resetForSession();
+		resetAnalyzerBootstrapSessionState();
 		if (deps.ctxCwd) deps.runtime.projectRoot = deps.ctxCwd;
 	},
 }));
@@ -117,6 +134,10 @@ vi.mock("../clients/observed-mutation-sources.js", async (importOriginal) => {
 	};
 });
 
+import {
+	isAnalyzerBootstrapShutdown,
+	resetAnalyzerBootstrapSessionState,
+} from "../clients/bootstrap.js";
 import { CacheManager } from "../clients/cache-manager.js";
 import {
 	type DiskChange,
@@ -204,6 +225,9 @@ describe("#2465 round 2: the observed-mutation settled sweep runs under --no-rea
 		// early return used to skip entirely.
 		await handle.prompt("anything new?");
 		expect(handle.errors).toEqual([]);
+		// The session ran with the analyzer bootstrap armed, whichever case ran
+		// before it (the previous session's `session_shutdown` shut the gate).
+		expect(isAnalyzerBootstrapShutdown()).toBe(false);
 
 		// The stamp alone is suppressed under --no-read-guard. The sweep
 		// replays through the bridge with a NORMALIZED map key (`uriToPath`-
