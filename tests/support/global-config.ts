@@ -6,8 +6,8 @@
  * (`clients/lens-flag-registry.ts`). `PI_LENS_CONFIG_PATH` names that file, and
  * the loaded copy reads it while the factory runs (`index.ts`
  * `loadPiLensGlobalConfig()`), so the variable must name the file for the
- * factory and the session. The shape is the one `index-4682` and `index-4687`
- * already use.
+ * factory and the session. `useGlobalConfig` scopes it to a describe block;
+ * `withGlobalConfig` scopes it to one callback.
  *
  * A flag a test is ABOUT does not come here: it moves to tier 2 (`pi-session.ts`).
  */
@@ -42,4 +42,29 @@ export function useGlobalConfig(): (config: Record<string, unknown>) => void {
 		fs.writeFileSync(file, JSON.stringify(config));
 		process.env.PI_LENS_CONFIG_PATH = file;
 	};
+}
+
+/**
+ * The callback-scoped companion to `useGlobalConfig` (#4937 remainder 1).
+ * Writes `config` to `file`, points `PI_LENS_CONFIG_PATH` at it for the
+ * duration of `body`, and puts the variable back afterwards, also when `body`
+ * throws. The caller owns `file` and its directory: the companion never deletes
+ * them, so a path the callback returns stays readable after the call (the
+ * release-qa row asserts it).
+ */
+export async function withGlobalConfig<T>(
+	file: string,
+	config: unknown,
+	body: () => T | Promise<T>,
+): Promise<T> {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, JSON.stringify(config));
+	const previous = process.env.PI_LENS_CONFIG_PATH;
+	process.env.PI_LENS_CONFIG_PATH = file;
+	try {
+		return await body();
+	} finally {
+		if (previous === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+		else process.env.PI_LENS_CONFIG_PATH = previous;
+	}
 }
