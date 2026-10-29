@@ -964,7 +964,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 29 -> 30 (#3435): the single-file lane now derives its base with
 		// `path.dirname(target)` instead of passing `projectRoot` through — one
 		// more `path` use, same sense (a path operation).
-		"clients/dependency-checker.ts": 30,
+		"clients/dependency-checker.ts": 28,
 		"clients/diagnostic-dispositions.ts": 10,
 		"clients/diagnostic-logger.ts": 3,
 		"clients/diagnostics-publish.ts": 6,
@@ -992,7 +992,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/golangci-lint.ts": 3,
 		"clients/dispatch/runners/hadolint.ts": 4,
 		"clients/dispatch/runners/helm-lint.ts": 11,
-		"clients/dispatch/runners/helm-render.ts": 16,
+		"clients/dispatch/runners/helm-render.ts": 15,
 		"clients/dispatch/runners/htmlhint.ts": 4,
 		"clients/dispatch/runners/javac.ts": 5,
 		"clients/dispatch/runners/ktlint.ts": 4,
@@ -1092,7 +1092,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/instance-registry.ts": 2,
 		"clients/jscpd-client.ts": 8,
 		"clients/json-cache-read.ts": 4,
-		"clients/knip-client.ts": 26,
+		"clients/knip-client.ts": 24,
 		// 14 -> 12 (#4689 r2): the language-root clamp asks `isUnderDir`
 		// instead of taking a `path.relative` of two spellings.
 		"clients/language-profile.ts": 12,
@@ -1103,7 +1103,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lens-map.ts": 14,
 		"clients/log-cleanup.ts": 9,
 		"clients/lsp-mutation.ts": 3,
-		"clients/lsp/client-registry.ts": 4,
+		"clients/lsp/client-registry.ts": 2,
 		// 0 -> 1 (#4615): the `[lsp-pub]` debug row's `path` member carries the
 		// client's own normalized document key into extension.log. One more
 		// `path` use, same sense (a path value written to a sink), and it is an
@@ -1163,7 +1163,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 121 -> 124 (#4914): `findEffectTsgoLsp` joins the `@effect/tsgo` manifest
 		// path, the `.bin/effect-tsgo` path, and `findNativeTypeScriptLsp` hands
 		// back its `node_modules` directory: three `path.join` filesystem calls.
-		"clients/lsp/server.ts": 124,
+		"clients/lsp/server.ts": 122,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
@@ -1256,7 +1256,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/runner-adapters/runner-findings.ts": 4,
 		"clients/project-diagnostics/runner-adapters/trivy.ts": 5,
 		"clients/project-diagnostics/scanner.ts": 4,
-		"clients/project-lens-config.ts": 19,
+		"clients/project-lens-config.ts": 17,
 		"clients/project-report.ts": 5,
 		"clients/project-snapshot.ts": 15,
 		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
@@ -1370,7 +1370,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// for pytest, PHPUnit, Mix, and generic runner locations.
 		// 74 -> 72 (#4689 batch 2): two `path.resolve` locals dropped from the root and
 		// failed-target keys.
-		"clients/test-runner-client.ts": 72,
+		"clients/test-runner-client.ts": 70,
 		"clients/todo-scanner.ts": 3,
 		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
 		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,
@@ -1414,7 +1414,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `toProjectRelativePath` too.
 		// 25 -> 19 (#4689 batch 4): mode=full's merge keys its Sets, dedup key and
 		// per-file map by `normalizeMapKey`, dropping six `path.resolve` calls.
-		"tools/lens-diagnostics.ts": 19,
+		"tools/lens-diagnostics.ts": 17,
 		// 10 -> 8 (#4577 M2): the scalar and batch `path`/`paths` arguments fold
 		// onto `resolveHostToolPath`, dropping one `path.resolve` each.
 		"tools/lsp-diagnostics.ts": 8,
@@ -1438,7 +1438,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/symbol-search.ts": 5,
 		"mcp/analyze-cli.ts": 4,
 		"mcp/cli.ts": 2,
-		"mcp/server.ts": 33,
+		"mcp/server.ts": 31,
 		"index.ts": 20,
 	},
 	record: {

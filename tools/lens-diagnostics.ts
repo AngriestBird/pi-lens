@@ -61,6 +61,7 @@ import { combineAbortSignals } from "../clients/deadline-utils.js";
 import { getProjectIgnoreMatcher } from "../clients/file-utils.js";
 import {
 	isAtOrAboveHomeDir,
+	isUnderDir,
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
 	normalizeMapKey,
@@ -1829,12 +1830,7 @@ export function runnerRetirementDecision(
 	}
 	const realFilePath = realpathOrResolve(filePath);
 	for (const entry of coverage) {
-		const root = entry.root;
-		const relative = path.relative(root, realFilePath);
-		const underRoot =
-			relative === "" ||
-			(!relative.startsWith("..") && !path.isAbsolute(relative));
-		if (!underRoot) continue;
+		if (!isUnderDir(realFilePath, entry.root)) continue;
 		if (entry.files.has(realFilePath)) {
 			return "retire";
 		}

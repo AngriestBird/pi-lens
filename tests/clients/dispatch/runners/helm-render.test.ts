@@ -1429,6 +1429,55 @@ describe("helm-render source mapping", () => {
 	});
 });
 
+describe("mapRenderedToSource layout reading (#2556)", () => {
+	// #2556 RECURRENCE GUARDED: the output-dir layout fallback read
+	// `path.relative(outputDir, rendered).startsWith("..")`, so a rendered
+	// directory named `..pkg` (inside outputDir) was read as a parent step and
+	// the finding fell back to Chart.yaml.
+	it("maps a rendered file under a ..-named output subdirectory by layout", () => {
+		const chart = installChart("valid-chart");
+		const outputDir = path.join(workspace, "out");
+		const decide = (rendered: string) =>
+			mapRenderedToSource({
+				renderedContent: "kind: Deployment\n",
+				renderedPath: rendered,
+				outputDir,
+				chartRoot: chart,
+			});
+
+		// A rendered file OUTSIDE outputDir has no layout. Plant a chart file where
+		// its absolute spelling would resolve if that spelling were read as a
+		// layout (`resolveTemplateSource` drops the first segment), so a guard
+		// that lets the absolute spelling through maps it onto the decoy.
+		const outside = path.join(workspace, "zz", "templates", "deployment.yaml");
+		const decoy = path.join(
+			chart,
+			...outside
+				.split(/[\\/]+/)
+				.filter(Boolean)
+				.slice(1),
+		);
+		fs.mkdirSync(path.dirname(decoy), { recursive: true });
+		fs.writeFileSync(decoy, "kind: Decoy\n");
+
+		expect({
+			dotDotNamed: decide(
+				path.join(outputDir, "..pkg", "templates", "deployment.yaml"),
+			),
+			outsideOutputDir: decide(outside),
+		}).toEqual({
+			dotDotNamed: {
+				filePath: path.join(chart, "templates", "deployment.yaml"),
+				mapped: true,
+			},
+			outsideOutputDir: {
+				filePath: path.join(chart, "Chart.yaml"),
+				mapped: false,
+			},
+		});
+	});
+});
+
 describe("parseHelmTemplateFailure", () => {
 	it("keeps one diagnostic per Error line and always produces at least one", () => {
 		const chartRoot = path.resolve("chart-root");

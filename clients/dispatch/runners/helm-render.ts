@@ -75,7 +75,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logLatency } from "../../latency-logger.js";
 import { PathKeyedMap } from "../../path-keyed-map.js";
-import { normalizeMapKey } from "../../path-utils.js";
+import {
+	isAbsoluteFilePath,
+	normalizeMapKey,
+	toProjectRelativePath,
+} from "../../path-utils.js";
 import { loadPiLensProjectConfig } from "../../project-lens-config.js";
 import {
 	getProjectTrustState,
@@ -302,8 +306,13 @@ export function mapRenderedToSource(options: {
 		);
 		if (resolved) return { filePath: resolved, mapped: true };
 	}
-	const relative = path.relative(options.outputDir, options.renderedPath);
-	if (relative && !relative.startsWith("..")) {
+	// The shared project-relative display path: relative when the rendered file
+	// is strictly inside the output dir, otherwise its absolute spelling.
+	const relative = toProjectRelativePath(
+		options.renderedPath,
+		options.outputDir,
+	);
+	if (!isAbsoluteFilePath(relative)) {
 		const resolved = resolveTemplateSource(relative, chartRoot, realChartRoot);
 		if (resolved) return { filePath: resolved, mapped: true };
 	}

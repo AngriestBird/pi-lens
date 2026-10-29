@@ -2782,6 +2782,30 @@ describe("monorepo root hoisting (#1671)", () => {
 		expect(roots[0]).toBe(tmp);
 	});
 
+	// #2556 RECURRENCE GUARDED: the member test read `path.relative(parent,
+	// child).startsWith("..")`, so a workspace member directory named `..crate`
+	// (inside the workspace) was read as outside it and kept a root of its own.
+	it("RustServer.root hoists a member directory with a ..-prefixed name (#2556)", async () => {
+		const { RustServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cargo-dots-"));
+		dirs.push(tmp);
+
+		fs.writeFileSync(
+			path.join(tmp, "Cargo.toml"),
+			'[workspace]\nmembers = ["..crate"]\n',
+		);
+		const crateDir = path.join(tmp, "..crate");
+		fs.mkdirSync(path.join(crateDir, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(crateDir, "Cargo.toml"),
+			'[package]\nname = "dots"\n',
+		);
+		const file = path.join(crateDir, "src", "lib.rs");
+		fs.writeFileSync(file, "pub fn x() {}\n");
+
+		await expect(RustServer.root(file)).resolves.toBe(tmp);
+	});
+
 	it("records a capped member glob through the Cargo consumer", async () => {
 		const { RustServer } = await import("../../../clients/lsp/server.js");
 		const { getDegradationSummary } =
