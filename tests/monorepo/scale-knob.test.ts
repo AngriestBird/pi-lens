@@ -61,6 +61,34 @@ describe("monorepo .pi-lens.json maxProjectFiles scale knob, end-to-end (#775 it
 		}
 	});
 
+	// RECURRENCE THIS PREVENTS: the derived budget rounding down instead of to
+	// nearest, or the ratio drifting below 1.25 (floor and a ratio of 1 both
+	// derive 3, not 4). The 5-file case above is over the budget under every
+	// ratio below 1.5, so it cannot see the cliff move downward; only the file
+	// count AT the derived budget can. Mutation: `Math.round(` -> `Math.floor(`
+	// in `deriveBudget` (clients/project-scale.js) leaves the case above and
+	// tests/clients/project-scale.test.ts green and reds this one.
+	it("a root .pi-lens.json maxProjectFiles=3 still warms at exactly its derived source-file budget (4 files)", () => {
+		const pkg: MonorepoPackageSpec = {
+			name: "@scope/a",
+			dir: "packages/a",
+			files: fileMap(4), // exactly the derived budget: round(3 * 1.25)
+		};
+		const repo = makeMonorepo({
+			packages: [pkg],
+			rootPiLensConfig: { maxProjectFiles: 3 },
+		});
+		try {
+			const ctx = resolveStartupScanContext(repo.root, {
+				homeDir: repo.root + "-not-home",
+			});
+			expect(ctx.canWarmCaches).toBe(true);
+			expect(ctx.sourceFileCount).toBe(4);
+		} finally {
+			repo.cleanup();
+		}
+	});
+
 	it("the SAME fixture warms fine under a larger maxProjectFiles (proves the .pi-lens.json value, not a hardcoded default, drove the flip)", () => {
 		const pkg: MonorepoPackageSpec = {
 			name: "@scope/a",
@@ -102,6 +130,42 @@ describe("monorepo .pi-lens.json maxProjectFiles scale knob, end-to-end (#775 it
 			repo.cleanup();
 		}
 	});
+
+	// RECURRENCE THIS PREVENTS: the review-graph budget rounding down instead of
+	// to nearest. maxProjectFiles=2 derives a cap of 1 under round and floor
+	// alike, so the skip case above cannot see the rounding; maxProjectFiles=3
+	// derives round(1.5) = 2 (floor gives 1). Mutation: `Math.round(linearValue)`
+	// -> `Math.floor(linearValue)` in `taperedReviewGraphMaxFiles`
+	// (clients/project-scale.js) leaves the skip case and
+	// tests/clients/project-scale.test.ts green and reds the "builds at the cap"
+	// row.
+	it.each([
+		{ files: 2, builds: true }, // exactly the derived cap: round(3 * 0.5)
+		{ files: 3, builds: false }, // one over it
+	])(
+		"a root .pi-lens.json maxProjectFiles=3 derives a review-graph cap of 2: $files files build=$builds",
+		async ({ files, builds }) => {
+			const pkg: MonorepoPackageSpec = {
+				name: "@scope/a",
+				dir: "packages/a",
+				files: fileMap(files),
+			};
+			const repo = makeMonorepo({
+				packages: [pkg],
+				rootPiLensConfig: { maxProjectFiles: 3 },
+			});
+			try {
+				clearGraphCache();
+				const graph = await buildOrUpdateGraph(repo.root, [], new FactStore());
+				expect(graph.nodes.size > 0).toBe(builds);
+				expect(getLastGraphBuildInfo().skipReason).toBe(
+					builds ? undefined : "too_many_files",
+				);
+			} finally {
+				repo.cleanup();
+			}
+		},
+	);
 
 	it("the SAME fixture builds fine under a larger maxProjectFiles", async () => {
 		const pkg: MonorepoPackageSpec = {
