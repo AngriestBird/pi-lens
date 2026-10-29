@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
@@ -112,6 +113,8 @@ describe("tool-smoke fails a runner whose tool broke, through dispatch (#4130)",
 		const workspace = fs.mkdtempSync(
 			path.join(repoRoot, ".probe-home", "fault-"),
 		);
+		const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "yamllint-"));
+		const previousPath = process.env.PATH;
 		const realSpawn = safeSpawn.safeSpawnAsync;
 		const spawn = vi
 			.spyOn(safeSpawn, "safeSpawnAsync")
@@ -127,6 +130,18 @@ describe("tool-smoke fails a runner whose tool broke, through dispatch (#4130)",
 					: realSpawn(cmd, args, options),
 			);
 		try {
+			// A hermetic yamllint on PATH: the run must not depend on the host
+			// having one (RECURRENCE THIS PREVENTS: the CI Unit tests lanes do not
+			// install yamllint, and the spawn assertion below reds before the
+			// killed-process classification runs). The shim sits outside the
+			// session repository on purpose: a bare lookup never resolves to a
+			// PATH entry inside the checkout (#4530), so a shim under
+			// `.probe-home` is not discovered. The kill double below intercepts
+			// the invocation, so the shim body never executes.
+			const shim = path.join(shimDir, "yamllint");
+			fs.writeFileSync(shim, "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(shim, 0o755);
+			process.env.PATH = `${shimDir}${path.delimiter}${previousPath ?? ""}`;
 			fs.cpSync(source, workspace, { recursive: true });
 			const { runners } = await dispatchLintDetailed(
 				path.join(workspace, fixture.file),
@@ -145,8 +160,11 @@ describe("tool-smoke fails a runner whose tool broke, through dispatch (#4130)",
 				"did-not-run: tool was invoked and produced no result",
 			);
 		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
 			spawn.mockRestore();
 			fs.rmSync(workspace, { recursive: true, force: true });
+			fs.rmSync(shimDir, { recursive: true, force: true });
 		}
 	}, 30_000);
 });
@@ -160,9 +178,7 @@ describe("tool-smoke cwd-sensitive rows (#2697)", () => {
 		const workspace = fs.mkdtempSync(
 			path.join(repoRoot, ".probe-home", "cwd-"),
 		);
-		const shimDir = fs.mkdtempSync(
-			path.join(repoRoot, ".probe-home", "yamllint-"),
-		);
+		const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "yamllint-"));
 		const previousPath = process.env.PATH;
 		const previousProcessCwd = process.cwd();
 		const spawn = vi.spyOn(safeSpawn, "safeSpawnAsync");

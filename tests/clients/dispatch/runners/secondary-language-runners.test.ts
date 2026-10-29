@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
+import { hasUsableResult } from "../../../../clients/dispatch/types.js";
 import { makeRunnerCtx } from "../../../support/runner-ctx.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
@@ -440,6 +441,149 @@ describe("secondary language fallback runners", () => {
 		},
 		30_000,
 	);
+
+	// RECURRENCE THIS PREVENTS: #4130 round 2 (PR #4971 threads on gleam-check and
+	// prisma-validate). The spawn guard only caught a cut-short run with NO
+	// output at all; a run killed after it printed something reached the parser,
+	// and gleam reported it `succeeded` (nothing parsed, status null) or
+	// `blocking_diagnostics` (something parsed), prisma reported an unmarked
+	// skip or `blocking_diagnostics`. Smoke then rendered a broken tool as
+	// pass or skip.
+	describe("a cut-short run that printed something is a fault (#4130)", () => {
+		const gleamFinding = (filePath: string) =>
+			[
+				"error: Type mismatch",
+				`  ┌─ ${filePath}:1:8`,
+				"  │",
+				"1 │ pub fn main() { 1 }",
+				"  │        ^ expected Int",
+			].join("\n");
+
+		async function runGleam(
+			spawn: SpawnShape,
+			render: (filePath: string) => string,
+		) {
+			const env = setupTestEnvironment("pi-lens-gleam-cut-short-");
+			try {
+				const filePath = path.join(env.tmpDir, "src", "app.gleam");
+				fs.mkdirSync(path.dirname(filePath), { recursive: true });
+				fs.writeFileSync(filePath, "pub fn main() { 1 }\n");
+				safeSpawnAsync.mockResolvedValue({
+					...spawn,
+					stderr: render(filePath),
+				});
+				const runner = (
+					await import("../../../../clients/dispatch/runners/gleam-check.js")
+				).default;
+				return await runner.run(
+					createCtx("gleam", filePath, env.tmpDir) as never,
+				);
+			} finally {
+				env.cleanup();
+			}
+		}
+
+		it("gleam keeps the findings it printed before a timeout, as a fault", async () => {
+			const result = await runGleam(
+				{
+					error: new Error("Process timed out after 30000ms"),
+					status: null,
+					stdout: "",
+					stderr: "",
+				},
+				gleamFinding,
+			);
+			expect(result.status).toBe("failed");
+			expect(result.failureKind).toBe("did-not-run");
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0]?.message).toContain("Type mismatch");
+			expect(hasUsableResult(result)).toBe(false);
+		});
+
+		it("gleam never reads a killed run with only progress output as clean", async () => {
+			const result = await runGleam(
+				{
+					error: new Error("Process timed out after 30000ms"),
+					status: null,
+					stdout: "",
+					stderr: "",
+				},
+				() => "   Compiling demo",
+			);
+			expect(result.status).toBe("skipped");
+			expect(result.skipFault).toBe("did-not-run");
+		});
+
+		it("gleam keeps a completed run's findings as ordinary findings", async () => {
+			const result = await runGleam(
+				{ error: null, status: 1, stdout: "", stderr: "" },
+				gleamFinding,
+			);
+			expect(result.status).toBe("failed");
+			expect(result.failureKind).toBe("blocking_diagnostics");
+			expect(result.skipFault).toBeUndefined();
+			expect(hasUsableResult(result)).toBe(true);
+		});
+
+		async function runPrisma(spawn: SpawnShape) {
+			const env = setupTestEnvironment("pi-lens-prisma-cut-short-");
+			try {
+				const filePath = path.join(env.tmpDir, "schema.prisma");
+				fs.writeFileSync(filePath, "model A { id Int @id }\n");
+				safeSpawnAsync.mockResolvedValue(spawn);
+				const runner = (
+					await import("../../../../clients/dispatch/runners/prisma-validate.js")
+				).default;
+				return await runner.run(
+					makeRunnerCtx(filePath, env.tmpDir, {
+						kind: "prisma",
+						pi: { getFlag: (name: string) => name === "no-lsp" },
+					} as never) as never,
+				);
+			} finally {
+				env.cleanup();
+			}
+		}
+
+		it("prisma faults a killed run whose partial output has no diagnostics", async () => {
+			const result = await runPrisma({
+				error: null,
+				status: null,
+				signal: "SIGKILL",
+				stdout: "Prisma schema loaded from schema.prisma",
+				stderr: "",
+			});
+			expect(result.status).toBe("skipped");
+			expect(result.skipFault).toBe("did-not-run");
+		});
+
+		it("prisma keeps a killed run's validation findings, as a fault", async () => {
+			const result = await runPrisma({
+				error: null,
+				status: null,
+				signal: "SIGKILL",
+				stdout: "",
+				stderr:
+					"Error: Prisma schema validation - (get-config wasm)\nValidation Error Count: 1\nschema.prisma:1",
+			});
+			expect(result.status).toBe("failed");
+			expect(result.failureKind).toBe("did-not-run");
+			expect(result.diagnostics).toHaveLength(1);
+			expect(hasUsableResult(result)).toBe(false);
+		});
+
+		it("prisma leaves a completed run with nothing parsed as the existing plain skip", async () => {
+			// The residual `skipWhenParsedNothing` family (PR body), unchanged here.
+			const result = await runPrisma({
+				error: null,
+				status: 1,
+				stdout: "Prisma schema loaded from schema.prisma",
+				stderr: "",
+			});
+			expect(result.status).toBe("skipped");
+			expect(result.skipFault).toBeUndefined();
+		});
+	});
 
 	it("surfaces a warning when zig exits non-zero without structured diagnostics", async () => {
 		const env = setupTestEnvironment("pi-lens-zig-runner-");

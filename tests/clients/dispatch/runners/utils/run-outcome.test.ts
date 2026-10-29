@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
 	classifyRunOutcome,
 	firstOutputLine,
+	processCutShort,
 	spawnFailedWithNoOutput,
 } from "../../../../../clients/dispatch/runners/utils/spawn-outcome.js";
+import type { Diagnostic } from "../../../../../clients/dispatch/types.js";
 import {
+	faultIfCutShort,
 	formatRunOutcomeFailure,
 	formatToolFailure,
 	skipUnlessToolRan,
@@ -303,5 +306,73 @@ describe("skipUnlessToolRan names the fault on the skip it returns (#4130)", () 
 				result: spawnResult({ status: 1, stdout: "findings" }),
 			}),
 		).toBeNull();
+	});
+});
+
+// RECURRENCE THIS PREVENTS: #4130 round 2. Five runner arms (cue-vet,
+// gleam-check, prisma-validate, terragrunt, trivy-config) each judged a
+// cut-short run on their own, and each one's guard missed a different slice:
+// partial output, a negative errno status, a killed run that printed progress
+// only. `faultIfCutShort` is the one rule they all call after the parse.
+describe("faultIfCutShort, the one rule for a cut-short run (#4130)", () => {
+	const finding = (semantic: "blocking" | "warning"): Diagnostic => ({
+		id: `t:${semantic}`,
+		message: "partial finding",
+		filePath: "a.txt",
+		line: 1,
+		column: 1,
+		severity: semantic === "blocking" ? "error" : "warning",
+		semantic,
+		tool: "t",
+	});
+
+	it.each([
+		[
+			"a spawn error with a negative errno status",
+			{ status: -2, error: new Error("ENOENT") },
+		],
+		[
+			"a spawn error with no status",
+			{ status: null, error: new Error("timed out") },
+		],
+		["a signal", { status: null, signal: "SIGKILL" as const }],
+		["no exit status and no error", { status: null }],
+	])("treats %s as cut short", (_name, partial) => {
+		const result = spawnResult(partial);
+		expect(processCutShort(result)).toBe(true);
+		expect(faultIfCutShort(result, [])).toEqual({
+			status: "skipped",
+			diagnostics: [],
+			semantic: "none",
+			skipFault: "did-not-run",
+		});
+	});
+
+	it("keeps partial findings as a non-blocking-kind failure, blocking by their own semantic", () => {
+		const cut = spawnResult({ status: null, signal: "SIGKILL" });
+		expect(faultIfCutShort(cut, [finding("blocking")])).toMatchObject({
+			status: "failed",
+			semantic: "blocking",
+			failureKind: "did-not-run",
+			diagnostics: [{ id: "t:blocking" }],
+		});
+		expect(faultIfCutShort(cut, [finding("warning")])).toMatchObject({
+			status: "failed",
+			semantic: "warning",
+			failureKind: "did-not-run",
+		});
+	});
+
+	it.each([
+		["a clean exit", { status: 0 }],
+		["a findings exit", { status: 1, stdout: "findings" }],
+		[
+			"a nonzero exit with nothing printed (the output-based rule is not process-level)",
+			{ status: 2 },
+		],
+	])("returns null for %s", (_name, partial) => {
+		const result = spawnResult(partial);
+		expect(processCutShort(result)).toBe(false);
+		expect(faultIfCutShort(result, [finding("blocking")])).toBeNull();
 	});
 });

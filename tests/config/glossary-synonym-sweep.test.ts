@@ -406,11 +406,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/biome-check.ts": 4,
 		"clients/dispatch/runners/cpp-check.ts": 1,
 		"clients/dispatch/runners/cue-vet.ts": 9,
-		"clients/dispatch/runners/gleam-check.ts": 1,
 		"clients/dispatch/runners/helm-lint.ts": 2,
 		"clients/dispatch/runners/helm-render.ts": 7,
 		"clients/dispatch/runners/oxlint.ts": 3,
-		"clients/dispatch/runners/prisma-validate.ts": 1,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 3,
 		"clients/dispatch/runners/rust-clippy.ts": 1,
 		"clients/dispatch/runners/pyright.ts": 1,
@@ -1621,13 +1619,16 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 14 -> 15 (#4226): the early-return runner result preserves the existing
 		// status field while disclosing a fully path-excluded query set.
 		"clients/dispatch/runners/tree-sitter.ts": 15,
-		"clients/dispatch/runners/trivy-config.ts": 10,
+		// 10 -> 9 (#4130 r2): the shared classifier replaces a status test.
+		"clients/dispatch/runners/trivy-config.ts": 9,
 		"clients/dispatch/runners/utils/availability-policy.ts": 5,
 		"clients/dispatch/runners/utils/candidate-probe.ts": 1,
 		"clients/dispatch/runners/utils/lazy-installer.ts": 3,
 		"clients/dispatch/runners/utils/runner-helpers.ts": 8,
-		"clients/dispatch/runners/utils/spawn-outcome.ts": 9,
-		"clients/dispatch/runners/utils/tool-failure.ts": 19,
+		// 9 -> 10 (#4130 r2): `processCutShort` reads the exit status once.
+		"clients/dispatch/runners/utils/spawn-outcome.ts": 10,
+		// 19 -> 20 (#4130 r2): `faultIfCutShort` builds the one partial-findings `failed` result.
+		"clients/dispatch/runners/utils/tool-failure.ts": 20,
 		"clients/dispatch/runners/vale.ts": 4,
 		"clients/dispatch/runners/yamllint.ts": 2,
 		"clients/dispatch/runners/zig-check.ts": 2,

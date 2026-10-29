@@ -16,7 +16,7 @@ import {
 	resolveAvailableOrInstall,
 } from "./utils/runner-helpers.js";
 import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
-import { finishParsedRun } from "./utils/tool-failure.js";
+import { faultIfCutShort, finishParsedRun } from "./utils/tool-failure.js";
 
 const terragrunt = createAvailabilityChecker("terragrunt", ".exe");
 
@@ -193,6 +193,9 @@ const terragruntRunner: RunnerDefinition = {
 			ctx.filePath,
 			absPath,
 		);
+		// #4130: a validate cut short is a fault whatever it printed.
+		const cutShort = faultIfCutShort(result, diagnostics);
+		if (cutShort) return cutShort;
 		return finishParsedRun({
 			tool: "terragrunt",
 			ctx,

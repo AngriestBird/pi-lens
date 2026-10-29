@@ -4,6 +4,7 @@
  */
 import { incrementDegradationCount } from "../../../degradation-ledger.js";
 import { truncateForLedger } from "../../../ledger-bounds.js";
+import type { SpawnResult } from "../../../safe-spawn.js";
 import {
 	type Diagnostic,
 	type DispatchContext,
@@ -16,6 +17,7 @@ import {
 	type ClassifyRunOutcomeInput,
 	classifyRunOutcome,
 	firstOutputLine,
+	processCutShort,
 	type RunOutcome,
 } from "./spawn-outcome.js";
 
@@ -136,6 +138,39 @@ export function skipUnlessToolRan(
 		reason: formatRunOutcomeFailure(tool, outcome, fields),
 	});
 	return faultSkip(kind);
+}
+
+/**
+ * The one rule for a run the process did not complete (killed, timed out,
+ * spawn error, no exit status) whose output reached the parser anyway (#4130).
+ * Call it right after the parse, before anything reads the diagnostics as a
+ * verdict. A cut-short run is never `succeeded`, never `blocking_diagnostics`
+ * and never a skip with no fault, whatever it printed before it was cut:
+ *
+ * - nothing parsed: `faultSkip("did-not-run")`.
+ * - findings parsed: `failed` with the findings kept and `failureKind:
+ *   "did-not-run"` (the rust-clippy shape). The kind is not
+ *   `blocking_diagnostics`, so `hasUsableResult` is false and smoke fails the
+ *   row, while the user still sees what the tool reported before it died.
+ *
+ * Returns `null` when the process completed: the caller carries on with its
+ * own reading of the output. A runner that bails before it parses
+ * (`skipUnlessToolRan`, a `result.error` guard) drops partial output and
+ * returns `faultSkip` directly; that is the same rule with no findings kept.
+ */
+export function faultIfCutShort(
+	result: SpawnResult,
+	diagnostics: readonly Diagnostic[],
+): RunnerResult | null {
+	if (!processCutShort(result)) return null;
+	if (diagnostics.length === 0) return faultSkip("did-not-run");
+	const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");
+	return {
+		status: "failed",
+		diagnostics: [...diagnostics],
+		semantic: hasBlocking ? "blocking" : "warning",
+		failureKind: "did-not-run",
+	};
 }
 
 /**

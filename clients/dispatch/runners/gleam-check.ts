@@ -10,8 +10,9 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { faultResult, faultSkip, findingsResult } from "../types.js";
+import { faultResult, findingsResult } from "../types.js";
 import { PRIORITY } from "../priorities.js";
+import { faultIfCutShort } from "./utils/tool-failure.js";
 
 const gleam = createAvailabilityChecker("gleam", ".exe");
 
@@ -153,15 +154,15 @@ const gleamCheckRunner: RunnerDefinition = {
 			timeout: 30000,
 		});
 
-		if (result.error && !result.stdout && !result.stderr) {
-			return faultSkip("did-not-run");
-		}
-
 		const diagnostics = parseGleamOutput(
 			`${result.stderr || ""}\n${result.stdout || ""}`,
 			ctx.filePath,
 			cwd,
 		);
+		// #4130: a check cut short is a fault whatever it printed, including
+		// nothing at all.
+		const cutShort = faultIfCutShort(result, diagnostics);
+		if (cutShort) return cutShort;
 		if (diagnostics.length === 0) {
 			if (result.status && result.status !== 0) {
 				const message =
