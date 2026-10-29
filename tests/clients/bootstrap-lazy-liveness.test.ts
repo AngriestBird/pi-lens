@@ -213,7 +213,14 @@ describe("#2467 — activation never loads the analyzer bootstrap", () => {
 		});
 		// The registrations really happened — otherwise "no demands" would be
 		// satisfied by an activation that did nothing at all (shape 7).
-		expect(handle.session.getAllTools().length).toBeGreaterThan(0);
+		// The extension runner's own tool list, not the session's: the session
+		// also counts pi's built-in tools, so a count there passes with nothing
+		// of pi-lens registered.
+		expect(
+			handle.session.extensionRunner
+				.getAllRegisteredTools()
+				.map((tool) => tool.definition.name),
+		).toEqual(expect.arrayContaining(["lens_diagnostics", "ast_grep_search"]));
 		expect(handle.session.extensionRunner.hasHandlers("tool_call")).toBe(true);
 		expect(handle.session.extensionRunner.hasHandlers("session_start")).toBe(
 			true,
