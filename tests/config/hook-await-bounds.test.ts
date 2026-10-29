@@ -545,22 +545,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"session_start scan goes through.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-session.ts#handleSessionStart:07098027~195e8353": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`readSequenceWithBudget` from the snapshot-root path: same " +
-			"real budget, same missing abort arm.",
-		owner: "#2523 slice 2",
-	},
-	"clients/runtime-session.ts#handleSessionStart:07098027~a42f4a7e": {
-		family: "hook-await",
-		site: "session_start",
-		reason:
-			"`readSequenceWithBudget` from the sequence fast path (#451): " +
-			"the budget is real (250ms default) but carries no abort arm.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-session.ts#handleSessionStart:2a60d0e5~dbbbc4f4": {
 		family: "hook-await",
 		site: "session_start",
@@ -657,6 +641,26 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"Session-start summary: go and rust availability probes, 3000ms " +
 			"each and sequential, re-armed on every full session_start " +
 			"(#2523's `bounded but no abort race` list).",
+		owner: "#2523 slice 2",
+	},
+	"clients/runtime-session.ts#handleSessionStart:cd0c710f~74098d00": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`readSequenceAndHydrateFreshSnapshot` from the full-mode path: it " +
+			"awaits `readSequenceWithBudget` (the real 250ms budget, no " +
+			"abort arm; see that function's own entry), the same await " +
+			"that sat inline here before the two copies were folded.",
+		owner: "#2523 slice 2",
+	},
+	"clients/runtime-session.ts#handleSessionStart:d7493ff5~a42f4a7e": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"`readSequenceAndHydrateFreshSnapshot` from the quick-mode snapshot-root path: it " +
+			"awaits `readSequenceWithBudget` (the real 250ms budget, no " +
+			"abort arm; see that function's own entry), the same await " +
+			"that sat inline here before the two copies were folded.",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-session.ts#handleSessionStart:e20461cb~6148cbdf": {
@@ -776,6 +780,16 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"from session_start with no wall bound above the spawn.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-session.ts#readSequenceAndHydrateFreshSnapshot:07098027~436bac0c":
+		{
+			family: "hook-await",
+			site: "session_start",
+			reason:
+				"`readSequenceWithBudget` from the shared sequence/snapshot step: " +
+				"the budget is real (250ms default) but carries no abort arm; " +
+				"one await for both quick and full session_start.",
+			owner: "#2523 slice 2",
+		},
 	"clients/runtime-session.ts#readSequenceWithBudget:41c0b191~d5c54d05": {
 		family: "hook-await",
 		site: "session_start",

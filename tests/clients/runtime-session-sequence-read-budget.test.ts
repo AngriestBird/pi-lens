@@ -496,6 +496,110 @@ describe("#1162 — bounded session_start sequence read", () => {
 		},
 	);
 
+	// Recurrence guarded: quick and full session_start each carried a private
+	// ~60-line copy of the sequence-read -> freshness -> snapshot-load ->
+	// hydrate step (jscpd, 87 duplicated lines) and now share
+	// `readSequenceAndHydrateFreshSnapshot`. A drift between the copies (a
+	// record, the cold-sentinel freshness seq, the hydrate) must red in the
+	// mode that lost it; each cell drives the real `handleSessionStart` in one
+	// mode through the seam.
+	describe.each(["quick", "full"] as const)(
+		"%s mode drives the shared sequence/snapshot step",
+		(mode) => {
+			const exportedPath = (cwd: string) => path.join(cwd, "index.ts");
+			const saveSeq0Snapshot = (cwd: string) =>
+				saveProjectSnapshot(cwd, {
+					version: PROJECT_SNAPSHOT_VERSION,
+					projectRoot: cwd,
+					generatedAt: new Date().toISOString(),
+					seq: 0,
+					files: {},
+					symbols: {},
+					reverseDeps: {},
+					cachedExports: [["x", exportedPath(cwd)]],
+					projectRulesScan: { hasCustomRules: true, rules: [] },
+				});
+			const phaseRecord = (phase: string) =>
+				logLatencySpy.mock.calls
+					.map((call) => call[0] as { phase?: string; metadata?: object })
+					.find((record) => record.phase === phase);
+
+			it("a healthy read confirming a fresh snapshot hydrates the runtime and records both phases", async () => {
+				process.env.PI_LENS_STARTUP_MODE = mode;
+				const env = setupTestEnvironment(`pi-lens-seq-seam-fresh-${mode}-`);
+				process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+				try {
+					const cwd = makeProject(env);
+					saveSeq0Snapshot(cwd);
+					readLatestProjectSequenceAsyncSpy.mockResolvedValue({
+						projectSeq: 0,
+						fileSeqByPath: new Map(),
+						logEntries: 0,
+					});
+					const runtime = new RuntimeCoordinator();
+
+					await handleSessionStart(makeDeps(cwd, runtime));
+
+					expect(runtime.cachedExports.get("x")).toBe(exportedPath(cwd));
+					expect(phaseRecord("session_start_sequence_read")?.metadata).toEqual(
+						expect.objectContaining({ timedOut: false, entries: 0 }),
+					);
+					expect(phaseRecord("session_start_snapshot_load")?.metadata).toEqual(
+						expect.objectContaining({ fresh: true, seq: 0 }),
+					);
+				} finally {
+					env.cleanup();
+				}
+			});
+
+			it("a stalled read never trusts the snapshot at session start, and records the unknown sequence (quick mode then hydrates late, #1785)", async () => {
+				process.env.PI_LENS_STARTUP_MODE = mode;
+				const env = setupTestEnvironment(`pi-lens-seq-seam-stall-${mode}-`);
+				process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+				try {
+					const cwd = makeProject(env);
+					saveSeq0Snapshot(cwd);
+					const slow = deferred<ProjectSequenceIndex>();
+					readLatestProjectSequenceAsyncSpy.mockImplementation(
+						() => slow.promise,
+					);
+					const runtime = new RuntimeCoordinator();
+
+					await handleSessionStart(makeDeps(cwd, runtime));
+
+					// The seq-0 snapshot would match the cold sentinel; the unknown
+					// freshness seq keeps it from hydrating (#1168 finding 2).
+					expect(runtime.cachedExports.get("x")).toBeUndefined();
+					expect(phaseRecord("session_start_sequence_read")?.metadata).toEqual(
+						expect.objectContaining({ timedOut: true }),
+					);
+					expect(phaseRecord("session_start_snapshot_load")?.metadata).toEqual(
+						expect.objectContaining({ fresh: false, sequenceUnknown: true }),
+					);
+					expect(
+						getDegradationSummary().find(
+							(group) => group.kind === "snapshot-sequence-read-timeout",
+						)?.count,
+					).toBeGreaterThanOrEqual(1);
+
+					if (mode === "quick") {
+						// Only quick mode wires the retroactive hydration (#1785). Full
+						// mode's omission is not asserted: its own rescan rewrites the
+						// snapshot before the late read lands, so a mutant that wired
+						// the hook into full mode survives this fixture.
+						slow.resolve({ projectSeq: 0, fileSeqByPath: new Map() });
+						// The session's own `.then` on this promise was registered first,
+						// so this continuation runs after the deferred hydration.
+						await slow.promise;
+						expect(runtime.cachedExports.get("x")).toBe(exportedPath(cwd));
+					}
+				} finally {
+					env.cleanup();
+				}
+			});
+		},
+	);
+
 	it("does NOT reseed in the background for a one-shot `pi --print` invocation (shape 4 screen)", async () => {
 		const env = setupTestEnvironment("pi-lens-seq-budget-print-");
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
