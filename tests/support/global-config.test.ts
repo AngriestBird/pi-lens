@@ -80,8 +80,7 @@ describe("withGlobalConfig", () => {
  * save-in-beforeEach, restore-in-afterEach pair for this variable. A
  * restore-only registration reds the env-restore sweep (#4589) while the file
  * still assigns the variable, so the pair could not move until the setter owned
- * the write too. The cases below run in file order: the first leaves the
- * variable changed, the next observes what the scope's restore put back.
+ * the write too.
  */
 
 /** Run `register` with the variable at `value` (or unset), then put it back. */
@@ -100,22 +99,27 @@ function registerWith<T>(value: string | undefined, register: () => T): T {
 const COLLECTED_VALUE = "/pi-lens-global-config-test/collected.json";
 
 /**
- * Records the variable as it stands once the scope's own restore has run.
- * Vitest runs `afterEach` hooks of one scope in reverse registration order, so
- * the observer is registered BEFORE `useConfigPath()` and runs after its
- * restore. The file-level `beforeEach` rewrites the variable to the sentinel
- * before every case, which is why the next test cannot be the observer.
+ * Asserts the scope's restore after EVERY case of the enclosing describe. Call
+ * it BEFORE `useConfigPath()` in that describe: Vitest runs one scope's
+ * `afterEach` hooks in reverse registration order (`sequence.hooks` is
+ * "stack" by default), so this check runs after the restore and before the
+ * file-level `afterEach`, which puts back the per-case `original`. Registered
+ * after the setter, it would read the value the case left behind.
+ *
+ * The check runs in each case itself, so no case reads state a sibling case
+ * wrote: the verdict is the same under any shuffle order. The earlier witness
+ * read a value that only a sibling case's afterEach filled; shuffle seed 202
+ * ran it first and read "never observed" (`Targeted tests (advisory)`,
+ * #4937 round 3).
  */
-function observeAfterRestore(): { value: () => string | undefined } {
-	let seen: string | undefined = "never observed";
+function expectRestoreTo(expected: string | undefined): void {
 	afterEach(() => {
-		seen = process.env.PI_LENS_CONFIG_PATH;
+		expect(process.env.PI_LENS_CONFIG_PATH).toBe(expected);
 	});
-	return { value: () => seen };
 }
 
 describe("useConfigPath restores a variable that was set when the scope was collected", () => {
-	const observed = observeAfterRestore();
+	expectRestoreTo(COLLECTED_VALUE);
 	const setConfigPath = registerWith(COLLECTED_VALUE, () => useConfigPath());
 
 	it("points the variable at the file it is given, writing nothing for an absent file", () => {
@@ -126,7 +130,8 @@ describe("useConfigPath restores a variable that was set when the scope was coll
 	});
 
 	it("put the collection-time value back after that test", () => {
-		expect(observed.value()).toBe(COLLECTED_VALUE);
+		setConfigPath(path.join(dir, "elsewhere", "config.json"));
+		expect(process.env.PI_LENS_CONFIG_PATH).not.toBe(COLLECTED_VALUE);
 	});
 
 	it("unsets the variable when it is given undefined", () => {
@@ -136,7 +141,7 @@ describe("useConfigPath restores a variable that was set when the scope was coll
 });
 
 describe("useConfigPath restores a variable that was unset when the scope was collected", () => {
-	const observed = observeAfterRestore();
+	expectRestoreTo(undefined);
 	const setConfigPath = registerWith(undefined, () => useConfigPath());
 
 	it("sets the variable inside the test", () => {
@@ -145,7 +150,8 @@ describe("useConfigPath restores a variable that was unset when the scope was co
 	});
 
 	it("unset the variable again after that test", () => {
-		expect(observed.value()).toBeUndefined();
+		setConfigPath(path.join(dir, "elsewhere", "config.json"));
+		expect(process.env.PI_LENS_CONFIG_PATH).toBeDefined();
 	});
 });
 
