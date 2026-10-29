@@ -23,6 +23,7 @@ import {
 	loadCoverageMap,
 	matchGlob,
 	parseChangedFiles,
+	withoutDeclaredFamilies,
 } from "./lib/tla-coverage.mjs";
 import { evaluateWorkflowRunEvidence } from "./lib/workflow-run-evidence.mjs";
 import {
@@ -2537,8 +2538,9 @@ function globToRegExp(pattern, { directory }) {
 }
 
 /** The record-shaped mentions of a section, in the order the body makes them. */
-function recordMentions(content) {
-	const source = String(content ?? "");
+function recordMentions(content, families = []) {
+	// A `TLA+ unaffected: <family>` line names a family, not a record (#3902).
+	const source = withoutDeclaredFamilies(content ?? "", families);
 	const mentioned = new Map();
 	for (const match of source.matchAll(/`([^`\n]+)`/g)) {
 		const span = match[1].trim();
@@ -2735,7 +2737,8 @@ function warnRecordReadBackSkipped(step, names, reason = "git grep failed") {
 
 function lintObservabilityRecordsTested(lines, headings, options = {}) {
 	const content = observabilitySectionContent(lines, headings);
-	const { mentions, truncated } = recordMentions(content);
+	const families = loadSeamMap(options.cwd)?.families ?? [];
+	const { mentions, truncated } = recordMentions(content, families);
 	if (!mentions.length) return [];
 	if (truncated)
 		console.warn(
@@ -4862,11 +4865,11 @@ function hookAnchorsFromDiff(diff, map, options) {
 
 // `owner/repo` of the checkout's `origin`, or `undefined` when it has none or
 // it is not a GitHub URL. The local twin of GITHUB_REPOSITORY on the event path.
-function originRepository(cwd) {
+function originRepository(cwd, git) {
 	try {
 		return (
 			parseOwnerRepoFromGitRemote(
-				gitExecFileSync(["remote", "get-url", "origin"], {
+				git(["remote", "get-url", "origin"], {
 					cwd,
 					encoding: "utf8",
 					stdio: ["ignore", "pipe", "ignore"],
@@ -4889,7 +4892,7 @@ function originRepository(cwd) {
  */
 export function lintWorkflowRunEvidence(
 	body,
-	{ diff, cwd = process.cwd(), repository } = {},
+	{ diff, cwd = process.cwd(), repository, git = gitExecFileSync } = {},
 ) {
 	if (!diff) return [];
 	const unreadable = [];
@@ -4898,17 +4901,17 @@ export function lintWorkflowRunEvidence(
 	// the run-evidence rule; a base that cannot be resolved or read (a shallow
 	// checkout) answers "" instead, which fails closed: not added, and not a
 	// comment-only edit.
-	const mergeBase = resolvePrBase(cwd);
-	const existsOnBase = baseFileReader(cwd);
+	const mergeBase = resolvePrBase(cwd, git);
+	const existsOnBase = baseFileReader(cwd, git);
 	const errors = evaluateWorkflowRunEvidence({
 		changedFiles: parseChangedFiles(diff),
 		body,
-		repository: repository ?? originRepository(cwd),
+		repository: repository ?? originRepository(cwd, git),
 		readBaseWorkflow: (file) => {
 			if (!mergeBase) return "";
 			if (existsOnBase(file) === false) return null;
 			try {
-				return gitExecFileSync(["show", `${mergeBase}:${file}`], {
+				return git(["show", `${mergeBase}:${file}`], {
 					cwd,
 					encoding: "utf8",
 				});
@@ -5029,6 +5032,7 @@ export function lintLocalPrBody(
 		workingTree: true,
 		ref: options.ref,
 		headFiles: options.headFiles,
+		git,
 		proseMode: options.proseMode,
 		title: options.title,
 	});
@@ -5073,7 +5077,7 @@ export function lintLocalPrBody(
 	result.errors.push(...coverage.errors);
 	if (coverage.errors.length) result.valid = false;
 	for (const advisory of coverage.advisories) console.warn(advisory);
-	const workflowEvidence = lintWorkflowRunEvidence(body, { diff, cwd });
+	const workflowEvidence = lintWorkflowRunEvidence(body, { diff, cwd, git });
 	result.errors.push(...workflowEvidence);
 	if (workflowEvidence.length) result.valid = false;
 	const closeSyntax = lintCloseKeywords(fullBody);
