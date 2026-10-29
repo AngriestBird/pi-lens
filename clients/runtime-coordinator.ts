@@ -304,14 +304,12 @@ export interface InlineBlockerRecord {
 	 * end, since a transient shrink-then-restore of the file must un-demote it.
 	 * `"self-drift"` (#2982) also RE-ARMS, for the same reason in a different
 	 * axis: the record's own bytes changed after the verdict, and bytes that
-	 * change back must un-demote it. It is deliberately NOT
-	 * `"dependency-drift"` — that reason routes through the #1950 delivery cap
-	 * in `runtime-turn.ts`, which retires a record permanently after three
-	 * stale deliveries. That cap was designed for recoverable LSP dependency
-	 * drift; a self-drift record can carry ast-grep or tree-sitter security
-	 * provenance, and walking such a finding out of turn-end rendering because
-	 * an advisory was shown three times is not a policy this gate may apply.
-	 * A re-arming reason needs no cap: it heals on its own when the bytes do.
+	 * change back must un-demote it. Re-arming does not cover an agent rewrite
+	 * that never returns to the recorded bytes, so since #4990 this axis has
+	 * its own delivery cap, `SELF_DRIFT_MAX_DELIVERIES` (`runtime-turn.ts`),
+	 * separate from the #1950 dependency-drift cap. It retires the record
+	 * with a ledger reason that says a re-run can still confirm it, and a
+	 * heal resets the count (`staleDeliveryCount`).
 	 */
 	staleReason?: "dependency-drift" | "past-eof" | "self-drift";
 	/**
