@@ -1685,8 +1685,8 @@ export type DegradationKind =
 	| "scan-worktree-exclusion-skipped"
 	/**
 	 * A report-file security scanner (gitleaks, trivy) could not produce a result:
-	 * its CLI failed to spawn or the scan threw. Subject is the tool; counted,
-	 * with the latest message kept.
+	 * its CLI failed to spawn, exited non-zero without writing its report, or
+	 * the scan threw. Subject is the tool; counted, with the latest message kept.
 	 */
 	| "security-scan-report-failed"
 	/** A duplicate RPC session start was suppressed after its first full pass. */

@@ -31,6 +31,7 @@ import {
 } from "./dispatch/runners/utils/availability-policy.js";
 import { createAvailabilityProbeFlight } from "./availability-probe-flight.js";
 import { createSingleFlight } from "./single-flight.js";
+import { formatToolFailure } from "./dispatch/runners/utils/tool-failure.js";
 import { scannerReportParentDir } from "./scanner-temp-root.js";
 import type { SpawnResult } from "./safe-spawn.js";
 
@@ -440,12 +441,15 @@ export abstract class SecurityScanClient<TResult> {
 	 * the three non-parse outcomes (spawn error, no report written, a throw) and
 	 * the directory's removal on every path.
 	 *
-	 * Result policy: a spawn error or a throw is an unsuccessful empty result
-	 * (`success` false); a CLI that exits without writing its report is a
-	 * successful empty one carrying stderr's first line, because both CLIs write
-	 * the report even when nothing is found and a missing file means it stopped
-	 * before scanning. `spec.parse` runs inside the guard, so its own throw
-	 * lands in the same unsuccessful result.
+	 * Result policy: a spawn error, a throw, or a non-zero exit that left no
+	 * report is an unsuccessful empty result (`success` false) and one
+	 * `security-scan-report-failed` row; a CLI that exits 0 without writing its
+	 * report is a successful empty one carrying stderr's first line (both CLIs
+	 * write the report even when nothing is found, so a missing file after a
+	 * clean exit is an empty run, while a non-zero exit before the report means
+	 * the scan never ran and must not be cached as clean). A report that exists
+	 * is parsed whatever the exit code. `spec.parse` runs inside the guard, so
+	 * its own throw lands in the same unsuccessful result.
 	 */
 	protected async runReportScan(
 		spec: ReportScanSpec<TResult>,
@@ -468,6 +472,22 @@ export abstract class SecurityScanClient<TResult> {
 			}
 
 			if (!fs.existsSync(reportPath)) {
+				// Shape 10: a CLI that stopped with a non-zero exit before writing
+				// its report did not scan, so it is not a clean scan (jscpd and
+				// opengrep make the same call, jscpd with this same wording).
+				if (result.status !== 0) {
+					const reason = formatToolFailure({
+						tool: this.toolName,
+						status: result.status,
+						signal: result.signal,
+						stderr: result.stderr,
+						reportMissing: true,
+					});
+					this.log(reason);
+					this.recordReportScanFailure(reason);
+					// `formatToolFailure` already bounds `reason` for the ledger.
+					return spec.fail({ scannedAt, summary: reason });
+				}
 				return spec.fail({
 					success: true,
 					scannedAt,

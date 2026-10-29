@@ -5,8 +5,9 @@
  * fix to one outcome could land in one scanner only.
  *
  * Recurrence prevented: a change to the shared outcomes (the unsuccessful
- * result on a spawn error or a throw, the successful empty result when the CLI
- * writes no report, the report directory's removal on every path) that one
+ * result on a spawn error, a throw or a non-zero exit with no report, the
+ * successful empty result when a zero-exit CLI writes no report, the report
+ * directory's removal on every path) that one
  * former caller no longer honours. Each case runs the real client's public
  * `scan()` through the real seam; only the CLI process (`safeSpawnAsync`) is
  * faked, as the host boundary, and it writes the report to the path the client
@@ -240,6 +241,68 @@ describe.each(scanners)("runReportScan through $name", (scanner) => {
 		expect(result.summary).toBe("database download failed");
 		expect(result.findings).toEqual([]);
 		// A CLI that wrote no report is a successful empty result, not a failure.
+		expect(failedScanRecord()).toBeUndefined();
+		expectReportDirRemoved();
+	});
+
+	// Recurrence prevented: a scanner that refused (exit 3, nothing written) read
+	// as a successful empty scan, so fresh-fetch cached it as clean and no row
+	// recorded it (shape 10, a scan that did not run is not clean). Both CLIs
+	// are started so that a non-zero exit is a failure (gitleaks gets
+	// `--exit-code 0`, trivy's default is 0).
+	it("reports an unsuccessful empty result when the CLI exits non-zero without a report", async () => {
+		fakeCli(async () => ({
+			status: 3,
+			stdout: "",
+			stderr: "fatal: bad config\nsecond line\n",
+		}));
+
+		const result = await scanner.scan(root);
+
+		expect(result.success).toBe(false);
+		expect(result.analyzed).toBeUndefined();
+		const reason = `${scanner.name} exited 3 with no report file: fatal: bad config`;
+		expect(result.summary).toBe(reason);
+		expect(result.findings).toEqual([]);
+		expect(failedScanRecord()).toMatchObject({
+			count: 1,
+			latestReasons: [
+				{ subject: scanner.name, reason: `${reason} (count: 1)` },
+			],
+		});
+		expectReportDirRemoved();
+	});
+
+	it("names the exit status when a non-zero exit left no report and no stderr", async () => {
+		fakeCli(async () => ({ status: 3, stdout: "", stderr: "" }));
+
+		const result = await scanner.scan(root);
+
+		expect(result.success).toBe(false);
+		expect(result.summary).toBe(
+			`${scanner.name} exited 3 with no report file: no stderr`,
+		);
+		expect(failedScanRecord()).toMatchObject({ count: 1 });
+		expectReportDirRemoved();
+	});
+
+	// The status is read only when no report exists: a written report is the
+	// scan's evidence, whatever the exit code (the pre-existing outcome).
+	it("still parses a report the CLI wrote when it exits non-zero", async () => {
+		safeSpawnAsync.mockImplementation(async (_bin, argv) => {
+			if (!(argv as string[]).includes(scanner.reportFlag)) {
+				return { status: 0, stdout: "", stderr: "" };
+			}
+			const reportPath = reportPathOf(argv, scanner.reportFlag);
+			reportDirs.push(path.dirname(reportPath));
+			fs.writeFileSync(reportPath, scanner.report);
+			return { status: 5, stdout: "", stderr: "" };
+		});
+
+		const result = await scanner.scan(root);
+
+		expect(result.success).toBe(true);
+		expect(result.findings).toHaveLength(1);
 		expect(failedScanRecord()).toBeUndefined();
 		expectReportDirRemoved();
 	});
