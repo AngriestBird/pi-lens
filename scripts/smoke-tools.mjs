@@ -2402,6 +2402,16 @@ export function classify(outcome) {
 			diags,
 		};
 	}
+	// #4130: a skip that carries a fault kind invoked the tool and the tool
+	// broke (timeout, signal death, rejected invocation, no report). Only a skip
+	// with no kind means "nothing to invoke" and stays a skip.
+	if (status === "skipped" && outcome.result.skipFault) {
+		return {
+			state: "fail",
+			detail: `${outcome.result.skipFault}: tool was invoked and produced no result`,
+			diags,
+		};
+	}
 	if (status === "skipped") {
 		return {
 			state: "skip",

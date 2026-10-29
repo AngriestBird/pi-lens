@@ -55,7 +55,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { findingsResult } from "../types.js";
+import { faultSkip, findingsResult } from "../types.js";
 import {
 	createAvailabilityChecker,
 	resolveAvailableOrInstall,
@@ -265,7 +265,11 @@ const trivyConfigRunner: RunnerDefinition = {
 					stdout: result.stdout,
 				}),
 			});
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return faultSkip(
+				result.error || result.signal || result.status === null
+					? "did-not-run"
+					: "rejected-invocation",
+			);
 		}
 
 		const diagnostics = parseTrivyConfigOutput(

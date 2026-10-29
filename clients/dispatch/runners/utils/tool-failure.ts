@@ -8,6 +8,7 @@ import {
 	type Diagnostic,
 	type DispatchContext,
 	faultResult,
+	faultSkip,
 	findingsResult,
 	type RunnerResult,
 } from "../../types.js";
@@ -127,13 +128,14 @@ export function skipUnlessToolRan(
 	fields?: ToolFailureInput["fields"],
 ): RunnerResult | null {
 	const outcome = classifyRunOutcome(input);
-	if (outcome.kind === "ran") return null;
+	const kind = outcome.kind;
+	if (kind === "ran") return null;
 	incrementDegradationCount({
 		kind: "runner-empty-result",
 		subject: tool,
 		reason: formatRunOutcomeFailure(tool, outcome, fields),
 	});
-	return { status: "skipped", diagnostics: [], semantic: "none" };
+	return faultSkip(kind);
 }
 
 /**

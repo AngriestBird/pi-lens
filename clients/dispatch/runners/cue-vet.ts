@@ -118,7 +118,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { faultResult, findingsResult } from "../types.js";
+import { faultResult, faultSkip, findingsResult } from "../types.js";
 import { PRIORITY } from "../priorities.js";
 
 const cue = createAvailabilityChecker("cue", ".exe", ["version"]);
@@ -433,7 +433,7 @@ const cueVetRunner: RunnerDefinition = {
 		}
 
 		if (spawnFailedWithNoOutput(result, `${result.stdout}${result.stderr}`)) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return faultSkip("did-not-run");
 		}
 
 		// `cue vet` is silent on success (empty stdout, exit 0) — that IS the

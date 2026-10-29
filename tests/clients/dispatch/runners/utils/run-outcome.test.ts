@@ -7,6 +7,7 @@ import {
 import {
 	formatRunOutcomeFailure,
 	formatToolFailure,
+	skipUnlessToolRan,
 } from "../../../../../clients/dispatch/runners/utils/tool-failure.js";
 import type { SpawnResult } from "../../../../../clients/safe-spawn.js";
 import {
@@ -253,5 +254,54 @@ describe("classifyRunOutcome output-cap evidence (#2100)", () => {
 		expect(formatRunOutcomeFailure("oxlint", outcome)).toContain(
 			"was stopped at its output cap",
 		);
+	});
+});
+
+// RECURRENCE THIS PREVENTS: #4130 item 3. A timeout, a signal death and a
+// rejected invocation all reached the smoke classifier as a bare skipped
+// result, indistinguishable from an absent tool. `skipUnlessToolRan` already
+// knows the outcome kind; the skip carries it.
+describe("skipUnlessToolRan names the fault on the skip it returns (#4130)", () => {
+	it.each([
+		[
+			"did-not-run (killed by a signal)",
+			{ result: spawnResult({ status: null, signal: "SIGKILL" }) },
+			"did-not-run",
+		],
+		[
+			"did-not-run (timeout)",
+			{
+				result: spawnResult({
+					status: null,
+					error: new Error("Process timed out after 30000ms"),
+				}),
+			},
+			"did-not-run",
+		],
+		[
+			"rejected-invocation (status outside the declared table)",
+			{
+				result: spawnResult({ status: 2, stderr: "unknown flag" }),
+				exitCodes: { ran: [1] },
+			},
+			"rejected-invocation",
+		],
+		[
+			"report-missing (artifact tool wrote no report)",
+			{ result: spawnResult({ status: 3 }), reportMissing: true },
+			"report-missing",
+		],
+	])("%s", (_name, input, skipFault) => {
+		const skipped = skipUnlessToolRan("some-tool", input);
+		expect(skipped?.status).toBe("skipped");
+		expect(skipped?.skipFault).toBe(skipFault);
+	});
+
+	it("returns null when the tool ran", () => {
+		expect(
+			skipUnlessToolRan("some-tool", {
+				result: spawnResult({ status: 1, stdout: "findings" }),
+			}),
+		).toBeNull();
 	});
 });

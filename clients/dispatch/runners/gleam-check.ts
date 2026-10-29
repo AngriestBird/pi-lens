@@ -10,7 +10,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { faultResult, findingsResult } from "../types.js";
+import { faultResult, faultSkip, findingsResult } from "../types.js";
 import { PRIORITY } from "../priorities.js";
 
 const gleam = createAvailabilityChecker("gleam", ".exe");
@@ -154,7 +154,7 @@ const gleamCheckRunner: RunnerDefinition = {
 		});
 
 		if (result.error && !result.stdout && !result.stderr) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return faultSkip("did-not-run");
 		}
 
 		const diagnostics = parseGleamOutput(

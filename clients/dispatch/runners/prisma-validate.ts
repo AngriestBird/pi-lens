@@ -8,6 +8,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
+import { faultSkip } from "../types.js";
 import { resolveLocalFirstAsync } from "./utils/runner-helpers.js";
 import { getIsolatedNpxSpawnOptions } from "../../tool-probe.js";
 import { finishParsedRun } from "./utils/tool-failure.js";
@@ -78,7 +79,7 @@ const prismaValidateRunner: RunnerDefinition = {
 		);
 
 		if (result.error && !result.stdout && !result.stderr) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return faultSkip("did-not-run");
 		}
 
 		if (result.status === 0) {

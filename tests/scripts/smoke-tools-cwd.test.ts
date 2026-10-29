@@ -67,6 +67,29 @@ describe("tool-smoke runner verdicts (#4130)", () => {
 		}
 	});
 
+	// RECURRENCE THIS PREVENTS: #4130 item 3. A timeout, a signal death and a
+	// rejected invocation reached the classifier as a bare skipped result and
+	// rendered "unavailable (not a failure)". The skip now names the fault.
+	it.each(["did-not-run", "rejected-invocation", "report-missing"])(
+		"fails a skip that names the fault %s",
+		(skipFault) => {
+			expect(
+				classify({
+					result: {
+						status: "skipped",
+						skipFault,
+						diagnostics: [],
+						semantic: "none",
+					},
+				}),
+			).toEqual({
+				state: "fail",
+				detail: `${skipFault}: tool was invoked and produced no result`,
+				diags: 0,
+			});
+		},
+	);
+
 	it("keeps a filtered runner visible as not executed", () => {
 		expect(classify(undefined)).toEqual({
 			state: "skip",
@@ -74,6 +97,58 @@ describe("tool-smoke runner verdicts (#4130)", () => {
 			diags: 0,
 		});
 	});
+});
+
+describe("tool-smoke fails a runner whose tool broke, through dispatch (#4130)", () => {
+	// A yamllint the OS kills mid-run, reached through the real dispatcher. The
+	// process boundary (`safeSpawnAsync`) is the only double: it kills the
+	// yamllint invocation and passes every other spawn through. Pre-fix the
+	// runner's bare skip read as "tool unavailable" and exited 0.
+	it("fails a signal-killed yamllint", async () => {
+		const fixture = FIXTURES.find((row) => row.lang === "yaml-cwd");
+		if (!fixture) throw new Error("yaml-cwd fixture row is missing");
+		const source = path.join(repoRoot, fixture.dir);
+		fs.mkdirSync(path.join(repoRoot, ".probe-home"), { recursive: true });
+		const workspace = fs.mkdtempSync(
+			path.join(repoRoot, ".probe-home", "fault-"),
+		);
+		const realSpawn = safeSpawn.safeSpawnAsync;
+		const spawn = vi
+			.spyOn(safeSpawn, "safeSpawnAsync")
+			.mockImplementation((cmd, args, options) =>
+				args?.includes("parsable")
+					? Promise.resolve({
+							error: null,
+							status: null,
+							signal: "SIGKILL",
+							stdout: "",
+							stderr: "",
+						} as never)
+					: realSpawn(cmd, args, options),
+			);
+		try {
+			fs.cpSync(source, workspace, { recursive: true });
+			const { runners } = await dispatchLintDetailed(
+				path.join(workspace, fixture.file),
+				fixtureDispatchCwd(fixture, workspace),
+				{ getFlag: (flag) => (flag === "no-delta" ? true : undefined) },
+				{ blockingOnly: false },
+			);
+			expect(
+				spawn.mock.calls.some(([, args]) => args?.includes("parsable")),
+			).toBe(true);
+			const verdict = classify(
+				runners.find((row) => row.runnerId === "yamllint"),
+			);
+			expect(verdict.state).toBe("fail");
+			expect(verdict.detail).toBe(
+				"did-not-run: tool was invoked and produced no result",
+			);
+		} finally {
+			spawn.mockRestore();
+			fs.rmSync(workspace, { recursive: true, force: true });
+		}
+	}, 30_000);
 });
 
 describe("tool-smoke cwd-sensitive rows (#2697)", () => {

@@ -117,6 +117,7 @@ async function dispatchOutcome(
 		registry.register(runner);
 		let observedStatus: string | undefined;
 		let observedSemantic: string | undefined;
+		let observedSkipFault: string | undefined;
 		let observedDiagnostics: Array<{ id?: string; semantic?: string }> = [];
 		const result = await dispatchForFile(
 			createDispatchContext(
@@ -130,12 +131,14 @@ async function dispatchOutcome(
 			(_runnerId, runnerResult) => {
 				observedStatus = runnerResult.status;
 				observedSemantic = runnerResult.semantic;
+				observedSkipFault = runnerResult.skipFault;
 				observedDiagnostics = runnerResult.diagnostics;
 			},
 		);
 		return {
 			status: observedStatus,
 			semantic: observedSemantic,
+			skipFault: observedSkipFault,
 			diagnostics: observedDiagnostics,
 			output: result.output,
 			ledger: getDegradationSummary(),
@@ -271,6 +274,8 @@ describe("secondary language fallback runners", () => {
 		expect(observed.status).toBe("skipped");
 		expect(observed.output).toContain("not a clean result");
 		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("SIGTERM");
+		// #4130: the signal death reaches the delivery sink as a named fault.
+		expect(observed.skipFault).toBe("did-not-run");
 	});
 
 	it("falls back to flutter analyze when dart is unavailable", async () => {
@@ -330,6 +335,8 @@ describe("secondary language fallback runners", () => {
 		expect(observed.status).toBe("skipped");
 		expect(observed.output).toContain("not a clean result");
 		expect(observed.ledger[0]?.latestReasons[0]?.reason).toContain("no output");
+		// #4130: a failed run that said nothing is a fault, not an absent tool.
+		expect(observed.skipFault).toBe("did-not-run");
 	});
 
 	it("guards actual dart unavailability through dispatch (#1816)", async () => {
@@ -344,7 +351,56 @@ describe("secondary language fallback runners", () => {
 		expect(observed.output).toContain("not a clean result");
 		expect(observed.spawnCalls).toBe(0);
 		expect(observed.ledger).toEqual([]);
+		// #4130: nothing was invoked, so an absent tool stays a plain skip.
+		expect(observed.skipFault).toBeUndefined();
 	});
+
+	// RECURRENCE THIS PREVENTS: #4130 item 3. zig-check and gleam-check turned a
+	// spawn that failed with no output into a bare skip, which the smoke
+	// classifier read as "tool absent". The tool resolved and was invoked, so
+	// the skip names the fault.
+	it.each([
+		["zig-check", "zig", "src/main.zig", "pub fn main() void {}\n"],
+		["gleam-check", "gleam", "src/app.gleam", "pub fn main() { 1 }\n"],
+	] as const)(
+		"%s names a spawn failure on its skip (#4130)",
+		async (id, kind, file, source) => {
+			const env = setupTestEnvironment(`pi-lens-${id}-spawn-fault-`);
+			try {
+				const filePath = path.join(env.tmpDir, file);
+				fs.mkdirSync(path.dirname(filePath), { recursive: true });
+				fs.writeFileSync(filePath, source);
+				safeSpawnAsync.mockResolvedValue({
+					error: new Error("Process timed out after 30000ms"),
+					status: null,
+					stdout: "",
+					stderr: "",
+				});
+				const runner = (
+					await import(`../../../../clients/dispatch/runners/${id}.js`)
+				).default;
+
+				const result = await runner.run(
+					createCtx(kind, filePath, env.tmpDir) as never,
+				);
+				expect(result.status).toBe("skipped");
+				expect(result.skipFault).toBe("did-not-run");
+
+				// The same runner with no tool installed invokes nothing: plain skip.
+				safeSpawnAsync.mockClear();
+				mockRunnerHelpers(() => false);
+				vi.resetModules();
+				const absent = await (
+					await import(`../../../../clients/dispatch/runners/${id}.js`)
+				).default.run(createCtx(kind, filePath, env.tmpDir) as never);
+				expect(absent.status).toBe("skipped");
+				expect(absent.skipFault).toBeUndefined();
+				expect(safeSpawnAsync).not.toHaveBeenCalled();
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
 
 	it("surfaces a warning when zig exits non-zero without structured diagnostics", async () => {
 		const env = setupTestEnvironment("pi-lens-zig-runner-");

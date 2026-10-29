@@ -428,6 +428,8 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 		const result = await cueVetRunner.run(createCtx(cueFile, cueCwd));
 		expect(result.status).toBe("skipped");
 		expect(result.diagnostics).toEqual([]);
+		// #4130: the spawn failed after cue resolved, so the skip names the fault.
+		expect(result.skipFault).toBe("did-not-run");
 	});
 
 	// F5 (review round 2, HIGH): a package-less standalone file used to block
