@@ -398,6 +398,9 @@ lets a tool_result also leave an inline-blocker record (work kind `blocker`),
 which a `turn_end` re-serves rather than drains; `blockerScoped` is the shipped
 #4921 shape: a `turn_end` delivers only its own session's blocker records
 (`InlineBlockerRecord.session`, `getInlineBlockersSnapshot({ sessionId })`).
+`slotAddressed` is the shipped #4943 shape: a request takes the per-project
+turn-end message (`Stage`, `TakeSlot`) only when its own session's `turn_end`
+staged it (`deliverTo`, `consumeTurnEndFindings(..., sessionId)`).
 
 ### #3705's rows, by column
 
@@ -443,6 +446,21 @@ blocker. `Fix4921BlockerScoped` adds `blockerScoped` and passes. Both run at
 `SecondaryTurnEnd`'s bound: the blocker kind added to `SecondaryTurnEndScoped`
 (with `/new` and `/reload`) passed 6.4M distinct states unfinished in 4 min,
 against 398,844 without it, so that config keeps its three kinds.
+
+The composer's message itself is staged in one per-project slot (the
+`turn-end-findings` record) that the next request takes, not the `turn_end`.
+`Stage` replaces the slot's message with the staging session's,
+unconditionally, as the cache write does: a session may stage again after its
+message was taken, and over its own staged message. `TakeSlot` is a live
+session's request taking it. `Pre4943SlotUnaddressed` is master before #4943:
+the slot names no reader, so the subagent's request takes the message the
+primary's `turn_end` staged. `Fix4943SlotAddressed` adds `slotAddressed` and
+passes. The slot lives in one coordinator generation here, since neither
+config takes a replacement transition. An overwrite drops the earlier
+message; a blocker comes back, because its session's next `turn_end`
+re-composes it, but a one-shot advisory does not. `Current` does not take
+`Stage` or `TakeSlot`, so its verdict says nothing about the slot; the two
+#4943 configs are the slot's only evidence.
 
 ### Overlap with `formal/turn-end-delivery-holds`
 
@@ -621,6 +639,8 @@ counterexample.
 | `SecondaryTurnEndScoped` | the proposed fix, NOT shipped: a `turn_end` drains its own scope's work, across `/new` and `/reload` | pass | 398844 |
 | `Pre4921BlockerUnscoped` | #4921, master before the fix: the worklist, cascade and runner records are scoped, the inline-blocker map is not; a subagent's `turn_end` delivers the primary's blocker | `violated SecondaryIsolation` | 60 |
 | `Fix4921BlockerScoped` | #4921, shipped: a `turn_end` delivers only its own session's inline-blocker records | pass | 6642 |
+| `Pre4943SlotUnaddressed` | #4943, master before the fix: the per-project turn-end slot names no reader; a subagent's request takes the message the primary's `turn_end` staged | `violated SecondaryIsolation` | 8 |
+| `Fix4943SlotAddressed` | #4943, shipped: a request takes the staged message only when its own session staged it | pass | 16 |
 
 ## Pre-fix and Mut configs and their issues
 
@@ -687,6 +707,7 @@ alternative" is a shape the adopted design rejects, never shipped.
 | `MutParkNoFence` | #4161, #4168 | design alternative: `settle` without `isCurrentSession` (since 9c8a6f530, owner-fenced by dac19f046) | A turn begins in session 1; `/reload`; its settle parks into session 2's map under the same key; session 2 shows it. |
 | `SecondaryTurnEnd` | #3613 R2, #3758 | master, open: `handleTurnEnd` takes the process runtime for every activation (`onTurnEnd`, `index.ts`) | The primary's tool_result leaves a worklist record; a subagent starts; its `turn_end` drains it. |
 | `Pre4921BlockerUnscoped` | #4921 | pre-#4921 (a6c5c380d): `InlineBlockerRecord` carried no owner and `handleTurnEnd` read `getInlineBlockersSnapshot()` whole | The primary's tool_result records a blocker; a subagent starts; its `turn_end` delivers it. |
+| `Pre4943SlotUnaddressed` | #4943 | pre-#4943 (2af695cd8): `consumeTurnEndFindings` took the `turn-end-findings` record for any reader | A subagent starts; the primary's `turn_end` stages its message; the subagent's request takes it. |
 
 Since #3613's turn half, `Current` holds `SecondaryIsolation`, and since
 #4942 `NoCrossSessionState` too (6797 states; it was violated, 257 states, while

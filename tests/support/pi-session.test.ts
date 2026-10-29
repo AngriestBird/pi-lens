@@ -125,6 +125,40 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		expect(toolResult.isError).toBeFalsy();
 	});
 
+	it("waits on a reply that settles later, and sends its message as the answer", async () => {
+		// #4943 R1: a case runs two sessions in a fixed interleaving by letting
+		// one session's reply wait on the other's prompt. Recurrence prevented:
+		// a host whose faux provider stops awaiting a reply factory hands pi the
+		// pending promise in place of the scripted message, and the interleaving
+		// in tests/index-4943-turn-end-delivery-slot.test.ts no longer runs.
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "async-reply", "proj"),
+			responses: [
+				async () => {
+					await gate;
+					return fauxAssistantMessage(fauxText("answered after the wait"));
+				},
+				fauxAssistantMessage(fauxText("second answer")),
+			],
+		});
+		const first = handle.prompt("first question");
+		release?.();
+		await first;
+		await handle.prompt("second question");
+
+		const assistant = handle.requests[1].filter(
+			(message) => message.role === "assistant",
+		);
+		expect(assistant.flatMap((message) => textBlocks(message.content))).toEqual(
+			["answered after the wait"],
+		);
+	});
+
 	// #4732: a case that drives a tool pi-lens has never met registers it
 	// through pi's own `customTools`. Recurrence prevented: the option is
 	// dropped on its way to `createAgentSessionFromServices`, and pi answers

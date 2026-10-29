@@ -69,6 +69,7 @@ import {
 import {
 	evaluateGitGuard,
 	syncGitGuardRecord,
+	writeGitGuardRecord,
 } from "../../clients/git-guard.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
@@ -2276,6 +2277,64 @@ describe("F2: an oversized part is reached only when it leads the message (#3813
 			expect(first).not.toContain("Late runner");
 			expect(pendingRunnerFindingsSize()).toBe(1);
 			await drain(rig, fillerFile, () => pendingRunnerFindingsSize() === 0);
+		} finally {
+			rig.cleanup();
+		}
+	});
+});
+
+describe("#4943: the composer addresses its message to its own session", () => {
+	it("hands this session its advisory-only message when the record leads with another session's blocker", async () => {
+		// RECURRENCE GUARDED: #4943 R1. With no blocker of its own, a turn end
+		// that carries another session's blocker writes that session as the
+		// record's owner (`sessionId`), while `content` is this session's own
+		// message. Keyed by the owner, the other session's request took this
+		// session's advisory, and this session's request got nothing.
+		const rig = makeRig("pi-lens-4943-composer-");
+		rig.lensGuard = true;
+		try {
+			const other = "session-other";
+			const theirs = path.join(rig.cwd, "theirs.ts");
+			fs.writeFileSync(theirs, "export const t = 1;\n");
+			const text = `Unresolved from this turn — theirs.ts:\n🔴 STOP — theirs is unsafe`;
+			writeGitGuardRecord(rig.cacheManager, rig.runtime, rig.cwd, {
+				content: text,
+				blockerContent: text,
+				hasBlockers: true,
+				affectedFiles: [theirs],
+				blockingFiles: [theirs],
+				sessionId: other,
+				projectSeqStart: 0,
+				projectSeqEnd: 0,
+				fileSeqByPath: {},
+				fileContentHashes: {},
+				consumed: true,
+				deliverTo: other,
+			});
+			const file = path.join(rig.cwd, "run-a.ts");
+			deferSettled(rig, "run-a.ts", {
+				status: "succeeded",
+				semantic: "warning",
+				diagnostics: [runnerDiagnostic(file, `late ${RUNNER_END}`)],
+			});
+
+			await handleTurnEnd(
+				makeDeps(rig.runtime, rig.cacheManager, rig.cwd, undefined, true),
+			);
+			const stored = rig.cacheManager.readCache<{ sessionId?: string }>(
+				"turn-end-findings",
+				rig.cwd,
+				Number.POSITIVE_INFINITY,
+			)?.data;
+			// The cell: the record leads with the other session's blocker.
+			expect(stored?.sessionId).toBe(other);
+			expect(
+				consumeTurnEndFindings(rig.cacheManager, rig.cwd, rig.runtime, other),
+			).toBeUndefined();
+			expect(
+				consumeTurnEndFindings(rig.cacheManager, rig.cwd, rig.runtime, SESSION)
+					?.messages[0]?.content,
+			).toContain(RUNNER_END);
 		} finally {
 			rig.cleanup();
 		}

@@ -7,6 +7,7 @@ import {
 	type AdvisoryProvenance,
 } from "./advisory-provenance.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	translateGuidanceToolNames,
@@ -113,16 +114,40 @@ export function peekTurnEndFindings(
 	};
 }
 
+/**
+ * #4943: `sessionId` is the reading request's session. A message another
+ * session's turn end composed (`deliverTo`), or the blocker text of a record
+ * another session owns, is that session's: the read leaves it untouched for
+ * that session's next request. Omitted (the MCP host, whose coordinator id is
+ * per process), every message is the reader's.
+ */
 export function consumeTurnEndFindings(
 	cacheManager: CacheManager,
 	cwd: string,
 	runtime?: RuntimeCoordinator,
+	sessionId?: string,
 ): ContextResult | undefined {
 	const findings = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
 		"turn-end-findings",
 		cwd,
 	);
 	if (!findings?.data?.content || findings.data.consumed === true) return;
+	const addressee = findings.data.deliverTo ?? findings.data.sessionId;
+	if (
+		sessionId !== undefined &&
+		addressee !== undefined &&
+		addressee !== sessionId
+	) {
+		// Once per addressee, not per request: every request of the other
+		// session skips the same message until its owner reads it.
+		recordDegradationOnce({
+			kind: "turn-end-delivery-addressed-elsewhere",
+			subject: addressee,
+			reason:
+				"a staged turn-end message is addressed to another session; it waits for that session's next request",
+		});
+		return;
+	}
 	const validation = validateAdvisoryProvenance(findings.data, cwd, runtime);
 	logProvenanceDecision(validation, findings.data.provenance, "turn-end", cwd);
 
