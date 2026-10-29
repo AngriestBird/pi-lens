@@ -15,6 +15,16 @@ import type { Diagnostic } from "./dispatch/types.js";
 import { normalizeEphemeralMapKey } from "./path-utils.js";
 
 /**
+ * #1561 F1: the source id ONE blocking diagnostic is attributed to. The single
+ * derivation `inlineBlockerSources` and the per-source row retirement
+ * (`retireInlineBlockerOnConfirmedClean`, #4990) both read, so a verdict's
+ * coverage and a row's provenance cannot drift apart.
+ */
+export function inlineBlockerSourceOf(diagnostic: Diagnostic): string {
+	return diagnostic.tool?.trim() || "unknown";
+}
+
+/**
  * #1561 F1: taken from the very diagnostics the record's text was rendered
  * from, so the provenance can never disagree with the text it guards. An
  * untagged diagnostic contributes the literal "unknown", which no verdict
@@ -24,7 +34,7 @@ import { normalizeEphemeralMapKey } from "./path-utils.js";
 export function inlineBlockerSources(
 	blockers: readonly Diagnostic[],
 ): string[] {
-	return [...new Set(blockers.map((d) => d.tool?.trim() || "unknown"))];
+	return [...new Set(blockers.map(inlineBlockerSourceOf))];
 }
 
 /**

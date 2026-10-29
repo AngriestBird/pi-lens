@@ -196,8 +196,10 @@ export interface InlineBlockerPolicyTallyEntry {
 	sources: readonly string[] | undefined;
 	/**
 	 * True for a record the freshness/past-EOF gates demoted. Those render
-	 * through the advisory channel and the policy does not run on them, so they
-	 * are counted but contribute no candidates.
+	 * through the advisory channel; since #4990 they run the SAME policy pass as
+	 * the live branch, so their `outcome` is the one that decides whether the
+	 * demoted body survives, and their candidates/suppression counts belong to
+	 * the same per-turn record.
 	 */
 	stale: boolean;
 	outcome?: InlineBlockerPolicyOutcome;

@@ -469,6 +469,7 @@
 		"clients/degradation-ledger.test.ts::clients/extension-log": 1,
 		"clients/degradation-ledger.test.ts::clients/latency-logger": 1,
 		"clients/demoted-blocker-render-retirement.test.ts::clients/latency-logger": 1,
+		"clients/demoted-finding-4990.test.ts::clients/latency-logger": 1,
 		"clients/dependency-checker-batch-race.test.ts::clients/installer/index": 1,
 		"clients/dependency-checker-batch-race.test.ts::clients/package-manager": 1,
 		"clients/dependency-checker-batch-telemetry.test.ts::clients/installer/index": 1,

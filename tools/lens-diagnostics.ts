@@ -367,7 +367,7 @@ export function createLensDiagnosticsTool(
 				logExtension({
 					subsystem: "git-guard",
 					level: "debug",
-					message: `inline_blocker: retired for ${info.filePath}`,
+					message: `inline_blocker: retired or narrowed to its uncovered source rows for ${info.filePath}`,
 				});
 			}
 		},

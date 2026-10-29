@@ -746,7 +746,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-agent-end.ts": 7,
 		// 3 -> 4 (#4921): `getInlineBlockersSnapshot` keeps one turn session's
 		// records, an `Array.prototype.filter` call, not a delivery gate.
-		"clients/runtime-coordinator.ts": 4,
+		// 4 -> 5 (#4990): the per-source row retirement keeps the rows the clean
+		// verdict did not cover, the same array call, not a delivery gate.
+		"clients/runtime-coordinator.ts": 5,
 		"clients/runtime-session.ts": 4,
 		// 3 -> 5 -> 3 (#4187): round 4's tool-call authorship retirement filtered
 		// the owned in-process mutation paths; round 5 folds two of its three
@@ -1498,7 +1500,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-tool-result.ts": 5,
 		// 6 -> 8 (#3218): the resolved-blocker filter keys each current blocker
 		// record.
-		"clients/runtime-turn.ts": 8,
+		// 8 -> 9 (#4990): the demoted channel names the mark's demoted record.
+		"clients/runtime-turn.ts": 9,
 		"clients/search-read-registration.ts": 1,
 		"clients/test-runner-client.ts": 4,
 		"clients/test-runner-delivery.ts": 15,

@@ -22,6 +22,7 @@ import {
 import { formatDiagnostics } from "./dispatch/utils/format-utils.js";
 import {
 	inlineBlockerLines,
+	inlineBlockerSourceOf,
 	inlineBlockerSources,
 } from "./inline-blocker-fields.js";
 import type { MutationKind } from "./mutating-tool.js";
@@ -303,14 +304,12 @@ export interface InlineBlockerRecord {
 	 * end, since a transient shrink-then-restore of the file must un-demote it.
 	 * `"self-drift"` (#2982) also RE-ARMS, for the same reason in a different
 	 * axis: the record's own bytes changed after the verdict, and bytes that
-	 * change back must un-demote it. It is deliberately NOT
-	 * `"dependency-drift"` — that reason routes through the #1950 delivery cap
-	 * in `runtime-turn.ts`, which retires a record permanently after three
-	 * stale deliveries. That cap was designed for recoverable LSP dependency
-	 * drift; a self-drift record can carry ast-grep or tree-sitter security
-	 * provenance, and walking such a finding out of turn-end rendering because
-	 * an advisory was shown three times is not a policy this gate may apply.
-	 * A re-arming reason needs no cap: it heals on its own when the bytes do.
+	 * change back must un-demote it. Re-arming does not cover an agent rewrite
+	 * that never returns to the recorded bytes, so since #4990 this axis has
+	 * its own delivery cap, `SELF_DRIFT_MAX_DELIVERIES` (`runtime-turn.ts`),
+	 * separate from the #1950 dependency-drift cap. It retires the record
+	 * with a ledger reason that says a re-run can still confirm it, and a
+	 * heal resets the count (`staleDeliveryCount`).
 	 */
 	staleReason?: "dependency-drift" | "past-eof" | "self-drift";
 	/**
@@ -369,12 +368,13 @@ export interface InlineBlockerRecord {
 	diagnostics?: readonly Diagnostic[];
 	/**
 	 * #1950: how many turn ends have re-served this record while `stale`.
-	 * Only incremented for the `"dependency-drift"` reason — `"past-eof"`
-	 * retires after its own single delivery (#1944) and never needs a count.
-	 * Caps a recoverable-but-unconfirmed demotion at
-	 * `DEPENDENCY_DRIFT_MAX_DELIVERIES` deliveries
-	 * (`clients/blocker-freshness.ts`) instead of re-serving it for the rest
-	 * of the session.
+	 * Only incremented for the `"dependency-drift"` and `"self-drift"` reasons
+	 * — `"past-eof"` retires after its own single delivery (#1944) and never
+	 * needs a count. Caps a recoverable-but-unconfirmed demotion at its axis's
+	 * cap, `DEPENDENCY_DRIFT_MAX_DELIVERIES` or `SELF_DRIFT_MAX_DELIVERIES`
+	 * (`clients/blocker-freshness.ts`), instead of re-serving it for the rest
+	 * of the session. The count belongs to one demotion episode: healing a
+	 * self-drift demotion drops it (#4990).
 	 */
 	staleDeliveryCount?: number;
 	/**
@@ -2294,11 +2294,12 @@ export class RuntimeCoordinator {
 	 * {@link markInlineBlockerStale}: it RE-ARMS rather than latching, so a
 	 * file whose bytes drift and then come back (a checkout, a revert, an
 	 * editor writing the original content) un-demotes on the next sweep
-	 * instead of staying demoted for the session. That re-arm is what lets
-	 * this axis skip the #1950 delivery cap entirely — a record that can heal
-	 * needs no bounded-noise retirement, and applying the cap here would walk
-	 * an ast-grep or tree-sitter security finding out of turn-end rendering
-	 * permanently (#2982 review).
+	 * instead of staying demoted for the session. That re-arm covers a file whose
+	 * bytes COME BACK; it does not cover an agent rewrite that never returns to
+	 * them, which is why this axis carries its own delivery cap
+	 * (`SELF_DRIFT_MAX_DELIVERIES`, #4990) — a record that heals before the cap
+	 * un-demotes and is never retired, so the security-provenance concern
+	 * (#2982 review) still holds.
 	 *
 	 * Composes with the sibling gates the same way they compose with each
 	 * other: it never touches a record another gate demoted, and never heals a
@@ -2321,7 +2322,16 @@ export class RuntimeCoordinator {
 		// `undefined` is a strictness spike the ratchet counts. Healing has to
 		// drop `staleReason` off the rebuilt record, so destructure it away
 		// instead of letting `...existing` carry the old value through.
-		const { staleReason: _cleared, ...rest } = existing;
+		//
+		// The delivery count goes with it (#4990 review F3): it is the cap's
+		// tally for ONE demotion episode, and a heal ends the episode. Carried
+		// across, the next demotion retired on its first delivery with a ledger
+		// reason claiming a full cap the agent never saw.
+		const {
+			staleReason: _cleared,
+			staleDeliveryCount: _clearedCount,
+			...rest
+		} = existing;
 		this._pendingInlineBlockers.set(key, {
 			...rest,
 			stale: isSelfDrift,
@@ -2417,14 +2427,14 @@ export class RuntimeCoordinator {
 	/**
 	 * #1950: commit one more turn end that re-served this record while
 	 * `stale`. The caller (`runtime-turn.ts`) only calls this for a
-	 * `"dependency-drift"` demotion — a `"past-eof"` demotion retires after
-	 * its own single delivery (#1944, `retireDemotedPastEofBlocker`) and
-	 * never accumulates a count — and only AFTER confirming the turn's
-	 * content will not be suppressed by the signature dedupe (see
-	 * {@link peekInlineBlockerStaleDeliveryCount}), so this counts ACTUAL
-	 * deliveries the agent saw, not turn-end loop iterations. Returns the new
-	 * count, or 0 when there is no entry to count against (already retired,
-	 * or never recorded).
+	 * `"dependency-drift"` or `"self-drift"` demotion — a `"past-eof"`
+	 * demotion retires after its own single delivery (#1944,
+	 * `retireDemotedPastEofBlocker`) and never accumulates a count — and only
+	 * AFTER confirming the turn's content will not be suppressed by the
+	 * signature dedupe (see {@link peekInlineBlockerStaleDeliveryCount}), so
+	 * this counts ACTUAL deliveries the agent saw, not turn-end loop
+	 * iterations. Returns the new count, or 0 when there is no entry to count
+	 * against (already retired, or never recorded).
 	 */
 	incrementInlineBlockerStaleDelivery(filePath: string): number {
 		const key = filePath;
@@ -2439,28 +2449,34 @@ export class RuntimeCoordinator {
 	}
 
 	/**
-	 * #1950: retire a dependency-drift demotion once it has been delivered
-	 * `DEPENDENCY_DRIFT_MAX_DELIVERIES` times with no re-run confirming or
-	 * clearing it. Unlike {@link retireDemotedPastEofBlocker}, the record is
-	 * NOT provably unrecoverable — its coordinates are still in bounds, and a
-	 * fresh dispatch of the file could still confirm or clear it. This is a
-	 * bounded-noise cap, not a "this can never resolve" verdict, and the
-	 * caller's ledger reason must say so (`demoted-finding-retired`'s "capped,
-	 * re-run can still confirm" vs. past-EOF's "retired, unrecoverable").
+	 * #1950/#4990: retire a drift demotion once it has been delivered its axis's
+	 * cap with no re-run confirming or clearing it.
+	 * `"dependency-drift"` retires at `DEPENDENCY_DRIFT_MAX_DELIVERIES` and
+	 * `"self-drift"` at `SELF_DRIFT_MAX_DELIVERIES` (both decided by the caller,
+	 * `runtime-turn.ts`, which also owns the count). Unlike
+	 * {@link retireDemotedPastEofBlocker}, the record is NOT provably
+	 * unrecoverable — its coordinates are still in bounds, and a fresh dispatch
+	 * of the file could still confirm or clear it. This is a bounded-noise cap,
+	 * not a "this can never resolve" verdict, and the caller's ledger reason must
+	 * say so (`demoted-finding-retired`'s "capped, re-run can still confirm" vs.
+	 * past-EOF's "retired, unrecoverable").
 	 *
-	 * Only ever touches this gate's OWN demotion (`staleReason ===
-	 * "dependency-drift"`) — a past-EOF demotion on the same file is that
-	 * gate's own record to retire, not this one's.
+	 * Only ever touches the named axis's OWN demotion: a record demoted by a
+	 * sibling gate on the same file is that gate's record to retire, not this
+	 * one's.
 	 *
 	 * @returns true when an entry was retired — the caller records it, so the
 	 * suppression is never silent (#1432 Gap 1).
 	 */
-	retireDemotedDependencyDriftBlocker(filePath: string): boolean {
+	retireDemotedDriftBlocker(
+		filePath: string,
+		reason: "dependency-drift" | "self-drift",
+	): boolean {
 		const key = filePath;
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing) return false;
 		if (!existing.stale) return false;
-		if (existing.staleReason !== "dependency-drift") return false;
+		if (existing.staleReason !== reason) return false;
 		this._pendingInlineBlockers.delete(key);
 		return true;
 	}
@@ -2498,13 +2514,22 @@ export class RuntimeCoordinator {
 	 * `semantic === "blocking"` diagnostic across all runners, so eslint,
 	 * biome-check, actionlint, elixir/gleam-check and ast-grep security rules all
 	 * land in this map. A language-server check knows nothing about any of them,
-	 * so `coveredSources` must be a SUPERSET of the recorded sources or the entry
-	 * stands. This is a commit gate: a record whose provenance is unknown (no
-	 * `sources`) fails CLOSED and is never retired, because "we don't know what
-	 * raised this" must not resolve to "an LSP check can clear it".
+	 * so the coverage test is per ROW (#4990 gap 1): the diagnostics whose source
+	 * the verdict covered leave the record, the rest stay, and a record with no
+	 * structured rows fails CLOSED and is never retired, because "we don't know
+	 * what raised this" must not resolve to "an LSP check can clear it".
 	 *
-	 * @returns true when an entry was retired — the caller logs it, so an
-	 * eviction is never silent (#1432 Gap 1).
+	 * Before #4990 the test was all-or-nothing on `record.sources`, so a record
+	 * with `["lsp", "oxlint"]` outlived a confirmed-clean typescript verdict
+	 * forever: one server cannot speak for the oxlint row, and the oxlint row was
+	 * never re-dispatched either. Per-source row retirement is the same filter
+	 * the record's own builder already applies (`inlineBlockerSources`), so a
+	 * partly-covered record narrows to what the verdict did not speak for and
+	 * keeps gating only on those rows.
+	 *
+	 * @returns true when the record was retired OR narrowed (at least one source
+	 * row left it). The caller records either, so a drop is never silent
+	 * (#1432 Gap 1).
 	 */
 	retireInlineBlockerOnConfirmedClean(
 		filePath: string,
@@ -2522,15 +2547,38 @@ export class RuntimeCoordinator {
 		) {
 			return false;
 		}
-		// Fail closed on unknown provenance, and on any source the fresh verdict
-		// did not consult. An eslint-origin blocker outliving an LSP-only clean is
-		// the correct outcome — the next dispatch of that file is what clears it.
+		// Fail closed on unknown provenance: "we don't know what raised this" must
+		// not resolve to "an LSP check can clear it".
 		if (!existing.sources || existing.sources.length === 0) return false;
 		const covered = new Set(coveredSources ?? []);
-		if (!existing.sources.every((source) => covered.has(source))) return false;
-		// #3218 criterion 2: this retire is a resolution — name it at turn end.
-		this.noteResolvedBlockerFile(existing, undefined, true);
-		this._pendingInlineBlockers.delete(key);
+		if (existing.sources.every((source) => covered.has(source))) {
+			// #3218 criterion 2: this retire is a resolution — name it at turn end.
+			this.noteResolvedBlockerFile(existing, undefined, true);
+			this._pendingInlineBlockers.delete(key);
+			return true;
+		}
+		// Partial coverage (#4990 gap 1). Without the structured rows there is no
+		// honest per-source split, so the record stands, exactly as before.
+		const diagnostics = existing.diagnostics;
+		if (!diagnostics || diagnostics.length === 0) return false;
+		const kept = diagnostics.filter(
+			(diagnostic) => !covered.has(inlineBlockerSourceOf(diagnostic)),
+		);
+		if (kept.length === diagnostics.length) return false;
+		if (kept.length === 0) {
+			this.noteResolvedBlockerFile(existing, undefined, true);
+			this._pendingInlineBlockers.delete(key);
+			return true;
+		}
+		// Same rebuild `retireUnobservedRunnerBlockers` performs: the derived
+		// fields come from the surviving rows, never from the old record.
+		this._pendingInlineBlockers.set(key, {
+			...existing,
+			summary: formatDiagnostics(kept, "blocking").trim(),
+			diagnostics: kept,
+			sources: inlineBlockerSources(kept),
+			lines: inlineBlockerLines(kept, existing.filePath),
+		});
 		return true;
 	}
 

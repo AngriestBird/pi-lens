@@ -1847,7 +1847,7 @@ export function incrementWidgetDependencyDriftDelivery(
  * `filePath` once its delivery cap is reached — by HIDING it from the
  * footer, not by dropping it.
  *
- * `RuntimeCoordinator.retireDemotedDependencyDriftBlocker` can delete its
+ * `RuntimeCoordinator.retireDemotedDriftBlocker` can delete its
  * whole `_pendingInlineBlockers` record because that store backs exactly one
  * surface (the turn-end advisory text). This store does not: `allDiagnostics`
  * is also what `getFileDiagnosticSummaries` serves to `lens_diagnostics

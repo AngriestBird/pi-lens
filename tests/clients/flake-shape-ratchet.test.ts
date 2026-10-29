@@ -291,6 +291,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the freshness gate writes its rows through logLatency; turn_end logs more phases after the gate than the five the getRecentLoggedPhases ring keeps, and test mode skips the file sink, so a passed-through spy is the only reader",
 		},
+	// 2026-10-29 (#4990): the demoted channel's policy pass writes its
+	// inline_blocker_policy row through logLatency; turn_end logs more phases
+	// after it than the five-phase ring keeps, and test mode skips the file
+	// sink, so a passed-through spy is the only reader.
+	"in-process-mock:clients/demoted-finding-4990.test.ts::clients/latency-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the inline_blocker_policy row goes through logLatency; turn_end logs more phases after it than the five the getRecentLoggedPhases ring keeps, and test mode skips the file sink, so a passed-through spy is the only reader",
+		},
 	// 2026-10-21 (#4638 review): the behaviour under test is the post-write
 	// runner admission of a server answer, so the capability seam hands it a
 	// doubled service and everything downstream of the runner stays production.
