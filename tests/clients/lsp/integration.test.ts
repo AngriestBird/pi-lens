@@ -26,6 +26,7 @@ import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { spawnFakeLspServer } from "../../support/fake-lsp-server.js";
 import { removeTempDirSync } from "../test-utils.js";
 import { waitFor } from "../interleaving-kit.js";
+import { scaledTestTimeout } from "../../support/test-timeout-scale.js";
 import { CacheManager } from "../../../clients/cache-manager.js";
 import { getDegradationSummary } from "../../../clients/degradation-ledger.js";
 import { registerMutationBridge } from "../../../clients/mutation-bridge.js";
@@ -886,7 +887,11 @@ describe("LSP Client Integration — batched watched-files (#271)", () => {
 	});
 
 	// Poll until the server has echoed at least one frame (the flush is on a
-	// ~100ms debounce + a stdio round-trip), with a generous ceiling.
+	// ~100ms debounce + a stdio round-trip), with a generous ceiling. The 4,000 ms
+	// budget scales with `PI_LENS_TEST_TIMEOUT_SCALE` (12,000 ms on the Windows
+	// leg), so the caller passes `scaledTestTimeout(20_000)`: Vitest's deadline
+	// must outlast the wait, or an un-echoed frame reports `Test timed out`
+	// instead of the wait's diagnostic (#4983).
 	const waitForEcho = async () => {
 		await waitFor(
 			() => received.length,
@@ -895,26 +900,30 @@ describe("LSP Client Integration — batched watched-files (#271)", () => {
 		);
 	};
 
-	it("coalesces N rapid file opens into ONE wire frame with N changes", async () => {
-		const files = ["wf-a.ts", "wf-b.ts", "wf-c.ts"].map((f) =>
-			path.join(process.cwd(), f),
-		);
-		// Open three distinct files within the debounce window.
-		for (const f of files) {
-			await client!.notify.open(f, "const x = 1;", "typescript");
-		}
+	it(
+		"coalesces N rapid file opens into ONE wire frame with N changes",
+		async () => {
+			const files = ["wf-a.ts", "wf-b.ts", "wf-c.ts"].map((f) =>
+				path.join(process.cwd(), f),
+			);
+			// Open three distinct files within the debounce window.
+			for (const f of files) {
+				await client!.notify.open(f, "const x = 1;", "typescript");
+			}
 
-		await waitForEcho();
+			await waitForEcho();
 
-		// Exactly one notification reached the server for the whole burst…
-		expect(received).toHaveLength(1);
-		// …carrying all three URIs (deduped, insertion order).
-		expect(received[0]).toHaveLength(3);
-		const uris = received[0].map((c) => c.uri);
-		for (const f of files) {
-			expect(uris).toContain(pathToFileURL(f).href);
-		}
-	});
+			// Exactly one notification reached the server for the whole burst…
+			expect(received).toHaveLength(1);
+			// …carrying all three URIs (deduped, insertion order).
+			expect(received[0]).toHaveLength(3);
+			const uris = received[0].map((c) => c.uri);
+			for (const f of files) {
+				expect(uris).toContain(pathToFileURL(f).href);
+			}
+		},
+		scaledTestTimeout(20_000),
+	);
 
 	it("does not emit a frame for a silent open (cascade read)", async () => {
 		await client!.notify.open(

@@ -23,6 +23,12 @@
  * #4865), so none of `flake-shape-ratchet`'s four detectors
  * (real-process-spawn, elapsed-time-assertion, raw-timer-wait,
  * ungoverned-wait-for) apply.
+ *
+ * Each test that waits on an accepted socket passes `scaledTestTimeout(20_000)`:
+ * the wait's own 4,000 ms budget grows with `PI_LENS_TEST_TIMEOUT_SCALE`
+ * (12,000 ms on the Windows leg), and Vitest's deadline must stay above it or a
+ * never-accepted socket reports `Test timed out` instead of the wait's
+ * diagnostic (#4983).
  */
 
 import * as fs from "node:fs";
@@ -43,6 +49,7 @@ import {
 } from "../../clients/warm-attach.js";
 import { removeTempDirSync } from "./test-utils.js";
 import { waitFor } from "./interleaving-kit.js";
+import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 
 /** One event-loop turn, including the poll phase that delivers socket I/O. */
 const pump = (): Promise<void> =>
@@ -138,60 +145,64 @@ describe("warm diagnostics server: an accepted socket's error event (#3389)", ()
 		);
 	});
 
-	it("records an unknown subject for a code-less error and leaves the connection usable", async () => {
-		// Review round 1, F3395-01: the `error` EVENT channel accepts any `Error`,
-		// not only Node's errno-carrying system errors, so the handler's
-		// `?? "unknown"` arm IS reachable — round 1 of this PR wrongly declared it
-		// unreachable. Two things must hold: one bounded row whose subject says
-		// `unknown` rather than a missing or empty string, and a connection that
-		// stays usable, because a code-less error is not evidence the transport is
-		// gone (a real system failure destroys the stream before the handler runs;
-		// this one does not).
-		const accepted: net.Socket[] = [];
-		await configureWarmAttach(root);
-		// The accepted socket has exactly one input channel and no other reachable
-		// handle: `node:net`'s ESM namespace is not configurable, so the factory
-		// cannot be wrapped from here. The server's OWN `connection` event hands
-		// over the same socket production's handler already received.
-		_warmAttachServerForTests()?.on("connection", (socket) => {
-			accepted.push(socket);
-		});
-		const endpoint = diagnosticsIpcPathForCwd(root, process.pid);
-		const client = net.createConnection(endpoint);
-		client.setEncoding("utf8");
-		client.on("error", () => {});
-		await new Promise<void>((resolve, reject) => {
-			client.once("connect", resolve);
-			client.once("error", reject);
-		});
-		await waitFor(
-			() => accepted.length,
-			(n) => n > 0,
-			{
-				timeoutMs: 4_000,
-				yieldControl: pump,
-			},
-		);
-		const socket = accepted[0];
-		expect(socket).toBeDefined();
-		socket?.emit("error", new Error("code-less socket failure"));
+	it(
+		"records an unknown subject for a code-less error and leaves the connection usable",
+		async () => {
+			// Review round 1, F3395-01: the `error` EVENT channel accepts any `Error`,
+			// not only Node's errno-carrying system errors, so the handler's
+			// `?? "unknown"` arm IS reachable — round 1 of this PR wrongly declared it
+			// unreachable. Two things must hold: one bounded row whose subject says
+			// `unknown` rather than a missing or empty string, and a connection that
+			// stays usable, because a code-less error is not evidence the transport is
+			// gone (a real system failure destroys the stream before the handler runs;
+			// this one does not).
+			const accepted: net.Socket[] = [];
+			await configureWarmAttach(root);
+			// The accepted socket has exactly one input channel and no other reachable
+			// handle: `node:net`'s ESM namespace is not configurable, so the factory
+			// cannot be wrapped from here. The server's OWN `connection` event hands
+			// over the same socket production's handler already received.
+			_warmAttachServerForTests()?.on("connection", (socket) => {
+				accepted.push(socket);
+			});
+			const endpoint = diagnosticsIpcPathForCwd(root, process.pid);
+			const client = net.createConnection(endpoint);
+			client.setEncoding("utf8");
+			client.on("error", () => {});
+			await new Promise<void>((resolve, reject) => {
+				client.once("connect", resolve);
+				client.once("error", reject);
+			});
+			await waitFor(
+				() => accepted.length,
+				(n) => n > 0,
+				{
+					timeoutMs: 4_000,
+					yieldControl: pump,
+				},
+			);
+			const socket = accepted[0];
+			expect(socket).toBeDefined();
+			socket?.emit("error", new Error("code-less socket failure"));
 
-		const group = await waitForGroup("warm-attach-socket-error");
-		expect(uncaught).toEqual([]);
-		expect(group?.count ?? 0).toBe(1);
-		expect(group?.latestReasons[0]?.subject).toBe("unknown");
-		expect(group?.latestReasons[0]?.reason).toContain(
-			"code-less socket failure",
-		);
-		// Still usable: the request written after the event is still answered, so
-		// the handler cannot be turned into a teardown without this failing.
-		const reply = await new Promise<string>((resolve) => {
-			client.once("data", (chunk) => resolve(String(chunk)));
-			client.write("not-json\n");
-		});
-		expect(reply).toContain("error");
-		client.end();
-	});
+			const group = await waitForGroup("warm-attach-socket-error");
+			expect(uncaught).toEqual([]);
+			expect(group?.count ?? 0).toBe(1);
+			expect(group?.latestReasons[0]?.subject).toBe("unknown");
+			expect(group?.latestReasons[0]?.reason).toContain(
+				"code-less socket failure",
+			);
+			// Still usable: the request written after the event is still answered, so
+			// the handler cannot be turned into a teardown without this failing.
+			const reply = await new Promise<string>((resolve) => {
+				client.once("data", (chunk) => resolve(String(chunk)));
+				client.write("not-json\n");
+			});
+			expect(reply).toContain("error");
+			client.end();
+		},
+		scaledTestTimeout(20_000),
+	);
 
 	it.each([
 		["empty", ""],
@@ -237,6 +248,7 @@ describe("warm diagnostics server: an accepted socket's error event (#3389)", ()
 			expect(group?.latestReasons[0]?.subject).toBe("unknown");
 			client.end();
 		},
+		scaledTestTimeout(20_000),
 	);
 
 	it("records nothing when a client closes cleanly after an unterminated line", async () => {

@@ -307,7 +307,14 @@ async function reload(runtime: AgentSessionRuntime): Promise<void> {
 	await runtime.session.reload();
 }
 
-/** Let a fire-and-forget sidecar write land, bounded by a real-clock deadline. */
+/**
+ * Let a fire-and-forget sidecar write land, bounded by a real-clock deadline.
+ *
+ * Callers pass `scaledTestTimeout(20_000)`: the wait's own 4,000 ms budget grows
+ * with `PI_LENS_TEST_TIMEOUT_SCALE` (12,000 ms on the Windows leg), so the
+ * enclosing test must outlast it or a sidecar that never lands reports `Test
+ * timed out` instead of the wait's diagnostic (#4983).
+ */
 async function sidecarSettled(sessionId: string): Promise<void> {
 	const file = path.join(
 		getProjectDataDir(cwd),
@@ -627,52 +634,58 @@ describe("#3873 O2, O3: the adopt walk and each store's action", () => {
 		);
 	});
 
-	it("a resume from the sidecar names the sidecar it read, and a branch move shows in payloadReads", async () => {
-		const runtime = await startRuntime(SessionManager.create(cwd, sessionsDir));
-		const c = conversation(runtime);
-		const a = fixture("a.conf", 6);
-		const b = fixture("b.conf", 6);
-		c.user("prompt 1");
-		await c.read("call_read_a", a);
-		const p1Done = c.done();
-		c.user("prompt 2");
-		await c.read("call_read_b", b);
-		c.done();
-		await turnEnd(runtime);
-		await c.S().navigateTree(p1Done);
-		c.user("prompt 2 on branch Y");
-		c.done();
+	it(
+		"a resume from the sidecar names the sidecar it read, and a branch move shows in payloadReads",
+		async () => {
+			const runtime = await startRuntime(
+				SessionManager.create(cwd, sessionsDir),
+			);
+			const c = conversation(runtime);
+			const a = fixture("a.conf", 6);
+			const b = fixture("b.conf", 6);
+			c.user("prompt 1");
+			await c.read("call_read_a", a);
+			const p1Done = c.done();
+			c.user("prompt 2");
+			await c.read("call_read_b", b);
+			c.done();
+			await turnEnd(runtime);
+			await c.S().navigateTree(p1Done);
+			c.user("prompt 2 on branch Y");
+			c.done();
 
-		await runtime.switchSession(c.S().sessionManager.getSessionFile()!);
+			await runtime.switchSession(c.S().sessionManager.getSessionFile()!);
 
-		const adopt = (await rows("session_handoff_adopt")).at(-1);
-		expect(adopt).toMatchObject({ reason: "resume", chosen: "own-sidecar" });
-		expect(adopt?.tried).toEqual([
-			expect.objectContaining({
+			const adopt = (await rows("session_handoff_adopt")).at(-1);
+			expect(adopt).toMatchObject({ reason: "resume", chosen: "own-sidecar" });
+			expect(adopt?.tried).toEqual([
+				expect.objectContaining({
+					source: "own-sidecar",
+					found: true,
+					version: 2,
+					ageMs: expect.any(Number),
+				}),
+			]);
+			expect(adopt?.tried?.[0]?.storeNames).toEqual(
+				expect.arrayContaining(["widget", "read-guard"]),
+			);
+			expect((await rows("read_guard_branch_retained")).at(-1)).toMatchObject({
+				trigger: "resume",
 				source: "own-sidecar",
-				found: true,
-				version: 2,
-				ageMs: expect.any(Number),
-			}),
-		]);
-		expect(adopt?.tried?.[0]?.storeNames).toEqual(
-			expect.arrayContaining(["widget", "read-guard"]),
-		);
-		expect((await rows("read_guard_branch_retained")).at(-1)).toMatchObject({
-			trigger: "resume",
-			source: "own-sidecar",
-			kept: 1,
-			dropped: 1,
-			payloadReads: 2,
-		});
-		expect(
-			(await rows("session_store_action")).filter(
-				(row) => row.reason === "resume" && row.store === "read-guard",
-			),
-		).toEqual([
-			expect.objectContaining({ itemsIn: 2, itemsKept: 1, itemsDropped: 1 }),
-		]);
-	});
+				kept: 1,
+				dropped: 1,
+				payloadReads: 2,
+			});
+			expect(
+				(await rows("session_store_action")).filter(
+					(row) => row.reason === "resume" && row.store === "read-guard",
+				),
+			).toEqual([
+				expect.objectContaining({ itemsIn: 2, itemsKept: 1, itemsDropped: 1 }),
+			]);
+		},
+		scaledTestTimeout(20_000),
+	);
 
 	it("a launch with no sidecar says both candidates were absent, and kept 0 reads payloadReads null", async () => {
 		await startRuntime(SessionManager.create(cwd, sessionsDir));

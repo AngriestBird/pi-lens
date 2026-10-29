@@ -406,190 +406,207 @@ describe("review graph service", () => {
 		}
 	});
 
-	it("isReviewGraphMigrationNeeded: stale version → true, current/absent → false (#260)", async () => {
-		const env = setupTestEnvironment("pi-lens-review-graph-migrate-");
-		try {
-			// Nothing persisted → nothing to migrate (a cold start builds on demand).
-			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
+	// Each test that waits on the migration flag passes `scaledTestTimeout(20_000)`:
+	// the wait's own 4,000 ms budget grows with `PI_LENS_TEST_TIMEOUT_SCALE`
+	// (12,000 ms on the Windows leg), and Vitest's deadline must stay above it or
+	// a persist that never lands reports `Test timed out` instead of the wait's
+	// diagnostic (#4983).
+	it(
+		"isReviewGraphMigrationNeeded: stale version → true, current/absent → false (#260)",
+		async () => {
+			const env = setupTestEnvironment("pi-lens-review-graph-migrate-");
+			try {
+				// Nothing persisted → nothing to migrate (a cold start builds on demand).
+				expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
 
-			// A snapshot written under an older version → migration needed.
-			const cacheDir = path.join(getProjectDataDir(env.tmpDir), "cache");
-			fs.mkdirSync(cacheDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(cacheDir, "review-graph.json"),
-				JSON.stringify({
-					version: "v1-old",
-					builtAt: "x",
-					signature: "s",
-					nodes: [],
-					edges: [],
-				}),
-			);
-			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(true);
+				// A snapshot written under an older version → migration needed.
+				const cacheDir = path.join(getProjectDataDir(env.tmpDir), "cache");
+				fs.mkdirSync(cacheDir, { recursive: true });
+				fs.writeFileSync(
+					path.join(cacheDir, "review-graph.json"),
+					JSON.stringify({
+						version: "v1-old",
+						builtAt: "x",
+						signature: "s",
+						nodes: [],
+						edges: [],
+					}),
+				);
+				expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(true);
 
-			// A real build persists the CURRENT version → no longer stale.
-			createTempFile(
-				env.tmpDir,
-				"src/a.ts",
-				"export function alpha() {\n  return 1;\n}\n",
-			);
-			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
-			flushReviewGraphPersistsForTests();
-			// Wait for the offloaded persist to land instead of only a fixed 500 ms
-			// poll: the worker write outlived it on the Windows runner (#4019).
-			await waitForReviewGraphPersistsForTests();
-			await waitFor(
-				() => isReviewGraphMigrationNeeded(env.tmpDir),
-				(needed) => !needed,
-				{ timeoutMs: 4_000 },
-			);
-			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
-		} finally {
-			clearReviewGraphWorkspaceCache();
-			env.cleanup();
-		}
-	});
+				// A real build persists the CURRENT version → no longer stale.
+				createTempFile(
+					env.tmpDir,
+					"src/a.ts",
+					"export function alpha() {\n  return 1;\n}\n",
+				);
+				await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+				flushReviewGraphPersistsForTests();
+				// Wait for the offloaded persist to land instead of only a fixed 500 ms
+				// poll: the worker write outlived it on the Windows runner (#4019).
+				await waitForReviewGraphPersistsForTests();
+				await waitFor(
+					() => isReviewGraphMigrationNeeded(env.tmpDir),
+					(needed) => !needed,
+					{ timeoutMs: 4_000 },
+				);
+				expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
+			} finally {
+				clearReviewGraphWorkspaceCache();
+				env.cleanup();
+			}
+		},
+		scaledTestTimeout(20_000),
+	);
 
-	it("refs #655: a v3 snapshot (pre-collision-safe-ID scheme) is detected as stale and safely rebuilt, never misread", async () => {
-		// #655's v4 bump changed the symbol-node ID shape from `<file>:<name>` to
-		// `<file>:<name>:<kind>:<startLine>`. A real v3 snapshot's nodes/edges still
-		// use the OLD id shape throughout — merging it with newly-built v4 IDs
-		// would silently duplicate/misalign nodes, so it must be rejected exactly
-		// like the v2→v3 (#260) bump was, not partially reused.
-		const env = setupTestEnvironment("pi-lens-review-graph-v3-migrate-");
-		try {
-			// Deliberately pinned to "v3", below REVIEW_GRAPH_VERSION, to exercise
-			// the legacy-migration rejection path itself (the #1082/#1106
-			// vacuous-fixture class: a future bump to "v3" would silently
-			// un-exercise this).
-			expect(REVIEW_GRAPH_VERSION).not.toBe("v3");
-			const cacheDir = path.join(getProjectDataDir(env.tmpDir), "cache");
-			fs.mkdirSync(cacheDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(cacheDir, "review-graph.json"),
-				JSON.stringify({
-					version: "v3",
-					builtAt: "x",
-					signature: "s",
-					nodes: [
-						[
-							"src/a.ts:alpha",
-							{
-								id: "src/a.ts:alpha",
-								kind: "symbol",
-								language: "jsts",
-								filePath: "src/a.ts",
-								symbolName: "alpha",
-								symbolKind: "function",
-							},
+	it(
+		"refs #655: a v3 snapshot (pre-collision-safe-ID scheme) is detected as stale and safely rebuilt, never misread",
+		async () => {
+			// #655's v4 bump changed the symbol-node ID shape from `<file>:<name>` to
+			// `<file>:<name>:<kind>:<startLine>`. A real v3 snapshot's nodes/edges still
+			// use the OLD id shape throughout — merging it with newly-built v4 IDs
+			// would silently duplicate/misalign nodes, so it must be rejected exactly
+			// like the v2→v3 (#260) bump was, not partially reused.
+			const env = setupTestEnvironment("pi-lens-review-graph-v3-migrate-");
+			try {
+				// Deliberately pinned to "v3", below REVIEW_GRAPH_VERSION, to exercise
+				// the legacy-migration rejection path itself (the #1082/#1106
+				// vacuous-fixture class: a future bump to "v3" would silently
+				// un-exercise this).
+				expect(REVIEW_GRAPH_VERSION).not.toBe("v3");
+				const cacheDir = path.join(getProjectDataDir(env.tmpDir), "cache");
+				fs.mkdirSync(cacheDir, { recursive: true });
+				fs.writeFileSync(
+					path.join(cacheDir, "review-graph.json"),
+					JSON.stringify({
+						version: "v3",
+						builtAt: "x",
+						signature: "s",
+						nodes: [
+							[
+								"src/a.ts:alpha",
+								{
+									id: "src/a.ts:alpha",
+									kind: "symbol",
+									language: "jsts",
+									filePath: "src/a.ts",
+									symbolName: "alpha",
+									symbolKind: "function",
+								},
+							],
 						],
-					],
-					edges: [],
-				}),
-			);
-			// A v3 snapshot must be flagged as needing migration under the v4 build.
-			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(true);
+						edges: [],
+					}),
+				);
+				// A v3 snapshot must be flagged as needing migration under the v4 build.
+				expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(true);
 
-			// getCachedReviewGraph's blind read must also reject it outright (never
-			// hand back a v3-shaped graph to a v4-ID-aware caller like module-report).
-			const { getCachedReviewGraph } =
-				await import("../../clients/review-graph/builder.js");
-			expect(getCachedReviewGraph(env.tmpDir)).toBeUndefined();
+				// getCachedReviewGraph's blind read must also reject it outright (never
+				// hand back a v3-shaped graph to a v4-ID-aware caller like module-report).
+				const { getCachedReviewGraph } =
+					await import("../../clients/review-graph/builder.js");
+				expect(getCachedReviewGraph(env.tmpDir)).toBeUndefined();
 
-			// A real build produces a fresh v8 graph with the new ID shape, not the
-			// old one, and is no longer flagged as needing migration.
-			createTempFile(
-				env.tmpDir,
-				"src/a.ts",
-				"export function alpha() {\n  return 1;\n}\n",
-			);
-			const graph = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
-			expect(graph.version).toBe(REVIEW_GRAPH_VERSION);
-			const alphaId = [...graph.nodes.keys()].find((id) =>
-				id.includes(":alpha:"),
-			);
-			expect(alphaId).toBeDefined();
-			flushReviewGraphPersistsForTests();
-			// Wait for the offloaded persist to land instead of only a fixed 500 ms
-			// poll: the worker write outlived it on the Windows runner (#4019).
-			await waitForReviewGraphPersistsForTests();
-			await waitFor(
-				() => isReviewGraphMigrationNeeded(env.tmpDir),
-				(needed) => !needed,
-				{ timeoutMs: 4_000 },
-			);
-			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
-		} finally {
-			clearReviewGraphWorkspaceCache();
-			env.cleanup();
-		}
-	});
+				// A real build produces a fresh v8 graph with the new ID shape, not the
+				// old one, and is no longer flagged as needing migration.
+				createTempFile(
+					env.tmpDir,
+					"src/a.ts",
+					"export function alpha() {\n  return 1;\n}\n",
+				);
+				const graph = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+				expect(graph.version).toBe(REVIEW_GRAPH_VERSION);
+				const alphaId = [...graph.nodes.keys()].find((id) =>
+					id.includes(":alpha:"),
+				);
+				expect(alphaId).toBeDefined();
+				flushReviewGraphPersistsForTests();
+				// Wait for the offloaded persist to land instead of only a fixed 500 ms
+				// poll: the worker write outlived it on the Windows runner (#4019).
+				await waitForReviewGraphPersistsForTests();
+				await waitFor(
+					() => isReviewGraphMigrationNeeded(env.tmpDir),
+					(needed) => !needed,
+					{ timeoutMs: 4_000 },
+				);
+				expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
+			} finally {
+				clearReviewGraphWorkspaceCache();
+				env.cleanup();
+			}
+		},
+		scaledTestTimeout(20_000),
+	);
 
-	it("refs #694: a v4 snapshot (pre-twin-preference, compiled-artifact edges) is detected as stale and safely rebuilt", async () => {
-		// #694's v5 bump: import resolution now prefers a .ts/.tsx source twin
-		// over a compiled .js sibling, and node creation is gated against
-		// untracked-AND-ignored files. A real v4 snapshot from a compile-in-place
-		// project has edges materialized on the compiled artifact node
-		// throughout — merging that with newly-built v5 edges would leave the
-		// graph in mixed, partially-corrected state, so it must be rejected
-		// exactly like the earlier version bumps.
-		const env = setupTestEnvironment("pi-lens-review-graph-v4-migrate-");
-		try {
-			// Deliberately pinned to "v4", below REVIEW_GRAPH_VERSION, to exercise
-			// the legacy-migration rejection path itself (the #1082/#1106
-			// vacuous-fixture class: a future bump to "v4" would silently
-			// un-exercise this).
-			expect(REVIEW_GRAPH_VERSION).not.toBe("v4");
-			const cacheDir = path.join(getProjectDataDir(env.tmpDir), "cache");
-			fs.mkdirSync(cacheDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(cacheDir, "review-graph.json"),
-				JSON.stringify({
-					version: "v4",
-					builtAt: "x",
-					signature: "s",
-					nodes: [
-						[
-							"file:src/types.js",
-							{
-								id: "file:src/types.js",
-								kind: "file",
-								language: "jsts",
-								filePath: "src/types.js",
-							},
+	it(
+		"refs #694: a v4 snapshot (pre-twin-preference, compiled-artifact edges) is detected as stale and safely rebuilt",
+		async () => {
+			// #694's v5 bump: import resolution now prefers a .ts/.tsx source twin
+			// over a compiled .js sibling, and node creation is gated against
+			// untracked-AND-ignored files. A real v4 snapshot from a compile-in-place
+			// project has edges materialized on the compiled artifact node
+			// throughout — merging that with newly-built v5 edges would leave the
+			// graph in mixed, partially-corrected state, so it must be rejected
+			// exactly like the earlier version bumps.
+			const env = setupTestEnvironment("pi-lens-review-graph-v4-migrate-");
+			try {
+				// Deliberately pinned to "v4", below REVIEW_GRAPH_VERSION, to exercise
+				// the legacy-migration rejection path itself (the #1082/#1106
+				// vacuous-fixture class: a future bump to "v4" would silently
+				// un-exercise this).
+				expect(REVIEW_GRAPH_VERSION).not.toBe("v4");
+				const cacheDir = path.join(getProjectDataDir(env.tmpDir), "cache");
+				fs.mkdirSync(cacheDir, { recursive: true });
+				fs.writeFileSync(
+					path.join(cacheDir, "review-graph.json"),
+					JSON.stringify({
+						version: "v4",
+						builtAt: "x",
+						signature: "s",
+						nodes: [
+							[
+								"file:src/types.js",
+								{
+									id: "file:src/types.js",
+									kind: "file",
+									language: "jsts",
+									filePath: "src/types.js",
+								},
+							],
 						],
-					],
-					edges: [],
-				}),
-			);
-			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(true);
+						edges: [],
+					}),
+				);
+				expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(true);
 
-			const { getCachedReviewGraph } =
-				await import("../../clients/review-graph/builder.js");
-			expect(getCachedReviewGraph(env.tmpDir)).toBeUndefined();
+				const { getCachedReviewGraph } =
+					await import("../../clients/review-graph/builder.js");
+				expect(getCachedReviewGraph(env.tmpDir)).toBeUndefined();
 
-			createTempFile(
-				env.tmpDir,
-				"src/types.ts",
-				"export interface Foo {\n  a: number;\n}\n",
-			);
-			const graph = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
-			expect(graph.version).toBe(REVIEW_GRAPH_VERSION);
-			flushReviewGraphPersistsForTests();
-			// Wait for the offloaded persist to land instead of only a fixed 500 ms
-			// poll: the worker write outlived it on the Windows runner (#4019).
-			await waitForReviewGraphPersistsForTests();
-			await waitFor(
-				() => isReviewGraphMigrationNeeded(env.tmpDir),
-				(needed) => !needed,
-				{ timeoutMs: 4_000 },
-			);
-			expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
-		} finally {
-			clearReviewGraphWorkspaceCache();
-			env.cleanup();
-		}
-	});
+				createTempFile(
+					env.tmpDir,
+					"src/types.ts",
+					"export interface Foo {\n  a: number;\n}\n",
+				);
+				const graph = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+				expect(graph.version).toBe(REVIEW_GRAPH_VERSION);
+				flushReviewGraphPersistsForTests();
+				// Wait for the offloaded persist to land instead of only a fixed 500 ms
+				// poll: the worker write outlived it on the Windows runner (#4019).
+				await waitForReviewGraphPersistsForTests();
+				await waitFor(
+					() => isReviewGraphMigrationNeeded(env.tmpDir),
+					(needed) => !needed,
+					{ timeoutMs: 4_000 },
+				);
+				expect(isReviewGraphMigrationNeeded(env.tmpDir)).toBe(false);
+			} finally {
+				clearReviewGraphWorkspaceCache();
+				env.cleanup();
+			}
+		},
+		scaledTestTimeout(20_000),
+	);
 
 	it("refs #655: an unresolved bare-name call stays 'name-only'; a unique-name call resolves 'exact'", async () => {
 		const env = setupTestEnvironment("pi-lens-review-graph-resolution-");
