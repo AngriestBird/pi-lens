@@ -110,6 +110,9 @@ pi --lens-guard          # Block git commit/push when unresolved blockers exist 
 pi --lens-checkout-guard # Decline git commands that rewrite the working tree while another live pi-lens session shares this dirty checkout (experimental)
 pi --no-opengrep         # Disable the Opengrep security scanner (default-on auxiliary LSP)
 pi --no-ast-grep         # Disable the ast-grep auxiliary LSP server (default-on)
+pi --no-zizmor           # Disable the zizmor auxiliary LSP server (default-on)
+pi --no-typos            # Disable the typos auxiliary LSP server (default-on)
+pi --lens-spotbugs       # Run SpotBugs on Java and Kotlin files (opt-in; needs a Java build descriptor and compiled classes)
 pi --no-read-guard       # Disable the read-before-edit behavior monitor
 pi --lens-retain-injections # Re-send injected findings unchanged in later requests, for exact-prefix (local) prompt caches
 pi --lens-turn-summary   # Persist a per-turn summary of diagnostics, autofixes, and autoformats

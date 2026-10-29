@@ -78,6 +78,9 @@ column is the effective behavior when nothing is set.
 | `--lens-checkout-guard` | `guard.sharedCheckout` | global | **off** |
 | `--no-opengrep` | `opengrep.enabled` | global | Opengrep scanner **on** |
 | `--no-ast-grep` | `astGrep.enabled` | global | ast-grep auxiliary server **on** |
+| `--no-zizmor` | `zizmor.enabled` | global | zizmor auxiliary server **on** |
+| `--no-typos` | `typos.enabled` | global | typos auxiliary server **on** |
+| `--lens-spotbugs` | `spotbugs.enabled` | global | SpotBugs **off** |
 | `--no-read-guard` | `readGuard.enabled` | global | read-before-edit monitor **on** |
 | `--no-lens-context` | `contextInjection.enabled` | global | context injection **on** |
 | `--lens-retain-injections` | `contextInjection.retain` | global | **off** |

@@ -112,6 +112,12 @@ export interface PiLensGlobalConfig {
 	opengrep?: PiLensToggleConfig;
 	/** Whether the ast-grep auxiliary LSP attaches (`--no-ast-grep`). */
 	astGrep?: PiLensToggleConfig;
+	/** Whether the zizmor auxiliary LSP attaches (`--no-zizmor`). */
+	zizmor?: PiLensToggleConfig;
+	/** Whether the typos auxiliary LSP attaches (`--no-typos`). */
+	typos?: PiLensToggleConfig;
+	/** Whether SpotBugs runs on Java and Kotlin files (`--lens-spotbugs`; opt-in). */
+	spotbugs?: PiLensToggleConfig;
 	/** Whether the read-before-edit behavior monitor runs (`--no-read-guard`). */
 	readGuard?: PiLensToggleConfig;
 	format?: {

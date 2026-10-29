@@ -519,12 +519,57 @@ function validFillerFor(key: string): unknown {
 	return true;
 }
 
-const suppressionNoticesFor = (file: string): string[] =>
-	notices.filter(
-		(message) =>
-			message.includes(file) &&
-			message.includes("further config notices were suppressed"),
+const isSuppressionSummaryFor = (message: string, file: string): boolean =>
+	message.includes(file) &&
+	message.includes("further config notices were suppressed");
+
+/**
+ * The notices one file's LEGACY list emitted, by POSITION: the run that starts
+ * at the file's first move notice and holds only that file's move notices and
+ * summaries. The list closes with its own summary, so the legacy summary is the
+ * one inside this run.
+ *
+ * A file that spells every recognized key ends up to two bounded lists, each
+ * with its own summary: the legacy moves, and the global-only settings the
+ * project loader refuses (#4946 added three global-only sections and tipped
+ * that second list past its bound). Matching on the summary's phrase alone
+ * counts both and made these probes depend on how many global-only sections
+ * the registry holds; keeping the first one hid the second. Position tells
+ * them apart, and a lost legacy summary leaves the run without one.
+ */
+function legacyListFor(file: string): { summaries: string[]; end: number } {
+	const start = notices.findIndex(
+		(message) => message.startsWith("deprecated ") && message.includes(file),
 	);
+	if (start < 0) return { summaries: [], end: 0 };
+	let end = start;
+	while (
+		end < notices.length &&
+		((notices[end] as string).startsWith("deprecated ") ||
+			isSuppressionSummaryFor(notices[end] as string, file))
+	) {
+		end += 1;
+	}
+	return {
+		summaries: notices
+			.slice(start, end)
+			.filter((message) => isSuppressionSummaryFor(message, file)),
+		end,
+	};
+}
+
+/** The summary that closes the file's legacy list: exactly one, or none. */
+const suppressionNoticesFor = (file: string): string[] =>
+	legacyListFor(file).summaries;
+
+/**
+ * The summaries after the legacy list: the refused global-only settings list
+ * the PROJECT loader ends (the LSP loader does not produce it).
+ */
+const refusalSuppressionFor = (file: string): string[] =>
+	notices
+		.slice(legacyListFor(file).end)
+		.filter((message) => isSuppressionSummaryFor(message, file));
 
 const deprecationNoticesFor = (file: string): string[] =>
 	deprecationNotices().filter((message) => message.includes(file));
@@ -561,6 +606,9 @@ describe("round 5 F-A/F-B/S-A: every record list goes through the one bound", ()
 		);
 		// … and the truncation is COUNTED, not silent.
 		expect(suppressed, detail).toHaveLength(1);
+		// The refused global-only list is its own bounded list with its own
+		// summary (#4946): one, not folded into the legacy one and not lost.
+		expect(refusalSuppressionFor(legacyFile), detail).toHaveLength(1);
 	});
 
 	it("bounds five nested legacy files PER FILE, each with its own count", async () => {
@@ -588,6 +636,12 @@ describe("round 5 F-A/F-B/S-A: every record list goes through the one bound", ()
 				MAX_MIGRATION_RECORDS,
 			);
 			expect(suppressed, detail).toHaveLength(1);
+			// Only the nearest file's global-only settings are refused (an ancestor
+			// is a legacy document, not the file in force), so only it ends the
+			// second list.
+			expect(refusalSuppressionFor(file), detail).toHaveLength(
+				file === legacyFiles[4] ? 1 : 0,
+			);
 		}
 		// Pre-fix this walk produced 5 x 28 deprecation notices and no
 		// suppression record anywhere.
@@ -613,6 +667,7 @@ describe("round 5 F-A/F-B/S-A: every record list goes through the one bound", ()
 			moves: deprecationNoticesFor(legacyFile).length,
 			suppressed: suppressionNoticesFor(legacyFile).length,
 		};
+		const projectRefusalSummaries = refusalSuppressionFor(legacyFile).length;
 
 		// Same file, other loader, from a clean latch.
 		notices.length = 0;
@@ -633,6 +688,11 @@ describe("round 5 F-A/F-B/S-A: every record list goes through the one bound", ()
 			`project=${JSON.stringify(viaProject)} lsp=${JSON.stringify(viaLsp)}`,
 		).toEqual(viaLsp);
 		expect(viaProject.suppressed).toBe(1);
+		// The loaders differ in exactly one disclosed way: only the project loader
+		// refuses global-only settings, so only it ends the second bounded list
+		// and discloses that list's truncation.
+		expect(projectRefusalSummaries).toBe(1);
+		expect(refusalSuppressionFor(legacyFile)).toHaveLength(0);
 	});
 });
 

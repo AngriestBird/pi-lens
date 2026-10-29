@@ -142,6 +142,15 @@
     "astGrep": {
       "x-stability": "stable"
     },
+    "zizmor": {
+      "x-stability": "stable"
+    },
+    "typos": {
+      "x-stability": "stable"
+    },
+    "spotbugs": {
+      "x-stability": "stable"
+    },
     "opengrep": {
       "x-stability": "stable"
     },

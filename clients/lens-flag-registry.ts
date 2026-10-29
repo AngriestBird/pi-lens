@@ -183,6 +183,29 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		scope: "global",
 	},
 	{
+		name: "no-zizmor",
+		description:
+			"Disable the zizmor auxiliary LSP server (default-on; audits GitHub Actions workflows). Also via zizmor.enabled=false in ~/.pi-lens/config.json.",
+		configKey: "zizmor.enabled",
+		negated: true,
+		default: false,
+		scope: "global",
+	},
+	{
+		name: "no-typos",
+		description:
+			"Disable the typos auxiliary LSP server (default-on; flags known misspellings in source and Markdown). Also via typos.enabled=false in ~/.pi-lens/config.json.",
+		configKey: "typos.enabled",
+		negated: true,
+		default: false,
+		scope: "global",
+	},
+	globalOptInFlag(
+		"lens-spotbugs",
+		"Opt-in: run SpotBugs on Java and Kotlin files when a Java build descriptor and a compiled .class directory exist (heavyweight: JVM cold start plus whole-tree analysis). Default off. Also via spotbugs.enabled=true in ~/.pi-lens/config.json.",
+		"spotbugs.enabled",
+	),
+	{
 		name: "no-read-guard",
 		description:
 			"Disable read-before-edit behavior monitor. Also via readGuard.enabled=false in ~/.pi-lens/config.json.",

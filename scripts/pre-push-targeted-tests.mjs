@@ -211,6 +211,9 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// identity writes (its own walkFiles helper), so it is registered in both
 	// lists, as the #4590 rule requires for a both-tree scanner.
 	"tests/config/git-fixture-governance.test.ts",
+	// #4946: walks clients/, tools/, mcp/ and index.ts for flag names the code
+	// reads, against the flag registry; a production change arms it.
+	"tests/config/flag-read-registry-sweep.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer
