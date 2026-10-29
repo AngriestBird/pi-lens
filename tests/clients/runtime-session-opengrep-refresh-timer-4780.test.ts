@@ -65,7 +65,11 @@ import {
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { withEnv } from "../support/with-env.js";
-import { pinFixtureHome, setupTestEnvironment } from "./test-utils.js";
+import {
+	drainBackgroundWritesForTests,
+	pinFixtureHome,
+	setupTestEnvironment,
+} from "./test-utils.js";
 
 const BIN_DIR = path.join(TEST_HOME, "bin");
 const CACHED = path.join(TEST_HOME, "rules", "opengrep-registry.yaml");
@@ -101,6 +105,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+	// #4958: the session-start snapshot persist is fire-and-forget and writes
+	// under TEST_HOME. Drain it while the env is still pinned, or a late write
+	// recreates TEST_HOME after the rmSync below. env?.cleanup() does not cover it.
+	await drainBackgroundWritesForTests();
 	vi.unstubAllEnvs();
 	// projectCwd() creates this root lazily and no teardown removed it, so the
 	// file-level tmp-fixture sweep reported it (registered=1, #4958 siblings).
