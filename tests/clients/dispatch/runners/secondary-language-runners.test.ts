@@ -557,6 +557,21 @@ describe("secondary language fallback runners", () => {
 			expect(result.skipFault).toBe("did-not-run");
 		});
 
+		it("prisma never counts a killed run's non-validation output as findings", async () => {
+			// npm's E404 (`npx --no prisma` with nothing to run) parses to a
+			// "finding" for any text; only prisma's own report may be kept.
+			const result = await runPrisma({
+				error: null,
+				status: null,
+				signal: "SIGKILL",
+				stdout: "",
+				stderr: "npm error code E404",
+			});
+			expect(result.status).toBe("skipped");
+			expect(result.skipFault).toBe("did-not-run");
+			expect(result.diagnostics).toEqual([]);
+		});
+
 		it("prisma keeps a killed run's validation findings, as a fault", async () => {
 			const result = await runPrisma({
 				error: null,
