@@ -540,6 +540,96 @@ describe.each([false, true])(
 			});
 		});
 
+		// Recurrence (#4962 r4 verify N1): the completeness rule also flips two
+		// cited producers from current to historical beside an uncited part, a
+		// #4954 coverage advisory and a confirmed-clean resolution. The mixed cell
+		// above pins only the late-runner citation, so a rule narrowed to that
+		// citation would drop both flips without a red.
+		it("labels a coverage advisory historical beside a part that cites no file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-advisory-${guard}`,
+				incident:
+					"A cited coverage advisory vouched for an uncited secrets blocker in the same message",
+				issue: "#4617",
+				async run(h) {
+					const primary = h.write("src/a.ts", "export const a = 1;\n");
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					h.runtime.appendCascadeRun(indeterminateRun(primary));
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
+						},
+					});
+					expect(view.text).toContain("Cascade could not compute");
+					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("labels a resolution historical beside a part that cites no file", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-resolution-${guard}`,
+				incident:
+					"A confirmed-clean resolution vouched for an uncited secrets blocker in the same message",
+				issue: "#4617",
+				async run(h) {
+					const file = h.write("src/value.ts", "export const value = 1;\n");
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					h.blocker("src/value.ts", "L1: type mismatch");
+					expect(
+						h.runtime.retireInlineBlockerOnConfirmedClean(
+							file,
+							h.runtime.nextWriteOrderToken(),
+							["lsp"],
+						),
+					).toBe(true);
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
+						},
+					});
+					expect(view.text).toContain("confirmed clean");
+					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// The excluded default (#4962 r3): a write turn's stamp binds its edits,
 		// as it did before #4617, so a part beside them that cites no file
 		// leaves it current. Applying the completeness rule there would label
