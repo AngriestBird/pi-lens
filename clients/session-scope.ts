@@ -218,12 +218,8 @@ class Scope implements SessionScope {
 		// A host that sends no reason still ends the scope.
 		this.retiredReason = reason ?? "shutdown";
 		this.life.bump();
-		// #4965: the id lookup names live scopes only. A key a successor already
-		// re-bound stays with the successor.
-		const { byKey } = sessionIndex();
-		for (const key of this.boundKeys)
-			if (byKey.get(key) === this) byKey.delete(key);
-		this.boundKeys.clear();
+		// #4965: the id lookup names live scopes only.
+		unbindScope(this);
 	}
 
 	moveBranch(): void {
@@ -432,6 +428,20 @@ export function bindSessionId(scope: SessionScope, key: string): void {
 	if (!scope.isLive()) return;
 	(scope as Scope).boundKeys.add(key);
 	sessionIndex().byKey.set(key, scope as Scope);
+}
+
+/**
+ * Give `scope`'s keys back: its session ended while the scope stays live for
+ * the activation's other members (a leave that is not the activation's last,
+ * or a member pi disposed beside a live sibling). A key a successor already
+ * re-bound stays with the successor. {@link retireScope} does this too.
+ */
+export function unbindScope(scope: SessionScope): void {
+	const own = scope as Scope;
+	const { byKey } = sessionIndex();
+	for (const key of own.boundKeys)
+		if (byKey.get(key) === own) byKey.delete(key);
+	own.boundKeys.clear();
 }
 
 /** The live scope bound to `key`, or `undefined` for a session that has none. */

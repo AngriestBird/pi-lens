@@ -88,6 +88,7 @@ import {
 	startKey,
 	stashHandoff,
 	successorStartKey,
+	unbindScope,
 } from "./clients/session-scope.js";
 import { sanitizeCorrelationId } from "./clients/read-guard-logger.js";
 import {
@@ -849,6 +850,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		role: "primary" | "concurrent-secondary";
 		ctx: unknown;
 		scope?: SessionScope;
+		onDisposed: () => void;
 	}> = [];
 	// Whether this activation ever ran a full admission (#4106: an activation
 	// that admitted none keeps the classifier's answer for an unmatched leave).
@@ -869,11 +871,31 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// The registration is keyed by the context its admission used, so a
 			// re-admission's context is the one this member's leave must hold.
 			known.ctx = ctx;
-			return known;
 		}
-		const member = { sessionId, role, ctx };
-		liveSessionMembers.push(member);
+		const member = known ?? {
+			sessionId,
+			role,
+			ctx,
+			onDisposed: () => endDisposedMember(member),
+		};
+		if (!known) liveSessionMembers.push(member);
+		// #4965: every start reads the process, so a member pi disposed with no
+		// shutdown ends by the next start, not only at a primary start or a leave.
+		hasLiveSessionInProcess(member);
 		return member;
+	};
+	/**
+	 * #4965: a member pi disposed with no shutdown (#4704) gives its session
+	 * id back to the lookup, as its leave would have. Its scope retires only
+	 * when no member of this activation is live, the last leave's rule: the
+	 * coordinator's scope is every member's, and `scope` may name this one.
+	 */
+	const endDisposedMember = (
+		member: (typeof liveSessionMembers)[number],
+	): void => {
+		if (!member.scope) return;
+		if (liveSessionMembers.some(isLiveSessionMember)) unbindScope(member.scope);
+		else retireScope(member.scope, "disposed");
 	};
 	/**
 	 * End this leave's membership, answering whether it was the activation's
@@ -4589,9 +4611,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 			dumpActiveHandles("session_shutdown");
 			return ndjsonDrain;
 		} finally {
-			// A non-last leave keeps the activation current for its siblings.
+			// A non-last leave keeps the activation current for its siblings,
+			// and gives its session id back to the lookup (#4965).
 			if (isLastLiveMember)
 				retireOwnScope(shutdownReason, stableSessionId, shutdownScope);
+			else if (leave.scope) unbindScope(leave.scope);
 		}
 	});
 
