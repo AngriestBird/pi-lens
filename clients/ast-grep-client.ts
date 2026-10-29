@@ -10,7 +10,6 @@
 
 import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	AstGrepRuleManager,
@@ -30,6 +29,7 @@ import { getMutationBridge } from "./mutation-bridge.js";
 import type { LineageHandle } from "./session-scope.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { resolvePackagePath } from "./package-root.js";
+import { scannerReportParentDir } from "./scanner-temp-root.js";
 import { getAstGrepRuleFingerprint } from "./sgconfig.js";
 import { truncatedByOutputCap } from "./spawn-output-cap.js";
 import {
@@ -507,7 +507,9 @@ export class AstGrepClient {
 		lang: string,
 		options: { includeAnonymous?: boolean } = {},
 	): Promise<{ output?: string; error?: string }> {
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ast-dump-"));
+		const tmpDir = fs.mkdtempSync(
+			path.join(scannerReportParentDir(), "pi-lens-ast-dump-"),
+		);
 		const tmpFile = path.join(
 			tmpDir,
 			`snippet.${lang.replace(/[^a-z0-9_-]/gi, "") || "txt"}`,
@@ -556,7 +558,7 @@ export class AstGrepClient {
 
 		const snippet = validationSnippetFor(lang);
 		const tmpDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-sg-validate-"),
+			path.join(scannerReportParentDir(), "pi-lens-sg-validate-"),
 		);
 		const tmpFile = path.join(tmpDir, `snippet.${snippet.ext}`);
 		try {
@@ -617,7 +619,9 @@ export class AstGrepClient {
 
 		const language = extractRuleLanguage(ruleYaml) ?? "typescript";
 		const snippet = validationSnippetFor(language);
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-sg-rule-"));
+		const tmpDir = fs.mkdtempSync(
+			path.join(scannerReportParentDir(), "pi-lens-sg-rule-"),
+		);
 		try {
 			fs.writeFileSync(
 				path.join(tmpDir, `snippet.${snippet.ext}`),

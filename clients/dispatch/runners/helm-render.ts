@@ -52,8 +52,8 @@
  *
  * ## No repo writes
  *
- * Rendering goes to a scratch directory under `os.tmpdir()`, removed on every
- * exit path. The chart directory is never touched, and `--dependency-update` is
+ * Rendering goes to a scratch directory under `scannerReportParentDir()`
+ * (`os.tmpdir()` in production), removed on every exit path. The chart directory is never touched, and `--dependency-update` is
  * deliberately NOT passed: it would fetch archives into `charts/`. A missing
  * dependency is reported as a finding instead.
  *
@@ -71,7 +71,6 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { logLatency } from "../../latency-logger.js";
 import { PathKeyedMap } from "../../path-keyed-map.js";
@@ -82,6 +81,7 @@ import {
 	projectTrustDenialReason,
 } from "../../project-trust.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
+import { scannerReportParentDir } from "../../scanner-temp-root.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import {
 	killedForOutputCap,
@@ -926,7 +926,7 @@ async function renderAndValidate(
 	if (!helmCmd) return helmUnavailableResult(cwd);
 
 	const outputDir = fs.mkdtempSync(
-		path.join(os.tmpdir(), "pi-lens-helm-render-"),
+		path.join(scannerReportParentDir(), "pi-lens-helm-render-"),
 	);
 	try {
 		const render = await safeSpawnAsync(
