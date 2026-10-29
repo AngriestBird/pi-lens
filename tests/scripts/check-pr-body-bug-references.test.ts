@@ -3,6 +3,8 @@ import {
 	lintLocalPrBody,
 	lintPullRequestEvent,
 	referencedIssues,
+	resolveBugClosing,
+	resolveBugClosingViaGh,
 	resolveBugReferenced,
 } from "../../scripts/check-pr-body.mjs";
 
@@ -48,6 +50,14 @@ const base = (summary: string, tail = "") =>
 const detection = (shape = "new: stale mirror", enforcer = "#4439") =>
 	`\n## Detection\n\nCaught by: external user\nShould have been caught by: CI unit\nGap: none: no layer would have seen it\nShape: ${shape}\nEnforcer: ${enforcer}\n`;
 const refsOnly = base("Fixes the reader. Refs #4321 for the rest.");
+// Recurrence (#4968 F1): merged PR #4924 carried `(refs #4532)` in its title and
+// named the bug in its body only as `Part (a) of #4532 gap 13 only`, a form no
+// keyword list reads. #4532 is `bug`, and #4924 merged with no `## Detection`.
+const title4924 =
+	"fix: sweep held-document drift before lsp answers (refs #4532)";
+const body4924 = base(
+	"- Part (a) of #4532 gap 13 only: files pi (the language server) already holds. Files pi does NOT hold (part (b)) are a separate lane; `clients/out-of-band-changes.ts` is untouched.",
+);
 const noGit = (() => "") as never;
 
 describe("referencedIssues (#4968)", () => {
@@ -198,6 +208,80 @@ describe("resolveBugReferenced (#4968)", () => {
 		expect(fetchImpl).not.toHaveBeenCalled();
 	});
 
+	// The title channel (#4968 F1): the template makes the title carry the
+	// issue, so a bug named there owes the lesson whatever the body's wording.
+	it("reads a bug named only in the title (PR #4924)", async () => {
+		expect(
+			await resolveBugReferenced(body4924, labelFetch(["bug"]), title4924),
+		).toBe(true);
+		expect(await resolveBugReferenced(body4924, labelFetch(["bug"]))).toBe(
+			false,
+		);
+	});
+
+	it("reads a nightly-drift issue named in the title", async () => {
+		expect(
+			await resolveBugReferenced(
+				base("A plain change."),
+				labelFetch(["nightly-drift"]),
+				"fix: tidy (refs #12)",
+			),
+		).toBe(true);
+	});
+
+	it("is false for a title issue that is not a bug", async () => {
+		expect(
+			await resolveBugReferenced(
+				body4924,
+				labelFetch(["enhancement"]),
+				title4924,
+			),
+		).toBe(false);
+	});
+
+	it("reads an issue the title and the body both name once", async () => {
+		const fetchImpl = labelFetch(["enhancement"]);
+		await resolveBugReferenced(
+			base("Refs #12."),
+			fetchImpl,
+			"fix: tidy (refs #12)",
+		);
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves an issue the body closes to the closing route", async () => {
+		const fetchImpl = labelFetch(["bug"]);
+		expect(
+			await resolveBugReferenced(
+				base("Closes #12."),
+				fetchImpl,
+				"fix: tidy (closes #12)",
+			),
+		).toBe(false);
+		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
+	it("is null when the title issue's label cannot be read", async () => {
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValue(new Response("denied", { status: 500 }));
+		expect(await resolveBugReferenced(body4924, fetchImpl, title4924)).toBe(
+			null,
+		);
+	});
+
+	it("does not read a number in a title that has none", async () => {
+		const fetchImpl = labelFetch(["bug"]);
+		expect(
+			await resolveBugReferenced(
+				base("A plain change."),
+				fetchImpl,
+				"docs: tidy v4.4 notes for owner/repo#12 and 2026-10-29",
+			),
+		).toBe(false);
+		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
 	it("ignores a reference behind a bot block", async () => {
 		const fetchImpl = labelFetch(["bug"]);
 		const text = `${base("A plain change.")}\n\n<!-- greptile -->\nLast reviewed commit (refs #77)\n`;
@@ -220,13 +304,17 @@ describe("a PR that only references a bug issue (#4968)", () => {
 						);
 			return new Response(JSON.stringify({ body: text }), { status: 200 });
 		});
-	const runEvent = async (text: string, labels: string[] | "fail") => {
+	const runEvent = async (
+		text: string,
+		labels: string[] | "fail",
+		title?: string,
+	) => {
 		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 		const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			const result = await lintPullRequestEvent(
 				eventFetch(labels, text),
-				{ pull_request: { number: 4968, body: text } },
+				{ pull_request: { number: 4968, body: text, title } },
 				() => "",
 			);
 			return {
@@ -307,6 +395,54 @@ describe("a PR that only references a bug issue (#4968)", () => {
 		expect(run.errors).toContain("owner/repo#12");
 	});
 
+	it("CI reds a bug named only in the title (PR #4924)", async () => {
+		const run = await runEvent(body4924, ["bug"], title4924);
+		expect(run.result.valid).toBe(false);
+		expect(run.errors).toContain('missing "## Detection"');
+	});
+
+	it("CI passes a title-named bug with a complete Detection section", async () => {
+		const run = await runEvent(
+			`${body4924}\n${detection()}`,
+			["bug"],
+			title4924,
+		);
+		expect(run.errors).toBe("");
+		expect(run.result.valid).toBe(true);
+	});
+
+	// F2: CI has the token, so an unreadable label refuses there. The message
+	// does not tell the author to rewrite a reference that was already readable.
+	it("CI refuses a title issue whose label cannot be read", async () => {
+		const run = await runEvent(body4924, "fail", title4924);
+		expect(run.result.valid).toBe(false);
+		expect(run.errors).toMatch(/#4532.*could not be read/s);
+		expect(run.errors).not.toContain("Write each reference");
+	});
+
+	it("CI tells the author to rewrite a reference it cannot read", async () => {
+		const run = await runEvent(base("Refs owner/repo#12."), ["enhancement"]);
+		expect(run.errors).toContain('Write each reference as "Refs #N"');
+	});
+
+	// F7: the unknown refusal also binds a PR that only references the bug.
+	it("CI names a referenced bug in the unknown refusal", async () => {
+		const run = await runEvent(
+			`${refsOnly}\n${detection().replace("external user", "unknown")}`,
+			["bug"],
+		);
+		expect(run.errors).not.toContain("a bug-closing PR names");
+		expect(run.errors).toContain("closes or references a bug");
+	});
+
+	// F3: #4968 names `nightly-drift` for Closes too; 17 of 20 nightly-drift
+	// issues carry no `bug` label, so a bug-only closing route left them out.
+	it("CI reds a Closes of a nightly-drift-only issue", async () => {
+		const run = await runEvent(base("Closes #4321."), ["nightly-drift"]);
+		expect(run.result.valid).toBe(false);
+		expect(run.errors).toContain('missing "## Detection"');
+	});
+
 	// The closing path is unchanged: an unreadable closed-issue label still
 	// warns and skips (#4288), so a closing-only PR is not newly refused.
 	it("CI keeps warn-and-skip for an unreadable closed issue", async () => {
@@ -344,30 +480,84 @@ describe("the local preflight reads a referenced bug (#4968)", () => {
 		expect(result.errors).toEqual([]);
 	});
 
-	it("refuses when the referenced label is unreadable", () => {
-		const result = lintLocalPrBody(refsOnly, process.cwd(), noGit, {
-			bugClosing: false,
-			bugReferenced: null,
+	// F2: a worker without gh (a write-confined sandbox) cannot read a label.
+	// Locally that warns and skips, as the closing route does; CI, which has the
+	// token, refuses (pinned above). Before, every `Refs #N` body reddened offline.
+	const localWarnings = (run: () => unknown) => {
+		const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			run();
+			return warnings.mock.calls.flat().join("\n");
+		} finally {
+			warnings.mockRestore();
+		}
+	};
+
+	it("warns and skips when the referenced label is unreadable", () => {
+		let result: ReturnType<typeof lintLocalPrBody> | undefined;
+		const warned = localWarnings(() => {
+			result = lintLocalPrBody(refsOnly, process.cwd(), noGit, {
+				bugClosing: false,
+				bugReferenced: null,
+			});
 		});
-		expect(result.valid).toBe(false);
-		expect(result.errors.join(" ")).toMatch(/#4321.*could not be read/s);
+		expect(result?.errors).toEqual([]);
+		expect(result?.valid).toBe(true);
+		expect(warned).toMatch(/could not read the label of #4321.*skipped/s);
 	});
 
-	it("refuses when the caller supplies no label reader at all", () => {
-		const result = lintLocalPrBody(refsOnly, process.cwd(), noGit, {
-			bugClosing: false,
+	it("warns and skips when the caller supplies no label reader at all", () => {
+		let result: ReturnType<typeof lintLocalPrBody> | undefined;
+		const warned = localWarnings(() => {
+			result = lintLocalPrBody(refsOnly, process.cwd(), noGit, {
+				bugClosing: false,
+			});
 		});
-		expect(result.valid).toBe(false);
+		expect(result?.valid).toBe(true);
+		expect(warned).toContain("#4321");
 	});
 
-	it("hands the whole body to an injected reader", () => {
+	// The skip covers the label read only. A reference the reader cannot turn
+	// into `#N` needs no network, so it still refuses offline.
+	it("still refuses a reference form it cannot read when labels are unreadable", () => {
+		const result = lintLocalPrBody(
+			base("Refs owner/repo#12."),
+			process.cwd(),
+			noGit,
+			{ bugClosing: false, bugReferenced: null },
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("owner/repo#12");
+		expect(result.errors.join(" ")).toContain(
+			'Write each reference as "Refs #N"',
+		);
+	});
+
+	it("hands the whole body and the title to an injected reader", () => {
 		const resolve = vi.fn().mockReturnValue(false);
-		const result = lintLocalPrBody(refsOnly, process.cwd(), noGit, {
+		const result = lintLocalPrBody(body4924, process.cwd(), noGit, {
 			bugClosing: false,
 			resolveBugReferenced: resolve,
+			title: title4924,
 		});
-		expect(resolve).toHaveBeenCalledWith(refsOnly);
+		expect(resolve).toHaveBeenCalledWith(body4924, title4924);
 		expect(result.errors).toEqual([]);
+	});
+
+	// F4: the light validator runs only when no route already required the
+	// section. A referenced bug with an `unknown` answer is reported once.
+	it("reports an unknown answer on a referenced bug once", () => {
+		const result = lintLocalPrBody(
+			`${refsOnly}\n${detection().replace("external user", "unknown")}`,
+			process.cwd(),
+			noGit,
+			{ bugClosing: false, bugReferenced: true },
+		);
+		const detectionErrors = result.errors.filter((error) =>
+			error.includes('"## Detection"'),
+		);
+		expect(detectionErrors).toHaveLength(1);
+		expect(detectionErrors[0]).toContain("not a detection lesson");
 	});
 
 	it("does not read references when the body already closes a bug", () => {
@@ -379,5 +569,47 @@ describe("the local preflight reads a referenced bug (#4968)", () => {
 			{ bugClosing: true, resolveBugReferenced: resolve },
 		);
 		expect(resolve).not.toHaveBeenCalled();
+	});
+});
+
+// F3 (#4968): the closing route reads the same label list as a reference. A
+// `Closes` of a nightly-drift-only issue owed no section before.
+describe("the closing route reads nightly-drift (#4968)", () => {
+	const labelFetch = (names: string[]) =>
+		vi
+			.fn()
+			.mockImplementation(
+				async () =>
+					new Response(
+						JSON.stringify({ labels: names.map((name) => ({ name })) }),
+						{ status: 200 },
+					),
+			);
+	beforeEach(() => {
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	});
+	afterEach(() => vi.unstubAllEnvs());
+
+	it("resolveBugClosing is true for a nightly-drift label", async () => {
+		expect(
+			await resolveBugClosing("Closes #12.", labelFetch(["nightly-drift"])),
+		).toBe(true);
+	});
+
+	it("resolveBugClosingViaGh is true for a nightly-drift label", async () => {
+		const exec = vi
+			.fn()
+			.mockReturnValue(JSON.stringify({ labels: [{ name: "nightly-drift" }] }));
+		expect(
+			await resolveBugClosingViaGh("Closes #12.", process.cwd(), exec as never),
+		).toBe(true);
+	});
+
+	it("resolveBugClosing stays false for an unrelated label", async () => {
+		expect(
+			await resolveBugClosing("Closes #12.", labelFetch(["enhancement"])),
+		).toBe(false);
 	});
 });

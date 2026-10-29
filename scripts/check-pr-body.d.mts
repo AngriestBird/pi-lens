@@ -100,6 +100,7 @@ export declare function resolveBugClosingViaGh(
 export declare function resolveBugReferenced(
 	fullBody: string,
 	fetchImpl?: typeof fetch,
+	title?: string,
 ): Promise<boolean | null>;
 export declare function resolveBugReferencedViaGh(
 	fullBody: string,
@@ -109,6 +110,7 @@ export declare function resolveBugReferencedViaGh(
 		args: string[],
 		options: Record<string, unknown>,
 	) => string,
+	title?: string,
 ): Promise<boolean | null>;
 export declare function referencedIssues(body?: string): {
 	issues: number[];
@@ -117,6 +119,8 @@ export declare function referencedIssues(body?: string): {
 export declare function lintReferencedBugLabels(
 	fullBody: string,
 	resolved: boolean | null,
+	title?: string,
+	options?: { skipUnreadableLabels?: boolean },
 ): string[];
 export declare function testCorpus(options?: {
 	cwd?: string;
@@ -139,7 +143,7 @@ export declare function lintLocalPrBody(
 		bugClosing?: boolean | null;
 		resolveBugClosing?: (body: string) => boolean | null;
 		bugReferenced?: boolean | null;
-		resolveBugReferenced?: (body: string) => boolean | null;
+		resolveBugReferenced?: (body: string, title?: string) => boolean | null;
 	},
 ): { valid: boolean; errors: string[] };
 export declare function parseRuntimeHunks(diff: string): Array<{
@@ -179,7 +183,9 @@ export declare function resolveTouchesTests(
 ): Promise<boolean | null>;
 export declare function lintPullRequestEvent(
 	fetchImpl?: typeof fetch,
-	event?: { pull_request?: { number: number; body?: string | null } },
+	event?: {
+		pull_request?: { number: number; body?: string | null; title?: string };
+	},
 	diffImpl?: () => string,
 ): Promise<{ valid: boolean; repaired: boolean }>;
 export declare function localDiff(

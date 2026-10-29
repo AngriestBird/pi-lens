@@ -556,11 +556,12 @@ operator's private notes, so a different orchestrator can run the same train.
   words are the `DETECTION_LAYERS` list exported by `scripts/check-pr-body.mjs`,
   which the `## Detection` body check reads; the prose does not restate them.
   `nightly` may carry its workflow as `nightly:<workflow>`. A PR that only
-  references a `bug` or `nightly-drift` issue owes the section too (#4968: the
-  2026-10-29 audit found 24 bug-linked PRs merged in one week with `Refs #N`
-  and no lesson). A PR that owes the section is refused when `Caught by:`,
+  references a `bug` or `nightly-drift` issue, in its body or its title, owes
+  the section too (#4968: the 2026-10-29 audit found 24 bug-linked PRs merged
+  in one week with `Refs #N` and no lesson). A PR that owes the section is refused when `Caught by:`,
   `Should have been caught by:`, the reason after `Gap: none:`, the
-  `Shape: new:` name or the `Enforcer: none:` reason is a placeholder (starts with `unknown`, or is exactly `n/a`, `tbd` or `?`)
+  `Shape: new:` name or the `Enforcer: none:` reason is a placeholder (starts
+  with `unknown`, or is exactly `n/a`, `tbd` or `?`)
   (#4519: 139 of 363 closed bugs read unknown in the 2026-10-16 retro).
   If that layer does not exist, file it as an issue with the bug as
   its named recurrence — the same standard shapes are held to. The lesson

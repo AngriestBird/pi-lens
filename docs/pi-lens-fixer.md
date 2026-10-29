@@ -266,10 +266,12 @@ rigor (#2599).
   issue's labels through `gh api`; a `::warning::` that the Detection check
   was skipped means gh failed, so the section was not required, not that it
   passed (#4288). A body that only references an issue (`Refs #N`, or any
-  close keyword the closing read does not own) owes the same section when that
-  issue is labelled `bug` or `nightly-drift`, and a label gh cannot read, or a
-  reference written as `owner/repo#N` or a URL, is refused, not skipped
-  (#4968). A non-bug PR either deletes the `## Detection` section or
+  close keyword the closing read does not own), or whose title names one
+  (`(refs #N)`), owes the same section when that issue is labelled `bug` or
+  `nightly-drift`; so does a body that closes a `nightly-drift` issue. A
+  reference written as `owner/repo#N` or a URL is refused. CI refuses a label
+  it cannot read; the local preflight, with no working gh, warns and skips it
+  as for a closed issue (#4968). A non-bug PR either deletes the `## Detection` section or
   fills the three lines, and a `Shape:` or `Enforcer:` line it does write is
   validated too; free text in between reds the local preflight. A bug-closing
   PR that answers a layer, the `Gap: none:` reason, the `Shape: new:` name or
