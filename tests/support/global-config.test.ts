@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { removeTempDirSync } from "../clients/test-utils.js";
-import { withGlobalConfig } from "./global-config.js";
+import { useConfigPath, withGlobalConfig } from "./global-config.js";
 
 const SENTINEL = "/pi-lens-global-config-test/sentinel.json";
 let original: string | undefined;
@@ -66,5 +66,96 @@ describe("withGlobalConfig", () => {
 		const file = path.join(dir, "config.json");
 		await withGlobalConfig(file, {}, () => undefined);
 		expect(process.env.PI_LENS_CONFIG_PATH).toBeUndefined();
+	});
+});
+
+/**
+ * The path setter `useConfigPath` (#4937 remainder 1, round 2): it sets or
+ * unsets `PI_LENS_CONFIG_PATH`, optionally writes the file verbatim, and owns
+ * the restore, so a loader test whose SUBJECT is the path (absent file,
+ * explicit file, default under HOME, malformed text, unset variable) holds no
+ * inline save and restore.
+ *
+ * Recurrence this guards: nine loader files each carried a private
+ * save-in-beforeEach, restore-in-afterEach pair for this variable. A
+ * restore-only registration reds the env-restore sweep (#4589) while the file
+ * still assigns the variable, so the pair could not move until the setter owned
+ * the write too. The cases below run in file order: the first leaves the
+ * variable changed, the next observes what the scope's restore put back.
+ */
+
+/** Run `register` with the variable at `value` (or unset), then put it back. */
+function registerWith<T>(value: string | undefined, register: () => T): T {
+	const saved = process.env.PI_LENS_CONFIG_PATH;
+	if (value === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+	else process.env.PI_LENS_CONFIG_PATH = value;
+	try {
+		return register();
+	} finally {
+		if (saved === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+		else process.env.PI_LENS_CONFIG_PATH = saved;
+	}
+}
+
+const COLLECTED_VALUE = "/pi-lens-global-config-test/collected.json";
+
+/**
+ * Records the variable as it stands once the scope's own restore has run.
+ * Vitest runs `afterEach` hooks of one scope in reverse registration order, so
+ * the observer is registered BEFORE `useConfigPath()` and runs after its
+ * restore. The file-level `beforeEach` rewrites the variable to the sentinel
+ * before every case, which is why the next test cannot be the observer.
+ */
+function observeAfterRestore(): { value: () => string | undefined } {
+	let seen: string | undefined = "never observed";
+	afterEach(() => {
+		seen = process.env.PI_LENS_CONFIG_PATH;
+	});
+	return { value: () => seen };
+}
+
+describe("useConfigPath restores a variable that was set when the scope was collected", () => {
+	const observed = observeAfterRestore();
+	const setConfigPath = registerWith(COLLECTED_VALUE, () => useConfigPath());
+
+	it("points the variable at the file it is given, writing nothing for an absent file", () => {
+		const absent = path.join(dir, "absent", "config.json");
+		setConfigPath(absent);
+		expect(process.env.PI_LENS_CONFIG_PATH).toBe(absent);
+		expect(fs.existsSync(absent)).toBe(false);
+	});
+
+	it("put the collection-time value back after that test", () => {
+		expect(observed.value()).toBe(COLLECTED_VALUE);
+	});
+
+	it("unsets the variable when it is given undefined", () => {
+		setConfigPath(undefined);
+		expect(process.env.PI_LENS_CONFIG_PATH).toBeUndefined();
+	});
+});
+
+describe("useConfigPath restores a variable that was unset when the scope was collected", () => {
+	const observed = observeAfterRestore();
+	const setConfigPath = registerWith(undefined, () => useConfigPath());
+
+	it("sets the variable inside the test", () => {
+		setConfigPath(path.join(dir, "config.json"));
+		expect(process.env.PI_LENS_CONFIG_PATH).toBeDefined();
+	});
+
+	it("unset the variable again after that test", () => {
+		expect(observed.value()).toBeUndefined();
+	});
+});
+
+describe("useConfigPath contents", () => {
+	const setConfigPath = useConfigPath();
+
+	it("writes the given text verbatim, malformed JSON included, creating the directory", () => {
+		const file = path.join(dir, "deep", "nested", "config.json");
+		setConfigPath(file, "{ not json");
+		expect(process.env.PI_LENS_CONFIG_PATH).toBe(file);
+		expect(fs.readFileSync(file, "utf8")).toBe("{ not json");
 	});
 });

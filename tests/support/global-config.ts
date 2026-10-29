@@ -7,7 +7,8 @@
  * the loaded copy reads it while the factory runs (`index.ts`
  * `loadPiLensGlobalConfig()`), so the variable must name the file for the
  * factory and the session. `useGlobalConfig` scopes it to a describe block;
- * `withGlobalConfig` scopes it to one callback.
+ * `withGlobalConfig` scopes it to one callback; `useConfigPath` is the bare
+ * path setter for a test whose subject is the path itself.
  *
  * A flag a test is ABOUT does not come here: it moves to tier 2 (`pi-session.ts`).
  */
@@ -18,6 +19,41 @@ import { afterEach } from "vitest";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
 /**
+ * The path setter (#4937 remainder 1, round 2). Register the restore for the
+ * enclosing scope and return `setConfigPath`. Call it at collection time
+ * (module or `describe` body). `setConfigPath(file)` points
+ * `PI_LENS_CONFIG_PATH` at `file` for the rest of the current test and writes
+ * nothing, which expresses an absent file, an explicit file the test wrote, or
+ * the default under a fixture HOME. `setConfigPath(file, text)` first writes
+ * `text` verbatim to `file` (creating its directory), which expresses a
+ * malformed config as well as a valid one. `setConfigPath(undefined)` unsets
+ * the variable. The restore runs after every test of the scope and puts the
+ * variable back to the value it had when this function was called, so the next
+ * test starts from the harness default.
+ */
+export function useConfigPath(): (
+	file: string | undefined,
+	text?: string,
+) => void {
+	const saved = process.env.PI_LENS_CONFIG_PATH;
+	afterEach(() => {
+		if (saved === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+		else process.env.PI_LENS_CONFIG_PATH = saved;
+	});
+	return (file, text) => {
+		if (file === undefined) {
+			delete process.env.PI_LENS_CONFIG_PATH;
+			return;
+		}
+		if (text !== undefined) {
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, text);
+		}
+		process.env.PI_LENS_CONFIG_PATH = file;
+	};
+}
+
+/**
  * Register the restore for the enclosing scope and return the setter. Call it
  * at collection time (module or `describe` body). Each setter call writes the
  * config to a fresh file and points `PI_LENS_CONFIG_PATH` at it for the rest of
@@ -26,11 +62,9 @@ import { removeTempDirSync } from "../clients/test-utils.js";
  * next test starts from the harness default.
  */
 export function useGlobalConfig(): (config: Record<string, unknown>) => void {
-	const saved = process.env.PI_LENS_CONFIG_PATH;
+	const setConfigPath = useConfigPath();
 	const dirs: string[] = [];
 	afterEach(() => {
-		if (saved === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-		else process.env.PI_LENS_CONFIG_PATH = saved;
 		for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 	});
 	return (config) => {
@@ -38,9 +72,7 @@ export function useGlobalConfig(): (config: Record<string, unknown>) => void {
 			path.join(os.tmpdir(), "pi-lens-global-config-"),
 		);
 		dirs.push(dir);
-		const file = path.join(dir, "config.json");
-		fs.writeFileSync(file, JSON.stringify(config));
-		process.env.PI_LENS_CONFIG_PATH = file;
+		setConfigPath(path.join(dir, "config.json"), JSON.stringify(config));
 	};
 }
 
