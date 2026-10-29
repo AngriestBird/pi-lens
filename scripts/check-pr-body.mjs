@@ -2538,9 +2538,9 @@ function globToRegExp(pattern, { directory }) {
 }
 
 /** The record-shaped mentions of a section, in the order the body makes them. */
-function recordMentions(content) {
+function recordMentions(content, families = []) {
 	// A `TLA+ unaffected: <family>` line names a family, not a record (#3902).
-	const source = withoutDeclaredFamilies(content ?? "");
+	const source = withoutDeclaredFamilies(content ?? "", families);
 	const mentioned = new Map();
 	for (const match of source.matchAll(/`([^`\n]+)`/g)) {
 		const span = match[1].trim();
@@ -2737,7 +2737,8 @@ function warnRecordReadBackSkipped(step, names, reason = "git grep failed") {
 
 function lintObservabilityRecordsTested(lines, headings, options = {}) {
 	const content = observabilitySectionContent(lines, headings);
-	const { mentions, truncated } = recordMentions(content);
+	const families = loadSeamMap(options.cwd)?.families ?? [];
+	const { mentions, truncated } = recordMentions(content, families);
 	if (!mentions.length) return [];
 	if (truncated)
 		console.warn(

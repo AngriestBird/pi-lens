@@ -20,9 +20,11 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 
 // #3902: the PR-body lint cases inject a fake git, so none may spawn a real
-// one. The child-process boundary records every spawn and refuses it; a case
-// asserts the record stayed empty. A real spawn plus a lex of every matching
-// runtime file took 235 ms solo and over 5 s on a loaded Windows runner.
+// one. The child-process boundary records every `execFileSync` spawn and
+// refuses it; a case asserts the record stayed empty. It does not see the
+// `execSync` form, which `check-pr-body.mjs` does not import today (a p3
+// residual in the PR body). A real spawn plus a lex of every matching runtime
+// file took 235 ms solo and over 5 s on a loaded Windows runner.
 const realGit = vi.hoisted(() => ({ calls: [] as string[][] }));
 vi.mock("node:child_process", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:child_process")>()),
@@ -478,17 +480,33 @@ describe("TLA+ coverage in the PR-body lint (#3802)", () => {
 });
 
 describe("withoutDeclaredFamilies (#3902)", () => {
+	const FAMILIES = ["read-guard", "session-lifecycle"];
+
 	it("drops the family token of a declaration and keeps its reason", () => {
 		expect(
 			withoutDeclaredFamilies(
 				"- **TLA+ unaffected: read-guard — emits `tool-cwd-resolution`.",
+				FAMILIES,
 			),
 		).toBe("- **TLA+ unaffected:  — emits `tool-cwd-resolution`.");
 		expect(
 			withoutDeclaredFamilies(
 				"TLA+ unaffected: read-guard — a.\nSee read-guard and `kind-one`.",
+				FAMILIES,
 			),
 		).toBe("TLA+ unaffected:  — a.\nSee read-guard and `kind-one`.");
+	});
+
+	// F1 (#3902 review, round 1): only a known family is a declared slot. A
+	// malformed declaration, or a token that merely starts with a family name,
+	// keeps its token so the #4597 read-back still sees it.
+	it("keeps the token of a declaration that names no known family", () => {
+		expect(
+			withoutDeclaredFamilies("TLA+ unaffected: probe-kind-3902", FAMILIES),
+		).toBe("TLA+ unaffected: probe-kind-3902");
+		expect(
+			withoutDeclaredFamilies("TLA+ unaffected: read-guard-foo — a.", FAMILIES),
+		).toBe("TLA+ unaffected: read-guard-foo — a.");
 	});
 });
 

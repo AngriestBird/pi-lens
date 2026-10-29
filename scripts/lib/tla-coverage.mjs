@@ -434,13 +434,20 @@ function bodyNamesFamily(lines, family) {
 /**
  * The text with the family token of each `TLA+ unaffected:` declaration line
  * removed. A family name is a declared slot of that line, not an Observability
- * record mention (#3902); the reason after it stays.
+ * record mention (#3902); the reason after it stays. Only a token that names a
+ * known family (`families`, the map's list) is removed, so a malformed
+ * declaration keeps its token and the #4597 read-back still checks it.
  */
-export function withoutDeclaredFamilies(text = "") {
-	const declared = new RegExp(`(${DECLARATION_PREFIX})[\\w-]+`);
+export function withoutDeclaredFamilies(text = "", families = []) {
+	const known = new Set(families);
+	const declared = new RegExp(`(${DECLARATION_PREFIX})([\\w-]+)`);
 	return String(text)
 		.split(/\r?\n/)
-		.map((line) => line.replace(declared, "$1"))
+		.map((line) =>
+			line.replace(declared, (whole, prefix, token) =>
+				known.has(token) ? prefix : whole,
+			),
+		)
 		.join("\n");
 }
 
