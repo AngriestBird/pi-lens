@@ -3550,10 +3550,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		const cwd = ctx.cwd ?? runtime.projectRoot;
 		// #4942: the files THIS settling session read or wrote are the ones to
 		// sweep; the coordinator's guard holds only the primary's. The replay
-		// below still stamps the coordinator's guard (the mutation bridge
-		// carries no session id), which only ever tightens it: settled-sweep
+		// below still stamps the coordinator's guard (the mutation bridge's
+		// stamp reads no session), which only ever tightens it: settled-sweep
 		// drift never creates an authorship (#4210).
-		const settleGuard = runtime.readGuardFor(getStableSessionId(ctx));
+		const settleSessionId = getStableSessionId(ctx);
+		const settleGuard = runtime.readGuardFor(settleSessionId);
 		try {
 			const result = await runObservedSettledSweep({
 				turnIndex: runtime.turnIndex,
@@ -3566,11 +3567,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// #3521: a /tree can land while the sweep awaits; the replayed
 				// write then must not vouch for a file the new branch never showed.
 				// #3620: nor, after `/new`, for one the new session never read.
+				// #4943: the settling session owns what its sweep found, so the
+				// drain right after this sweep formats it.
 				record: (entry) =>
 					replayThroughMutationBridge({
 						...entry,
 						readGuardBranchEpoch,
 						lineage,
+						...(settleSessionId !== undefined && {
+							sessionId: settleSessionId,
+						}),
 					}),
 				getStoredLineHashes: (candidate) =>
 					storedLineHashesFor(settleGuard, candidate),
@@ -3646,23 +3652,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 		ctx: DeferredDrainCtx,
 	): Promise<void> {
 		const currentSessionId = getStableSessionId(ctx);
-		// #791 defense-in-depth: mirrors how session_start already skips
-		// handleSessionStart for a concurrent in-process secondary
-		// (subagent) — if THIS firing is positively identified as belonging
-		// to a live sibling secondary session rather than the registered
-		// primary, skip the deferred-format flush entirely rather than
-		// relying only on the per-record ownership filter inside
-		// handleAgentEnd. Fail-safe: any inconclusive signal classifies
-		// "primary" and runs as before.
-		const emission = classifyOwnedSessionEmission(ctx, currentSessionId);
-		if (emission === "concurrent-secondary") {
-			// #4942: the backstop for read captures a dead run left (see the top of
-			// `handleAgentEnd`) is per session now. The coordinator's settle no
-			// longer reaches a secondary's guard, and this arm returns before
-			// `handleAgentEnd`, so the secondary releases its own here.
-			runtime.readGuardFor(currentSessionId).dropProvisionalReads();
+		// #791, #4943: a firing positively identified as a live sibling
+		// secondary's (an in-process subagent, or a start declined for another
+		// root) drains only the records its own session owns, and skips the
+		// primary-only parts: the ownerless and stale-orphan claims and the
+		// actionable-warning quick fixes. Fail-safe: any inconclusive signal
+		// classifies "primary" and runs as before.
+		const sessionRole = classifyOwnedSessionEmission(ctx, currentSessionId);
+		if (sessionRole === "concurrent-secondary") {
 			dbg(
-				`deferred_mutation_drain: concurrent secondary session detected — skipping (sessionId=${currentSessionId})`,
+				`deferred_mutation_drain: concurrent secondary session detected — draining its own records only (sessionId=${currentSessionId})`,
 			);
 			logLatency({
 				type: "phase",
@@ -3671,7 +3670,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 				durationMs: 0,
 				metadata: { sessionId: currentSessionId },
 			});
-			return;
 		}
 		await handleAgentEnd({
 			signal: ctx.signal,
@@ -3683,6 +3681,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 			dbg,
 			runtime,
 			cacheManager,
+			// The process has one format service; a secondary's id would replace
+			// the primary's, so every drain asks for the coordinator's.
 			getFormatService: () =>
 				getFormatService(runtime.telemetrySessionId, true),
 			getAutofixClients: async () => {
@@ -3690,6 +3690,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return { biomeClient, ruffClient };
 			},
 			currentSessionId,
+			sessionRole,
 		});
 		if (ctx.ui?.setStatus && ctx.ui.theme) {
 			updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);

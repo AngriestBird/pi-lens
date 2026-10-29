@@ -1491,7 +1491,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// record and returns its ownership fields.
 		// 29 -> 31 (#4921): `noteResolvedBlockerFile` carries the removed
 		// record's owning session onto its Resolved note.
-		"clients/runtime-coordinator.ts": 31,
+		// 31 -> 33 (#4943): a secondary's owned-only claim reads the queued
+		// record's owner and leaves another session's record queued.
+		"clients/runtime-coordinator.ts": 33,
 		"clients/runtime-tool-call.ts": 1,
 		"clients/runtime-tool-result.ts": 5,
 		// 6 -> 8 (#3218): the resolved-blocker filter keys each current blocker

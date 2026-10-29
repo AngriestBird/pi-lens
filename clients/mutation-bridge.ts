@@ -518,7 +518,9 @@ function queueDeferredMutation(
 			classification.toolName,
 			projectRoot,
 			kind,
-			runtime.telemetrySessionId,
+			// #4943: the writing session owns the record, so its own settle drains
+			// it (the same owner the turn-state range above reads).
+			entry.sessionId ?? runtime.telemetrySessionId,
 			projectRoot,
 			// #3521: the settled sweep's epoch, so a record it queues after
 			// a /tree is not credited to the new branch. #3677: a value this

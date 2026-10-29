@@ -267,6 +267,8 @@ export interface ObservedReplayEntry {
 	readGuardBranchEpoch?: number;
 	/** #3620: see `BridgeMutationEntry.lineage`. */
 	lineage?: LineageHandle;
+	/** #4943: the session whose write this is; see `BridgeMutationEntry.sessionId`. */
+	sessionId?: string;
 }
 
 /** How a caller hands an observed change back to the pipeline. */
