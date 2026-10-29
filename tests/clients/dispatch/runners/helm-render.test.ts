@@ -738,6 +738,51 @@ describe("helm-render rendered-manifest checks", () => {
 		expect(fs.existsSync(scratch as string)).toBe(false);
 	});
 
+	// Recurrence: #4133 gave every scanner whose report directory is created
+	// with `mkdtempSync` the `scannerReportParentDir` seam, so a harness that
+	// SIGKILLs the child before the `finally` strands the directory inside a root
+	// it removes. The render scratch directory stayed on a raw `os.tmpdir()`.
+	it("renders into a scratch directory under the owned scanner root", async () => {
+		const chart = installChart("valid-chart");
+		optIn({ helm: { renderValidation: { enabled: true } } });
+		const scannerRoot = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-scanner-root-")),
+		);
+		vi.stubEnv("PI_LENS_TEST_SCANNER_TMPDIR", scannerRoot);
+		try {
+			const stub = stubSpawns({
+				render: (outputDir) => {
+					writeRendered(
+						outputDir,
+						path.join("pi-lens-render-valid", "templates", "deployment.yaml"),
+						RENDERED_DEPLOYMENT,
+					);
+					return { status: 0, stdout: "", stderr: "" };
+				},
+			});
+
+			await helmRenderRunner.run(
+				makeRunnerCtx(
+					path.join(chart, "templates", "deployment.yaml"),
+					workspace,
+					{ kind: "yaml", projectRoot: workspace },
+				),
+			);
+
+			const scratch = stub.renderedIn();
+			expect(scratch).toBeTruthy();
+			expect(fs.realpathSync(path.dirname(scratch as string))).toBe(
+				scannerRoot,
+			);
+			expect(path.basename(scratch as string)).toContain(
+				"pi-lens-helm-render-",
+			);
+		} finally {
+			vi.unstubAllEnvs();
+			fs.rmSync(scannerRoot, { recursive: true, force: true });
+		}
+	});
+
 	it("says the manifests are unscanned when trivy exits 0 with an unreadable report", async () => {
 		const chart = installChart("valid-chart");
 		optIn({
