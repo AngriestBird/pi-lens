@@ -2665,6 +2665,170 @@ describe("runtime-agent-end deferred formatting", () => {
 		});
 	});
 
+	// #4943 R1 (option b): a concurrent in-process secondary drains its own
+	// records at its own settle. Before, its settle skipped the drain, so a
+	// subagent's record waited for the primary's 10-minute stale claim. The
+	// end-to-end witness is tests/index-4943-deferred-drain-owner.test.ts; these
+	// cases pin what the secondary's drain must NOT take.
+	describe("#4943 a concurrent secondary's drain", () => {
+		const formatted = () =>
+			vi.fn(async (fp: string) => {
+				fs.writeFileSync(fp, "const x = 1;\n");
+				return {
+					filePath: fp,
+					formatters: [{ name: "biome", success: true, changed: true }],
+					anyChanged: true,
+					allSucceeded: true,
+				};
+			});
+
+		it("formats only the secondary's own record: never another session's, an ownerless one or a stale orphan", async () => {
+			// RECURRENCE GUARDED: a secondary's settle that read the primary's
+			// claim rules took the primary's ownerless and aged-out records, and
+			// formatted files the primary was still working on.
+			const env = setupTestEnvironment("pi-lens-agent-end-4943-owned-only-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const own = createTempFile(env.tmpDir, "src/own.ts", "const x=1");
+				const foreign = createTempFile(
+					env.tmpDir,
+					"src/foreign.ts",
+					"const x=1",
+				);
+				const ownerless = createTempFile(
+					env.tmpDir,
+					"src/ownerless.ts",
+					"const x=1",
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferFormat(own, env.tmpDir, "edit", env.tmpDir, "session-sub");
+				runtime.deferFormat(
+					foreign,
+					env.tmpDir,
+					"edit",
+					env.tmpDir,
+					"session-parent",
+				);
+				runtime.deferFormat(ownerless, env.tmpDir, "edit", env.tmpDir);
+				const formatFile = formatted();
+
+				const summary = await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					getFormatService: () => ({ recordRead: () => {}, formatFile }) as any,
+					currentSessionId: "session-sub",
+					sessionRole: "concurrent-secondary",
+					// Every foreign record is stale: a primary's drain would claim it.
+					staleAfterMs: -1,
+				});
+
+				expect(formatFile.mock.calls.map(([fp]) => fp)).toEqual([own]);
+				expect(summary?.changed).toEqual([own]);
+				expect(runtime.pendingDeferredFormatCount).toBe(2);
+				// I4: the drain's own write is the draining session's change-log row.
+				expect(
+					readChangesSince(env.tmpDir, 0).map(({ source, sessionId }) => ({
+						source,
+						sessionId,
+					})),
+				).toEqual([{ source: "format", sessionId: "session-sub" }]);
+			} finally {
+				if (previousDataDir === undefined) {
+					delete process.env.PILENS_DATA_DIR;
+				} else {
+					process.env.PILENS_DATA_DIR = previousDataDir;
+				}
+				env.cleanup();
+			}
+		});
+
+		it("claims nothing for a secondary with no stable session id", async () => {
+			// RECURRENCE GUARDED: the primary's fail-safe (no id claims everything)
+			// read by a secondary would drain every session's queue.
+			const env = setupTestEnvironment("pi-lens-agent-end-4943-no-id-");
+			try {
+				const ownerless = createTempFile(env.tmpDir, "src/a.ts", "const x=1");
+				const foreign = createTempFile(env.tmpDir, "src/b.ts", "const x=1");
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferFormat(ownerless, env.tmpDir, "edit", env.tmpDir);
+				runtime.deferFormat(
+					foreign,
+					env.tmpDir,
+					"edit",
+					env.tmpDir,
+					"session-parent",
+				);
+				const formatFile = formatted();
+
+				const summary = await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					getFormatService: () => ({ recordRead: () => {}, formatFile }) as any,
+					sessionRole: "concurrent-secondary",
+				});
+
+				expect(formatFile).not.toHaveBeenCalled();
+				expect(summary).toBeUndefined();
+				expect(runtime.pendingDeferredFormatCount).toBe(2);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("leaves the per-cwd actionable-warning quick fixes to the primary", async () => {
+			// RECURRENCE GUARDED: the quick-fix pass reads a per-cwd report, not
+			// a record any session owns; a secondary's settle applying it would
+			// rewrite files of the primary's turn.
+			const env = setupTestEnvironment("pi-lens-agent-end-4943-quickfix-");
+			try {
+				const reads: string[] = [];
+				const end = (sessionRole: "primary" | "concurrent-secondary") => {
+					const runtime = new RuntimeCoordinator();
+					runtime.projectRoot = env.tmpDir;
+					return handleAgentEnd({
+						ctxCwd: env.tmpDir,
+						getFlag: (name) =>
+							name === "lens-actionable-warning-autofix" ||
+							name === "lens-actionable-warnings" ||
+							name === "no-lsp",
+						notify: vi.fn(),
+						dbg: () => {},
+						runtime,
+						cacheManager: {
+							readCache: (kind: string) => {
+								reads.push(`${sessionRole}:${kind}`);
+								return undefined;
+							},
+							addModifiedRange: vi.fn(),
+						} as any,
+						getFormatService: () =>
+							({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+						currentSessionId: `session-${sessionRole}`,
+						sessionRole,
+					});
+				};
+
+				await end("concurrent-secondary");
+				await end("primary");
+
+				expect(reads).toEqual(["primary:actionable-warnings"]);
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
+
 	describe("#484 turn-summary collection gate", () => {
 		it("does not record deferred-format events on the turn-summary collector when lens-turn-summary is off (default)", async () => {
 			const env = setupTestEnvironment("pi-lens-agent-end-summary-off-");

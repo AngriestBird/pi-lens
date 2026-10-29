@@ -3383,8 +3383,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			turnIndex: runtime.turnKey(deps.sessionId),
 			signal: getAmbientAbortSignal(),
 			// #3596: the replay lands after the settle's own awaits.
+			// #4943: and names this turn's session, which owns its deferred pass.
 			record: (entry) =>
-				replayThroughMutationBridge({ ...entry, lineage: writeSession }),
+				replayThroughMutationBridge({
+					...entry,
+					lineage: writeSession,
+					...(deps.sessionId !== undefined && { sessionId: deps.sessionId }),
+				}),
 			getStoredLineHashes: (candidate) =>
 				storedLineHashesFor(deps.readGuard, candidate),
 			isRecordable: (candidate) =>

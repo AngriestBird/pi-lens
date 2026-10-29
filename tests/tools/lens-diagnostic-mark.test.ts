@@ -68,6 +68,7 @@ type RecordedEntry = {
 	consumer?: string;
 	provenance?: string;
 	toolCallId?: string;
+	sessionId?: string;
 };
 const recordedEntries: RecordedEntry[] = [];
 Object.defineProperty(globalThis, MUTATION_BRIDGE_KEY, {
@@ -538,6 +539,31 @@ describe("lens_diagnostic_mark's suppress record names its call (#4187 R4-1)", (
 				provenance: "observed",
 				toolCallId: "call-4187-suppress",
 			}),
+		]);
+	});
+
+	it("names the session that called it, which owns the write's deferred pass (#4943)", async () => {
+		// RECURRENCE GUARDED: #4943 R1. A subagent's suppress write was queued
+		// under the coordinator's id, so the primary's settle formatted it.
+		recordedEntries.length = 0;
+		writeFile("owned.ts", "const a = 1;\nconst target = bad();\n");
+		const result = await tool.execute(
+			"call-4943-suppress",
+			{
+				filePath: "owned.ts",
+				line: 2,
+				message: "bad call",
+				rule: "no-bad",
+				tool: "eslint",
+				disposition: "suppress",
+			},
+			undefined,
+			() => {},
+			{ cwd: tmpDir, sessionManager: { getSessionId: () => "session-sub" } },
+		);
+		expect(result.isError).toBeFalsy();
+		expect(recordedEntries.map((entry) => entry.sessionId)).toEqual([
+			"session-sub",
 		]);
 	});
 

@@ -3004,6 +3004,11 @@ export class RuntimeCoordinator {
 	 *    observability — deleting it here would drop it forever with no
 	 *    origin ever able to reclaim it.
 	 *
+	 * `ownedOnly` is a concurrent secondary's drain (#4943): it claims exactly
+	 * the records its own known session id owns. An ownerless record, another
+	 * session's and a stale orphan are all left for the primary, so a
+	 * secondary with no stable id claims nothing.
+	 *
 	 * Returns the claimed records, the left-queued mismatched-origin records,
 	 * and per-skipped record why it was left behind — callers use this for
 	 * `agent_end`'s latency-log provenance and for the "stale fallback
@@ -3014,6 +3019,7 @@ export class RuntimeCoordinator {
 		now: number,
 		staleAfterMs: number,
 		currentOriginCwd?: string,
+		ownedOnly = false,
 	): {
 		claimed: DeferredFormatRecord[];
 		staleClaimed: DeferredFormatRecord[];
@@ -3025,13 +3031,19 @@ export class RuntimeCoordinator {
 		const deferredToOwner: DeferredFormatRecord[] = [];
 		const droppedOrphans: DeferredFormatRecord[] = [];
 		for (const [key, record] of this._pendingDeferredMutations) {
-			const sameSession =
-				record.ownerSessionId === undefined ||
-				currentSessionId === undefined ||
-				record.ownerSessionId === currentSessionId;
+			const sameSession = ownedOnly
+				? currentSessionId !== undefined &&
+					record.ownerSessionId === currentSessionId
+				: record.ownerSessionId === undefined ||
+					currentSessionId === undefined ||
+					record.ownerSessionId === currentSessionId;
 			if (sameSession) {
 				claimed.push(record);
 				this._pendingDeferredMutations.delete(key);
+				continue;
+			}
+			if (ownedOnly) {
+				deferredToOwner.push(record);
 				continue;
 			}
 			const age = now - record.lastTouchedAt;
@@ -3089,12 +3101,14 @@ export class RuntimeCoordinator {
 		now: number,
 		staleAfterMs: number,
 		currentOriginCwd?: string,
+		ownedOnly = false,
 	) {
 		return this.claimDeferredFormatFiles(
 			currentSessionId,
 			now,
 			staleAfterMs,
 			currentOriginCwd,
+			ownedOnly,
 		);
 	}
 
