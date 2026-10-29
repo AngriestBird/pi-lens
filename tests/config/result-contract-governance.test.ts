@@ -15,6 +15,7 @@ import { MAX_RESULT_BYTES } from "../../tools/render-compact.js";
 import { McpHarness } from "../mcp/harness.js";
 import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { bindSession, retireBoundSessions } from "../support/bound-sessions.js";
 import { createPiMock } from "../support/pi-mock.js";
 
 // #4151: parity must not race two independent cold ast-grep starts against
@@ -109,6 +110,7 @@ describe("result contract across registered tool surfaces", () => {
 	});
 
 	afterAll(() => {
+		retireBoundSessions();
 		mcp?.dispose();
 		process.chdir(originalCwd);
 		// `dispose()` signals the MCP child but does not wait for it to exit; on
@@ -391,6 +393,11 @@ describe("result contract across registered tool surfaces", () => {
 		const { flushLatencyLog, getLatencyLogPath } =
 			await import("../../clients/latency-logger.js");
 		const sessionId = `row-bytes-${Date.now().toString(36)}`;
+		// #4965: the row's figures live on the session's scope, which production
+		// begins and binds at session_start. This session id was never started,
+		// so begin its scope the way session_start does (a delivery for an unbound
+		// session is dropped and counted, not held with no owner).
+		bindSession(sessionId);
 		const ctx = {
 			cwd,
 			sessionManager: { getSessionId: () => sessionId },

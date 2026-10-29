@@ -1,3 +1,4 @@
+// flake-shape: in-process-mock — the cache_usage_summary and baseline rows go through logLatency and test mode skips the file sink, so a passed-through spy is the only reader (same seam as cache-observability.test.ts); the scope store under test is real (#4965)
 /**
  * #4965 (shape 72): the cache observability keeps a session's attribution state
  * and `messages[0]` baseline in one cell on the session's scope, found by the

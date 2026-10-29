@@ -230,9 +230,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :299, :345, :362, :386, :400, :623
 	"clients/cache-observability.ts": {
 		silent: 10,
-		identities: "765e8cbdadc92783",
+		identities: "1386f1967c2c9482",
 		reason: PRE_RULE,
-	}, // :507, :837, :862, :882, :1176, :1186, :1239, :1264, :1427, :1587
+	}, // :589, :1118, :1143, :1163, :1648, :1658, :1711, :1736, :1949, :2246
 	"clients/cache/rule-cache.ts": {
 		silent: 5,
 		identities: "4332dc8628e97e3b",
