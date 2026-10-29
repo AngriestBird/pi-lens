@@ -28,6 +28,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../../clients/cache-manager.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
 import { getProjectDataDir } from "../../../clients/file-utils.js";
 import { installLspServiceDouble } from "../../support/lsp-service-seam.js";
 import type { TestRunnerFindingsCache } from "../../../clients/project-diagnostics/runner-adapters/runner-findings.js";
@@ -179,10 +183,21 @@ describe("#4943 R2: the MCP host reads the turn-end slot as its own address", ()
 			deliverTo: PI_SESSION,
 			consumed: false,
 		});
+		resetDegradationLedger();
 		const delivery = await runTurnEndForIpc(tmpDir);
 		expect(delivery.outcome.turnEnd).toBeUndefined();
 		expect(delivery.deliveryId).toBeUndefined();
 		expect(stored()).toBe(before);
+		// The skip is told apart from an empty slot: one ledger record per
+		// addressee, though the pass peeked twice (the cached peek, then the
+		// peek after its own turn end).
+		const skips = getDegradationSummary().find(
+			(group) => group.kind === "turn-end-delivery-addressed-elsewhere",
+		);
+		expect(skips?.count).toBe(1);
+		expect(skips?.latestReasons.map((entry) => entry.subject)).toEqual([
+			PI_SESSION,
+		]);
 	});
 
 	it("acknowledges only the message it delivered, not one a pi turn end staged since", async () => {
