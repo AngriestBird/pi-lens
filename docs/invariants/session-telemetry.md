@@ -59,12 +59,17 @@
   turn's session, a commit-gate rewrite of the content leaves it out so the
   record's owner (`sessionId`) is the addressee, and the `context` hook
   consumes only a record addressed to its own session (the composer's id
-  expression); any other request leaves it untouched. A record with neither
-  field goes to whoever asks. The MCP host reads unaddressed: its
-  coordinator id is per process, and a restarted server still delivers what
-  the last one staged. A staged message another writer replaces before its
-  owner asks is not kept; the owner's next turn end composes its unresolved
-  blockers again, since the dedupe's last writer was the other session.
+  expression); any other request leaves it untouched and writes one
+  `turn-end-delivery-addressed-elsewhere` ledger record per addressee. A
+  record with neither field goes to whoever asks. The sibling
+  `test-runner-findings` slot is read with the same id
+  (`deliveryEligible.sessionId`): a concurrent secondary never pins the
+  coordinator id. The MCP host reads unaddressed: its coordinator id is per
+  process, and a restarted server still delivers what the last one staged.
+  A staged message another writer replaces before its owner asks is not
+  kept; the owner's next turn end composes its unresolved blockers again,
+  since the dedupe's last writer was the other session, but a one-shot
+  advisory is not composed again.
 - Every session-scope hand-off decision leaves one `latency.log` row per
   lifecycle event, never one per occurrence in a loop (#3873):
   `session_handoff_slot`, `session_handoff_adopt`, `session_store_action`
