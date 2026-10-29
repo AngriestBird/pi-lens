@@ -92,7 +92,8 @@ since the verdict · is the durable record present.
 | 5 | no (no-file turn end) | unchanged | cleared | allow | `still allows the commit after an unjudged turn end that changed nothing` |
 | 6 | no (no-file turn end) | changed outside dispatch | cleared | **unknown** | `keeps the gate closed when the suppressed file's bytes moved outside dispatch` |
 | 7 | no turn end at all after the change | changed outside dispatch | cleared | **unknown** | same case, and `does not allow the commit after an external change to a marked file` (pi host) |
-| 8 | yes, after an outside change | changed outside dispatch | re-rendered | block | the freshness sweep demotes the record; since #4990 the demoted channel re-runs the policy, and the content check below is what keeps the stamp from opening the gate | 9 | yes | unverifiable (no content baseline) | either | **unknown** | `keeps the gate closed for a suppressed record with no content baseline` |
+| 8 | yes, after an outside change | changed outside dispatch | re-rendered | block | the freshness sweep demotes the record; since #4990 the demoted channel re-runs the policy, and the content check below is what keeps the stamp from opening the gate |
+| 9 | yes | unverifiable (no content baseline) | either | **unknown** | `keeps the gate closed for a suppressed record with no content baseline` |
 
 One clause, added to the rule above rather than replacing it: **a suppression
 verdict is a statement about BYTES, so it stands only while the file still

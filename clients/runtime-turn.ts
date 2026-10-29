@@ -1164,6 +1164,19 @@ function driftDeliveryCap(
 	};
 }
 
+/**
+ * #1616 suppressed-bucket rule: a delivery that still has something to say
+ * states what a disposition dropped from it, once per delivery. The live and
+ * the demoted inline-blocker arms run the same policy stack (#4990), so they
+ * share this one wording; `git-guard`'s `TURN_END_BLOCKER_SECTION` parses the
+ * live arm's header, which carries it.
+ */
+function suppressedByDispositionNote(suppressed: number): string {
+	return suppressed > 0
+		? ` (suppressed by disposition: ${suppressed} finding(s))`
+		: "";
+}
+
 export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const {
 		ctxCwd,
@@ -1892,7 +1905,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 			}
 			const advisoryPart =
-				`${STALE_LINE_MARKER} ${displayPath}:\n${degraded.body}` +
+				`${STALE_LINE_MARKER} ${displayPath}${suppressedByDispositionNote(policy.suppressed)}:\n${degraded.body}` +
 				(retirementNote ? `\n${retirementNote}` : "");
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			advisoryParts.push(advisoryPart);
@@ -1930,13 +1943,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				policySuppressedPaths.push(bPath);
 				continue;
 			}
-			// #1616 suppressed-bucket rule: a delivery that still has something to
-			// say states what it dropped, once per delivery.
-			const suppressedNote =
-				policy.suppressed > 0
-					? ` (suppressed by disposition: ${policy.suppressed} finding(s))`
-					: "";
-			const replayPart = `Unresolved from this turn — ${displayPath}${suppressedNote}:\n${policy.body}`;
+			const replayPart = `Unresolved from this turn — ${displayPath}${suppressedByDispositionNote(policy.suppressed)}:\n${policy.body}`;
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			blockerParts.push(replayPart);
 			// #4617: the replay is about this file, which a no-write turn did not

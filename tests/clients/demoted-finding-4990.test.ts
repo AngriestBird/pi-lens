@@ -319,6 +319,14 @@ describe("#4990 gap 2 — the demoted channel honours stored dispositions", () =
 			// The demoted body keeps its past-tense wording, never the live
 			// "must be fixed" imperative (#1944).
 			expect(text).not.toContain("must be fixed");
+			// Review F2 (#4998): the drop is TOLD, not only logged. Both arms run
+			// the same policy stack, so both owe the owner doc's disclosure rule
+			// (`clients/finding-delivery-gate.ts` "What a disposition dropped is
+			// also told to the agent, never only logged"); before this the
+			// demoted arm rendered the survivors and said nothing about the rest.
+			expect(text).toContain(
+				"[stale — re-run to confirm] app.ts (suppressed by disposition: 1 finding(s)):",
+			);
 
 			const last = inlinePolicyRows().at(-1);
 			expect(last?.metadata?.stale).toBe(1);
@@ -449,6 +457,80 @@ describe("#4990 gap 3 — the self-drift delivery cap", () => {
 				"[stale — re-run to confirm]",
 			);
 			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Review F3 (#4998): the count is PER DEMOTION EPISODE. The self axis re-arms,
+	// so a record whose bytes come back un-demotes; healing must drop the count
+	// with the demotion, or the next episode retires on its first delivery and
+	// the ledger claims more deliveries than the agent ever saw.
+	it("starts a fresh delivery count when a healed self-drift record is re-demoted", async () => {
+		const env = setupTestEnvironment("pi-lens-4990-self-drift-episode-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "episode.ts");
+			const recordedBytes = "export const before = 1;\n";
+			fs.writeFileSync(filePath, recordedBytes);
+
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			recordBlockers(runtime, filePath, [
+				blockingDiagnostic(filePath, 1, "incomplete assertion"),
+			]);
+			runtime.updateGitGuardStatus(true, "blockers");
+
+			// Episode 1: the agent rewrites the file to fix the named code.
+			fs.writeFileSync(filePath, "export const fixedA = true;\n");
+			for (let delivery = 1; delivery < SELF_DRIFT_MAX_DELIVERIES; delivery++) {
+				await driveTurn(runtime, cacheManager, filePath, cwd, delivery);
+				expect(turnEndText(cacheManager, cwd, runtime)).toContain(
+					"[stale — re-run to confirm]",
+				);
+			}
+			expect(runtime.getInlineBlockersSnapshot()[0]?.staleDeliveryCount).toBe(
+				SELF_DRIFT_MAX_DELIVERIES - 1,
+			);
+
+			// Heal: the recorded bytes come back (a checkout, a revert, an editor
+			// undo), which is exactly the re-arm this axis was built for.
+			fs.writeFileSync(filePath, recordedBytes);
+			await driveTurn(
+				runtime,
+				cacheManager,
+				filePath,
+				cwd,
+				SELF_DRIFT_MAX_DELIVERIES,
+			);
+			const healed = runtime.getInlineBlockersSnapshot();
+			expect(healed).toHaveLength(1);
+			expect(healed[0]?.stale).toBe(false);
+			expect(healed[0]?.staleReason).toBeUndefined();
+			expect(healed[0]?.staleDeliveryCount).toBeUndefined();
+
+			// Episode 2: a different rewrite demotes it again. This episode has
+			// seen ONE delivery, so it must neither retire nor claim a cap.
+			fs.writeFileSync(filePath, "export const fixedB = true;\n");
+			await driveTurn(
+				runtime,
+				cacheManager,
+				filePath,
+				cwd,
+				SELF_DRIFT_MAX_DELIVERIES + 1,
+			);
+			const secondEpisode = turnEndText(cacheManager, cwd, runtime);
+			expect(secondEpisode).toContain("[stale — re-run to confirm]");
+			expect(secondEpisode).not.toContain("Not shown again after");
+			const after = runtime.getInlineBlockersSnapshot();
+			expect(after).toHaveLength(1);
+			expect(after[0]?.staleReason).toBe("self-drift");
+			expect(after[0]?.staleDeliveryCount).toBe(1);
+			expect(
+				demotedRetirementReasons().filter((reason) =>
+					reason.includes("self-drift"),
+				),
+			).toEqual([]);
 		} finally {
 			env.cleanup();
 		}

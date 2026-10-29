@@ -2323,7 +2323,16 @@ export class RuntimeCoordinator {
 		// `undefined` is a strictness spike the ratchet counts. Healing has to
 		// drop `staleReason` off the rebuilt record, so destructure it away
 		// instead of letting `...existing` carry the old value through.
-		const { staleReason: _cleared, ...rest } = existing;
+		//
+		// The delivery count goes with it (#4990 review F3): it is the cap's
+		// tally for ONE demotion episode, and a heal ends the episode. Carried
+		// across, the next demotion retired on its first delivery with a ledger
+		// reason claiming a full cap the agent never saw.
+		const {
+			staleReason: _cleared,
+			staleDeliveryCount: _clearedCount,
+			...rest
+		} = existing;
 		this._pendingInlineBlockers.set(key, {
 			...rest,
 			stale: isSelfDrift,
@@ -2419,14 +2428,14 @@ export class RuntimeCoordinator {
 	/**
 	 * #1950: commit one more turn end that re-served this record while
 	 * `stale`. The caller (`runtime-turn.ts`) only calls this for a
-	 * `"dependency-drift"` demotion — a `"past-eof"` demotion retires after
-	 * its own single delivery (#1944, `retireDemotedPastEofBlocker`) and
-	 * never accumulates a count — and only AFTER confirming the turn's
-	 * content will not be suppressed by the signature dedupe (see
-	 * {@link peekInlineBlockerStaleDeliveryCount}), so this counts ACTUAL
-	 * deliveries the agent saw, not turn-end loop iterations. Returns the new
-	 * count, or 0 when there is no entry to count against (already retired,
-	 * or never recorded).
+	 * `"dependency-drift"` or `"self-drift"` demotion — a `"past-eof"`
+	 * demotion retires after its own single delivery (#1944,
+	 * `retireDemotedPastEofBlocker`) and never accumulates a count — and only
+	 * AFTER confirming the turn's content will not be suppressed by the
+	 * signature dedupe (see {@link peekInlineBlockerStaleDeliveryCount}), so
+	 * this counts ACTUAL deliveries the agent saw, not turn-end loop
+	 * iterations. Returns the new count, or 0 when there is no entry to count
+	 * against (already retired, or never recorded).
 	 */
 	incrementInlineBlockerStaleDelivery(filePath: string): number {
 		const key = filePath;

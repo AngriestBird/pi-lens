@@ -38,10 +38,12 @@
  * entries whose `sources` were not all `"lsp"` skipped the check entirely. A
  * tree-sitter verdict about F's own syntax is emphatically invalidated by F's own
  * bytes changing, and no other path could clear it —
- * `retireInlineBlockerOnConfirmedClean` requires `coveredSources` to be a superset
- * of the record's sources, `coveredSourcesForCheck` builds that set from the LSP
- * server registry, and no registered server has id `"tree-sitter"`, so the retire
- * could never fire however many clean checks ran. Live shape: a
+ * `retireInlineBlockerOnConfirmedClean` retires only the rows whose source the
+ * verdict's `coveredSources` covers (per row since #4990; a superset of the
+ * record's sources was required before), `coveredSourcesForCheck` builds that set
+ * from the LSP server registry, and no registered server has id `"tree-sitter"`,
+ * so a tree-sitter row could never retire however many clean checks ran. Live
+ * shape: a
  * `ts-incomplete-assertion` blocker re-served every turn for the rest of a session
  * against a file already proven clean by grep, LSP, and a passing test.
  *
