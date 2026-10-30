@@ -947,7 +947,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// duplicated path operations with one owner.
 		"clients/cache/rule-cache.ts": 5,
 		"clients/call-graph.ts": 4,
-		"clients/cargo-manifest.ts": 6,
+		"clients/cargo-manifest.ts": 5,
 		"clients/cascade-logger.ts": 2,
 		"clients/code-quality-warnings.ts": 5,
 		// 5 -> 4 (#4689 r2): the entry's file is rendered by

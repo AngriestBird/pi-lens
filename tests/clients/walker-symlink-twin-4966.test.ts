@@ -68,6 +68,7 @@ import { findLocalTyposConfig } from "../../clients/typos-config.js";
 import { findGoverningTsconfigDir } from "../../clients/workspace-topology.js";
 import { findLocalZizmorConfig } from "../../clients/zizmor-config.js";
 import {
+	assertNonEmptyScan,
 	listSourceFiles,
 	callSites,
 	readWalkedFile,
@@ -664,8 +665,8 @@ describe("#4966: the walker registry covers every file that climbs", () => {
 	const registered = new Set(WALKERS.flatMap((walker) => walker.files));
 
 	it("finds the climbing files (a scan that reads nothing is dead, not clean)", () => {
-		// Calibration on the authoring head: 46 files call a seam climber.
-		expect(live.length).toBeGreaterThanOrEqual(25);
+		// Calibration on the authoring head: 41 files call a seam climber.
+		assertNonEmptyScan("walker twin census", live.length, 25);
 		expect(live).toContain("clients/tool-policy.ts");
 	});
 
