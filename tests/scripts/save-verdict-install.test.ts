@@ -265,7 +265,7 @@ describe("the row an install state produces (#4999 R4-1 state table)", () => {
 		expect(detailWithInstallCauses(row)).not.toContain("install ");
 	});
 
-	it("row 2: still measures a tool the installer does not manage (R4-1)", async () => {
+	it("row 2: installCauses reports a decline and the detail omits it on a measured row (R4-1; the driver probe witnesses the wiring)", async () => {
 		// The regression itself: gopls is on PATH (the runner's toolchain), the
 		// installer declines the unknown id, and round 3 filed the row not
 		// measured instead of letting the arms decide.
