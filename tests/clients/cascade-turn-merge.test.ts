@@ -1740,12 +1740,12 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 				"n1.ts",
 			);
 
-			// Turn 4: nothing left pending.
-			runtime.beginTurn();
-			edit(cacheManager, other, env.tmpDir);
-			expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).not.toContain(
-				"unresolved",
-			);
+			// Nothing left pending. #5034 r3: read the record itself; a fourth
+			// turn reaches the turn-cycle cap and returns before the cascade merge
+			// (`isMaxCyclesExceeded`), so its silence proved nothing.
+			const { listCascadePendingNeighbors } =
+				await import("../../clients/cascade-format.js");
+			expect(listCascadePendingNeighbors()).toEqual([]);
 		} finally {
 			env.cleanup();
 		}
