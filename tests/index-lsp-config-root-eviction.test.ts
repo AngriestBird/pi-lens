@@ -48,10 +48,6 @@ const dirs: string[] = [];
 let previousStartupMode: string | undefined;
 let previousHome: string | undefined;
 let previousPersistDelay: string | undefined;
-/** The session this file last started: the one teardown shuts down. */
-let lastSession:
-	| { pi: ReturnType<typeof createPiMock>; ctx: ReturnType<typeof makeCtx> }
-	| undefined;
 
 function tempRoot(prefix: string): string {
 	const dir = fs.realpathSync(
@@ -93,11 +89,10 @@ beforeEach(() => {
 
 /**
  * #5024: settle the session's background writers before the file removes the
- * fixture home, in the order `tests/support/pi-session.ts`'s
- * `drainPiSessionWrites` uses for a loaded copy: `session_shutdown` (index.ts's
- * own bounded settle), then the `clients/background-write-drains.ts` registry,
- * which is where the project-snapshot persist worker and the installer's
- * debounced probe-cache flush join.
+ * fixture home. The settle is the `clients/background-write-drains.ts` registry
+ * runner that `tests/support/pi-session.ts`'s `drainPiSessionWrites` also joins;
+ * the project-snapshot persist worker and the installer's debounced probe-cache
+ * flush join there.
  *
  * WHY IT MATTERS: `session_start` hands a project-snapshot persist to a
  * `worker_threads` worker, and that worker holds the snapshot root it was
@@ -115,27 +110,31 @@ beforeEach(() => {
  * Idempotent, so the guard case below can run it inside its own body.
  */
 async function settleExtensionWriters(): Promise<void> {
-	const session = lastSession;
-	lastSession = undefined;
-	if (session)
-		await session.pi.emit("session_shutdown", { reason: "quit" }, session.ctx);
 	await drainRegisteredBackgroundWritesForTests();
 }
 
 afterEach(async () => {
-	await settleExtensionWriters();
-	_resetSessionLifecycleForTests();
-	resetLSPConfigStateForTests();
-	if (previousStartupMode === undefined)
-		delete process.env.PI_LENS_STARTUP_MODE;
-	else process.env.PI_LENS_STARTUP_MODE = previousStartupMode;
-	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
-	else process.env.PI_LENS_HOME = previousHome;
-	if (previousPersistDelay === undefined)
-		delete process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
-	else
-		process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS =
-			previousPersistDelay;
+	// The restores run even when a writer outlives the bounded settle: a
+	// rejected settle reds this file without leaving module or env state behind
+	// for the next case in the worker.
+	try {
+		await settleExtensionWriters();
+	} finally {
+		_resetSessionLifecycleForTests();
+		resetLSPConfigStateForTests();
+		if (previousStartupMode === undefined)
+			delete process.env.PI_LENS_STARTUP_MODE;
+		else process.env.PI_LENS_STARTUP_MODE = previousStartupMode;
+		if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+		else process.env.PI_LENS_HOME = previousHome;
+		if (previousPersistDelay === undefined)
+			delete process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
+		else
+			process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS =
+				previousPersistDelay;
+	}
+	// Removed only after a settle that returned: a root a writer may still
+	// re-create stays in `dirs`, because the splice never runs on a throw.
 	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 });
 
@@ -147,7 +146,6 @@ describe("index.ts ensureLSPConfigInitialized vs the session-root registry (#251
 		extension(pi.asExtensionAPI());
 
 		const firstCtx = makeCtx({ cwd: root, sessionId: "host-session-1" });
-		lastSession = { pi, ctx: firstCtx };
 		await pi.emit("session_start", makeSessionStartEvent(), firstCtx);
 		expect(isServerDisabled(DENIED_SERVER, file)).toBe(true);
 
@@ -167,7 +165,6 @@ describe("index.ts ensureLSPConfigInitialized vs the session-root registry (#251
 		// returns early here and leaves the denial lifted for the process.
 		_resetSessionLifecycleForTests();
 		const secondCtx = makeCtx({ cwd: root, sessionId: "host-session-2" });
-		lastSession = { pi, ctx: secondCtx };
 		await pi.emit(
 			"session_start",
 			makeSessionStartEvent({ reason: "new" }),
@@ -190,7 +187,6 @@ describe("index.ts ensureLSPConfigInitialized vs the session-root registry (#251
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
 		const ctx = makeCtx({ cwd: root, sessionId: "host-session-teardown" });
-		lastSession = { pi, ctx };
 		await pi.emit("session_start", makeSessionStartEvent(), ctx);
 		const home = process.env.PI_LENS_HOME as string;
 
