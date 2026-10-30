@@ -42,7 +42,10 @@ import { configSearchDirs } from "../../clients/config-locations.js";
 import { resolveRunnerPath } from "../../clients/dispatch/runner-context.js";
 import { isEphemeralCheckoutRoot } from "../../clients/ephemeral-root.js";
 import { resolveKtfmtGradleStyle } from "../../clients/gradle-ktfmt-style.js";
-import { hasResolvableNodeModules } from "../../clients/lsp/environment-gap.js";
+import {
+	demoteEnvironmentGapDiagnostics,
+	hasResolvableNodeModules,
+} from "../../clients/lsp/environment-gap.js";
 import { NearestRoot } from "../../clients/lsp/server.js";
 import { findLocalOpengrepConfig } from "../../clients/opengrep-config.js";
 import { getPackageRoot } from "../../clients/package-root.js";
@@ -451,6 +454,32 @@ const WALKERS: readonly Walker[] = [
 		decoy: "none",
 		run: (start) => hasResolvableNodeModules(start),
 		expected: () => true,
+	},
+	{
+		// The file-start half of the same walk: the default start is the FILE's
+		// real directory, so a file link looks where its target lives.
+		id: "demoteEnvironmentGapDiagnostics",
+		files: ["clients/lsp/environment-gap.ts"],
+		input: "file",
+		markers: { "package.json": PKG },
+		decoy: { "package.json": PKG, "node_modules/.keep": "" },
+		run: (start) =>
+			demoteEnvironmentGapDiagnostics(
+				[
+					{
+						severity: 1,
+						source: "typescript",
+						code: 2503,
+						message: "Cannot find namespace 'NodeJS'.",
+						range: {
+							start: { line: 0, character: 0 },
+							end: { line: 0, character: 1 },
+						},
+					},
+				],
+				{ filePath: start },
+			)[0]?.severity,
+		expected: () => 2,
 	},
 ];
 
