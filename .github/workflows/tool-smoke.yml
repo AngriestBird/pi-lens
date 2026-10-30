@@ -462,6 +462,14 @@ jobs:
           tar -xzf "$dest/$archive" -C "$dest"
           chmod +x "$dest/bin/jdtls"
           echo "path=$dest/bin/jdtls" >> "$GITHUB_OUTPUT"
+          # Launcher probe (informational): the cascade row for a server that
+          # never answers can only say "spawn-failure"; this prints the
+          # launcher's own exit status and stderr beside it.
+          set +e
+          timeout 30 "$dest/bin/jdtls" -data "$RUNNER_TEMP/pi-lens-jdtls-probe" </dev/null >"$RUNNER_TEMP/pi-lens-jdtls-probe.out" 2>&1
+          echo "jdtls launcher probe: exit $?"
+          head -c 3000 "$RUNNER_TEMP/pi-lens-jdtls-probe.out"
+          command -v python3 java || true
 
       # Cascade layer (#1712): the handshake proves initialize and the clean gate
       # proves a finding on the file itself; neither proves the path an agent's
