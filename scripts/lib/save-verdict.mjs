@@ -127,6 +127,35 @@ export async function installCauses(fixture, deps) {
 }
 
 /**
+ * The detail a probe row reports: the install causes only where no arm measured.
+ *
+ * A cause is evidence about the ROW, never a verdict. `ensureTool` answers
+ * `undefined` for every id the installer does not manage, and the installer
+ * records `declined: unknown tool id` for gopls, csharp-ls and fsautocomplete
+ * while the runner's own toolchain still supplies the binary — so letting the
+ * cause decide filed a measured row as `not measured` (#4999 R4-1: go, csharp
+ * and fsharp regressed in tool-smoke run 40978934098 attempt 2).
+ *
+ * The arms own the verdict: a row that produced `cells` keeps the arm detail and
+ * carries no install cause. A row they left unmeasured names both the installer's
+ * cause and the reason no arm could measure it, so an operator can still tell an
+ * absent toolchain from a failed download from a crashed server.
+ *
+ * @param {{
+ *   cells?: unknown,
+ *   install?: string[],
+ *   detail?: string,
+ * }} row
+ * @returns {string}
+ */
+export function detailWithInstallCauses(row) {
+	const detail = typeof row?.detail === "string" ? row.detail : "";
+	if (row?.cells) return detail;
+	const causes = (row?.install ?? []).filter(isCause);
+	return [...causes, detail].filter(Boolean).join(" — ");
+}
+
+/**
  * Classify one server's save verdict from its measurement arms.
  *
  * `mode` is the server's diagnostic mode (`pull` for a server that answers

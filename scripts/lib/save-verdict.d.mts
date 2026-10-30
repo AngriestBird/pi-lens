@@ -95,3 +95,9 @@ export function installCauses(
 		getInstallAttempt?: (toolId: string) => InstallAttemptRecord | undefined;
 	},
 ): Promise<string[]>;
+
+export function detailWithInstallCauses(row: {
+	cells?: unknown;
+	install?: string[];
+	detail?: string;
+}): string;

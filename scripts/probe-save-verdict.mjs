@@ -60,6 +60,7 @@ import {
 } from "./lib/lsp-fixture-workspace.mjs";
 import { commentFor } from "./lib/probe-fixture.mjs";
 import {
+	detailWithInstallCauses,
 	installCauses,
 	orderByNeed,
 	parseSaveVerdictRows,
@@ -238,6 +239,7 @@ for (const fx of fixtures) {
 		mode: undefined,
 		cells: undefined,
 		failures: [],
+		install: [],
 		detail: "",
 	};
 	const running = probeFixture(fx, row);
@@ -251,6 +253,10 @@ for (const fx of fixtures) {
 		// deadline, so this is bounded. The row stays unmeasured either way.
 		await running.catch(() => undefined);
 	}
+	// The row assembler (#4999 R4-1): the install causes join the detail only when
+	// the arms left the row unmeasured, so a measured row never carries one and an
+	// unmeasured row names both the installer's cause and why no arm could measure.
+	row.detail = detailWithInstallCauses(row);
 	if (row.cells) rows.push(row);
 	else
 		notMeasured.push({ fixture: fx.lang, reason: row.detail || "unreached" });
@@ -267,17 +273,12 @@ async function probeFixture(fx, row) {
 	});
 	try {
 		if (install && ensureTool) {
-			// #4999 R3-1: `ensureTool` answers `undefined` on a failed install instead
-			// of throwing, so the installer's own attempt record is the only place the
-			// cause survives. Without it the row below reads "server never spawned",
-			// which cannot tell an absent toolchain from a failed download.
-			row.failures.push(
-				...(await installCauses(fx, { ensureTool, getInstallAttempt })),
-			);
-			if (row.failures.length) {
-				row.detail = row.failures.join("; ");
-				return;
-			}
+			// The row's verdict is what the arms measure; an install cause is evidence
+			// about the row, never a decision (#4999 R4-1). The installer records
+			// `declined: unknown tool id` for gopls, csharp-ls and fsautocomplete while
+			// the runner's own toolchain still supplies the binary, so returning here —
+			// the round-3 shape — filed a measurable row `not measured`.
+			row.install = await installCauses(fx, { ensureTool, getInstallAttempt });
 		}
 		if (fx.setup) {
 			const setup = runFixtureSetup(fx.setup, workspace, false);
