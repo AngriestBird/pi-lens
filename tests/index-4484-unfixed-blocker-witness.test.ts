@@ -2082,7 +2082,7 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 		// the line says so (its line MOVED, review r3 F6) instead of dropping it
 		// from a count that still holds it (#5008).
 		expect(w2).toMatch(
-			/Still unfixed: 1 blocker reported earlier; 1 at a line that moved since capture\./,
+			/Still unfixed: 1 blocker reported earlier; 1 whose line could not be re-placed in these bytes\./,
 		);
 		await fixAndDrain(s);
 	}, 180_000);
@@ -2120,7 +2120,7 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 			await s.edit(`${AG_PRE}export const tail = 2;\n${OVER_CAP}\n`, [7]),
 		).toMatch(/Still unfixed: 1 blocker reported earlier/);
 		expect(w2).toMatch(
-			/Still unfixed: 1 blocker reported earlier; 1 at a line that moved since capture\./,
+			/Still unfixed: 1 blocker reported earlier; 1 whose line could not be re-placed in these bytes\./,
 		);
 		await fixAndDrain(s);
 	}, 180_000);
@@ -2450,7 +2450,7 @@ describe("#5008 witness: a partial run answers for the servers that answered", (
 				[2],
 			),
 		).toMatch(
-			/Still unfixed: 2 blockers reported earlier \(L3 ts:2304\); 1 at a line that moved since capture\./,
+			/Still unfixed: 2 blockers reported earlier \(L3 ts:2304\); 1 whose line could not be re-placed in these bytes\./,
 		);
 		boundary.lsp.mode = "answer";
 		await fixAndDrain(s);

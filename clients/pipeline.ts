@@ -1726,8 +1726,13 @@ function formatBlockerPlaces(
 	// about whether this file has a line at all. A same-file stale carry has one
 	// (from older bytes), so counting it as "no line in this file" denied what
 	// the row holds; another file's row and a line-less blocker have none here.
+	// Verify r4: positionStale only says the carry could not re-place the row in
+	// these bytes (the line may be unchanged, e.g. past the hash cap), so the
+	// clause claims that and not a move.
 	if (unplaced.movedLine > 0)
-		parts.push(`; ${unplaced.movedLine} at a line that moved since capture`);
+		parts.push(
+			`; ${unplaced.movedLine} whose line could not be re-placed in these bytes`,
+		);
 	if (unplaced.noLineInThisFile > 0)
 		parts.push(`; ${unplaced.noLineInThisFile} with no line in this file`);
 	return parts.join("");

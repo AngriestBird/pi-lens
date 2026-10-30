@@ -446,7 +446,7 @@ describe("#3190 witness: a retracted deleted-path blocker through pi", () => {
 		expect(second).toMatch(
 			/Still unfixed: 1 blocker reported earlier; 1 with no line in this file\./,
 		);
-		expect(second).not.toMatch(/moved since capture/);
+		expect(second).not.toMatch(/could not be re-placed in these bytes/);
 		await pi.emit(
 			"session_shutdown",
 			{ type: "session_shutdown", reason: "quit" },
