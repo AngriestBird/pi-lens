@@ -2289,10 +2289,29 @@ export async function waitForProjectSnapshotPersistsForTests(): Promise<void> {
 	}
 }
 
+/**
+ * Test-only strict form of {@link waitForProjectSnapshotPersistsForTests}: that
+ * wait is a bounded poll (200 x 10 ms) and resolves with work outstanding, so a
+ * persist slower than the bound would land after a fixture root was removed.
+ * This one rejects when any request, active persist or queued persist remains.
+ */
+async function settleProjectSnapshotPersistsForTests(): Promise<void> {
+	await waitForProjectSnapshotPersistsForTests();
+	if (
+		_snapshotWorkerRequests.size > 0 ||
+		_activeSnapshotPersists.size > 0 ||
+		_queuedSnapshotPersists.size > 0
+	) {
+		throw new Error(
+			"project-snapshot persists still pending after the bounded wait",
+		);
+	}
+}
+
 // #4937: the loaded extension copy's in-flight worker write is invisible to a
 // test's own import of this module; the tier-2 harness joins it through the
 // registry (`clients/background-write-drains.ts`).
-registerBackgroundWriteDrain(waitForProjectSnapshotPersistsForTests);
+registerBackgroundWriteDrain(settleProjectSnapshotPersistsForTests);
 
 /** Test-only: force any in-flight worker body write to the sync main-thread path. */
 export function flushProjectSnapshotPersistsForTests(): void {

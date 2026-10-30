@@ -49,7 +49,7 @@ describe("pi-session: the file-level drain pass (#4937)", () => {
 			fs.mkdirSync(path.join(fixture.root, "data"), { recursive: true });
 			fs.writeFileSync(path.join(fixture.root, "data", "late.json"), "{}");
 		});
-		// The registry holds a drain weakly; this local keeps it alive for the case.
+		// A stand-in writer the registry joins, as the loaded copy's would be.
 		const drain = async () => {
 			release();
 			await landed;

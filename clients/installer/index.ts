@@ -2475,11 +2475,30 @@ export async function flushProbeCache(): Promise<ProbeCacheFlushResult> {
 	}
 }
 
+/**
+ * Test-only strict form of {@link flushProbeCache}: a flush that fails or is
+ * deferred behind another process's lock arms a retry timer, and that retry
+ * would write after a fixture root was removed. Flush until nothing is pending;
+ * when a flush cannot land, cancel the retry and reject.
+ */
+async function settleProbeCacheForTests(): Promise<void> {
+	let result = await flushProbeCache();
+	for (let pass = 0; pass < 8 && result === "written-with-pending"; pass++) {
+		result = await flushProbeCache();
+	}
+	if (result === "idle" || result === "written") return;
+	if (_probeCacheFlushTimer !== null) {
+		clearTimeout(_probeCacheFlushTimer);
+		_probeCacheFlushTimer = null;
+	}
+	throw new Error(`probe-cache flush did not land (${result})`);
+}
+
 // #4937: the debounced flush timer above lives in this evaluation of the module;
 // the tier-2 harness's loaded extension copy owns one the test's own import
 // cannot reach, so its write lands after the fixture root is removed. The
 // harness joins it through the registry (`clients/background-write-drains.ts`).
-registerBackgroundWriteDrain(flushProbeCache);
+registerBackgroundWriteDrain(settleProbeCacheForTests);
 
 function isAstGrepVersionOutput(output: string): boolean {
 	return /\bast[- ]grep\b/i.test(output);
@@ -2582,6 +2601,19 @@ export async function updateProbeCache(
 	} catch {
 		// best-effort
 	}
+}
+
+// Exported for testing only.
+export function getProbeCacheStateForTesting(): {
+	dirty: boolean;
+	writeInFlight: boolean;
+	flushTimerArmed: boolean;
+} {
+	return {
+		dirty: _probeCacheDirty,
+		writeInFlight: _probeCacheWriteInFlight !== null,
+		flushTimerArmed: _probeCacheFlushTimer !== null,
+	};
 }
 
 // Exported for testing only.

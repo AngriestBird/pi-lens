@@ -100,16 +100,86 @@ describe("background write drains across module copies (#4937)", () => {
 			const other = await import("../../clients/installer/index.js");
 			await other.updateProbeCache("probe-tool", tool);
 			const cacheFile = path.join(home, "probe-cache.json");
-			// The debounced timer (300 ms) has not fired: the write is deferred.
-			expect(fs.existsSync(cacheFile)).toBe(false);
+			// The write is still pending behind the debounce timer: asserted
+			// through the module's own state, not by racing the timer on disk.
+			expect(other.getProbeCacheStateForTesting()).toEqual({
+				dirty: true,
+				writeInFlight: false,
+				flushTimerArmed: true,
+			});
 
 			await drainRegisteredBackgroundWritesForTests();
 
 			expect(
 				Object.keys(JSON.parse(fs.readFileSync(cacheFile, "utf-8"))),
 			).toEqual(["probe-tool"]);
+			expect(other.getProbeCacheStateForTesting()).toEqual({
+				dirty: false,
+				writeInFlight: false,
+				flushTimerArmed: false,
+			});
 			other.resetProbeCacheStateForTesting();
 		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence: review of #5006 (F1), the drain read a deferred write as
+	// settled. The snapshot wait is a bounded poll (200 x 10 ms); a persist that
+	// outlives it resolved the drain, and the write then re-created the fixture
+	// root. The drain must reject while work remains.
+	it("rejects when a snapshot persist outlives the bounded wait", async () => {
+		const env = setupTestEnvironment("bwd-snapshot-slow-");
+		let other: typeof import("../../clients/project-snapshot.js") | undefined;
+		try {
+			pinEnv(path.join(env.tmpDir, "home"), path.join(env.tmpDir, "data"));
+			vi.resetModules();
+			other = await import("../../clients/project-snapshot.js");
+			const snapshot = JSON.parse(
+				fs.readFileSync(path.join(CORPUS, "snapshot.json"), "utf-8"),
+			) as ProjectSnapshot;
+			const cwd = path.join(env.tmpDir, "project");
+			process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "3500";
+			other.saveProjectSnapshot(cwd, snapshot);
+
+			await expect(drainRegisteredBackgroundWritesForTests()).rejects.toThrow(
+				/still pending/,
+			);
+			expect(other.getProjectSnapshotPersistStateForTests(cwd).active).toBe(
+				true,
+			);
+		} finally {
+			await other?.waitForProjectSnapshotPersistsForTests();
+			await other?.terminateProjectSnapshotPersistWorkerForTests();
+			env.cleanup();
+		}
+	}, 30_000);
+
+	// Recurrence: review of #5006 (F1), a probe-cache flush that failed (or was
+	// deferred behind a lock) armed a retry timer and the drain resolved; the
+	// retry then wrote under a removed root. The drain must reject and leave no
+	// retry armed.
+	it("rejects and disarms the retry when a probe-cache flush cannot land", async () => {
+		const env = setupTestEnvironment("bwd-probe-cache-fail-");
+		let other: typeof import("../../clients/installer/index.js") | undefined;
+		try {
+			const home = path.join(env.tmpDir, "home");
+			fs.mkdirSync(home, { recursive: true });
+			pinEnv(home, path.join(env.tmpDir, "data"));
+			const tool = path.join(env.tmpDir, "tool.sh");
+			fs.writeFileSync(tool, "#!/bin/sh\n");
+			// A directory where the cache file belongs: the atomic write fails.
+			fs.mkdirSync(path.join(home, "probe-cache.json"));
+			vi.resetModules();
+			other = await import("../../clients/installer/index.js");
+			await other.updateProbeCache("probe-tool", tool);
+
+			await expect(drainRegisteredBackgroundWritesForTests()).rejects.toThrow(
+				/did not land/,
+			);
+			expect(other.getProbeCacheStateForTesting().flushTimerArmed).toBe(false);
+		} finally {
+			other?.resetProbeCacheStateForTesting();
 			env.cleanup();
 		}
 	});

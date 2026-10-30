@@ -18,8 +18,17 @@
  * STATE. Keyed on `globalThis` with `Symbol.for`, not on module scope (the
  * module is itself evaluated once per copy) and not in `process-singletons`
  * (its test reset would drop the registration of a copy that is already
- * loaded). Entries are weak: the registering module keeps its drain alive as an
- * exported function, so a collected copy drops out on its own.
+ * loaded). Entries are held strongly, in a plain Set: a drain is a module-level
+ * function that its module keeps alive anyway, and no `WeakRef` is constructed
+ * at module load (a test that stubs the global `WeakRef` counts every
+ * construction, and `clients/dependency-checker.ts` imports the installer).
+ *
+ * STRICT DRAINS. A drain resolves only when its writer has nothing left to
+ * land, and rejects when it cannot get there: a bounded wait or a scheduled
+ * retry that read as "settled" would let the write land after the root was
+ * removed, the defect this registry exists to close. A registering module
+ * therefore registers a wrapper that checks its own pending state, not a bare
+ * bounded helper.
  */
 
 const REGISTRY_KEY = Symbol.for("pi-lens.background-write-drains.v1");
@@ -28,35 +37,28 @@ type Drain = () => Promise<unknown>;
 
 const host = globalThis as typeof globalThis & { [key: symbol]: unknown };
 
-function registry(): Set<WeakRef<Drain>> {
+function registry(): Set<Drain> {
 	const existing = host[REGISTRY_KEY];
-	if (existing instanceof Set) return existing as Set<WeakRef<Drain>>;
-	const fresh = new Set<WeakRef<Drain>>();
+	if (existing instanceof Set) return existing as Set<Drain>;
+	const fresh = new Set<Drain>();
 	host[REGISTRY_KEY] = fresh;
 	return fresh;
 }
 
 /**
- * Register `drain` for this module evaluation. `drain` MUST be an exported
- * function of the registering module (or otherwise strongly held by it): the
- * registry holds it weakly, and a function nothing else references is
- * collected and silently never runs.
+ * Register `drain` for this module evaluation. It must resolve only once the
+ * module's writer has nothing left to land, and reject when it cannot.
  */
 export function registerBackgroundWriteDrain(drain: Drain): void {
-	registry().add(new WeakRef(drain));
+	registry().add(drain);
 }
 
 /**
- * Test-only: run every live registered drain, in registration order, and
- * return once all have settled. A drain that rejects rejects the pass: a
- * teardown that cannot settle a writer should fail its file loudly, not
- * remove the root under it.
+ * Test-only: run every registered drain, in registration order, and return
+ * once all have settled. A drain that rejects rejects the pass: a teardown
+ * that cannot settle a writer should fail its file loudly, not remove the root
+ * under it.
  */
 export async function drainRegisteredBackgroundWritesForTests(): Promise<void> {
-	const refs = registry();
-	for (const ref of refs) {
-		const drain = ref.deref();
-		if (drain === undefined) refs.delete(ref);
-		else await drain();
-	}
+	for (const drain of registry()) await drain();
 }
