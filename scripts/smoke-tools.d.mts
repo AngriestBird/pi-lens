@@ -273,6 +273,15 @@ export function runLspGate(options?: {
 	verbose?: boolean;
 	deps?: unknown;
 }): Promise<number>;
+/** Run the nightly live cascade layer (#1712), optionally with test seams. */
+export function runLspCascade(options?: {
+	langs?: string[];
+	install?: boolean;
+	verbose?: boolean;
+	timesOut?: string | null;
+	minPass?: number | null;
+	deps?: unknown;
+}): Promise<number>;
 /** The fixtures the nightly `lens_diagnostics mode=full` row drives (#2780). */
 export function lensFullPopulation(fixtures?: LspFixture[]): LspFixture[];
 /** Classify one real `lens_diagnostics mode=full` LSP-primary-finding result. */

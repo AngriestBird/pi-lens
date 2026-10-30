@@ -1,0 +1,89 @@
+export const CASCADE_CONCLUSIVE_DEADLINE_MS: number;
+export const CASCADE_WARM_DEADLINE_MS: number;
+export const CASCADE_RETRY_INTERVAL_MS: number;
+
+export interface CascadeFixture {
+	/** The LSP_FIXTURES row whose tools, setup and handshake-census entry this reuses. */
+	lang: string;
+	dir: string;
+	/** The exporter the lane breaks. */
+	file: string;
+	/** The exported function the edit breaks; each neighbour calls it. */
+	symbol: string;
+	neighbours: string[];
+	edit: { from: string; to: string };
+	/** Pattern the server's own message must match in each neighbour's block. */
+	expectFindings?: string;
+	/** Known not to conclude in the deadline, with the reason. */
+	expectInconclusive?: string;
+	warmDeadlineMs?: number;
+	conclusiveDeadlineMs?: number;
+	serverHint?: string;
+}
+
+export type NeighbourVerdict = "unconfirmed" | "findings" | "clean";
+
+export interface CascadeRunLike {
+	skipReason?: string;
+	observedNeighborPaths?: string[];
+	unconfirmed?: { servers: Array<{ paths: string[] }> };
+	result?: { formatted?: string };
+}
+
+export interface CascadeClassification {
+	state: "conclusive" | "wrong-verdict" | "inconclusive";
+	neighbours: Record<string, NeighbourVerdict>;
+	detail: string;
+}
+
+export interface CascadeMeasurement {
+	handshook?: boolean;
+	answered: boolean;
+	warmMs: number;
+	attempts: number;
+	firstCascadeMs?: number;
+	elapsedMs?: number;
+	timeToConclusiveMs?: number;
+	neighbours?: Record<string, NeighbourVerdict>;
+	concluded?: CascadeClassification;
+}
+
+export interface CascadeRow {
+	lang: string;
+	runner: string;
+	state: "pass" | "fail" | "skip";
+	detail: string;
+	diags: number;
+}
+
+export const CASCADE_FIXTURES: CascadeFixture[];
+export function neighbourVerdict(
+	run: CascadeRunLike | undefined,
+	workspace: string,
+	rel: string,
+): NeighbourVerdict;
+export function neighbourShowsFinding(
+	run: CascadeRunLike | undefined,
+	rel: string,
+	pattern: string,
+): boolean;
+export function classifyCascadeRun(
+	run: CascadeRunLike | undefined,
+	fx: Pick<CascadeFixture, "neighbours" | "expectFindings">,
+	workspace: string,
+): CascadeClassification;
+export function cascadeRow(
+	fx: Partial<CascadeFixture> & { lang: string },
+	m: CascadeMeasurement,
+): CascadeRow;
+export function cascadeTimesRecord(
+	rows: CascadeRow[],
+	measurements: Record<string, CascadeMeasurement>,
+	env?: Record<string, string | undefined>,
+): {
+	schema: number;
+	command: string;
+	date: string;
+	runner: Record<string, unknown>;
+	rows: Array<Record<string, unknown>>;
+};

@@ -11,13 +11,13 @@
  * actual pass/fail verdict and is wired to a FINAL `if: always()` step in
  * tool-smoke.yml, so it runs on every outcome.
  *
- * Reads the run's EIGHT gating step outcomes from env (set by the
+ * Reads the run's NINE gating step outcomes from env (set by the
  * workflow step that invokes this script), plus each layer's captured log
  * text from the file paths the workflow's own `tee` steps wrote — never
  * re-derives success/failure or re-parses anything itself beyond those
- * inputs. The eight are the only steps in tool-smoke.yml WITHOUT
+ * inputs. The nine are the only steps in tool-smoke.yml WITHOUT
  * `continue-on-error: true` (Tool layer, LSP handshake layer, LSP gate,
- * lens_diagnostics mode=full row, Format layer, Resolution layer, the
+ * LSP cascade layer of #1712, lens_diagnostics mode=full row, Format layer, Resolution layer, the
  * LSP evaluated floor of #4514, and the LSP save verdict of #3405) — the
  * only ones whose outcome can actually turn the job red;
  * see scripts/lib/tool-smoke-drift.mjs's module doc for the shared
@@ -28,6 +28,7 @@
  *   TOOL_LAYER_OUTCOME / TOOL_LAYER_LOG
  *   LSP_HANDSHAKE_OUTCOME / LSP_HANDSHAKE_LOG
  *   LSP_GATE_OUTCOME / LSP_GATE_LOG
+ *   LSP_CASCADE_OUTCOME / LSP_CASCADE_LOG
  *   LENS_FULL_OUTCOME / LENS_FULL_LOG
  *   FORMAT_LAYER_OUTCOME / FORMAT_LAYER_LOG
  *   RESOLUTION_LAYER_OUTCOME / RESOLUTION_LAYER_LOG
@@ -70,6 +71,7 @@ const LAYERS = /** @type {const} */ ([
 	["TOOL_LAYER_OUTCOME", "TOOL_LAYER_LOG", "Tool layer"],
 	["LSP_HANDSHAKE_OUTCOME", "LSP_HANDSHAKE_LOG", "LSP handshake layer"],
 	["LSP_GATE_OUTCOME", "LSP_GATE_LOG", "LSP diagnostics clean-gate"],
+	["LSP_CASCADE_OUTCOME", "LSP_CASCADE_LOG", "LSP cascade layer"],
 	["LENS_FULL_OUTCOME", "LENS_FULL_LOG", "lens_diagnostics mode=full row"],
 	["FORMAT_LAYER_OUTCOME", "FORMAT_LAYER_LOG", "Format layer"],
 	["RESOLUTION_LAYER_OUTCOME", "RESOLUTION_LAYER_LOG", "Resolution layer"],

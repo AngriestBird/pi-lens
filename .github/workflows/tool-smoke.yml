@@ -245,6 +245,7 @@ jobs:
       tool_layer: ${{ steps.tool_layer.outcome }}
       lsp_handshake: ${{ steps.lsp_handshake.outcome }}
       lsp_gate: ${{ steps.lsp_gate.outcome }}
+      lsp_cascade: ${{ steps.lsp_cascade.outcome }}
       lens_full: ${{ steps.lens_full.outcome }}
       format_layer: ${{ steps.format_layer.outcome }}
       resolution_layer: ${{ steps.resolution_layer.outcome }}
@@ -436,6 +437,35 @@ jobs:
         run: |
           set -o pipefail
           node scripts/smoke-tools.mjs --lsp-gate --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-gate.log"
+
+      # Cascade layer (#1712): the handshake proves initialize and the clean gate
+      # proves a finding on the file itself; neither proves the path an agent's
+      # write takes to learn it broke an IMPORTER. This edits an exporter in a
+      # 3-file project per priority server (typescript-go, rust-analyzer, gopls,
+      # jdtls), calls the production `computeCascadeForFile`, and requires each
+      # importer to reach a conclusive verdict with the server's own finding. A
+      # server that handshook and then never concludes inside the deadline reds
+      # the step (a declared `expectInconclusive` excepted, with its reason).
+      # `--times-out` leaves the measured time-to-conclusive per server, uploaded
+      # below as the #1549 budget input and staged for the first measured table
+      # in docs/lsp-cascade-times.md. The step reads the handshake census above
+      # (same PI_LENS_HOME), so a server that never handshook is a warning, not
+      # a red; `--min-pass` keeps an all-unavailable night from reading green.
+      - name: LSP cascade layer (edit an exporter, importers conclude)
+        id: lsp_cascade
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          node scripts/smoke-tools.mjs --lsp-cascade --install --verbose --min-pass=1 --times-out="$RUNNER_TEMP/tool-smoke-lsp-cascade-times.json" 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-cascade.log"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: lsp-cascade-times
+          path: ${{ runner.temp }}/tool-smoke-lsp-cascade-times.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 90
 
       # #3401: the matrix refresh keeps its expiry/hysteresis bookkeeping in
       # docs/lsp-capability-matrix.md. This checkout is master, and the refresh
@@ -1047,6 +1077,8 @@ jobs:
           LSP_HANDSHAKE_LOG: ${{ runner.temp }}/tool-smoke-lsp-handshake.log
           LSP_GATE_OUTCOME: ${{ needs.tool-smoke.outputs.lsp_gate }}
           LSP_GATE_LOG: ${{ runner.temp }}/tool-smoke-lsp-gate.log
+          LSP_CASCADE_OUTCOME: ${{ needs.tool-smoke.outputs.lsp_cascade }}
+          LSP_CASCADE_LOG: ${{ runner.temp }}/tool-smoke-lsp-cascade.log
           LENS_FULL_OUTCOME: ${{ needs.tool-smoke.outputs.lens_full }}
           LENS_FULL_LOG: ${{ runner.temp }}/tool-smoke-lens-full.log
           FORMAT_LAYER_OUTCOME: ${{ needs.tool-smoke.outputs.format_layer }}
