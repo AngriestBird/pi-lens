@@ -621,16 +621,14 @@ export function unansweredPrimaries(
 			return { serverIds: [], disabledServerIds: [], cause: "unstarted" };
 		acquired.add(entry.info.id);
 	}
+	// An alternate acquired while its owner never resolved a root (deno beside
+	// an unrooted typescript) leaves nothing here: it is the file's only candidate.
 	const serverIds = [
 		...new Set([
 			...[...resolvedPrimaryRoots.keys()].filter((id) => !acquired.has(id)),
 			...disabledServerIds,
 		]),
 	];
-	// An alternate acquired while its owner never resolved a root (deno beside
-	// an unrooted typescript) is the file's only candidate: nothing is missing.
-	if (acquired.size > 0 && serverIds.length === 0)
-		return { serverIds: [], disabledServerIds: [], cause: "unstarted" };
 	return {
 		serverIds,
 		disabledServerIds,
