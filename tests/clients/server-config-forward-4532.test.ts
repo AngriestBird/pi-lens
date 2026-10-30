@@ -291,6 +291,33 @@ describe("a pip install into a lockfile-less venv (#4532 gap 3)", () => {
 		expect(restarted).toEqual([normalizeMapKey(tmp)]);
 	});
 
+	it("stamps the interpreter directory past stray files in `lib`", async () => {
+		// Recurrence (review 5009 F1): `lib` holds non-directory entries beside the
+		// interpreter directory, and slicing the ordinal-sorted listing BEFORE the
+		// type guard let four stray files spend the cap, so the venv's only
+		// interpreter directory was never stamped and an install there published
+		// nothing. The cap bounds the stats, not the candidates.
+		const site = sitePackages();
+		fs.mkdirSync(site, { recursive: true });
+		for (const stray of ["a.txt", "b.txt", "c.txt", "d.txt"]) {
+			fs.writeFileSync(path.join(tmp, ".venv", "lib", stray), "");
+		}
+		const seen = await lookAfter(() => pipInstall(site));
+		expect(seen.map((change) => change.sources)).toEqual([["install"]]);
+	});
+
+	it("sees an install in the second interpreter directory", async () => {
+		// The cap's own value, pinned (review 5009 F1): a venv holds one
+		// interpreter directory per version, so the second sorts inside the bound
+		// and an install into it must publish. The cap's policy is "a real venv
+		// fits"; the case reds the moment the bound drops below two.
+		fs.mkdirSync(sitePackages(".venv", "python3.11"), { recursive: true });
+		const site = sitePackages(".venv", "python3.12");
+		fs.mkdirSync(site, { recursive: true });
+		const seen = await lookAfter(() => pipInstall(site));
+		expect(seen.map((change) => change.sources)).toEqual([["install"]]);
+	});
+
 	it("records a venv install older than the first look's client epoch", async () => {
 		pipInstall(sitePackages());
 		const seen = recordPublishes();

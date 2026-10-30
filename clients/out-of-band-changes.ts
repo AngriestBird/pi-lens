@@ -66,6 +66,7 @@ import {
 	realpathOrResolve,
 } from "./path-utils.js";
 import { SERVER_CONFIG_FILE_NAMES } from "./lsp/server-config-files.js";
+import { PROJECT_VENV_DIR_NAMES } from "./python-environment.js";
 import { createSingleFlight } from "./single-flight.js";
 import { compareOrdinal } from "./string-utils.js";
 
@@ -98,11 +99,6 @@ const INSTALL_MARKERS = [
 	".yarn-state.yml",
 	".yarn-integrity",
 ];
-/**
- * The Python venv directory names `detectPythonEnvironment` resolves at a root,
- * in its own order (#4532 gap 3).
- */
-const VENV_DIR_NAMES = [".venv", "venv"];
 /** The interpreter level of a POSIX venv's `site-packages` directory. */
 const VENV_LIB_DIR = "lib";
 /** The Windows venv layout's `site-packages`, relative to the venv root. */
@@ -244,14 +240,20 @@ function diffServerConfigs(
  * package release that leaves `<name>` and its `.dist-info` in place)
  * changes no entry of
  * `site-packages` itself, so it publishes nothing; pip's own uninstall-then-
- * install moves the directory.
+ * install moves the directory. The other side of the same bound is a write AT
+ * the `site-packages` root: Python caches a top-level module's bytecode in a
+ * `__pycache__` there, so the FIRST import of a top-level installed module
+ * moves the directory's identity and publishes one install (which also
+ * refuses the diagnostics cache workspace-wide, `clients/disk-change-
+ * subscribers.ts`). It is bounded to that first import: the `.pyc` is cached,
+ * so a re-import moves nothing. Review 5009 F2.
  */
 async function readVenvInstallParts(
 	root: string,
 	listed: ReadonlySet<string>,
 ): Promise<Array<{ part: string; changedAt: number }>> {
 	const targets: Array<{ label: string; dir: string }> = [];
-	for (const name of VENV_DIR_NAMES) {
+	for (const name of PROJECT_VENV_DIR_NAMES) {
 		if (!listed.has(name)) continue;
 		const venvRoot = join(root, name);
 		// The Windows layout has no interpreter level, so it is one stat either way.
@@ -269,14 +271,15 @@ async function readVenvInstallParts(
 			continue;
 		}
 		// Deterministic order, as the declaration walk's keys are (S2871): the
-		// population that fits `VENV_VERSION_DIRS_MAX` must not depend on the
-		// order the filesystem listed the entries in.
+		// population that fits `VENV_INTERPRETER_DIRS_MAX` must not depend on the
+		// order the filesystem listed the entries in. The type guard runs BEFORE
+		// the cap, so a stray file in `lib` is never a candidate and cannot spend
+		// a slot the venv's own interpreter directory needs (review 5009 F1).
 		interpreters.sort((a, b) => compareOrdinal(a.name, b.name));
-		for (const interpreter of interpreters.slice(
-			0,
-			VENV_INTERPRETER_DIRS_MAX,
-		)) {
-			if (!interpreter.isDirectory() && !interpreter.isSymbolicLink()) continue;
+		const interpreterDirs = interpreters
+			.filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+			.slice(0, VENV_INTERPRETER_DIRS_MAX);
+		for (const interpreter of interpreterDirs) {
 			targets.push({
 				label: `${name}/${VENV_LIB_DIR}/${interpreter.name}/site-packages`,
 				dir: join(venvRoot, VENV_LIB_DIR, interpreter.name, "site-packages"),

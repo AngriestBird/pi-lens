@@ -193,6 +193,27 @@ const PROJECT_SOURCED_PYTHON_SOURCES = new Set<PythonEnvironmentSource>([
 	"uv-workspace",
 ]);
 
+/**
+ * The root-level venv directories this module resolves, in the order it prefers
+ * them. One list, so a reader that stamps what an install into one of them
+ * writes (`clients/out-of-band-changes.ts`, #4532 gap 3) cannot disagree with
+ * the detector about which names a project's environment can be.
+ */
+const PROJECT_VENV_DIRS: ReadonlyArray<{
+	dir: string;
+	source: PythonEnvironmentSource;
+}> = [
+	{ dir: ".venv", source: "project-dot-venv" },
+	{ dir: "venv", source: "project-venv" },
+];
+
+/**
+ * The root-level venv directory names `detectPythonEnvironment` resolves, for
+ * the readers that stamp an install into one of them (#4532 gap 3).
+ */
+export const PROJECT_VENV_DIR_NAMES: ReadonlyArray<string> =
+	PROJECT_VENV_DIRS.map((venv) => venv.dir);
+
 const AMBIENT_ENVIRONMENT_VARIABLES = {
 	"uv-project-environment": "UV_PROJECT_ENVIRONMENT",
 	"virtual-env": "VIRTUAL_ENV",
@@ -285,8 +306,10 @@ export async function detectPythonEnvironment(
 			: []),
 		{ root: process.env.VIRTUAL_ENV, source: "virtual-env" },
 		{ root: process.env.CONDA_PREFIX, source: "conda" },
-		{ root: path.join(root, ".venv"), source: "project-dot-venv" },
-		{ root: path.join(root, "venv"), source: "project-venv" },
+		...PROJECT_VENV_DIRS.map((venv) => ({
+			root: path.join(root, venv.dir),
+			source: venv.source,
+		})),
 	];
 
 	for (const candidate of candidates) {

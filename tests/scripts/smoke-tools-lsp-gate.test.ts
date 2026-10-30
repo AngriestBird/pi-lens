@@ -589,6 +589,7 @@ describe("smoke-tools venv install witness (#4532 gap 3)", () => {
 	async function witness(
 		reportsMissing: (call: number, installed: boolean) => boolean,
 		poll: { deadlineMs?: number; intervalMs?: number } = POLL,
+		errorAfterInstall = false,
 	) {
 		const workspace = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-venv-witness-"),
@@ -609,6 +610,14 @@ describe("smoke-tools venv install witness (#4532 gap 3)", () => {
 				),
 			);
 			calls.push({ installed });
+			if (errorAfterInstall && installed) {
+				// What the handler answers when its server is not there: an error
+				// result whose text reports no diagnostic at all.
+				return {
+					content: [{ text: "LSP service not available." }],
+					isError: true,
+				};
+			}
 			const missing = reportsMissing(calls.length, installed);
 			return {
 				content: [
@@ -645,5 +654,35 @@ describe("smoke-tools venv install witness (#4532 gap 3)", () => {
 		expect(rows.map((row) => row.state)).toEqual(["fail"]);
 		expect(rows[0].detail).toContain("precondition");
 		expect(calls.every((call) => !call.installed)).toBe(true);
+	});
+
+	it("reds when the answer after the install is an error result", async () => {
+		// Recurrence (review 5009): the phase read only the answer's text, so an
+		// `isError` result such as "LSP service not available." matched neither
+		// the inconclusive marker nor the missing-import check and the poll
+		// accepted it as cleared on its first call — a green row with no
+		// diagnostic answer behind it.
+		const { rows, calls } = await witness(() => true, POLL, true);
+		expect(rows.map((row) => row.state)).toEqual(["fail"]);
+		expect(rows[0].detail).toContain("still reports");
+		// The install DID happen, and every answer after it was an error.
+		expect(calls.at(-1)?.installed).toBe(true);
+	});
+
+	it("reports a red row when the fixture carries no venvInstall", async () => {
+		// Recurrence (review 5009): the phase dereferenced `fx.venvInstall` before
+		// its try, so a fixture without the flag rejected out of the helper
+		// instead of becoming a smoke row the gate can count.
+		const workspace = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-venv-witness-"),
+		);
+		tempHomes.push(workspace);
+		const rows = await runVenvInstallWitness(undefined, {
+			workspace,
+			execute: vi.fn(),
+			...POLL,
+		});
+		expect(rows.map((row) => row.state)).toEqual(["fail"]);
+		expect(rows[0].detail).toContain("witness error");
 	});
 });

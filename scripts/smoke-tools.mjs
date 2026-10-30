@@ -2516,7 +2516,13 @@ function diagnoseFile(execute, workspace, lang, file, before, cwd = workspace) {
 			null,
 			{ cwd },
 		);
-		return String(result?.content?.[0]?.text ?? "");
+		return {
+			text: String(result?.content?.[0]?.text ?? ""),
+			// The answer's status, not only its text: an error result ("LSP service
+			// not available.") is no diagnostic answer, so a witness that reads only
+			// the text can count it as cleared on its first call (review 5009).
+			isError: result?.isError === true,
+		};
 	};
 }
 
@@ -2560,7 +2566,8 @@ export async function runCreatedModuleWitness(
 ) {
 	const witness = fx.createdModuleWitness;
 	const tag = `${process.pid}_${Date.now().toString(36)}`;
-	const diagnose = (file) => diagnoseFile(execute, workspace, fx.lang, file)();
+	const diagnose = async (file) =>
+		(await diagnoseFile(execute, workspace, fx.lang, file)()).text;
 	const cases = [
 		{
 			label: "pi write",
@@ -2777,7 +2784,7 @@ export async function runBornAfterStartConfigWitness(
 				await diagnoseFile(execute, workspace, fx.lang, born.host.file)();
 			}
 			const ready = await pollUntil(
-				async () => witness.reportsMissing(await diagnose(), name),
+				async () => witness.reportsMissing((await diagnose()).text, name),
 				{ deadlineMs, intervalMs },
 			);
 			if (!ready.ok) {
@@ -2793,7 +2800,7 @@ export async function runBornAfterStartConfigWitness(
 			born.birth(born.root);
 			const cleared = await pollUntil(
 				async () => {
-					const text = await diagnose();
+					const text = (await diagnose()).text;
 					return (
 						!INCONCLUSIVE_ANSWER.test(text) &&
 						!witness.reportsMissing(text, name)
@@ -2858,35 +2865,38 @@ export async function runVenvInstallWitness(
 		intervalMs = BORN_AFTER_START_POLL_MS,
 	},
 ) {
-	const witness = fx.venvInstall;
-	const tag = `${process.pid}_${Date.now().toString(36)}`;
-	const root = path.join(workspace, `witness_venv_${tag}`);
-	const name = `witness_pkg_${tag}`;
-	const importer = path.join(root, `witness_user_venv${witness.ext}`);
-	const site = path.join(root, ...witness.sitePackages);
-	fs.mkdirSync(root, { recursive: true });
-	fs.mkdirSync(site, { recursive: true });
-	fs.writeFileSync(path.join(root, witness.configFile), witness.configText);
-	fs.writeFileSync(path.join(root, witness.rootMarker), "");
-	fs.writeFileSync(importer, witness.importerText(name));
-	const diagnose = diagnoseFile(
-		execute,
-		workspace,
-		fx.lang,
-		importer,
-		undefined,
-		root,
-	);
-	const runner = `${fx.serverHint} venv install (no lockfile)`;
+	const lang = fx?.lang ?? "unknown";
+	const runner = `${fx?.serverHint} venv install (no lockfile)`;
 	try {
+		// Inside the try: a caller with no `venvInstall` fixture gets a red row, not
+		// a rejection out of the helper (review 5009).
+		const witness = fx.venvInstall;
+		const tag = `${process.pid}_${Date.now().toString(36)}`;
+		const root = path.join(workspace, `witness_venv_${tag}`);
+		const name = `witness_pkg_${tag}`;
+		const importer = path.join(root, `witness_user_venv${witness.ext}`);
+		const site = path.join(root, ...witness.sitePackages);
+		fs.mkdirSync(root, { recursive: true });
+		fs.mkdirSync(site, { recursive: true });
+		fs.writeFileSync(path.join(root, witness.configFile), witness.configText);
+		fs.writeFileSync(path.join(root, witness.rootMarker), "");
+		fs.writeFileSync(importer, witness.importerText(name));
+		const diagnose = diagnoseFile(
+			execute,
+			workspace,
+			fx.lang,
+			importer,
+			undefined,
+			root,
+		);
 		const ready = await pollUntil(
-			async () => witness.reportsMissing(await diagnose(), name),
+			async () => witness.reportsMissing((await diagnose()).text, name),
 			{ deadlineMs, intervalMs },
 		);
 		if (!ready.ok) {
 			return [
 				{
-					lang: fx.lang,
+					lang,
 					runner,
 					state: "fail",
 					detail: `precondition: the missing import of ${name} was not reported in ${ready.polls} calls over ${ready.elapsedMs} ms before it was installed`,
@@ -2899,16 +2909,20 @@ export async function runVenvInstallWitness(
 		fs.mkdirSync(path.join(site, `${name}-1.0.dist-info`));
 		const cleared = await pollUntil(
 			async () => {
-				const text = await diagnose();
+				const answer = await diagnose();
+				// An error result is not an answer: it is neither "cleared" nor a
+				// missing-import report, so the poll keeps waiting (review 5009).
 				return (
-					!INCONCLUSIVE_ANSWER.test(text) && !witness.reportsMissing(text, name)
+					!answer.isError &&
+					!INCONCLUSIVE_ANSWER.test(answer.text) &&
+					!witness.reportsMissing(answer.text, name)
 				);
 			},
 			{ deadlineMs, intervalMs },
 		);
 		return [
 			{
-				lang: fx.lang,
+				lang,
 				runner,
 				state: cleared.ok ? "pass" : "fail",
 				detail: cleared.ok
@@ -2920,7 +2934,7 @@ export async function runVenvInstallWitness(
 	} catch (err) {
 		return [
 			{
-				lang: fx.lang,
+				lang,
 				runner,
 				state: "fail",
 				detail: `witness error: ${err?.message ?? err}`,
