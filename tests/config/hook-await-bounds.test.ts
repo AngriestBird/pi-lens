@@ -2648,7 +2648,14 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// `await fsp.lstat(...)` beside the marker stats; #2523 AC4's deps-type
 	// threading is what would bound it, and `lookForOutOfBandChanges` is called
 	// from inside `bounded()` at the hook, not here.
-	"clients/out-of-band-changes.ts": 10,
+	// #4532 gap 3: 10 -> 12. The lockfile-less venv install stamp reads the
+	// venv's `site-packages` identities — one `readdir` of `<venv>/lib` to find
+	// the interpreter directories and one directory stat per `site-packages` —
+	// in the same round as the lockfile and marker stats above. Both are
+	// ordinary filesystem reads inside the look, which both hook callers bound
+	// with `bounded()` one frame up; #2523 AC4's deps-type threading is what
+	// would bound them here.
+	"clients/out-of-band-changes.ts": 12,
 	"clients/package-manager.ts": 8,
 	"clients/partial-edit-apply.ts": 2,
 	// #4689 batch 10: 0 -> 1. `realpathOrResolveAsync` awaits the kernel
