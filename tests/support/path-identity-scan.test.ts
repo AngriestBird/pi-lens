@@ -208,8 +208,8 @@ const SITE_ROWS: ReadonlyArray<[string, string, PathIdentityNeedle[]]> = [
 		["hand-rolled-upward-walk"],
 	],
 	[
-		"plant: a bare dirname bound to another name",
-		'import { dirname } from "node:path";\nconst up = dirname;\nwhile (c !== root) {\n\tc = up(c);\n}',
+		"plant: a destructured dirname bound to another name",
+		"const { dirname } = path;\nconst up = dirname;\nwhile (c !== root) {\n\tc = up(c);\n}",
 		["hand-rolled-upward-walk"],
 	],
 	[
