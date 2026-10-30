@@ -541,8 +541,8 @@ describe("dispatch.disabledRunners — dispatch", () => {
 	// pinned the closed direction, so a change that admitted the whole taxonomy
 	// (or dropped one entry) shipped green. Every taxonomy reason outside the
 	// admitted three, the denial's own `disabled-by-config` aside, must still
-	// read as a failed tool, so a reason added to RUNNER_SKIP_REASONS fails here
-	// until someone decides which side of the list it belongs on.
+	// read as a failed tool. A reason moved onto the admitted list reds here
+	// until this list names it too, so the admission is a decision made twice.
 	const ADMITTED = [
 		"no-files-matched",
 		"configured-non-biome-linter",
