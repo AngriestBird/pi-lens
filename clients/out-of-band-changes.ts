@@ -14,8 +14,9 @@
  * entries whose ambient scope had changed under them.
  *
  * At each #4493 look (a bash tool_result, every tool_call) this module
- * compares the root's install stamps (lockfiles and package-manager install
- * markers) and a bounded walk of the root's declaration files, then publishes
+ * compares the root's install stamps (lockfiles, package-manager install
+ * markers and a Python venv's `site-packages` directories) and a bounded walk
+ * of the root's declaration files, then publishes
  * what changed as one `DiskChange` (#4535). The publisher allocates the
  * project sequence; its subscribers restart the root's primary clients and
  * send the exact-URI watched-files events (#4528), and move the
@@ -97,6 +98,22 @@ const INSTALL_MARKERS = [
 	".yarn-state.yml",
 	".yarn-integrity",
 ];
+/**
+ * The Python venv directory names `detectPythonEnvironment` resolves at a root,
+ * in its own order (#4532 gap 3).
+ */
+const VENV_DIR_NAMES = [".venv", "venv"];
+/** The version level of a POSIX venv's `site-packages` directory. */
+const VENV_LIB_DIR = "lib";
+/** The Windows venv layout's `site-packages`, relative to the venv root. */
+const VENV_WINDOWS_SITE_PACKAGES = join("Lib", "site-packages");
+/**
+ * Version directories under `<venv>/lib` statted per look. A venv holds one per
+ * interpreter on the platform; the cap keeps a pathological `lib` from turning
+ * every look into a stat storm, and a version directory past it only defers its
+ * install to a look that lists it again.
+ */
+const VENV_VERSION_DIRS_MAX = 4;
 
 /** Directories one declaration walk reads before it stops (degraded). */
 const DECLARATION_WALK_MAX_DIRS = 4096;
@@ -204,6 +221,78 @@ function diffServerConfigs(
 }
 
 /**
+ * The stamp of `root`'s Python venv `site-packages` directories (#4532 gap 3).
+ *
+ * A project that installs with `pip install` and keeps no lockfile — the
+ * reported shape: a `pyproject.toml` and a local `.venv` — wrote nothing the
+ * lockfile and `node_modules` stamp could see, so an install published no
+ * change, no server restarted, and pyright served the `Import "x" could not be
+ * resolved` it had cached for its whole life (measured on real pyright
+ * 1.1.414: stale through 40 calls over 20 s; the same install behind a
+ * published change clears on call 1).
+ *
+ * One directory stat per `site-packages` and NO listing of its contents: `pip
+ * install` adds the package's directory and its `<name>-<version>.dist-info`
+ * entry, which moves the directory's own mtime, inode or size. A root with no
+ * venv costs no syscall here; a venv costs one `lib` listing and one stat per
+ * version directory, plus one stat for the Windows layout (absent on POSIX).
+ *
+ * Residual: an install that rewrites files INSIDE an existing package
+ * directory without adding or removing an entry (a same-version reinstall that
+ * leaves `<name>` and its `.dist-info` in place) changes no entry of
+ * `site-packages` itself, so it publishes nothing; pip's own uninstall-then-
+ * install moves the directory.
+ */
+async function readVenvInstallParts(
+	root: string,
+	listed: ReadonlySet<string>,
+): Promise<Array<{ part: string; changedAt: number }>> {
+	const targets: Array<{ label: string; dir: string }> = [];
+	for (const name of VENV_DIR_NAMES) {
+		if (!listed.has(name)) continue;
+		const venvRoot = join(root, name);
+		// The Windows layout has no version level, so it is one stat either way.
+		targets.push({
+			label: `${name}/${VENV_WINDOWS_SITE_PACKAGES}`,
+			dir: join(venvRoot, VENV_WINDOWS_SITE_PACKAGES),
+		});
+		let versions: import("node:fs").Dirent[];
+		try {
+			versions = await fsp.readdir(join(venvRoot, VENV_LIB_DIR), {
+				withFileTypes: true,
+			});
+		} catch {
+			// none: the Windows layout, or a venv root that holds no `lib`.
+			continue;
+		}
+		// Deterministic order, as the declaration walk's keys are (S2871): the
+		// population that fits `VENV_VERSION_DIRS_MAX` must not depend on the
+		// order the filesystem listed the entries in.
+		versions.sort((a, b) => compareOrdinal(a.name, b.name));
+		for (const version of versions.slice(0, VENV_VERSION_DIRS_MAX)) {
+			if (!version.isDirectory() && !version.isSymbolicLink()) continue;
+			targets.push({
+				label: `${name}/${VENV_LIB_DIR}/${version.name}/site-packages`,
+				dir: join(venvRoot, VENV_LIB_DIR, version.name, "site-packages"),
+			});
+		}
+	}
+	return Promise.all(
+		targets.map(async (target) => {
+			try {
+				const stat = await fsp.stat(target.dir);
+				return {
+					part: `${target.label}=${fingerprint(stat)}`,
+					changedAt: stat.mtimeMs,
+				};
+			} catch {
+				return { part: `${target.label}=-`, changedAt: 0 };
+			}
+		}),
+	);
+}
+
+/**
  * The root's install stamp and the freshest timestamp in it.
  *
  * `stamp` is opaque equality evidence: one listing of the root, then a stat of
@@ -282,6 +371,10 @@ async function readInstallStamp(root: string): Promise<{
 	}
 	if (linkPrint !== undefined)
 		parts.push({ part: linkPrint, changedAt: linkChangedAt });
+	// #4532 gap 3: a Python install into a venv the project keeps no lockfile
+	// for is invisible to every name above, so the venv's site-packages
+	// directories join the stamp on the same round.
+	parts.push(...(await readVenvInstallParts(root, listed)));
 	return {
 		configs,
 		stamp: parts.map((entry) => entry.part).join("|"),

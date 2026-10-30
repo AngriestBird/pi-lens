@@ -661,6 +661,24 @@ const LSP_FIXTURES = [
 			ancestorMarker: "requirements.txt",
 			rootMarker: "setup.py",
 		},
+		// #4532 gap 3: `runVenvInstallWitness` (a `pip install` into a project
+		// `.venv` with no lockfile wrote nothing the look stamped, so pyright kept
+		// its cached missing import for the server's life).
+		venvInstall: {
+			ext: ".py",
+			importerText: (name) => `import ${name}\n\nprint(${name}.VALUE)\n`,
+			packageText: "VALUE = 1\n",
+			reportsMissing: (text, name) =>
+				text.includes(`Import "${name}" could not be resolved`),
+			// pyright reads a venv through its own config, so the fixture needs no
+			// interpreter (and no `pip`): `venvPath`/`venv` point at a directory
+			// tree shaped exactly like the one `python -m venv` writes, and the
+			// install is the two entries `pip install` adds to `site-packages`.
+			configFile: "pyrightconfig.json",
+			configText: JSON.stringify({ venvPath: ".", venv: ".venv" }),
+			sitePackages: [".venv", "lib", "python3.12", "site-packages"],
+			rootMarker: "setup.py",
+		},
 	},
 	// Clean (no-diagnostic) counterpart — bench-only signal for the clean-file edit
 	// path (#240). Every other fixture is intentionally broken, which masks how long
@@ -2483,9 +2501,12 @@ const INCONCLUSIVE_ANSWER = /NOT the same as 0 diagnostics/;
 /**
  * One `lsp_diagnostics` call on `file`, as the born-after-start phases read it
  * (the primary server's answer, as text). `before` runs first: the host's
- * `tool_call` look, when the phase stands in for the pi hook (#4532).
+ * `tool_call` look, when the phase stands in for the pi hook (#4532). `cwd` is
+ * the session directory the call runs from, which is also the root the answer
+ * route's own look keys on (`tools/lsp-diagnostics.ts`); a phase whose fixture
+ * root is not the workspace passes its own (#4532 gap 3).
  */
-function diagnoseFile(execute, workspace, lang, file, before) {
+function diagnoseFile(execute, workspace, lang, file, before, cwd = workspace) {
 	return async () => {
 		if (before) await before();
 		const result = await execute(
@@ -2493,7 +2514,7 @@ function diagnoseFile(execute, workspace, lang, file, before) {
 			{ path: file, waitMs: LSP_DIAGNOSTICS_WAIT_MS, serverScope: "primary" },
 			undefined,
 			null,
-			{ cwd: workspace },
+			{ cwd },
 		);
 		return String(result?.content?.[0]?.text ?? "");
 	};
@@ -2813,6 +2834,103 @@ export async function runBornAfterStartConfigWitness(
 }
 
 /**
+ * Born-after-start phase for a package installed into a project `.venv` that
+ * keeps no lockfile (#4532 gap 3). The lockfile and `node_modules` install
+ * stamp was blind to `pip install` in this shape, so nothing published, no
+ * primary client restarted and pyright kept the `Import "x" could not be
+ * resolved` it had cached for its whole life (real pyright 1.1.414: stale
+ * through 40 calls over 20 s on the pre-fix tree; the same install behind a
+ * published change cleared on call 1).
+ *
+ * The workspace is hosted as its own root with its config and its empty venv
+ * written BEFORE the first call (the server reads both once, at start), so the
+ * import is genuinely unresolved when the phase starts. The install is then
+ * written from outside pi-lens, as `pip install` leaves it: the package's
+ * directory and its `<name>-1.0.dist-info` entry inside `site-packages`, which
+ * is what moves the directory's own identity. One row.
+ */
+export async function runVenvInstallWitness(
+	fx,
+	{
+		workspace,
+		execute,
+		deadlineMs = BORN_AFTER_START_DEADLINE_MS,
+		intervalMs = BORN_AFTER_START_POLL_MS,
+	},
+) {
+	const witness = fx.venvInstall;
+	const tag = `${process.pid}_${Date.now().toString(36)}`;
+	const root = path.join(workspace, `witness_venv_${tag}`);
+	const name = `witness_pkg_${tag}`;
+	const importer = path.join(root, `witness_user_venv${witness.ext}`);
+	const site = path.join(root, ...witness.sitePackages);
+	fs.mkdirSync(root, { recursive: true });
+	fs.mkdirSync(site, { recursive: true });
+	fs.writeFileSync(path.join(root, witness.configFile), witness.configText);
+	fs.writeFileSync(path.join(root, witness.rootMarker), "");
+	fs.writeFileSync(importer, witness.importerText(name));
+	const diagnose = diagnoseFile(
+		execute,
+		workspace,
+		fx.lang,
+		importer,
+		undefined,
+		root,
+	);
+	const runner = `${fx.serverHint} venv install (no lockfile)`;
+	try {
+		const ready = await pollUntil(
+			async () => witness.reportsMissing(await diagnose(), name),
+			{ deadlineMs, intervalMs },
+		);
+		if (!ready.ok) {
+			return [
+				{
+					lang: fx.lang,
+					runner,
+					state: "fail",
+					detail: `precondition: the missing import of ${name} was not reported in ${ready.polls} calls over ${ready.elapsedMs} ms before it was installed`,
+					diags: 0,
+				},
+			];
+		}
+		fs.mkdirSync(path.join(site, name));
+		fs.writeFileSync(path.join(site, name, "__init__.py"), witness.packageText);
+		fs.mkdirSync(path.join(site, `${name}-1.0.dist-info`));
+		const cleared = await pollUntil(
+			async () => {
+				const text = await diagnose();
+				return (
+					!INCONCLUSIVE_ANSWER.test(text) && !witness.reportsMissing(text, name)
+				);
+			},
+			{ deadlineMs, intervalMs },
+		);
+		return [
+			{
+				lang: fx.lang,
+				runner,
+				state: cleared.ok ? "pass" : "fail",
+				detail: cleared.ok
+					? `the importer's missing import cleared on call ${cleared.polls} (${cleared.elapsedMs} ms after the package was installed into the venv)`
+					: `the importer still reports ${name} missing, or answers inconclusively, after ${cleared.polls} calls over ${cleared.elapsedMs} ms (installed into a lockfile-less .venv; #4532 gap 3)`,
+				diags: cleared.ok ? 0 : 1,
+			},
+		];
+	} catch (err) {
+		return [
+			{
+				lang: fx.lang,
+				runner,
+				state: "fail",
+				detail: `witness error: ${err?.message ?? err}`,
+				diags: 0,
+			},
+		];
+	}
+}
+
+/**
  * Gating LSP layer (#2780): run the real lsp_diagnostics handler against each
  * installed primary fixture and require at least one primary finding. This is
  * intentionally separate from the handshake layer, whose contract is only
@@ -3037,6 +3155,15 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 							(getLSPService?.()?.livePrimaryClientRoots?.() ?? []).map(
 								(entry) => path.relative(workspace, entry.root) || ".",
 							),
+						...deps?.createdModulePoll,
+					})),
+				);
+			}
+			if (fx.venvInstall && verdict.state === "pass") {
+				witnessRows.push(
+					...(await runVenvInstallWitness(fx, {
+						workspace,
+						execute: (...args) => createLspDiagnosticsTool().execute(...args),
 						...deps?.createdModulePoll,
 					})),
 				);

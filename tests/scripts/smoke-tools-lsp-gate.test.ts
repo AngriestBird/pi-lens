@@ -8,6 +8,7 @@ import {
 	LSP_FIXTURES,
 	runCreatedModuleWitness,
 	runLspGate,
+	runVenvInstallWitness,
 } from "../../scripts/smoke-tools.mjs";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -477,12 +478,14 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 
 		expect(output.join("\n")).toContain("LSP created-module witness");
 		// Every witness row stays red: the scripted server reports every import
-		// missing. 5 = 2 created-module rows (`runCreatedModuleWitness`: pi
+		// missing. 6 = 2 created-module rows (`runCreatedModuleWitness`: pi
 		// write, outside pi-lens) + 3 born-after-start config rows
 		// (`runBornAfterStartConfigWitness`: config file, root marker, root
-		// marker with no ancestor marker, added by #4532's gap 14).
+		// marker with no ancestor marker, added by #4532's gap 14) + 1
+		// lockfile-less venv install row (`runVenvInstallWitness`, #4532 gap 3).
 		expect(output.join("\n")).toContain("born after start (config file)");
-		expect(failures).toBe(5);
+		expect(output.join("\n")).toContain("venv install (no lockfile)");
+		expect(failures).toBe(6);
 	});
 
 	// Recurrence: the one-call witness red-flaked locally (2 of 5 pyright runs
@@ -568,5 +571,79 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 			expect.stringContaining("precondition"),
 			expect.stringContaining("precondition"),
 		]);
+	});
+});
+
+// #4532 gap 3: the lockfile-less venv install phase's verdicts, through its real
+// entry. The scripted server answers from what is actually on disk, so a pass
+// requires the package to be IN site-packages — not a flag the witness set.
+describe("smoke-tools venv install witness (#4532 gap 3)", () => {
+	const python = LSP_FIXTURES.find(
+		(fixture) =>
+			(fixture as { venvInstall?: unknown }).venvInstall !== undefined,
+	);
+
+	// A short deadline keeps a red case fast; the phase's real one is 20 s.
+	const POLL = { deadlineMs: 400, intervalMs: 2 };
+
+	async function witness(
+		reportsMissing: (call: number, installed: boolean) => boolean,
+		poll: { deadlineMs?: number; intervalMs?: number } = POLL,
+	) {
+		const workspace = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-venv-witness-"),
+		);
+		tempHomes.push(workspace);
+		const calls: Array<{ installed: boolean }> = [];
+		const execute = vi.fn(async (_id: string, params: { path: string }) => {
+			const source = fs.readFileSync(params.path, "utf8");
+			const name = /import (\w+)/.exec(source)?.[1] ?? "";
+			const installed = fs.existsSync(
+				path.join(
+					path.dirname(params.path),
+					".venv",
+					"lib",
+					"python3.12",
+					"site-packages",
+					name,
+				),
+			);
+			calls.push({ installed });
+			const missing = reportsMissing(calls.length, installed);
+			return {
+				content: [
+					{ text: missing ? `Import "${name}" could not be resolved` : "ok" },
+				],
+			};
+		});
+		const rows = await runVenvInstallWitness(python, {
+			workspace,
+			execute,
+			...poll,
+		});
+		return { rows, calls, workspace };
+	}
+
+	it("passes when the installed package clears the importer", async () => {
+		const { rows, calls } = await witness((_call, installed) => !installed);
+		expect(rows.map((row) => row.state)).toEqual(["pass"]);
+		expect(rows[0].detail).toContain("cleared on call");
+		// The pass rides the package really being inside site-packages.
+		expect(calls.at(-1)?.installed).toBe(true);
+	});
+
+	it("reds when the importer still reports the package after the install", async () => {
+		const { rows, calls } = await witness(() => true);
+		expect(rows.map((row) => row.state)).toEqual(["fail"]);
+		expect(rows[0].detail).toContain("still reports");
+		// The install DID happen: the red is the product's, not the fixture's.
+		expect(calls.at(-1)?.installed).toBe(true);
+	});
+
+	it("does not install when the importer never reported the package", async () => {
+		const { rows, calls } = await witness(() => false);
+		expect(rows.map((row) => row.state)).toEqual(["fail"]);
+		expect(rows[0].detail).toContain("precondition");
+		expect(calls.every((call) => !call.installed)).toBe(true);
 	});
 });
