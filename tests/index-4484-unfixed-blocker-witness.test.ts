@@ -99,7 +99,7 @@ const boundary = vi.hoisted(() => {
 						{
 							severity: 1,
 							message: "Cannot find name 'BAD_CALL'.",
-							code: 2304,
+							code: lsp.code,
 							source: "ts",
 							serverId: "typescript",
 							range,
@@ -131,6 +131,12 @@ const boundary = vi.hoisted(() => {
 			}),
 		enabled: false,
 		touches: 0,
+		/**
+		 * Review r2 (F3): the `code` the server reports for `BAD_CALL`. The
+		 * rendered rule is `${source}:${code}`, so a long id exercises the
+		 * place list's rule cap; the default is the ordinary TypeScript code.
+		 */
+		code: 2304 as number | string,
 		/**
 		 * Round 2: how the server answers the next touch. `inconclusive` is a
 		 * touch whose diagnostics wait hit its deadline, `partial` one where
@@ -387,6 +393,7 @@ beforeEach(async () => {
 	boundary.lsp.enabled = false;
 	boundary.lsp.touches = 0;
 	boundary.lsp.mode = "answer";
+	boundary.lsp.code = 2304;
 	boundary.lsp.auxGap = undefined;
 	boundary.lsp.silentAux = false;
 	boundary.helm.stdout = "";
@@ -403,6 +410,7 @@ afterEach(async () => {
 	const cleanup = pendingCleanup;
 	pendingCleanup = undefined;
 	boundary.lsp.mode = "answer";
+	boundary.lsp.code = 2304;
 	boundary.lsp.auxGap = undefined;
 	boundary.lsp.silentAux = false;
 	boundary.lsp.onHold = undefined;
@@ -2074,7 +2082,7 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 		// the line says so instead of dropping it from a count that still holds it
 		// (#5008).
 		expect(w2).toMatch(
-			/Still unfixed: 1 blocker reported earlier; 1 with no current line\./,
+			/Still unfixed: 1 blocker reported earlier; 1 with no line in this file\./,
 		);
 		await fixAndDrain(s);
 	}, 180_000);
@@ -2112,7 +2120,7 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 			await s.edit(`${AG_PRE}export const tail = 2;\n${OVER_CAP}\n`, [7]),
 		).toMatch(/Still unfixed: 1 blocker reported earlier/);
 		expect(w2).toMatch(
-			/Still unfixed: 1 blocker reported earlier; 1 with no current line\./,
+			/Still unfixed: 1 blocker reported earlier; 1 with no line in this file\./,
 		);
 		await fixAndDrain(s);
 	}, 180_000);
@@ -2441,8 +2449,52 @@ describe("#5008 witness: a partial run answers for the servers that answered", (
 				[2],
 			),
 		).toMatch(
-			/Still unfixed: 2 blockers reported earlier \(L3 ts:2304\); 1 with no current line\./,
+			/Still unfixed: 2 blockers reported earlier \(L3 ts:2304\); 1 with no line in this file\./,
 		);
+		boundary.lsp.mode = "answer";
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Review r2 (F1): the coverage NOTICE is once per session, the CLAIM is not.
+	// Recurrence: write 1 on a file with a silent scanner printed the notice, and
+	// write 2..N — same file, same scanner set — hit the notice's dedupe key and
+	// read `✓ JavaScript/TypeScript clean`, so the reporter's 133-write session
+	// claimed a clean security lane everywhere after its first edit.
+	it("keeps the silent scanner named on the writes after its once-only notice (#5008)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("gap-repeat", "src/aux-gap-repeat.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		boundary.lsp.auxGap = ["opengrep"];
+		// Write 2 pays the session latch: the notice is rendered once.
+		expect(await s.write(V_FIXED)).toMatch(
+			/coverage: opengrep silent — diagnostics are incomplete/,
+		);
+		// Write 3 is the same file with the same missing scanner, and the notice
+		// is now withheld. The status line still has to name it.
+		const w3 = await s.write(V_FIXED_OTHER);
+		expect(w3).toMatch(/unconfirmed — opengrep silent/);
+		expect(w3).not.toContain("\u2713");
+		expect(await s.commitBlocked()).toBe(false);
+		boundary.lsp.auxGap = undefined;
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Review r2 (F3): 108 of the 667 bundled rule ids exceed the 32-character
+	// cap, and the rendered value is `${source}:${id}`, so the ellipsis branch
+	// is reachable in production. Its output had no witness: the cap could be
+	// raised to 1e9 with every suite green.
+	it("bounds a long rule id beside a place, so five places stay one line (#5008)", async () => {
+		boundary.lsp.enabled = true;
+		boundary.lsp.code =
+			"documentbuilderfactory-external-parameter-entities-true-java";
+		const s = await openSession("long-rule", "src/long-rule.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		// The server stops answering, so the blocker is carried and rendered.
+		boundary.lsp.mode = "inconclusive";
+		expect(await s.edit(`${V1}const c = 3;\n`, [4])).toMatch(
+			/Still unfixed: 1 blocker reported earlier \(L2 ts:documentbuilderfactory-exter…\)\./,
+		);
+		boundary.lsp.code = 2304;
 		boundary.lsp.mode = "answer";
 		await fixAndDrain(s);
 	}, 120_000);

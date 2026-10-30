@@ -209,6 +209,17 @@ const lspRunner: RunnerDefinition = {
 		// A touch that says neither (`inconclusive` names the negative evidence,
 		// handled below) keeps the pre-#5008 reading.
 		let primaryAnswered = false;
+		// #5008 review r2 (F4): `confirmation` says the primary ANSWERED;
+		// `binding` says whether that answer was computed for THESE bytes. They
+		// are attached independently (`clients/lsp/index.ts` sets both under the
+		// same `collected !== undefined`), so a version-less primary whose publish
+		// describes the previous revision produces `confirmation: "partial"`
+		// beside `boundToCurrentDisk: false`. An empty answer for other bytes is
+		// not an observation of these — the rule #4231 already applies to its
+		// contributor filter below — so it withholds the verdict: `keepUnobserved`
+		// otherwise retires a live recorded blocker on it. Absent or "unknown"
+		// keeps the pre-r2 reading; only an explicit `false` withholds it.
+		let primaryAnswerStale = false;
 		let usedWarmAttach = false;
 		// #4645: the warm incumbent's answer to the membership probe this runner
 		// may not send itself; it stands in for that probe below.
@@ -320,7 +331,10 @@ const lspRunner: RunnerDefinition = {
 					]),
 				];
 				deferredServerIds = touched.deferredServerIds ?? [];
-				primaryAnswered = touchCompletedConfirmationPolicy(touched);
+				primaryAnswered =
+					touchCompletedConfirmationPolicy(touched) &&
+					touched.binding?.boundToCurrentDisk !== false;
+				primaryAnswerStale = touched.binding?.boundToCurrentDisk === false;
 				if (
 					diagnosticsInconclusive &&
 					touched.binding?.boundToCurrentDisk === false
@@ -462,6 +476,18 @@ const lspRunner: RunnerDefinition = {
 					diagnostics: [],
 					semantic: "none",
 					unconfirmedServerIds: [...unconfirmedServerIds],
+				};
+			}
+			if (primaryAnswerStale) {
+				// #5008 review r2 (F4): nothing is unconfirmed and no scanner is
+				// deferred, so no id names the gap — only the binding says the answer
+				// describes other bytes. `skipped` is this runner's no-verdict status
+				// (`reachedNoVerdict`), which is what keeps the primary's recorded
+				// blockers pending instead of retiring them on a clean claim.
+				return {
+					status: "skipped",
+					diagnostics: [],
+					semantic: "none",
 				};
 			}
 			return {

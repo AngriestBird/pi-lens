@@ -570,6 +570,12 @@ describe("the language-server verdict the clean advisory reads (#4734 r3)", () =
 		/** Dispatch this many times on the push surface; the last result counts. */
 		pushes?: number;
 		expected: true | undefined;
+		/**
+		 * #5008 review r2 (F1): the status line the latched partial notice still
+		 * owes. The latch suppresses the NOTICE, not the claim, so this row no
+		 * longer reaches the pipeline as the clean-line shape.
+		 */
+		expectedUnconfirmed?: string;
 	};
 	const succeeded = async (): Promise<RunnerResult> => ({
 		status: "succeeded",
@@ -628,6 +634,7 @@ describe("the language-server verdict the clean advisory reads (#4734 r3)", () =
 			groups: [{ mode: "all", runnerIds: ["lsp"] }],
 			pushes: 2,
 			expected: undefined,
+			expectedUnconfirmed: "opengrep silent (diagnostics are incomplete)",
 		},
 		{
 			label: "row 12: the lsp runner is deferred",
@@ -686,14 +693,16 @@ describe("the language-server verdict the clean advisory reads (#4734 r3)", () =
 		}
 
 		// Every row but 14 reaches the pipeline as the clean-line shape: no text,
-		// no `unconfirmedStatus`. Only the verdict tells them apart.
+		// no `unconfirmedStatus`. Only the verdict tells them apart. Row 11 is the
+		// exception since review r2: its notice is latched away on the second
+		// push, and the write must still name the silent scanner.
 		expect({
 			output: result.output,
 			unconfirmedStatus: result.unconfirmedStatus,
 			primaryLspChecked: result.primaryLspChecked,
 		}).toEqual({
 			output: "",
-			unconfirmedStatus: undefined,
+			unconfirmedStatus: row.expectedUnconfirmed,
 			primaryLspChecked: row.expected,
 		});
 	});

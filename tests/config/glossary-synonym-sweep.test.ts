@@ -1601,7 +1601,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/htmlhint.ts": 3,
 		"clients/dispatch/runners/javac.ts": 4,
 		"clients/dispatch/runners/ktlint.ts": 2,
-		"clients/dispatch/runners/lsp.ts": 10,
+		// 10 -> 11 (#5008 review r2): the all-clear arm's stale-bound answer
+		// returns `status: "skipped"` instead of `succeeded` — the same
+		// `RunnerResult.status` member sense as every other row here.
+		"clients/dispatch/runners/lsp.ts": 11,
 		"clients/dispatch/runners/markdownlint.ts": 4,
 		"clients/dispatch/runners/mypy.ts": 2,
 		"clients/dispatch/runners/oxlint.ts": 11,

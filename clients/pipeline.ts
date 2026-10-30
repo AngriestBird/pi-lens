@@ -1723,7 +1723,11 @@ function formatBlockerPlaces(
 	const unplaced = blockers.length - places.length;
 	const parts: string[] = [];
 	if (shown.length > 0) parts.push(` (${shown.join(", ")})`);
-	if (unplaced > 0) parts.push(`; ${unplaced} with no current line`);
+	// Review r2 (CodeRabbit PRRT_kwDORt8rec6x4fNi): the count names its SCOPE.
+	// It includes another file's row (helm-lint reports `values.yaml` while
+	// `templates/deploy.yaml` is processed), which HAS a current line, just not
+	// in these bytes, so "no current line" misdescribed it.
+	if (unplaced > 0) parts.push(`; ${unplaced} with no line in this file`);
 	return parts.join("");
 }
 
