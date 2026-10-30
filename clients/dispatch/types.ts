@@ -627,7 +627,7 @@ export function checkedWholeFile(
  * speaks for nothing, which is why this is the evidence a retire of another
  * file's row asks for (`RuntimeCoordinator.retireForeignRows`).
  */
-export function answeredRunnerIds(
+export function verdictRunnerIds(
 	result: Pick<DispatchResult, "inconclusiveSources" | "latencyReport">,
 ): string[] {
 	const noVerdict = new Set(result.inconclusiveSources?.runnerIds);

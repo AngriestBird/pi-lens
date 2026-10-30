@@ -1467,7 +1467,7 @@ function publishInlineVerdict(args: {
 		// clears. Only an authored, applied, error-free run whose raising runner
 		// answered and holds no blocker of its own on this file may say so.
 		if (inlineVerdictApplied && authored && !result.isError) {
-			const answered = new Set(result.answeredRunnerIds);
+			const verdict = new Set(result.verdictRunnerIds);
 			const stillReported = new Set(
 				(result.inlineBlockerDiagnostics ?? []).flatMap((d) =>
 					d.runnerId !== undefined && !isCrossFileBlocker(d, filePath)
@@ -1480,7 +1480,7 @@ function publishInlineVerdict(args: {
 				(row) =>
 					!isCrossFileBlocker(row, filePath) &&
 					row.runnerId !== undefined &&
-					answered.has(row.runnerId) &&
+					verdict.has(row.runnerId) &&
 					!stillReported.has(row.runnerId),
 				writeOrderToken(
 					result.orderTurn ?? writeOrderTurn,

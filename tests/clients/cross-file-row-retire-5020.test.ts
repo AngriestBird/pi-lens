@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { answeredRunnerIds } from "../../clients/dispatch/types.js";
+import { verdictRunnerIds } from "../../clients/dispatch/types.js";
 import type { Diagnostic } from "../../clients/dispatch/types.js";
 import { formatDiagnostics } from "../../clients/dispatch/utils/format-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -223,7 +223,7 @@ describe("#5020 retireForeignRowsOfMissingFiles", () => {
 	});
 });
 
-describe("#5020 answeredRunnerIds", () => {
+describe("#5020 verdictRunnerIds", () => {
 	it("names the runners that succeeded and were not inconclusive", () => {
 		const runner = (
 			runnerId: string,
@@ -239,7 +239,7 @@ describe("#5020 answeredRunnerIds", () => {
 				semantic: "none",
 			}) as const;
 		expect(
-			answeredRunnerIds({
+			verdictRunnerIds({
 				latencyReport: {
 					runners: [
 						runner("helm-lint", "succeeded"),
