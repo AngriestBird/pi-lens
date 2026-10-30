@@ -45,11 +45,7 @@ interface RulePolicyEntry {
  */
 export type RulePolicyMap = Record<string, RulePolicyEntry | undefined>;
 
-/**
- * The one global+project resolution a dispatch policy reads (`rules`, and
- * `dispatch.disabledRunners`). `createDispatchContext` resolves once and hands
- * the result to each reader, so a second policy key costs no second walk.
- */
+/** The global+project resolution a dispatch policy key is read from. */
 export function resolveDispatchPolicyConfig(
 	root: string,
 ): PiLensConfigResolution {
@@ -60,12 +56,11 @@ export function resolveDispatchPolicyConfig(
 	});
 }
 
-export function resolvedRulePolicyMap(
-	root: string,
-	resolved: PiLensConfigResolution = resolveDispatchPolicyConfig(root),
-): RulePolicyMap | undefined {
+export function resolvedRulePolicyMap(root: string): RulePolicyMap | undefined {
 	return rulePolicyMapFromConfig(
-		resolved.value.rules as Record<string, unknown> | undefined,
+		resolveDispatchPolicyConfig(root).value.rules as
+			| Record<string, unknown>
+			| undefined,
 	);
 }
 

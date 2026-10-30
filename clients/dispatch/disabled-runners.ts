@@ -23,6 +23,7 @@
  * same fail direction `lsp.servers.<id>.covers` takes.
  */
 
+import { resolveSessionConfigRoot } from "../analysis-root.js";
 import {
 	type PiLensConfigResolution,
 	reportPiLensConfigRecords,
@@ -37,21 +38,22 @@ import {
 	isKnownRunnerId,
 	runnerIdentityPopulated,
 } from "./known-runner-ids.js";
+import { resolveDispatchPolicyConfig } from "./rule-policy.js";
 
 /** The closed skip reason a disabled runner reports (`RUNNER_SKIP_REASONS`). */
 export const DISABLED_BY_CONFIG_SKIP_REASON = "disabled-by-config" as const;
 
 /** JSON pointer of the denial list inside the resolved value. */
-export const DISABLED_RUNNERS_POINTER = "/dispatch/disabledRunners";
+const DISABLED_RUNNERS_POINTER = "/dispatch/disabledRunners";
 
 /** One denied runner and the config leaf that denied it. */
-export interface DisabledRunner {
+interface DisabledRunner {
 	readonly id: string;
 	/** The tier and file that first contributed this member, when known. */
 	readonly decidedBy?: Provenance;
 }
 
-export interface DisabledRunnersResolution {
+interface DisabledRunnersResolution {
 	/** Denied runner ids that name a registered runner, in resolved order. */
 	readonly runners: readonly DisabledRunner[];
 	/** `PILENS_CFG_0005` records for members that name no registered runner. */
@@ -139,4 +141,22 @@ export function disabledRunnerIdsFor(
 	return resolved.runners.length === 0
 		? undefined
 		: new Set(resolved.runners.map((runner) => runner.id));
+}
+
+/**
+ * The denied ids for one file: read from the file's config owner, so a nested
+ * `.pi-lens.json` governs its own files (`rules` stays on the workspace root).
+ * `rootConfig` is the caller's resolution of `projectRoot`, reused when the
+ * owner is the root itself.
+ */
+export function disabledRunnerIdsForFile(
+	filePath: string,
+	projectRoot: string,
+	rootConfig: PiLensConfigResolution,
+): ReadonlySet<string> | undefined {
+	const owner =
+		resolveSessionConfigRoot(filePath, projectRoot).register ?? projectRoot;
+	return disabledRunnerIdsFor(
+		owner === projectRoot ? rootConfig : resolveDispatchPolicyConfig(owner),
+	);
 }

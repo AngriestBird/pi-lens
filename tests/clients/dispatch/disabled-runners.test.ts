@@ -20,6 +20,7 @@ import {
 	DISABLED_BY_CONFIG_SKIP_REASON,
 } from "../../../clients/dispatch/disabled-runners.js";
 import {
+	clearCoverageNoticeState,
 	createDispatchContext,
 	dispatchForFile,
 	RunnerRegistry,
@@ -376,6 +377,160 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		expect(result.coverage).not.toBe("fallback");
 		expect(result.coverage).not.toBe("primary");
 		expect(result.unconfirmedStatus).toBeDefined();
+	});
+
+	it("names dispatch.disabledRunners when every runner of the file is denied", async () => {
+		writeProject({ dispatch: { disabledRunners: ["lsp", "dotnet-build"] } });
+		const csharp = path.join(projectDir, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		const registry = new RunnerRegistry();
+		for (const id of ["lsp", "dotnet-build"]) {
+			registry.register({
+				...countingRunner(id, SUCCEEDED).runner,
+				appliesTo: ["csharp"],
+			});
+		}
+		const ctx = createDispatchContext(
+			csharp,
+			projectDir,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+
+		clearCoverageNoticeState();
+		const first = await dispatchForFile(ctx, fallbackGroup, registry);
+		const again = await dispatchForFile(ctx, fallbackGroup, registry);
+
+		expect(first.output).toContain("dispatch.disabledRunners");
+		expect(first.output).not.toContain("lsp.disabledServers");
+		expect(first.unconfirmedStatus).toContain("dispatch.disabledRunners");
+		expect(first.unconfirmedStatus).not.toContain("lsp.disabledServers");
+		// One note per session, then the status line alone.
+		expect(again.output).not.toContain("dispatch.disabledRunners");
+		expect(again.unconfirmedStatus).toContain("dispatch.disabledRunners");
+	});
+
+	it("keeps the LSP's own cause when a cold lsp and a denied runner both left the file unchecked", async () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		const csharp = path.join(projectDir, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		const registry = new RunnerRegistry();
+		registry.register({
+			...countingRunner("lsp", {
+				...SKIPPED,
+				primaryUnavailableCause: "unstarted",
+			}).runner,
+			appliesTo: ["csharp"],
+		});
+		registry.register({
+			...countingRunner("dotnet-build", BLOCKING_BUILD).runner,
+			appliesTo: ["csharp"],
+		});
+		const ctx = createDispatchContext(
+			csharp,
+			projectDir,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+
+		clearCoverageNoticeState();
+		const result = await dispatchForFile(ctx, fallbackGroup, registry);
+
+		expect(result.unconfirmedStatus).toContain("could not be started");
+		// The status line still names the runner's denial beside the LSP's cause.
+		expect(result.unconfirmedStatus).toContain("dispatch.disabledRunners");
+		expect(result.output).not.toContain("dispatch.disabledRunners");
+	});
+
+	it("names both keys when lsp.disabledServers and dispatch.disabledRunners deny the file's checkers", async () => {
+		writeGlobal({
+			dispatch: { disabledRunners: ["dotnet-build"] },
+			lsp: { disabledServers: ["csharp"] },
+		});
+		const csharp = path.join(projectDir, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		const registry = new RunnerRegistry();
+		registry.register({
+			...countingRunner("lsp", {
+				...SKIPPED,
+				primaryUnavailableCause: "disabled",
+				disabledPrimaryServerIds: ["csharp"],
+			}).runner,
+			appliesTo: ["csharp"],
+		});
+		registry.register({
+			...countingRunner("dotnet-build", SUCCEEDED).runner,
+			appliesTo: ["csharp"],
+		});
+		const ctx = createDispatchContext(
+			csharp,
+			projectDir,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+
+		clearCoverageNoticeState();
+		const result = await dispatchForFile(ctx, fallbackGroup, registry);
+
+		expect(result.output).toContain("lsp.disabledServers");
+		expect(result.output).toContain("dispatch.disabledRunners");
+		expect(result.unconfirmedStatus).toContain("dispatch.disabledRunners");
+	});
+
+	it("honors a denial in a nested .pi-lens.json over the workspace root", async () => {
+		const repo = path.join(tmpDir, "repo");
+		const pkg = path.join(repo, "pkg");
+		fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+		writeProject({ dispatch: { disabledRunners: ["dotnet-build"] } }, pkg);
+		const csharp = path.join(pkg, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		fs.writeFileSync(path.join(pkg, "pkg.csproj"), "<Project />\n");
+		const registry = new RunnerRegistry();
+		const build = countingRunner("dotnet-build", BLOCKING_BUILD);
+		registry.register({ ...build.runner, appliesTo: ["csharp"] });
+		const ctx = createDispatchContext(
+			csharp,
+			repo,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+
+		const result = await dispatchForFile(
+			ctx,
+			[{ mode: "all", runnerIds: ["dotnet-build"] }],
+			registry,
+		);
+
+		expect(build.counters.runCalls).toBe(0);
+		expect(result.hasBlockers).toBe(false);
+	});
+
+	it("falls back to the workspace root for a file outside it", async () => {
+		const repo = path.join(tmpDir, "repo");
+		fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+		writeProject({ dispatch: { disabledRunners: ["javac"] } }, repo);
+		const registry = new RunnerRegistry();
+		const javac = countingRunner("javac", BLOCKING_BUILD);
+		registry.register(javac.runner);
+		const ctx = createDispatchContext(
+			path.join(tmpDir, "outside", "a.ts"),
+			repo,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+
+		await dispatchForFile(
+			ctx,
+			[{ mode: "all", runnerIds: ["javac"] }],
+			registry,
+		);
+
+		expect(javac.counters.runCalls).toBe(0);
 	});
 
 	it("warns once about an unknown id and still skips the valid one", async () => {

@@ -279,9 +279,12 @@ Two rules make the rest of the table unambiguous:
   entry, so a typo does not read as a runner that was turned off.
 - **Edits apply on the next dispatch.** The list is resolved for each dispatch,
   so a change to the file needs no restart.
+- **The nearest config owns the file.** A nested `.pi-lens.json` governs the
+  files under it, so a denial there applies to those files only.
 - **Disabling the only checker leaves the file unconfirmed.** Turning off a
-  runner that was the sole check for a file kind produces the usual
-  "analysis unavailable" notice rather than a clean result.
+  runner that was the sole check for a file kind produces a notice that names
+  `dispatch.disabledRunners` (once per session, then the status line alone)
+  rather than a clean result.
 
 `pilens_effective_config file=Program.cs` reports the runner as denied, with the
 tier and file that denied it, while the language server stays selected:

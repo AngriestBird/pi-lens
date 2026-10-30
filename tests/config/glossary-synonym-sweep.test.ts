@@ -571,7 +571,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// blocking findings it reports and removes its matches from the visible
 		// and held-back lists, `Array.prototype.filter` calls, not a delivery
 		// filter.
-		"clients/dispatch/dispatcher.ts": 21,
+		// 21 -> 22 (#5010): `buildCoverageNotice` keeps the rows
+		// `dispatch.disabledRunners` skipped, an `Array.prototype.filter` call,
+		// not a delivery filter.
+		"clients/dispatch/dispatcher.ts": 22,
 		"clients/dispatch/fact-runner.ts": 1,
 		"clients/dispatch/fact-scheduler.ts": 2,
 		"clients/dispatch/facts/function-facts.ts": 2,

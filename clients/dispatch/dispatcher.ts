@@ -77,13 +77,12 @@ import { laneCopyStandsFor, semanticRank } from "./lane-copies.js";
 import { normalizeRuleId } from "./rule-id-normalize.js";
 import {
 	applyRulePolicy,
-	resolvedRulePolicyMap,
 	resolveDispatchPolicyConfig,
 	rulePolicyMapFromConfig,
 } from "./rule-policy.js";
 import {
 	DISABLED_BY_CONFIG_SKIP_REASON,
-	disabledRunnerIdsFor,
+	disabledRunnerIdsForFile,
 } from "./disabled-runners.js";
 import { getToolProfile } from "./tool-profile.js";
 import { classifyPreExisting, preEditSeedFactKey } from "./pre-edit-seed.js";
@@ -400,9 +399,15 @@ export function createDispatchContext(
 				})
 			: undefined;
 	const projectConfig = loadPiLensProjectConfig(normalizedCwd);
-	const policyConfig = resolveDispatchPolicyConfig(normalizedProjectRoot);
-	const rulePolicy = resolvedRulePolicyMap(normalizedProjectRoot, policyConfig);
-	const disabledRunnerIds = disabledRunnerIdsFor(policyConfig);
+	const rootConfig = resolveDispatchPolicyConfig(normalizedProjectRoot);
+	const rulePolicy = rulePolicyMapFromConfig(
+		rootConfig.value.rules as Record<string, unknown> | undefined,
+	);
+	const disabledRunnerIds = disabledRunnerIdsForFile(
+		absoluteFilePath,
+		normalizedProjectRoot,
+		rootConfig,
+	);
 
 	return {
 		filePath: normalizedFilePath,
@@ -874,11 +879,23 @@ function buildCoverageNotice(
 	const cause = combinePrimaryUnavailableCauses(
 		relevant.flatMap((r) => r.primaryUnavailableCause ?? []),
 	);
+	// `dispatch.disabledRunners` denials are skipped by the dispatch loop with
+	// a stated reason; they name their own key, not the LSP's.
+	const deniedRunnerIds = relevant
+		.filter((r) => r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON)
+		.map((r) => r.runnerId);
+	const deniedNote = `${deniedRunnerIds.join(", ")} disabled in config by dispatch.disabledRunners`;
 	const unconfirmedStatus = cause
-		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})`
-		: "not fully checked (a language tool is missing, timed out, or failed to run)";
+		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})${deniedRunnerIds.length > 0 ? `; ${deniedNote}` : ""}`
+		: deniedRunnerIds.length > 0
+			? `not checked (${deniedNote})`
+			: "not fully checked (a language tool is missing, timed out, or failed to run)";
 
-	if (cause === "disabled" || cause === "disabledFallback") {
+	if (
+		cause === "disabled" ||
+		cause === "disabledFallback" ||
+		(cause === undefined && deniedRunnerIds.length > 0)
+	) {
 		// #4403: the operator turned the primary off on purpose. That is not a
 		// tool that is missing or failed, and it holds for every file the
 		// server serves, so it gets one note per server per session, then the
@@ -887,7 +904,10 @@ function buildCoverageNotice(
 		const disabledIds = [
 			...new Set(relevant.flatMap((r) => r.disabledPrimaryServerIds ?? [])),
 		].sort((a, b) => Number(a > b) - Number(a < b));
-		const onceKeys = disabledIds.map((id) => `disabled-primary:${id}`);
+		const onceKeys = [
+			...disabledIds.map((id) => `disabled-primary:${id}`),
+			...deniedRunnerIds.map((id) => `disabled-runner:${id}`),
+		];
 		if (dedupe) {
 			if (onceKeys.every((key) => coverageNoticeSeen.has(key)))
 				return { unconfirmedStatus };
@@ -895,11 +915,15 @@ function buildCoverageNotice(
 		}
 		return {
 			notice: {
-				id: `coverage-disabled:${ctx.kind}:${disabledIds.join(",")}`,
+				id: `coverage-disabled:${ctx.kind}:${[...disabledIds, ...deniedRunnerIds].join(",")}`,
 				message:
-					cause === "disabled"
-						? `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers, so no language server checks these files this session (not a clean result).`
-						: `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers and its fallback did not answer, so no language server checked these files (not a clean result).`,
+					disabledIds.length === 0
+						? `Pi-lens ${ctx.kind} analysis unconfirmed — Runner (${deniedRunnerIds.join(", ")}) is disabled in config by dispatch.disabledRunners, so no runner checks these files this session (not a clean result).`
+						: deniedRunnerIds.length > 0
+							? `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers and runner (${deniedRunnerIds.join(", ")}) by dispatch.disabledRunners, so nothing checks these files this session (not a clean result).`
+							: cause === "disabled"
+								? `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers, so no language server checks these files this session (not a clean result).`
+								: `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers and its fallback did not answer, so no language server checked these files (not a clean result).`,
 				filePath: ctx.filePath,
 				severity: "warning",
 				semantic: "warning",
