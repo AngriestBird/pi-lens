@@ -331,7 +331,8 @@ matches under `pkg/`:
 - A trailing `/` names a directory: `legacy/` carves out every directory named `legacy` at any
   depth below the file, and everything in it.
 - An entry with no slash matches at any depth below the file: `*.gen.ts` carves out
-  `pkg/a.gen.ts` and `pkg/src/b.gen.ts`.
+  `pkg/a.gen.ts` and `pkg/src/b.gen.ts`. To carve out a whole directory, end the entry with `/` or
+  `/**`: a bare `legacy` names a file called `legacy`, not the files inside a directory of that name.
 - An entry that climbs out of the declaring directory, such as `../other/**`, matches nothing.
   A file outside the workspace root is never carved out.
 - A line starting with `#` is a comment, as in `.gitignore`, and is dropped.

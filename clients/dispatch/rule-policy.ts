@@ -167,10 +167,8 @@ function anchoredIgnorePaths(
 				?.ignorePaths;
 			if (!Array.isArray(ignorePaths)) continue;
 			const patterns = ignorePaths.filter(
-				(pattern): pattern is string =>
-					typeof pattern === "string" && pattern.length > 0,
+				(pattern): pattern is string => typeof pattern === "string",
 			);
-			if (patterns.length === 0) continue;
 			const scopes = byKey.get(key) ?? [];
 			scopes.push({ baseDir, patterns });
 			byKey.set(key, scopes);

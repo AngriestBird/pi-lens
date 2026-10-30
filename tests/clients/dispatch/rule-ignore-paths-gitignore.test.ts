@@ -27,7 +27,10 @@ import {
 	applyPushedFindingPolicy,
 	loadProjectRulePolicy,
 } from "../../../clients/dispatch/finding-policy.js";
-import { applyRulePolicy } from "../../../clients/dispatch/rule-policy.js";
+import {
+	applyRulePolicy,
+	ruleIgnoredForPath,
+} from "../../../clients/dispatch/rule-policy.js";
 import type { Diagnostic } from "../../../clients/dispatch/types.js";
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
 import { useConfigPath } from "../../support/global-config.js";
@@ -46,6 +49,7 @@ const PROBED = [
 	"src/c.ts",
 	"src/legacy/x.ts",
 	"legacy.ts",
+	"src/legacy.ts",
 	"../sibling/s.ts",
 ] as const;
 
@@ -76,6 +80,11 @@ const ROWS: Row[] = [
 		name: "rooted entry",
 		patterns: ["/legacy/**"],
 		ignored: ["legacy/a.ts", "legacy/keep.ts", "legacy/sub/deep.ts"],
+	},
+	{
+		name: "rooted slashless entry matches only at the declaring directory",
+		patterns: ["/legacy.ts"],
+		ignored: ["legacy.ts"],
 	},
 	{
 		name: "rooted directory-only entry",
@@ -260,5 +269,27 @@ describe("rules.<id>.ignorePaths across config tiers (#5029)", () => {
 			"legacy/keep.ts",
 			"src/c.ts",
 		]);
+	});
+});
+
+describe("ruleIgnoredForPath on a policy map built from bare strings (#5029)", () => {
+	// Recurrence: the strings a `rulePolicyMapFromConfig` map carries (no config
+	// file behind them) are gitignore lines relative to the workspace root, not
+	// plain globs. A single rooted entry used to match nothing.
+	const verdict = (patterns: string[], rel: string): boolean =>
+		ruleIgnoredForPath("no-eval", path.join(repo, rel), repo, {
+			"no-eval": { ignorePaths: patterns },
+		});
+
+	it("reads a lone rooted entry relative to the workspace root", () => {
+		expect(verdict(["/legacy/**"], "legacy/a.ts")).toBe(true);
+		expect(verdict(["/legacy/**"], "src/legacy/a.ts")).toBe(false);
+	});
+
+	it("reads a negation against the entries before it", () => {
+		const patterns = ["legacy/**", "!legacy/keep.ts"];
+		expect(verdict(patterns, "legacy/a.ts")).toBe(true);
+		expect(verdict(patterns, "legacy/keep.ts")).toBe(false);
+		expect(verdict(patterns, "src/c.ts")).toBe(false);
 	});
 });
