@@ -107,6 +107,7 @@ describe("LSP dispatch runner — warm attach reader (#1645 F2, #4645)", () => {
 		mocked.attachedDiagnostics.mockResolvedValue({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [
 					{
 						severity: 1,
@@ -148,7 +149,10 @@ describe("LSP dispatch runner — warm attach reader (#1645 F2, #4645)", () => {
 		fs.writeFileSync(file, "export const x = 1;\n");
 		mocked.attachedDiagnostics.mockResolvedValue({
 			available: true,
-			response: { diagnostics: ENVIRONMENT_GAP_ROWS },
+			response: {
+				diagnostics: ENVIRONMENT_GAP_ROWS,
+				binding: { boundToCurrentDisk: true },
+			},
 		});
 
 		const result = await lspRunner.run({
@@ -215,6 +219,7 @@ describe("LSP dispatch runner — warm attach reader (#1645 F2, #4645)", () => {
 			mocked.attachedDiagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [inferredRow],
 					projectIdentity: inferredIdentity,
 				},
@@ -232,7 +237,10 @@ describe("LSP dispatch runner — warm attach reader (#1645 F2, #4645)", () => {
 		it("keeps a blocker when no answer arrives (an incumbent built before #4645)", async () => {
 			mocked.attachedDiagnostics.mockResolvedValue({
 				available: true,
-				response: { diagnostics: [inferredRow] },
+				response: {
+					diagnostics: [inferredRow],
+					binding: { boundToCurrentDisk: true },
+				},
 			});
 
 			const result = await run();
@@ -247,6 +255,7 @@ describe("LSP dispatch runner — warm attach reader (#1645 F2, #4645)", () => {
 			mocked.attachedDiagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [ENVIRONMENT_GAP_ROWS[2]],
 					projectIdentity: inferredIdentity,
 				},
@@ -274,6 +283,7 @@ describe("LSP dispatch runner — warm attach reader (#1645 F2, #4645)", () => {
 			mocked.attachedDiagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [warningRow, inferredRow],
 					projectIdentity: inferredIdentity,
 				},

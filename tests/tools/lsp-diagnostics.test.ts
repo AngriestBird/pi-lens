@@ -116,6 +116,7 @@ describe("lsp_diagnostics tool", () => {
 		mocked.attachedDiagnostics.mockResolvedValue({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [
 					{
 						severity: 1,
@@ -177,6 +178,7 @@ describe("lsp_diagnostics tool", () => {
 		mocked.attachedDiagnostics.mockResolvedValue({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [
 					row("from incumbent ts", "typescript"),
 					row("from incumbent ast-grep", "ast-grep"),
@@ -230,6 +232,7 @@ describe("lsp_diagnostics tool", () => {
 		mocked.attachedDiagnostics.mockResolvedValue({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [],
 				confirmation: "partial",
 				unconfirmedServerIds: ["ast-grep", "typos"],
@@ -1588,6 +1591,7 @@ describe("lsp_diagnostics tool", () => {
 			mocked.attachedDiagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [
 						{
 							severity: 1,
@@ -1636,6 +1640,7 @@ describe("lsp_diagnostics tool", () => {
 			mocked.attachedDiagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [],
 					confirmation: "partial",
 					unconfirmedServerIds: ["opengrep"],
@@ -1773,7 +1778,11 @@ describe("lsp_diagnostics tool", () => {
 			mocked.warmAttached = true;
 			mocked.attachedDiagnostics.mockResolvedValue({
 				available: true,
-				response: { diagnostics: [], confirmation: "confirmed" },
+				response: {
+					diagnostics: [],
+					confirmation: "confirmed",
+					binding: { boundToCurrentDisk: true },
+				},
 			});
 			const executeCommand = vi.fn();
 			(mocked.service as any).executeCommand = executeCommand;
@@ -1798,12 +1807,124 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
+		// #5030: a warm incumbent's confirmed-clean answer about OLDER bytes. The
+		// DTO dropped the touch's content binding, so this reader rendered the
+		// answer clean for the current bytes (#5017 on the warm route; the direct
+		// route demotes a stale bound to unconfirmed, `boundMismatch`). The answer
+		// comes from the real producer through a JSON round trip. An incumbent
+		// built before #5030 sends no binding, and that reads as not current.
+		describe("warm-attached binding (#5030)", () => {
+			const servedAnswer = async (
+				file: string,
+				incumbentTouch: Record<string, unknown>,
+				edit: (response: Record<string, unknown>) => void = () => undefined,
+			) => {
+				const { _serveWarmRequestForTests } = await vi.importActual<
+					typeof import("../../clients/warm-attach.js")
+				>("../../clients/warm-attach.js");
+				const { contentHash, WARM_DIAGNOSTICS_SCHEMA_VERSION } =
+					await import("../../clients/mcp/ipc.js");
+				const content = fs.readFileSync(file, "utf-8");
+				(mocked.service as any).touchFile = vi
+					.fn()
+					.mockResolvedValueOnce(incumbentTouch);
+				const served = await _serveWarmRequestForTests({
+					route: "diagnostics",
+					version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+					file,
+					cwd: path.dirname(file),
+					content,
+					contentHash: contentHash(content),
+					deadlineAt: Date.now() + 60_000,
+				});
+				const response = JSON.parse(JSON.stringify(served.result));
+				edit(response);
+				return { available: true, response };
+			};
+			const readOf = async (route: "batch" | "single", file: string) => {
+				const result = await runMarkdown(
+					route === "batch"
+						? { paths: [file], severity: "all", serverScope: "primary" }
+						: { path: file, severity: "all", serverScope: "primary" },
+					[file],
+				);
+				return route === "batch"
+					? (result.details?.outcomeCounts?.clean ?? 0) === 1
+					: result.details?.unconfirmed === false;
+			};
+			const markdownFile = (prefix: string) => {
+				const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+				const file = path.join(tmpDir, "README.md");
+				fs.writeFileSync(file, "# Example\n");
+				return { tmpDir, file };
+			};
+
+			it.each([
+				["batch", false, false],
+				["batch", true, true],
+				["batch", "unknown", true],
+				["single", false, false],
+				["single", true, true],
+				["single", "unknown", true],
+			] as const)(
+				"%s route: an incumbent answer bound %s reads clean = %s",
+				async (route, bound, clean) => {
+					mocked.cascadeTier = "tier3-silent";
+					mocked.warmAttached = true;
+					const { tmpDir, file } = markdownFile("pi-lens-warm-5030-");
+					try {
+						mocked.attachedDiagnostics.mockResolvedValue(
+							await servedAnswer(file, {
+								diags: [],
+								confirmation: "confirmed",
+								binding: { boundToCurrentDisk: bound },
+							}),
+						);
+						expect(await readOf(route, file)).toBe(clean);
+					} finally {
+						removeTempDirSync(tmpDir);
+					}
+				},
+			);
+
+			it.each([
+				["no binding field (an older incumbent)", undefined],
+				["a null binding", null],
+				["a binding that is not an object", "yes"],
+				["a binding with no verdict", {}],
+				[
+					"a binding with an unrecognised verdict",
+					{ boundToCurrentDisk: "yes" },
+				],
+			] as const)("%s never reads clean", async (_label, wire) => {
+				mocked.cascadeTier = "tier3-silent";
+				mocked.warmAttached = true;
+				const { tmpDir, file } = markdownFile("pi-lens-warm-5030-old-");
+				try {
+					mocked.attachedDiagnostics.mockResolvedValue(
+						await servedAnswer(
+							file,
+							{ diags: [], confirmation: "confirmed" },
+							(response) => {
+								if (wire === undefined) delete response.binding;
+								else response.binding = wire;
+							},
+						),
+					);
+					expect(await readOf("batch", file)).toBe(false);
+					expect(await readOf("single", file)).toBe(false);
+				} finally {
+					removeTempDirSync(tmpDir);
+				}
+			});
+		});
+
 		it("a warm-attached result WITHOUT confirmation stays unconfirmed", async () => {
 			mocked.cascadeTier = "tier3-silent";
 			mocked.warmAttached = true;
 			mocked.attachedDiagnostics.mockResolvedValue({
 				available: true,
-				response: { diagnostics: [] },
+				response: { diagnostics: [], binding: { boundToCurrentDisk: true } },
 			});
 			const tmpDir = fs.mkdtempSync(
 				path.join(os.tmpdir(), "pi-lens-marksman-warm-unconfirmed-"),
