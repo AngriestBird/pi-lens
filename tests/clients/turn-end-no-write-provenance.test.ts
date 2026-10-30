@@ -1647,16 +1647,17 @@ describe.each([false, true])(
 		});
 
 		// #4617 review V5: a blank target resolves to the scan root itself, a
-		// directory and not a declaration, so it counts as a row that names none
-		// and the report falls back to the root manifests.
-		it("binds a trivy CVE advisory to the root manifests when its row names a blank target", async () => {
+		// directory and not a declaration, so it counts as a row that names no
+		// target and the report falls back to the root manifests. Cited instead,
+		// the directory left the live advisory reading historical.
+		it("keeps a trivy CVE advisory current, bound to the root manifests, when its row names a blank target", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-trivy-blank-target-${guard}`,
 				incident:
 					"A CVE row with a blank target cited the workspace directory instead of its lockfile",
 				issue: "#4617",
 				async run(h) {
-					const manifest = h.write("package-lock.json", "{\n}\n");
+					h.write("package-lock.json", "{\n}\n");
 					h.scan("trivy", {
 						findings: [
 							{
@@ -1673,14 +1674,9 @@ describe.each([false, true])(
 					});
 					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
 					h.runtime.beginTurn();
-					const view = await h.turnEnd({
-						flags,
-						beforeDelivery: () => {
-							fs.writeFileSync(manifest, '{\n  "x": 1\n}\n');
-						},
-					});
+					const view = await h.turnEnd({ flags });
 					expect(view.text).toContain("Dependency CVEs (trivy");
-					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
 			});
