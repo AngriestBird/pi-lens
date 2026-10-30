@@ -2232,10 +2232,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// #5034 r3 (F8): a neighbour listed because no primary answered for it (its
 	// `fallbackFor` alternate's rows, or none) was delivered, not observed. Its
 	// rows never replace the pending record, and the record's line still renders.
+	// The compute never adds such a neighbour to `observedNeighborPaths`.
 	const primaryUnanswered = new Set<string>();
 	for (const [nk, { run }] of lastObserver) {
-		if (run.observedNeighborPaths?.some((p) => normalizeMapKey(p) === nk))
-			continue;
 		if (
 			run.result?.neighbors.some(
 				(n) =>
