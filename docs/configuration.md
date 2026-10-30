@@ -314,18 +314,31 @@ workspace root's policy still reaches them. Every surface that filters by rule
 policy reads it this way: the per-edit dispatch, `lens_diagnostics`,
 `lsp_diagnostics`, and the turn-end advisories.
 
-`ignorePaths` globs are relative to the directory of the file that declares
-them. A global entry, and an entry in the workspace root's own file, match
-against the workspace root, as before. An entry in `pkg/.pi-lens.json` matches
-under `pkg/`:
+`ignorePaths` entries follow the same gitignore rules as the `ignore` field. Each entry is
+relative to the directory of the file that declares it: a global entry, and an entry in the
+workspace root's own file, match against the workspace root, and an entry in `pkg/.pi-lens.json`
+matches under `pkg/`:
 
 ```jsonc
-// pkg/.pi-lens.json — carves out pkg/legacy/**, nothing at the root
-{ "rules": { "no-eval": { "ignorePaths": ["legacy/**"] } } }
+// pkg/.pi-lens.json — carves out pkg/legacy/** except pkg/legacy/keep.ts; nothing at the root
+{ "rules": { "no-eval": { "ignorePaths": ["legacy/**", "!legacy/keep.ts"] } } }
 ```
 
-The entries are a union across tiers: a nearer file adds carve-outs and never
-lifts one.
+- The last matching entry wins, so `!` re-includes a file an earlier entry carved out, and an
+  entry placed after a `!` ignores it again.
+- A leading `/` roots the entry at the declaring file's directory: `/legacy/**` is `legacy/**`
+  there and nowhere deeper.
+- A trailing `/` names a directory: `legacy/` carves out every directory named `legacy` at any
+  depth below the file, and everything in it.
+- An entry with no slash matches at any depth below the file: `*.gen.ts` carves out
+  `pkg/a.gen.ts` and `pkg/src/b.gen.ts`.
+- An entry that climbs out of the declaring directory, such as `../other/**`, matches nothing.
+  A file outside the workspace root is never carved out.
+- A line starting with `#` is a comment, as in `.gitignore`, and is dropped.
+
+The files are a union: a path is carved out when any file's entries carve it out. A nearer file
+adds carve-outs and never lifts one, so a `!` entry re-includes only against the entries of its
+own file, and a project `!` cannot clear a carve-out the global config declared.
 
 ## Legacy locations (still read; being removed)
 
