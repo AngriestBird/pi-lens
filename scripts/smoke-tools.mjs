@@ -1165,6 +1165,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "typst",
+		// #3405: the fixture's lang is the file family, the server is tinymist.
+		// Declared here so a script that keys a row by SERVER id (the save-verdict
+		// probe's table) resolves the fixture to "tinymist" without a second
+		// alias table.
+		serverId: "tinymist",
 		dir: "tests/fixtures/tool-smoke/typst",
 		file: "main.typ",
 		serverHint: "tinymist",

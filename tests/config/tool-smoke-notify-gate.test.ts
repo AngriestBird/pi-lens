@@ -153,7 +153,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		);
 	});
 
-	it("reads all six gating layers' step outcomes via the smoke job's outputs, by expression (not hardcoded literals)", () => {
+	it("reads all eight gating layers' step outcomes via the smoke job's outputs, by expression (not hardcoded literals)", () => {
 		const env = notifyStep.env ?? {};
 		expect(env.TOOL_LAYER_OUTCOME).toBe(
 			"${{ needs.tool-smoke.outputs.tool_layer }}",
@@ -180,6 +180,15 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		expect(env.EVALUATED_FLOOR_LOG).toBe(
 			"${{ runner.temp }}/tool-smoke-evaluated-floor.log",
 		);
+		// #3405/#4999: the eighth gating step, the LSP save verdict. Without this
+		// pair a red save-verdict night filed as "(outside the tracked layers)"
+		// with no log — the #2723 shape this file exists to prevent, one step over.
+		expect(env.SAVE_VERDICT_OUTCOME).toBe(
+			"${{ needs.tool-smoke.outputs.save_verdict }}",
+		);
+		expect(env.SAVE_VERDICT_LOG).toBe(
+			"${{ runner.temp }}/tool-smoke-save-verdict.log",
+		);
 	});
 
 	// Recurrence: an output wired to the wrong step id reads "" in the notifier,
@@ -193,6 +202,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 			"format_layer",
 			"resolution_layer",
 			"evaluated_floor",
+			"save_verdict",
 		]) {
 			expect(smokeJob.outputs?.[id]).toBe(`\${{ steps.${id}.outcome }}`);
 		}
@@ -212,6 +222,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		expect(findStep(workflow, "LSP evaluated floor").id).toBe(
 			"evaluated_floor",
 		);
+		expect(findStep(workflow, "LSP save verdict").id).toBe("save_verdict");
 	});
 
 	// #2723 review F3: disambiguates "the job failed before the six
@@ -401,6 +412,7 @@ describe("each gating layer step's pipe keeps set -o pipefail (#2723 review F4)"
 		"Format layer",
 		"Resolution layer",
 		"LSP evaluated floor",
+		"LSP save verdict",
 	];
 
 	it.each(LAYER_STEP_NAMES)("%s's run script sets pipefail", (name) => {
@@ -494,6 +506,8 @@ describe("each layer's tee log filename matches the notify step's *_LOG env (#27
 		["lens_diagnostics mode=full row", "LENS_FULL_LOG"],
 		["Format layer", "FORMAT_LAYER_LOG"],
 		["Resolution layer", "RESOLUTION_LAYER_LOG"],
+		// #3405/#4999: the eighth tracked layer, same hand-maintained pair.
+		["LSP save verdict", "SAVE_VERDICT_LOG"],
 	])("%s's tee target matches env.%s", (stepName, envVar) => {
 		const step = findStep(workflow, stepName);
 		const fromTee = teeLogFilename(step.run as string);

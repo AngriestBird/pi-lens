@@ -45,6 +45,13 @@ export interface LspFixture {
 	expectedReason?: string;
 	expectedTool?: string;
 	tools?: string[];
+	/**
+	 * The registry server id this fixture's file routes to, when it is not the
+	 * fixture's own `lang` (`typst` → `tinymist`, `jedi` → `python-jedi`). Set
+	 * for scripts that key a row by SERVER id rather than by fixture lang; the
+	 * harness itself never reads it (it resolves the live servers from the file).
+	 */
+	serverId?: string;
 	/** Auxiliary (diagnostic-only) servers attached alongside the primary. */
 	auxiliaryServerIds?: string[];
 	auxiliarySourceMatch?: string;

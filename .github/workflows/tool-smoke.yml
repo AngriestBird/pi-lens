@@ -255,6 +255,7 @@ jobs:
       seed_matrix: ${{ steps.seed_matrix.outcome }}
       lsp_matrix: ${{ steps.lsp_matrix.outcome }}
       clean_signal: ${{ steps.clean_signal.outcome }}
+      save_verdict: ${{ steps.save_verdict.outcome }}
       server_capabilities: ${{ steps.server_capabilities.outcome }}
       idle_measurement: ${{ steps.idle_measurement.outcome }}
       idle_promote: ${{ steps.idle_promote.outcome }}
@@ -484,6 +485,35 @@ jobs:
           PILENS_PUB_DEBUG: "1"
         run: node scripts/probe-clean-signal.mjs --install
 
+      # #3405 acceptance 4: per-server save verdict — does a server publish the
+      # seeded finding WITHOUT a `textDocument/didSave`, or only after one? Before
+      # this step the column was prose moved from a PR body (five measured, seven
+      # read from source, nine unverified) and no command produced it, so nothing
+      # could re-measure it. The probe drives the real client over the same
+      # tool-smoke fixtures and arms the measurement four ways (no save, an
+      # untriggered window, the same bytes plus a save, and a diagnostic-neutral
+      # edit plus a save), then rewrites the three measurement columns of
+      # docs/lsp-capability-matrix.md's "## Save-triggered servers" table, which the
+      # refresh PR below carries. Merge-guarded: a server this runner cannot
+      # install keeps its row. NOT continue-on-error (#4514's shape): the script
+      # exits 0 for every measurement outcome and exits 1 only when it measured NO
+      # row at all (no save-declaring server reached), so a non-zero exit means the
+      # instrument itself died and must red instead of leaving the table looking
+      # measured. A run that stops on its own `--budget-seconds` is a disclosed
+      # partial run and exits 0 (#4999 F4); the log names the rows it did not
+      # reach. `--wait-ms` is one window per arm and is passed to every arm of the
+      # run, so the arms stay comparable. Its outcome is a tracked notifier layer
+      # (`SAVE_VERDICT_OUTCOME` below), so a red night files under this step's name
+      # with this step's log (#4999 F5).
+      - name: LSP save verdict (#3405)
+        id: save_verdict
+        timeout-minutes: 18
+        env:
+          PILENS_PUB_DEBUG: "1"
+        run: |
+          set -o pipefail
+          node scripts/probe-save-verdict.mjs --install --wait-ms 6000 --budget-seconds 600 2>&1 | tee "$RUNNER_TEMP/tool-smoke-save-verdict.log"
+
       # Server capability inventory (#390 item 1): regenerate
       # docs/servercapabilities.md (mode + ws-pull + nav/edit ops + raw caps) —
       # previously never run anywhere, so its ws-pull column (#389) stayed stale.
@@ -574,6 +604,7 @@ jobs:
             tests/config/lsp-first-publish-census.test.ts \
             tests/config/lsp-clean-behavior-census.test.ts \
             tests/config/lsp-idle-eviction-measurement.test.ts \
+            tests/config/lsp-save-verdict-census.test.ts \
             tests/scripts/lsp-matrix-refresh-expiry.test.ts \
             2>&1 | tee "$RUNNER_TEMP/lsp-capability-census.log"
 
@@ -999,8 +1030,8 @@ jobs:
       # independent notifier scoped to the job's actual pass/fail verdict,
       # placed last and gated on `if: always()` so it runs on every outcome,
       # mirroring install-smoke.yml's `Notify install drift` step. Reads the
-      # six gating layers' outcomes + captured logs (the only six steps
-      # above without `continue-on-error`, so the only six whose outcome
+      # eight gating layers' outcomes + captured logs (the only eight steps
+      # above without `continue-on-error`, so the only eight whose outcome
       # can turn the job red) — see scripts/lib/tool-smoke-drift.mjs's module
       # doc. GITHUB_TOKEN is inherited from this job's own env (`issues:
       # write` already granted at job level, #529/#594). Best-effort:
@@ -1024,10 +1055,16 @@ jobs:
           RESOLUTION_LAYER_LOG: ${{ runner.temp }}/tool-smoke-resolution-layer.log
           EVALUATED_FLOOR_OUTCOME: ${{ needs.tool-smoke.outputs.evaluated_floor }}
           EVALUATED_FLOOR_LOG: ${{ runner.temp }}/tool-smoke-evaluated-floor.log
-          # #2723 review F3: a job failure BEFORE the six tracked layers
+          # #3405/#4999: the save-verdict probe is not under `continue-on-error`
+          # either, so its failure reds the job and must be filed under its own
+          # name with its log — otherwise the notifier reports "(outside the
+          # tracked layers)" for a step whose evidence it has in hand.
+          SAVE_VERDICT_OUTCOME: ${{ needs.tool-smoke.outputs.save_verdict }}
+          SAVE_VERDICT_LOG: ${{ runner.temp }}/tool-smoke-save-verdict.log
+          # #2723 review F3: a job failure BEFORE the eight tracked layers
           # even start (checkout, a best-effort setup action, npm install,
           # build:dist — twelve steps, none of which set an *_OUTCOME above)
-          # leaves all six "skipped", identically to a genuine
+          # leaves all eight "skipped", identically to a genuine
           # cancellation. The smoke job's own result (`needs.tool-smoke.result`,
           # what `job.status` was before #4077) disambiguates: "failure" only
           # when a non-continue-on-error step actually failed somewhere in it.
