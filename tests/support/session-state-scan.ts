@@ -967,9 +967,14 @@ export function instanceContainerFields(
 	return out;
 }
 
-/** The one number the symbol-count pin tracks per flagged file. */
+/**
+ * The one number the symbol-count pin tracks per flagged file: the containers
+ * that are not an admitted read-only constant, plus the class fields bound to a
+ * container. An admitted constant is proven read-only on every shipped source,
+ * so it needs neither a row nor a pin; the day a use mutates it, it counts.
+ */
 export function symbolCount(candidate: SessionStateCandidate): number {
-	return candidate.containers.length + candidate.instanceFields.length;
+	return candidate.openContainers.length + candidate.instanceFields.length;
 }
 
 /** Blanked sources of every shipped root, read once per scan that needs them. */

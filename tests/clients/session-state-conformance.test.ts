@@ -1753,6 +1753,27 @@ describe("session-state scan — containers with no reset, and class fields (#50
 			);
 		});
 
+		// A file with a row must not need a new pin for a constant that is proven
+		// read-only, and must for the same constant once a use mutates it.
+		it("pins an admitted constant at zero and the same constant, once mutated, at one", () => {
+			const lookup = [
+				'const PLANTED_LOOKUP = new Map<string, string>([["a", "b"]]);',
+				'export const has = PLANTED_LOOKUP.has("a");',
+				"export function reset(): void {}",
+				"",
+			].join("\n");
+			const countOf = (source: string): number | undefined => {
+				let out: number | undefined;
+				withScanTree({ "planted.ts": source }, (dir) => {
+					const found = scanSessionStateCandidates(dir)[0];
+					out = found && symbolCount(found);
+				});
+				return out;
+			};
+			expect(countOf(lookup)).toBe(0);
+			expect(countOf(`${lookup}PLANTED_LOOKUP.set("c", "d");\n`)).toBe(1);
+		});
+
 		it("states the spellings it does not read, rather than claiming them", () => {
 			// Residual, named in SWEEP_HEURISTIC_LIMITS: a value built by a factory
 			// call, reached through another binding, or by an aliased constructor.

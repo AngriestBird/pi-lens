@@ -2320,7 +2320,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
  * 55/55 green because the file itself was already accounted for.
  *
  * This table pins `symbolCount()` of `scanSessionStateCandidates()` (module
- * containers plus class fields bound to a container, #5027) for
+ * containers that are not an admitted read-only constant, plus class fields
+ * bound to a container, #5027) for
  * every file the scan currently flags — registered AND exempted alike, since
  * an exemption's reason is written against the symbols known at the time it
  * was granted, and a new symbol arriving under cover of an old exemption is
@@ -2329,6 +2330,10 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
  * needs a registry entry, a reset, or its own exemption reason, then update
  * the pinned number here.
  *
+ * Before #5027 the number counted every module container, constants included;
+ * the `(n -> m)` notes below that name an import-time lookup table record that
+ * history, and the number itself no longer counts such a constant.
+ *
  * Generated from a full scan at the time this table was written (`node
  * -e`-style dump of `scanSessionStateCandidates()`, one row per flagged
  * file). Keep it sorted; the coverage test below diffs it against a live
@@ -2336,11 +2341,11 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
  * silently under- or over-counting.
  */
 export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
-	"agent-behavior-client.ts": 4,
+	"agent-behavior-client.ts": 3,
 	"agent-nudge.ts": 1,
 	"ast-grep-client.ts": 2,
 	"biome-client.ts": 1,
-	"blocker-freshness.ts": 5,
+	"blocker-freshness.ts": 4,
 	// #2467: flagged because the file now exports a session_start reset; the
 	// scan counts no module-scope CONTAINER here (the gate is a boolean and the
 	// resident slot a nullable reference).
@@ -2355,8 +2360,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #4487: the cascade pending-error record (1 -> 2), registered above and
 	// reset by resetDispatchBaselines.
 	"cascade-format.ts": 2,
-	"config-core/records.ts": 2,
-	"config-resolve.ts": 3,
+	"config-core/records.ts": 1,
+	"config-resolve.ts": 2,
 	// #2418: the one warn-once latch behind all three config loaders, moved
 	// here out of lens-config.ts and project-lens-config.ts.
 	// #2426: 1 -> 2. The second symbol is `DEPRECATION_NOUN_BY_CODE`, an
@@ -2365,7 +2370,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// item 5: the scan cannot tell a constant `Map` from a mutable one). It is
 	// never written after module evaluation, so resetting it would be
 	// meaningless; the file's one real latch is still the warn-once Set above.
-	"config-warn.ts": 2,
+	"config-warn.ts": 1,
 	// #4212 round 4: one bounded container — the per-dispatch-cycle rule-corpus
 	// fingerprint map (cap 16, FIFO eviction). The single-slot read-through in
 	// front of it and `_resetRuleCorpusCycleFingerprintsForTests` are the same
@@ -2380,7 +2385,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// from a mutable one). It is never written after module evaluation, so
 	// resetting it would be meaningless; this file's real session state is
 	// still the ledger map, its once-keys, and the generation counter.
-	"degradation-ledger.ts": 4,
+	"degradation-ledger.ts": 3,
 	"dependency-checker.ts": 8,
 	"diagnostic-dispositions.ts": 1,
 	"diagnostic-line-freshness.ts": 1,
@@ -2417,7 +2422,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// `preEditCapturesInFlight`, which holds an entry only while that file's
 	// capture runs (at most four); reset aborts each controller and each capture
 	// releases its slot after teardown, preventing overlap across resets.
-	"dispatch/integration.ts": 12,
+	"dispatch/integration.ts": 8,
 	// #3968: the runner-id identity leaf beside the dispatcher — one Set fed
 	// by `RunnerRegistry.register` and re-derived at every process start
 	// (registration state, not session state); see the file-level exemption
@@ -2429,7 +2434,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// (`BINDING_BY_EXTENSION`, `LSP_ONLY_RULE_LANGUAGES`) (5 → 7). Both are
 	// import-time frozen lookups with no session lifetime —
 	// SWEEP_HEURISTIC_LIMITS item 5, not state that must re-arm.
-	"dispatch/runners/ast-grep-napi.ts": 7,
+	"dispatch/runners/ast-grep-napi.ts": 1,
 	"dispatch/runners/biome-check.ts": 1,
 	"dispatch/runners/eslint.ts": 1,
 	"dispatch/runners/helm-lint.ts": 1,
@@ -2441,7 +2446,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #2442 review F2: the container regex now recognises BoundedFifoMap /
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
 	"dispatch/runners/spotbugs.ts": 1,
-	"dispatch/runners/tree-sitter.ts": 2,
+	"dispatch/runners/tree-sitter.ts": 1,
 	"dispatch/runners/utils/lazy-installer.ts": 2,
 	"dispatch/runners/utils/runner-helpers.ts": 7,
 	"dispatch/runners/yaml-rule-parser.ts": 4,
@@ -2449,7 +2454,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"ephemeral-root.ts": 1,
 	"event-loop-hold.ts": 0,
 	"extension-log.ts": 2,
-	"file-kinds.ts": 5,
+	"file-kinds.ts": 2,
 	// #2874: the live scan sees settledDataDirs plus the two project-ignore
 	// caches. All three ride the file-level exemption above: the ignore caches
 	// are signature-validated per call (#2929 round 4, F1), so no reset exists
@@ -2469,16 +2474,16 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// formatterSignatureFlights cache added with the project-root cwd resolver.
 	// #2777 folded the formatter marker map into tool-cwd.ts, removing one
 	// import-time container from this module.
-	"formatters.ts": 9,
+	"formatters.ts": 6,
 	// #2442 review F2: the container regex now recognises BoundedFifoMap /
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
-	"generated-artifacts.ts": 3,
+	"generated-artifacts.ts": 1,
 	"generation-guard.ts": 1,
 	"generation-lock.ts": 1,
 	// #2007 hoisted git's global-option table to a module-level `new Set`
 	// (1 → 2). It is an import-time frozen lookup with no session lifetime —
 	// SWEEP_HEURISTIC_LIMITS item 5, not state that must re-arm.
-	"git-guard.ts": 2,
+	"git-guard.ts": 0,
 	"git-tracked-ignore.ts": 3,
 	// #2455 fix round 4, F2: `go-client.ts` now owns the process's ONE
 	// `GoClient` (`export const goClient = new GoClient()`) and the
@@ -2495,13 +2500,13 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"hashline-anchor.ts": 1,
 	// #2442 review F2: the container regex now recognises BoundedFifoMap /
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
-	"installer/index.ts": 13,
+	"installer/index.ts": 12,
 	"instance-registry.ts": 0,
 	"jscpd-client.ts": 2,
 	"knip-client.ts": 5,
-	"language-profile.ts": 3,
-	"language-registry.ts": 4,
-	"latency-logger.ts": 3,
+	"language-profile.ts": 1,
+	"language-registry.ts": 3,
+	"latency-logger.ts": 2,
 	// #2418 removed lens-config.ts's row: its only module-scope state was the
 	// warn-once set, now owned by config-warn.ts, so the scan no longer flags
 	// the file at all.
@@ -2510,7 +2515,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"lsp-budget.ts": 0,
 	"lsp/capabilities.ts": 1,
 	"lsp/cascade-tier.ts": 1,
-	"lsp/client-registry.ts": 21,
+	"lsp/client-registry.ts": 20,
 	// #2065 fix round 1: 2 -> 3 for activeLspClients (see
 	// EXEMPT_SESSION_STATE_FILES).
 	// #2130 round 2: 3 -> 2. The `activeLspClients` module-level `new Set` moved
@@ -2518,7 +2523,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// container here. The state did not disappear — it moved UP, from one copy
 	// per module evaluation to one per process — and it stays exempt from a
 	// session_start reset for exactly the reason recorded above.
-	"lsp/client.ts": 2,
+	"lsp/client.ts": 1,
 	// #2442 review F2: the container regex now recognises BoundedFifoMap /
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
 	// #2427 review round 2 took this to 3 for a `silentInFlight` set; round 3
@@ -2533,7 +2538,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #2372 slice 3: 2 -> 1. The never-mutated `OPTIONAL_LSP_SERVER_IDS` set
 	// moved to lsp/client-registry.ts with the spawn path that reads it; that
 	// module exports no reset, so the scan does not flag it.
-	"lsp/index.ts": 19,
+	"lsp/index.ts": 18,
 	"lsp/jvm-runtime.ts": 0,
 	// #2324 R2-A added `napiFallbackCoverage`, the napi-run hand-off map
 	// (1 → 2). Registered above and cleared by the same
@@ -2543,14 +2548,14 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #4547: 6 -> 8. `PYTHON_BOUNDARY_MARKERS` and `PYTHON_EXTENSIONS` are
 	// import-time constant sets that nothing writes after load
 	// (SWEEP_HEURISTIC_LIMITS item 5); a session boundary cannot change them.
-	"lsp/server.ts": 8,
+	"lsp/server.ts": 4,
 	"lsp/service-singleton.ts": 0,
 	"lsp/session-roots.ts": 1,
 	"lsp/spawn-history.ts": 1,
 	"lsp/watch-queue.ts": 1,
 	// #4322: `RELEASED_OLDER_CACHE_VERSIONS`, an import-time constant set the
 	// scan cannot tell from state (1 -> 2). Exempted above, never written.
-	"lsp/workspace-diagnostics-cache.ts": 2,
+	"lsp/workspace-diagnostics-cache.ts": 1,
 	// #4320 r2: `_fileCreations`, the bounded Created markers (per server,
 	// root and path since #4346), registered above with `_allFilesChangedAt`.
 	"lsp/workspace-diagnostics-session.ts": 1,
@@ -2568,11 +2573,11 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// entry above.
 	"mcp/session.ts": 4,
 	"metrics-client.ts": 1,
-	"module-report-lsp.ts": 1,
-	"module-report.ts": 7,
+	"module-report-lsp.ts": 0,
+	"module-report.ts": 3,
 	// #2423: the frozen built-in tool-name table plus the call-scoped
 	// resolved-range carry. Both are argued in EXEMPT_SESSION_STATE_FILES.
-	"mutating-tool.ts": 2,
+	"mutating-tool.ts": 1,
 	// #2000 phase 2: the pending-baseline store (one slot per cwd:generation)
 	// plus the process-global Symbol.for slot; cleared via resetOpaqueMutationState.
 	// #2060: 1 -> 3 for UNMERGED_PORCELAIN_STATUSES and
@@ -2590,7 +2595,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// identity, so it needs no reset (SWEEP_HEURISTIC_LIMITS item 5).
 	// #4905: 7 -> 8, `overCapRootMemo`, in the entry above and cleared by
 	// `resetOpaqueMutationState`.
-	"opaque-mutation-scan.ts": 9,
+	"opaque-mutation-scan.ts": 6,
 	"out-of-band-changes.ts": 2,
 	// #1602 added `globalBinDirCache` (1 → 2), cleared by the same
 	// `_resetPackageManagerCache` the registry entry above names.
@@ -2605,7 +2610,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #4368 r1 row 13: `appearedPaths` (1 -> 2), registered above.
 	"path-birth.ts": 2,
 	// #4689: `pathIdentityFallbacks` and its exported reset, registered above.
-	"path-utils.ts": 2,
+	"path-utils.ts": 1,
 	"pipeline.ts": 1,
 	// #2506: the container key is a Symbol.for constant, so the scan sees no
 	// mutable module-scope container here — the same shape as
@@ -2624,7 +2629,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// bounded successful/failed and active/latest-queued persist state.
 	"project-snapshot.ts": 10,
 	"project-trust.ts": 1,
-	"python-provenance.ts": 12,
+	"python-provenance.ts": 2,
 	"quiet-window-config.ts": 0,
 	"quiet-window.ts": 0,
 	"read-guard-tool-lines.ts": 1,
@@ -2635,7 +2640,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// tree-sitter client's trap map it follows: a session boundary resets
 	// neither the wasm heap nor the client's charges, and each extraction
 	// rewrites its file's entry, so a session_start clear would re-arm nothing.
-	"review-graph/builder.ts": 20,
+	"review-graph/builder.ts": 19,
 	// #3417: the module-level git-dir memo is gone; the count is pinned at 0 so a
 	// re-hoisted memo (the stale-negative shape) fails this sweep, not just the
 	// lifecycle test.
@@ -2644,12 +2649,12 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #2442 review F2: the container regex now recognises BoundedFifoMap /
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
 	"review-graph/tsconfig-paths.ts": 2,
-	"review-graph/workspace-modules.ts": 2,
+	"review-graph/workspace-modules.ts": 1,
 	"runtime-config.ts": 0,
 	"runtime-coordinator.ts": 31,
 	// #2060: 3 -> 5 for GIT_INTEGRATION_SUBCOMMANDS and
 	// GIT_GLOBAL_OPTIONS_WITH_VALUE — command-shape vocabulary, not state.
-	"runtime-tool-result.ts": 5,
+	"runtime-tool-result.ts": 3,
 	// #2455 fix round 4, F2: the twin of `go-client.ts` above — the process's
 	// ONE `RustClient` plus `resetRustAvailability`, moved off
 	// `dispatch/runners/rust-clippy.ts`. That file keeps
@@ -2677,7 +2682,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// the shutdown ladder is done, plus a sweep that drops every pid whose
 	// process GROUP no longer exists), never by age, because age is exactly
 	// what evicted a long-lived server's verdict from the FIFO above.
-	"safe-spawn.ts": 5,
+	"safe-spawn.ts": 4,
 	"security-scan-client.ts": 1,
 	// #2146 moved the four registration fields onto the process singleton, so the
 	// scan sees no module-scope container here either.
@@ -2707,14 +2712,14 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #2366: one bounded pending-delivery map, cleared at primary session_start.
 	"test-runner-delivery.ts": 1,
 	"tool-agreement.ts": 1,
-	"tool-policy.ts": 8,
+	"tool-policy.ts": 2,
 	"tree-sitter-cache.ts": 2,
-	"tree-sitter-client.ts": 31,
+	"tree-sitter-client.ts": 28,
 	// #2636 review F6: getBundledQueriesRootHealth's memo (a bare module-scope
 	// `let`) plus its `_resetBundledQueriesRootHealthForTests` export (the
 	// scan's reset-signal detector) — see this file's EXEMPT_SESSION_STATE_FILES
 	// entry above for why it is exempt rather than registered.
-	"tree-sitter-query-loader.ts": 4,
+	"tree-sitter-query-loader.ts": 3,
 	"tree-sitter-shared.ts": 0,
 	"tree-sitter-symbol-extractor.ts": 2,
 	"turn-context.ts": 0,
@@ -2733,7 +2738,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// state and is cleared by serialization, so it needs no session reset.
 	// #4129 added the serialized-source WeakMap used to publish persist-owned
 	// wire bytes; it follows the WordIndex object's lifetime and needs no reset.
-	"word-index.ts": 5,
+	"word-index.ts": 4,
 	"workspace-topology.ts": 2,
 	"write-ordering-guard.ts": 1,
 	"zizmor-config.ts": 0,
