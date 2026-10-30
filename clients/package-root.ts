@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { walkUpDirs } from "./path-utils.js";
+import { realpathOrResolve, walkUpDirs } from "./path-utils.js";
 
 const packageRootCache = new Map<string, string>();
 
@@ -21,9 +21,13 @@ export function getPackageRoot(importMetaUrl: string): string {
 
 	// #4689 item 6: the module's own directory as a path identity, so a package
 	// reached through a link (`npm link`, a pnpm store) roots where its files
-	// live. No `package.json` on the way up leaves the filesystem root.
+	// live. The directory comes from the FILE's identity: a file link's own
+	// directory belongs to the link (#4966). No `package.json` on the way up
+	// leaves the filesystem root.
 	let root = "";
-	for (const dir of walkUpDirs(path.dirname(fileURLToPath(importMetaUrl)))) {
+	for (const dir of walkUpDirs(
+		path.dirname(realpathOrResolve(fileURLToPath(importMetaUrl))),
+	)) {
 		root = dir;
 		if (fs.existsSync(path.join(dir, "package.json"))) break;
 	}
