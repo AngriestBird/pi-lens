@@ -197,6 +197,23 @@ export interface TouchFileResult {
 	 * `supersededServerIds`. Absent when every server got it.
 	 */
 	supersededServerIds?: string[];
+	/**
+	 * #5040: the answer this touch reports WITHOUT having refreshed it — a
+	 * primary server's cache entry that stood unchanged through the touch (its
+	 * notify was skipped because the server already held these bytes, and
+	 * nothing was published for the path while the touch waited). `publishedAt`
+	 * is that entry's publish stamp, so a caller that must know whether the
+	 * answer describes the state after its OWN change can compare it against its
+	 * own edit clock; the cascade does, through `isPostEditObservation`.
+	 *
+	 * Present only for a REUSE: absent when the touch produced its own answer (a
+	 * publish or a pull inside the touch, the #707 sync confirm) and absent when
+	 * no server had a cached answer at all (the #799 silence-clean conclusion,
+	 * which is about silence rather than a reused observation). Auxiliary
+	 * contributors never appear: their answers are file-local, so an edit to
+	 * another file cannot invalidate them (#1720).
+	 */
+	reusedAnswer?: { serverId: string; publishedAt: number };
 	binding?: DiagnosticBinding;
 }
 

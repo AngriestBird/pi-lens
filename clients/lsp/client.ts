@@ -453,6 +453,19 @@ export interface LSPClientInfo {
 	 * per path.
 	 */
 	getDiagnosticsVersionForPath(filePath: string): number;
+	/**
+	 * #5040: when the diagnostics tracked for `filePath` were published —
+	 * `getAllDiagnostics()`'s per-file `ts` for this path alone, so a per-touch
+	 * reader never rebuilds the client's whole map. `undefined` when nothing is
+	 * tracked for the path (no publication, or a notify cleared it).
+	 *
+	 * The fact it reports is the age of a CACHED answer. `touchFile` reports it
+	 * only for an answer it reused without refreshing it, and the cascade
+	 * compares it against its own edit clock (#5040). Optional so a client shape
+	 * that cannot date its cache exists at all; such a client loses only the age
+	 * claim, exactly as a missing `binding` reads "unknown".
+	 */
+	getDiagnosticsPublishedAt?(filePath: string): number | undefined;
 	/** #3482: see {@link publicationCountsForPath}. Optional so a client double
 	 *  that predates it only loses the late-auxiliary backlog binding. */
 	getPublicationCountsForPath?(filePath: string): {
@@ -2156,6 +2169,25 @@ export function diagnosticsVersionForPath(
 	normalizedPath: string,
 ): number {
 	return state.diagnosticsVersionsByPath?.get(normalizedPath) ?? 0;
+}
+
+/**
+ * #5040: when the diagnostics this client holds for `normalizedPath` were last
+ * stored — the later of the push and pull stamps, i.e. exactly the `ts`
+ * `getAllDiagnostics()` reports for the path, without building that map. The
+ * one owner of the per-file publish stamp: `getAllDiagnostics` and
+ * `pruneDiagnostics` read it too, so a new reader never re-derives the
+ * max-of-two-maps rule. `undefined` when nothing is tracked for the path.
+ */
+export function diagnosticsPublishedAtForPath(
+	state: LSPClientState,
+	normalizedPath: string,
+): number | undefined {
+	const ts = Math.max(
+		state.pushDiagnosticTimestamps?.get(normalizedPath) ?? 0,
+		state.documentPullDiagnosticTimestamps?.get(normalizedPath) ?? 0,
+	);
+	return ts > 0 ? ts : undefined;
 }
 
 /**
@@ -7197,6 +7229,10 @@ export async function createLSPClient(options: {
 			return diagnosticsVersionForPath(state, normalizeMapKey(filePath));
 		},
 
+		getDiagnosticsPublishedAt(filePath) {
+			return diagnosticsPublishedAtForPath(state, normalizeMapKey(filePath));
+		},
+
 		getPublicationCountsForPath(filePath) {
 			return publicationCountsForPath(state, normalizeMapKey(filePath));
 		},
@@ -7217,10 +7253,7 @@ export async function createLSPClient(options: {
 			for (const key of keys) {
 				result.set(key, {
 					diags: getMergedDiagnosticsForPath(state, key),
-					ts: Math.max(
-						state.pushDiagnosticTimestamps.get(key) ?? 0,
-						state.documentPullDiagnosticTimestamps.get(key) ?? 0,
-					),
+					ts: diagnosticsPublishedAtForPath(state, key) ?? 0,
 					binding: state.diagnosticBindings.get(key),
 				});
 			}
@@ -7246,10 +7279,7 @@ export async function createLSPClient(options: {
 			]);
 			for (const key of keys) {
 				const diags = getMergedDiagnosticsForPath(state, key);
-				const ts = Math.max(
-					state.pushDiagnosticTimestamps.get(key) ?? 0,
-					state.documentPullDiagnosticTimestamps.get(key) ?? 0,
-				);
+				const ts = diagnosticsPublishedAtForPath(state, key) ?? 0;
 				if (!predicate(key, ts, diags)) continue;
 				clearDiagnosticsForPath(state, key);
 				removed++;

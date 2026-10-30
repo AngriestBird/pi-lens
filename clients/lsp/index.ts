@@ -7021,6 +7021,45 @@ export class LSPService {
 				result.binding = binding;
 			}
 
+			// #5040: WHICH contributor's answer this merge reports without having
+			// refreshed it. A push-only server that already holds these bytes has its
+			// notify skipped (`shouldSkipNotify`), so `clearDiagnosticsForPath` never runs
+			// and the cache entry this merge reads may predate the caller's own change.
+			// Name the oldest such entry so a caller that owns the edit clock can decide
+			// whether the answer describes the state after that change — never inferred
+			// here, because only the caller knows what changed. A publication that landed
+			// for the path inside this touch (`getDiagnosticsVersionForPath` past the
+			// pre-notify baseline, which covers push AND pull) or the #707 sync confirm
+			// (`syncConfirmed`, a command answer rather than a cached observation) is the
+			// touch's OWN answer and is never reported here. Auxiliaries are excluded:
+			// their findings are file-local, so an edit elsewhere cannot invalidate them
+			// (#1720), and the coverage gap already speaks for their silence.
+			if (collected !== undefined && !syncConfirmed) {
+				let reusedAnswer: TouchFileResult["reusedAnswer"];
+				for (const entry of spawned) {
+					if (isAuxiliary(entry.info)) continue;
+					if (notifyWriteTimedOutServerIds.includes(entry.info.id)) continue;
+					const baseline = diagnosticBaselines.get(entry.client);
+					const currentPathVersion = readPathVersion(entry.client);
+					if (
+						baseline !== undefined &&
+						currentPathVersion !== undefined &&
+						currentPathVersion > baseline
+					)
+						continue;
+					const publishedAt =
+						entry.client.getDiagnosticsPublishedAt?.(filePath);
+					if (publishedAt === undefined) continue;
+					if (
+						reusedAnswer === undefined ||
+						publishedAt < reusedAnswer.publishedAt
+					) {
+						reusedAnswer = { serverId: entry.info.id, publishedAt };
+					}
+				}
+				if (reusedAnswer) result.reusedAnswer = reusedAnswer;
+			}
+
 			// The recent-touches entries are recorded per server inside the notify-write
 			// loop above, at the moment each server's own write lands (#1253) — a server
 			// whose write timed out or rejected deliberately gets none, so the next touch

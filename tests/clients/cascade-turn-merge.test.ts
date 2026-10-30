@@ -1610,6 +1610,63 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 		}
 	});
 
+	// #5040: the second shape of absence gets its own sentence. A reused pre-edit
+	// answer DID arrive, so the #4485 "no answer arrived" wording would be false
+	// for it, and one server can hold both shapes in one turn, so the grouping
+	// cannot merge them.
+	it("turn_end words a pre-edit answer as its own cause, beside the no-answer line for the same server", async () => {
+		const env = setupTestEnvironment("cascade-5040-pending-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.ts");
+			const preEdit = path.join(env.tmpDir, "pre-edit.ts");
+			const silent = path.join(env.tmpDir, "silent.ts");
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				selectedNeighborPaths: [preEdit, silent],
+				unconfirmed: {
+					count: 2,
+					servers: [
+						{
+							serverId: "gopls",
+							reason: "pre-edit-answer",
+							waitMs: 0,
+							paths: [preEdit],
+						},
+						{
+							serverId: "gopls",
+							reason: "no-answer",
+							waitMs: 1000,
+							paths: [silent],
+						},
+					],
+				},
+			} as any);
+
+			const content = await turnEndOf(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toContain(
+				"Cascade asked gopls about 1 dependent(s) of a.ts, but its cached answer predates this edit; a clean cascade result does not cover them.",
+			);
+			expect(content).toContain(
+				"Cascade sent 1 dependent(s) of a.ts to gopls, but no answer arrived within 1000 ms; a clean cascade result does not cover them.",
+			);
+			expect(content).toContain("  • gopls: pre-edit.ts");
+			expect(content).toContain("  • gopls: silent.ts");
+			expect(occurrences(content, "predates this edit")).toBe(1);
+			expect(occurrences(content, "no answer arrived")).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// Recurrence (#4487): with the rolling delta gone, a result that owns only
 	// some of its neighbours rendered all of them, so a neighbour a later
 	// result also covered reached the agent twice in one turn.
