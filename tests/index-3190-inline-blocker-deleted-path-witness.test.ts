@@ -677,6 +677,12 @@ describe("#5020 witness: a cross-file row retires once its cited file is clean o
 			durableRows: 1,
 			reasons: [expect.stringContaining("reported nothing on it")],
 		});
+		// The declared p3 residual (#5020): the widget store is a second writer
+		// and its rows carry no cited file, so it still lists the row against the
+		// WRITTEN file until that file is next dispatched. This pins the residual,
+		// not the fix: a lane that retires it here deletes this assertion with its
+		// own red.
+		expect(await s.sessionDiagnostics()).toContain("other-b.yaml");
 		await s.shutdown();
 	});
 

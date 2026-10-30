@@ -109,6 +109,50 @@ describe("#5020 retireForeignRows", () => {
 		}
 	});
 
+	// Recurrence it prevents: a record can hold a blocking row with no cited file
+	// (the `Diagnostic` type requires `filePath`, so such a row reaches the record
+	// only from outside the type system, and this cell builds that shape with the
+	// cast below). A retire must keep it and must not dereference the absent path:
+	// with `isCrossFileBlocker`'s `!!d.filePath` clause removed this cell throws
+	// `TypeError: Cannot read properties of undefined (reading 'includes')`, which
+	// is what a turn-end hook would do instead of delivering its findings.
+	it("keeps a row that cites no file and places its line, as the record's own", () => {
+		const env = setupTestEnvironment("pi-lens-5020-nocite-");
+		try {
+			const a = path.join(env.tmpDir, "a.yaml");
+			const b = path.join(env.tmpDir, "b.yaml");
+			fs.writeFileSync(a, "a: 1\n");
+			const runtime = new RuntimeCoordinator();
+			const noCite = {
+				id: "helm-lint:3",
+				message: "helm-lint finding at 3",
+				line: 3,
+				severity: "error",
+				semantic: "blocking",
+				tool: "helm-lint",
+				runnerId: "helm-lint",
+				rule: "error",
+			} as unknown as Diagnostic;
+			record(runtime, a, [noCite, row(b, 2, "helm-lint")]);
+
+			const changed = runtime.retireForeignRows(
+				"cited-file-clean",
+				(r) => r.filePath === b,
+				runtime.nextWriteIndex(),
+			);
+
+			expect(changed.map((c) => c.filePath)).toEqual([a]);
+			const [after] = runtime.getInlineBlockersSnapshot();
+			expect(after?.diagnostics).toEqual([noCite]);
+			// Read as the record's own, so its line is placed in this file — the
+			// same reading `clients/pipeline.ts` gives such a row when it stamps a
+			// line hash. The derived `lines` is rebuilt from the survivors.
+			expect(after?.lines).toEqual([3]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("removes a record whose rows all name the cited file, and says it was resolved", () => {
 		const env = setupTestEnvironment("pi-lens-5020-all-");
 		try {
@@ -224,20 +268,21 @@ describe("#5020 retireForeignRowsOfMissingFiles", () => {
 });
 
 describe("#5020 verdictRunnerIds", () => {
+	const runner = (
+		runnerId: string,
+		status: "succeeded" | "failed" | "skipped",
+	) =>
+		({
+			runnerId,
+			status,
+			startTime: 0,
+			endTime: 0,
+			durationMs: 0,
+			diagnosticCount: 0,
+			semantic: "none",
+		}) as const;
+
 	it("names the runners that succeeded and were not inconclusive", () => {
-		const runner = (
-			runnerId: string,
-			status: "succeeded" | "failed" | "skipped",
-		) =>
-			({
-				runnerId,
-				status,
-				startTime: 0,
-				endTime: 0,
-				durationMs: 0,
-				diagnosticCount: 0,
-				semantic: "none",
-			}) as const;
 		expect(
 			verdictRunnerIds({
 				latencyReport: {
@@ -250,6 +295,29 @@ describe("#5020 verdictRunnerIds", () => {
 				} as never,
 				inconclusiveSources: {
 					runnerIds: ["yamllint"],
+					serverIds: [],
+					collectLaterRunnerIds: [],
+				},
+			}),
+		).toEqual(["helm-lint"]);
+	});
+
+	// Recurrence it prevents: `checkedWholeFile` in the same module refuses an
+	// edit-scoped verdict, and this predicate admitted one, so an ast-grep run
+	// that answered only for the edited ranges could retire another file's row
+	// on evidence that never covered the rest of the file (PR #5033 review F3).
+	it("refuses a runner whose verdict covers only the edited ranges", () => {
+		expect(
+			verdictRunnerIds({
+				latencyReport: {
+					runners: [
+						runner("ast-grep", "succeeded"),
+						runner("helm-lint", "succeeded"),
+					],
+				} as never,
+				editScopedRunnerIds: ["ast-grep"],
+				inconclusiveSources: {
+					runnerIds: [],
 					serverIds: [],
 					collectLaterRunnerIds: [],
 				},

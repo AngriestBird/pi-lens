@@ -626,13 +626,24 @@ export function checkedWholeFile(
  * that skipped, failed, is still in flight or answered for part of the file
  * speaks for nothing, which is why this is the evidence a retire of another
  * file's row asks for (`RuntimeCoordinator.retireForeignRows`).
+ *
+ * An edit-scoped runner (`editScopedRunnerIds`) is refused here for the reason
+ * `checkedWholeFile` refuses the whole run for it: its verdict covers the
+ * edited ranges, so "no blocker reported" says nothing about the rest of the
+ * file a cross-file row would be judged against.
  */
 export function verdictRunnerIds(
-	result: Pick<DispatchResult, "inconclusiveSources" | "latencyReport">,
+	result: Pick<
+		DispatchResult,
+		"inconclusiveSources" | "editScopedRunnerIds" | "latencyReport"
+	>,
 ): string[] {
-	const noVerdict = new Set(result.inconclusiveSources?.runnerIds);
+	const noWholeFileVerdict = new Set([
+		...(result.inconclusiveSources?.runnerIds ?? []),
+		...(result.editScopedRunnerIds ?? []),
+	]);
 	return (result.latencyReport?.runners ?? []).flatMap((runner) =>
-		runner.status === "succeeded" && !noVerdict.has(runner.runnerId)
+		runner.status === "succeeded" && !noWholeFileVerdict.has(runner.runnerId)
 			? [runner.runnerId]
 			: [],
 	);

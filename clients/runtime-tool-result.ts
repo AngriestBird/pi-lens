@@ -1464,9 +1464,11 @@ function publishInlineVerdict(args: {
 		// OTHER files' records hold against it. A chart-wide runner reports
 		// `other-b.yaml` while `deploy-a.yaml` is written, so the row sits in
 		// `deploy-a.yaml`'s record, which no dispatch of `other-b.yaml` ever
-		// clears. Only an authored, applied, error-free run whose raising runner
-		// answered and holds no blocker of its own on this file may say so.
-		if (inlineVerdictApplied && authored && !result.isError) {
+		// clears. Only an authored, applied run whose raising runner answered and
+		// holds no blocker of its own on this file may say so. There is no
+		// `isError` term: `PipelineResult.isError` is `false` from
+		// `analysePipeline`'s only return, so the branch could never be taken.
+		if (inlineVerdictApplied && authored) {
 			const verdict = new Set(result.verdictRunnerIds);
 			const stillReported = new Set(
 				(result.inlineBlockerDiagnostics ?? []).flatMap((d) =>

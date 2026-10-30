@@ -1661,7 +1661,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 5 -> 6 (#4484 r2): `reachedNoVerdict` reads the runner result's status.
 		// 6 -> 7 (#4733 r2): `checkedWholeFile` reads each latency row's status.
 		// 7 -> 8 (#4130): `faultResult` builds the one `failed` runner result.
-		// 9 -> 10 (#5020): `answeredRunnerIds` reads each latency row's status, as
+		// 9 -> 10 (#5020): `verdictRunnerIds` reads each latency row's status, as
 		// `checkedWholeFile` does.
 		"clients/dispatch/types.ts": 10,
 		"clients/file-utils.ts": 2,

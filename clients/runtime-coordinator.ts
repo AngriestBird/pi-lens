@@ -2608,7 +2608,8 @@ export class RuntimeCoordinator {
 	 * its own on it (the caller proves that; `shouldRetire` is its verdict per
 	 * row). `"cited-file-missing"`: the cited file no longer exists, which the
 	 * #1245 reconcile already decides for a record's OWN file. Everything else
-	 * stays, rows with no structured diagnostics included (fail closed).
+	 * stays, rows with no structured diagnostics included (fail closed), and so
+	 * does a row that cites no file (`isCrossFileBlocker` is total).
 	 *
 	 * A clean verdict retires only a record it is strictly newer than
 	 * (`confirmedAtWriteOrder`, turn first), as `retireInlineBlockerOnConfirmedClean`
@@ -2636,11 +2637,7 @@ export class RuntimeCoordinator {
 			if (!diagnostics) continue;
 			const kept = diagnostics.filter(
 				(row) =>
-					!(
-						row.filePath &&
-						isCrossFileBlocker(row, existing.filePath) &&
-						shouldRetire(row)
-					),
+					!(isCrossFileBlocker(row, existing.filePath) && shouldRetire(row)),
 			);
 			if (kept.length === diagnostics.length) continue;
 			changed.push({

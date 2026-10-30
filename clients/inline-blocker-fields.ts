@@ -70,9 +70,20 @@ export function inlineBlockerLines(
  * and the retire seams that treat such a row as another file's claim. The two
  * read it the same way, so a row the line list calls "no line in this file" is
  * the row a retire may judge by its cited file.
+ *
+ * TOTAL over the rows a record holds: a row with no `filePath` is the record's
+ * own, never another file's claim, so no caller needs a `d.filePath &&` guard
+ * in front of it. `Diagnostic.filePath` is required, so such a row reaches a
+ * record only from outside the type system (a persisted or foreign row, which
+ * `InlineBlockerRecord.diagnostics` holds as `Diagnostic[]`); without this
+ * clause the `normalizeEphemeralMapKey` below dereferences the absent path
+ * (`TypeError: Cannot read properties of undefined (reading 'includes')`), so
+ * every caller that can see one would have to repeat the guard (AGENTS.md
+ * shape 83: one owner per rule).
  */
 export function isCrossFileBlocker(d: Diagnostic, filePath: string): boolean {
 	return (
+		!!d.filePath &&
 		normalizeEphemeralMapKey(d.filePath) !== normalizeEphemeralMapKey(filePath)
 	);
 }
@@ -116,6 +127,8 @@ export function inlineBlockerPlacement(
 	for (const d of blockers) {
 		// Another file's row (#1641) and a blocker with no line are both "no line
 		// in this file"; only a stale carry of THIS file has a line to report.
+		// A row that cites no file at all is this record's own (`isCrossFileBlocker`
+		// is total), so it is placed when it carries a line.
 		if (isCrossFileBlocker(d, filePath)) continue;
 		if (typeof d.line !== "number") continue;
 		if (d.positionStale) {
