@@ -539,7 +539,7 @@ function lastOperand(node: SgNode): SgNode {
 	return value;
 }
 
-/** Local names bound to `dirname`: an import or destructure alias, `const up = path.dirname`. */
+/** Local names bound to `dirname`: an import or destructure alias, `const up = path.dirname`, `const up = dirname`, and a `const` of any of these. */
 function dirnameBindings(root: SgNode): Set<string> {
 	const names = new Set<string>();
 	for (const specifier of root.findAll({
@@ -562,15 +562,28 @@ function dirnameBindings(root: SgNode): Set<string> {
 		)
 			names.add(cookedIdentifier(value.text()));
 	}
-	for (const declarator of root.findAll({
-		rule: { kind: "variable_declarator" },
-	})) {
-		const name = declarator.field("name");
-		const value = declarator.field("value");
-		if (!name || !value || name.kind() !== "identifier") continue;
-		const held = lastOperand(value);
-		if (isMember(held) && memberName(held) === "dirname")
-			names.add(cookedIdentifier(name.text()));
+	// A `const` binding of `dirname` (`path.dirname`, or a bare name already
+	// bound) is followed to a fixed point, so `const up = dirname` and
+	// `const again = up` bind too (PR #5037 review, Greptile).
+	const declarators = root.findAll({ rule: { kind: "variable_declarator" } });
+	for (let grew = true; grew;) {
+		grew = false;
+		for (const declarator of declarators) {
+			const name = declarator.field("name");
+			const value = declarator.field("value");
+			if (!name || !value || name.kind() !== "identifier") continue;
+			const bound = cookedIdentifier(name.text());
+			if (names.has(bound)) continue;
+			const held = lastOperand(value);
+			const holdsDirname = isMember(held)
+				? memberName(held) === "dirname"
+				: held.kind() === "identifier" &&
+					(cookedIdentifier(held.text()) === "dirname" ||
+						names.has(cookedIdentifier(held.text())));
+			if (!holdsDirname) continue;
+			names.add(bound);
+			grew = true;
+		}
 	}
 	return names;
 }

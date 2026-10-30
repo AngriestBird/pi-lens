@@ -44,7 +44,10 @@
  * - an upward climb written without a parent call the third needle
  *   (`hand-rolled-upward-walk`, #4966) reads: a `reduce`, a regex or
  *   `slice`/`lastIndexOf` strip of the last segment, a split on the separator,
- *   or a climb through `new URL("..", base)`. The twin suite
+ *   a climb through `new URL("..", base)`, or a parent call hidden inside a
+ *   helper arrow bound to a name (`const up = (p) => path.dirname(p)`, called
+ *   in the loop; the loop calls `up`, and the `dirname` sits in another
+ *   function). Live population 0 for each. The twin suite
  *   (`tests/clients/walker-symlink-twin-4966.test.ts`) runs the registered
  *   walkers from a symlink twin instead of reading their spelling.
  * - a `walkUpDirs(…, { spelling: true })` call. The option is the seam's own

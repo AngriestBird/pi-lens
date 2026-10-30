@@ -208,6 +208,16 @@ const SITE_ROWS: ReadonlyArray<[string, string, PathIdentityNeedle[]]> = [
 		["hand-rolled-upward-walk"],
 	],
 	[
+		"plant: a bare dirname bound to another name",
+		'import { dirname } from "node:path";\nconst up = dirname;\nwhile (c !== root) {\n\tc = up(c);\n}',
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: a bound name bound again",
+		"const first = path.dirname;\nconst again = first;\nwhile (c !== root) {\n\tc = again(c);\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
 		"plant: a destructured alias",
 		"const { dirname: up } = path;\nwhile (c !== root) {\n\tc = up(c);\n}",
 		["hand-rolled-upward-walk"],
@@ -270,6 +280,10 @@ const CLEAN_ROWS: ReadonlyArray<[string, string]> = [
 		"for (const f of files) {\n\trec.dir = path.dirname(f);\n\tmap[f] = rec;\n}",
 	],
 	["a one-shot dirname outside any loop", "const d = path.dirname(f);"],
+	[
+		"a bare name bound to something that is not dirname",
+		"const up = other;\nwhile (c !== root) {\n\tc = up(c);\n}",
+	],
 	[
 		"the seam's own loop",
 		"for (const dir of walkUpDirs(start)) {\n\tif (has(dir)) return dir;\n}",
