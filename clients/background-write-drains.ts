@@ -23,42 +23,41 @@
  * at module load (a test that stubs the global `WeakRef` counts every
  * construction, and `clients/dependency-checker.ts` imports the installer).
  *
- * STRICT DRAINS. A drain resolves only when its writer has nothing left to
- * land, and rejects when it cannot get there: a bounded wait or a scheduled
- * retry that read as "settled" would let the write land after the root was
- * removed, the defect this registry exists to close. A registering module
- * therefore registers a wrapper that checks its own pending state, not a bare
- * bounded helper.
+ * STRICT DRAINS. A drain resolves with `undefined` only when its writer has
+ * nothing left to land, and with a string naming what remains otherwise: a
+ * bounded wait or a scheduled retry that read as "settled" would let the write
+ * land after the root was removed, the defect this registry exists to close.
+ * A registering module therefore registers a wrapper that checks its own
+ * pending state, not a bare bounded helper. The test side decides what an
+ * unsettled drain means (`tests/support/background-write-drains.ts` rejects).
  */
 
 const REGISTRY_KEY = Symbol.for("pi-lens.background-write-drains.v1");
 
-type Drain = () => Promise<unknown>;
+/** Resolves `undefined` once settled, else a description of what remains. */
+export type BackgroundWriteDrain = () => Promise<string | undefined>;
 
 const host = globalThis as typeof globalThis & { [key: symbol]: unknown };
 
-function registry(): Set<Drain> {
+function registry(): Set<BackgroundWriteDrain> {
 	const existing = host[REGISTRY_KEY];
-	if (existing instanceof Set) return existing as Set<Drain>;
-	const fresh = new Set<Drain>();
+	if (existing instanceof Set) return existing as Set<BackgroundWriteDrain>;
+	const fresh = new Set<BackgroundWriteDrain>();
 	host[REGISTRY_KEY] = fresh;
 	return fresh;
 }
 
 /**
- * Register `drain` for this module evaluation. It must resolve only once the
- * module's writer has nothing left to land, and reject when it cannot.
+ * Register `drain` for this module evaluation. It resolves `undefined` only
+ * once the module's writer has nothing left to land.
  */
-export function registerBackgroundWriteDrain(drain: Drain): void {
+export function registerBackgroundWriteDrain(
+	drain: BackgroundWriteDrain,
+): void {
 	registry().add(drain);
 }
 
-/**
- * Test-only: run every registered drain, in registration order, and return
- * once all have settled. A drain that rejects rejects the pass: a teardown
- * that cannot settle a writer should fail its file loudly, not remove the root
- * under it.
- */
-export async function drainRegisteredBackgroundWritesForTests(): Promise<void> {
-	for (const drain of registry()) await drain();
+/** Test-only: every drain registered so far, in registration order. */
+export function registeredBackgroundWriteDrainsForTests(): readonly BackgroundWriteDrain[] {
+	return [...registry()];
 }

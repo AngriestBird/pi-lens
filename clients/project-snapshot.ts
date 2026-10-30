@@ -2293,19 +2293,19 @@ export async function waitForProjectSnapshotPersistsForTests(): Promise<void> {
  * Test-only strict form of {@link waitForProjectSnapshotPersistsForTests}: that
  * wait is a bounded poll (200 x 10 ms) and resolves with work outstanding, so a
  * persist slower than the bound would land after a fixture root was removed.
- * This one rejects when any request, active persist or queued persist remains.
+ * This one reports what remains (any request, active persist or queued persist).
  */
-async function settleProjectSnapshotPersistsForTests(): Promise<void> {
+async function settleProjectSnapshotPersistsForTests(): Promise<
+	string | undefined
+> {
 	await waitForProjectSnapshotPersistsForTests();
-	if (
-		_snapshotWorkerRequests.size > 0 ||
-		_activeSnapshotPersists.size > 0 ||
-		_queuedSnapshotPersists.size > 0
-	) {
-		throw new Error(
-			"project-snapshot persists still pending after the bounded wait",
-		);
-	}
+	const pending =
+		_snapshotWorkerRequests.size +
+		_activeSnapshotPersists.size +
+		_queuedSnapshotPersists.size;
+	return pending > 0
+		? "project-snapshot persists still pending after the bounded wait"
+		: undefined;
 }
 
 // #4937: the loaded extension copy's in-flight worker write is invisible to a

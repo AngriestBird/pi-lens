@@ -53,6 +53,7 @@ describe("pi-session: the file-level drain pass (#4937)", () => {
 		const drain = async () => {
 			release();
 			await landed;
+			return undefined;
 		};
 		registerBackgroundWriteDrain(drain);
 

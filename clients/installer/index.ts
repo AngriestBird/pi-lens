@@ -2478,17 +2478,17 @@ export async function flushProbeCache(): Promise<ProbeCacheFlushResult> {
 /**
  * Test-only strict form of {@link flushProbeCache}: a flush that fails or is
  * deferred behind another process's lock arms a retry timer, and that retry
- * would write after a fixture root was removed. Resolve only on a flush that
- * left nothing pending; otherwise cancel the retry and reject.
+ * would write after a fixture root was removed. Settled only on a flush that
+ * left nothing pending; otherwise cancel the retry and report it.
  */
-async function settleProbeCacheForTests(): Promise<void> {
+async function settleProbeCacheForTests(): Promise<string | undefined> {
 	const result = await flushProbeCache();
-	if (result === "idle" || result === "written") return;
+	if (result === "idle" || result === "written") return undefined;
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
 		_probeCacheFlushTimer = null;
 	}
-	throw new Error(`probe-cache flush did not land (${result})`);
+	return `probe-cache flush did not land (${result})`;
 }
 
 // #4937: the debounced flush timer above lives in this evaluation of the module;

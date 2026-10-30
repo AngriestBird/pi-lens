@@ -170,7 +170,7 @@ import type {
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll } from "vitest";
-import { drainRegisteredBackgroundWritesForTests } from "../../clients/background-write-drains.js";
+import { drainRegisteredBackgroundWritesForTests } from "./background-write-drains.js";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {

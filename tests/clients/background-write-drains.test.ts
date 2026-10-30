@@ -16,13 +16,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { drainRegisteredBackgroundWritesForTests } from "../../clients/background-write-drains.js";
 import {
 	resetProjectSnapshotPersistWorkerForTests,
 	terminateProjectSnapshotPersistWorkerForTests,
 	waitForProjectSnapshotPersistsForTests,
 } from "../../clients/project-snapshot.js";
 import type { ProjectSnapshot } from "../../clients/project-snapshot.js";
+import { drainRegisteredBackgroundWritesForTests } from "../support/background-write-drains.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const CORPUS = path.join(
