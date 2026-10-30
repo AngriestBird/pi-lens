@@ -48,9 +48,11 @@ describe("unansweredPrimaries names the owner a fallback stood in for (#5014)", 
 			expected: ["python"],
 		},
 		{
+			// The pre-#5014 rule, kept: an acquired non-alternate primary answers
+			// for the file even when another rooted member was never acquired.
 			name: "the owner itself acquired: nothing missing",
 			spawned: [PythonServer],
-			rooted: ["python"],
+			rooted: ["python", "python-jedi"],
 			expected: [],
 		},
 		{
