@@ -29,8 +29,10 @@ import type {
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
 import { clearWidgetState } from "../../../clients/widget-state.js";
 import { createLensDiagnosticsTool } from "../../../tools/lens-diagnostics.js";
-import { removeTempDirSync } from "../test-utils.js";
 import { useConfigPath } from "../../support/global-config.js";
+import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
+import { removeTempDirSync } from "../test-utils.js";
+
 const setConfigPath = useConfigPath();
 
 let tmpDir: string;
@@ -205,9 +207,7 @@ describe("rules.<id> — lens_diagnostics source=lsp reads each file's owner", (
 			fs.mkdirSync(path.dirname(file), { recursive: true });
 			fs.writeFileSync(file, "const value: number = 'bad';\n");
 		}
-		const service = {
-			announceCreatedFiles: vi.fn(),
-			sweepDocumentDrift: vi.fn(async () => undefined),
+		const service = makeLspServiceDouble({
 			touchFile: vi.fn(async () => ({
 				diags: [
 					{
@@ -223,9 +223,7 @@ describe("rules.<id> — lens_diagnostics source=lsp reads each file's owner", (
 					},
 				],
 			})),
-			getDiagnostics: vi.fn(async () => []),
-			getCapabilitySnapshots: vi.fn(async () => []),
-		};
+		});
 		const tool = createLensDiagnosticsTool(
 			{ readCache: vi.fn(() => undefined) } as never,
 			() => repo,
