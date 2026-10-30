@@ -3,4 +3,4 @@ section: Fixed
 audience: internal
 ---
 
-- `tests/index-lsp-config-root-eviction.test.ts` now emits `session_shutdown` and joins the background-write drain registry and the instance-registry mutation tail before it removes its `PI_LENS_HOME` fixture, so a late project-snapshot worker write can no longer re-create the directory after teardown and red the tmp-fixture hygiene owner (refs #5024).
+- `tests/index-lsp-config-root-eviction.test.ts` now joins the background-write drain registry before it removes its `PI_LENS_HOME` fixture, so a late project-snapshot worker write no longer re-creates the directory after a settled teardown and reds the tmp-fixture hygiene owner. The instance-registry mutation tail is left to the environment restore and the worker's own teardown (refs #5024).
