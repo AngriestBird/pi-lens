@@ -2601,19 +2601,6 @@ export async function updateProbeCache(
 }
 
 // Exported for testing only.
-export function getProbeCacheStateForTesting(): {
-	dirty: boolean;
-	writeInFlight: boolean;
-	flushTimerArmed: boolean;
-} {
-	return {
-		dirty: _probeCacheDirty,
-		writeInFlight: _probeCacheWriteInFlight !== null,
-		flushTimerArmed: _probeCacheFlushTimer !== null,
-	};
-}
-
-// Exported for testing only.
 export function resetProbeCacheStateForTesting(): void {
 	_probeCache = null;
 	_probeCacheDirty = false;

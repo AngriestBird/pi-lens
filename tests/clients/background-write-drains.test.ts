@@ -40,6 +40,7 @@ function pinEnv(home: string, data: string): void {
 }
 
 afterEach(async () => {
+	vi.useRealTimers();
 	for (const key of PINNED_KEYS) {
 		if (savedEnv[key] === undefined) delete process.env[key];
 		else process.env[key] = savedEnv[key];
@@ -94,30 +95,23 @@ describe("background write drains across module copies (#4937)", () => {
 			pinEnv(home, path.join(env.tmpDir, "data"));
 			const tool = path.join(env.tmpDir, "tool.sh");
 			fs.writeFileSync(tool, "#!/bin/sh\n");
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			// The cache path is fixed when the module loads, so the second copy
 			// is evaluated under the pinned home.
 			vi.resetModules();
 			const other = await import("../../clients/installer/index.js");
 			await other.updateProbeCache("probe-tool", tool);
 			const cacheFile = path.join(home, "probe-cache.json");
-			// The write is still pending behind the debounce timer: asserted
-			// through the module's own state, not by racing the timer on disk.
-			expect(other.getProbeCacheStateForTesting()).toEqual({
-				dirty: true,
-				writeInFlight: false,
-				flushTimerArmed: true,
-			});
+			// The write is still pending behind the debounce timer: asserted as a
+			// live timer under fake timers, not by racing the clock on disk.
+			expect(vi.getTimerCount()).toBe(1);
 
 			await drainRegisteredBackgroundWritesForTests();
 
 			expect(
 				Object.keys(JSON.parse(fs.readFileSync(cacheFile, "utf-8"))),
 			).toEqual(["probe-tool"]);
-			expect(other.getProbeCacheStateForTesting()).toEqual({
-				dirty: false,
-				writeInFlight: false,
-				flushTimerArmed: false,
-			});
+			expect(vi.getTimerCount()).toBe(0);
 			other.resetProbeCacheStateForTesting();
 		} finally {
 			env.cleanup();
@@ -168,6 +162,7 @@ describe("background write drains across module copies (#4937)", () => {
 			pinEnv(home, path.join(env.tmpDir, "data"));
 			const tool = path.join(env.tmpDir, "tool.sh");
 			fs.writeFileSync(tool, "#!/bin/sh\n");
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			// A directory where the cache file belongs: the atomic write fails.
 			fs.mkdirSync(path.join(home, "probe-cache.json"));
 			vi.resetModules();
@@ -177,7 +172,7 @@ describe("background write drains across module copies (#4937)", () => {
 			await expect(drainRegisteredBackgroundWritesForTests()).rejects.toThrow(
 				/did not land/,
 			);
-			expect(other.getProbeCacheStateForTesting().flushTimerArmed).toBe(false);
+			expect(vi.getTimerCount()).toBe(0);
 		} finally {
 			other?.resetProbeCacheStateForTesting();
 			env.cleanup();
