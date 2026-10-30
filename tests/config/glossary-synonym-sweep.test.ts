@@ -636,10 +636,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/govulncheck-client.ts": 1,
 		"clients/gradle-ktfmt-style.ts": 1,
 		"clients/inline-blocker-dispositions.ts": 1,
-		// 2 (#3814 r2): the pipeline's own-file line filter and its number filter,
-		// moved verbatim from `clients/pipeline.ts` (6 -> 4) so the collect-later
-		// merge calls them instead of re-deriving them; no new filter.
-		"clients/inline-blocker-fields.ts": 2,
+		// `clients/inline-blocker-fields.ts`'s row is GONE (#5008 r3): the 2
+		// (#3814 r2) pinned `.filter(` calls — the own-file line filter and its
+		// number filter — became one classification loop in
+		// `inlineBlockerPlacement`, which returns the places AND the counts of what
+		// it could not place. No delivery filter left the tree; the file has no
+		// `filter` use left to pin.
 		"clients/installer/index.ts": 4,
 		"clients/installer/managed-tool-refresh.ts": 2,
 		"clients/instance-reaper.ts": 3,
@@ -1606,7 +1608,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/htmlhint.ts": 3,
 		"clients/dispatch/runners/javac.ts": 4,
 		"clients/dispatch/runners/ktlint.ts": 2,
-		"clients/dispatch/runners/lsp.ts": 10,
+		// 10 -> 11 (#5008 review r2): the all-clear arm's stale-bound answer
+		// returns `status: "skipped"` instead of `succeeded` — the same
+		// `RunnerResult.status` member sense as every other row here.
+		"clients/dispatch/runners/lsp.ts": 11,
 		"clients/dispatch/runners/markdownlint.ts": 4,
 		"clients/dispatch/runners/mypy.ts": 2,
 		"clients/dispatch/runners/oxlint.ts": 11,

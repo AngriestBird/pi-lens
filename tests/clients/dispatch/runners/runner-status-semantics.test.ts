@@ -578,6 +578,99 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
+	// #5008, the inverse cell: an auxiliary's finding is not a verdict about the
+	// PRIMARY's recorded blockers. Here the touch is inconclusive with no
+	// attribution at all (the shape `TouchFileResult` documents for a client
+	// without a per-path publication stamp), so only the runner's own
+	// `inconclusive` flag can keep them pending — without it, `failed` +
+	// `blocking_diagnostics` is `hasUsableResult` and every `lsp` blocker retires
+	// on the strength of another server's answer.
+	it("keeps an unconfirmed primary out of the answering auxiliary's verdict (#5008)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5008-inverse-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+
+			supportsLSP.mockReturnValue(true);
+			codeAction.mockResolvedValue([]);
+			touchFile.mockResolvedValue(
+				diagsResult(
+					[
+						{
+							severity: 1,
+							message: "Function returns 'unknown'",
+							source: "ast-grep",
+							code: "no-unknown-returns",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 10 },
+							},
+						},
+					],
+					{ inconclusive: true },
+				),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			// The answering server's finding still delivers as a blocker.
+			expect(result.status).toBe("failed");
+			expect(result.failureKind).toBe("blocking_diagnostics");
+			expect(result.diagnostics[0]?.message).toContain("unknown");
+			// The unanswered primary speaks for nothing, so the run retires nothing.
+			expect(reachedNoVerdict(result)).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #5008: the negative half of the same guard. A touch that reports neither a
+	// completed confirmation policy nor an inconclusive verdict says nothing
+	// about the primary, so a deferred auxiliary's findings must not turn it into
+	// a run that answers for the primary's blockers.
+	it("does not read a confirmation-less touch as an answered primary (#5008)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5008-unconfirmed-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+
+			supportsLSP.mockReturnValue(true);
+			touchFile.mockResolvedValue(
+				diagsResult(
+					[
+						{
+							severity: 2,
+							message: "Prefer a const declaration.",
+							source: "biome",
+							code: "use-const",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 5 },
+							},
+						},
+					],
+					{
+						unconfirmedServerIds: ["opengrep"],
+						deferredServerIds: ["opengrep"],
+					},
+				),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.status).toBe("deferred");
+			expect(reachedNoVerdict(result)).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("drops stale primary findings beside fresh answered findings (#4231)", async () => {
 		// #4231: a timed-out primary can retain its previous diagnostics. The
 		// runner must not turn that stale last-known error into a blocking result
@@ -632,18 +725,19 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
-	it("lsp runner returns skipped for an EMPTY result whose auxiliary was cut off (#1470)", async () => {
-		// The practical shape from #1470: opengrep hangs, our grace timer cuts it
-		// off, the primary answers clean. The touch is deliberately NOT
-		// inconclusive (the primary's answer is real), so the pre-fix runner
-		// reported "succeeded / no-diagnostics" — a clean bill of health on the
-		// security lane for a scan that never ran. `RunnerResult` has no
-		// per-server coverage channel, so "skipped" is the honest verdict for an
-		// EMPTY result and the coverage notice says so.
+	// #5008: the primary answered these bytes and opengrep never reported. That
+	// is a verdict about the PRIMARY's blockers (its empty answer retires them)
+	// and no verdict about opengrep's (the named id keeps those), which the
+	// dispatcher's server clause already carries. Reporting `skipped` for the
+	// whole run made a fixed blocker unretirable (#1470's honest gap, one
+	// position too wide).
+	it("lsp runner answers for the primary while an unconfirmed auxiliary keeps its gap (#5008)", async () => {
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;
 		const env = setupTestEnvironment("pi-lens-lsp-cutoff-");
 		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
 			const filePath = path.join(env.tmpDir, "main.ts");
 			fs.writeFileSync(filePath, "const x = 1;\n");
 
@@ -656,8 +750,140 @@ describe("runner status/semantic edge cases", () => {
 			);
 
 			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.status).toBe("succeeded");
+			expect(result.diagnostics).toEqual([]);
+			// Still no claim of full coverage: the gap rides the result.
+			expect(result.unconfirmedServerIds).toEqual(["opengrep"]);
+			expect(reachedNoVerdict(result)).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Review r2 (F2): the findings arm's `&& !primaryAnswered` had no witness. A
+	// run that DOES report findings still answers for the primary only when the
+	// touch completed its confirmation policy; with a deferred auxiliary, an
+	// unanswered primary must keep the run `deferred` (no verdict), or the
+	// auxiliary's findings retire the primary's recorded blockers.
+	it("answers a warnings-only findings run only when the primary answered for the deferred scanner (#5008)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5008-findings-deferred-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "README.md");
+			fs.writeFileSync(filePath, "A fresh typo.\n");
+			const typo = {
+				severity: 2,
+				message: "`teh` is a typo of `the`.",
+				source: "typos",
+				serverId: "typos",
+				code: "teh",
+				range: {
+					start: { line: 0, character: 2 },
+					end: { line: 0, character: 5 },
+				},
+			};
+
+			supportsLSP.mockReturnValue(true);
+			touchFile.mockResolvedValueOnce(
+				diagsResult([typo], {
+					confirmation: "partial",
+					deferredServerIds: ["typos"],
+				}),
+			);
+			const answered = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(answered.diagnostics).toHaveLength(1);
+			expect(answered.status).toBe("succeeded");
+			expect(answered.deferredServerIds).toEqual(["typos"]);
+			expect(reachedNoVerdict(answered)).toBe(false);
+
+			touchFile.mockResolvedValueOnce(
+				diagsResult([typo], { deferredServerIds: ["typos"] }),
+			);
+			const unanswered = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(unanswered.diagnostics).toHaveLength(1);
+			expect(unanswered.status).toBe("deferred");
+			expect(reachedNoVerdict(unanswered)).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Review r2 (F4): `confirmation` says the primary ANSWERED; `binding` says
+	// whether that answer was computed for THESE bytes. Recurrence (#5008): a
+	// version-less primary published for the previous revision, so its empty
+	// answer completed the confirmation policy against different content and the
+	// run read as a verdict — `keepUnobserved` then retired a live blocker.
+	// `boundToCurrentDisk: false` is the evidence #4231 already drops stale
+	// contributors by, so it says the same thing about the whole answer.
+	it("keeps a stale-bound partial answer out of the primary's verdict (#5008)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5008-stale-bound-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+
+			supportsLSP.mockReturnValue(true);
+			touchFile.mockResolvedValue(
+				diagsResult([], {
+					confirmation: "partial",
+					unconfirmedServerIds: ["opengrep"],
+					binding: { boundToCurrentDisk: false },
+				}),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
 			expect(result.status).toBe("skipped");
 			expect(result.diagnostics).toEqual([]);
+			// The gap still rides the result; only the verdict is withheld.
+			expect(result.unconfirmedServerIds).toEqual(["opengrep"]);
+			expect(reachedNoVerdict(result)).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Review r2 (F4), the arm with no named gap: the same stale-bound answer
+	// with nothing unconfirmed. Every server answered, so no id names the gap and
+	// only the binding says the answer was computed for other bytes; a
+	// `succeeded` here retired the primary's blocker on it just the same.
+	it("keeps a stale-bound all-clear answer from reading as a clean verdict (#5008)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5008-stale-clean-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+
+			supportsLSP.mockReturnValue(true);
+			touchFile.mockResolvedValue(
+				diagsResult([], {
+					confirmation: "partial",
+					binding: { boundToCurrentDisk: false },
+				}),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.status).toBe("skipped");
+			expect(reachedNoVerdict(result)).toBe(true);
+
+			// The same answer bound to these bytes stays the pre-r2 reading.
+			touchFile.mockResolvedValue(
+				diagsResult([], {
+					confirmation: "partial",
+					binding: { boundToCurrentDisk: true },
+				}),
+			);
+			const bound = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(bound.status).toBe("succeeded");
+			expect(reachedNoVerdict(bound)).toBe(false);
 		} finally {
 			env.cleanup();
 		}
@@ -899,11 +1125,14 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
-	it("reports a late-delivery scanner as deferred and an unpromised one as skipped (#2810)", async () => {
+	it("reports a late-delivery scanner as deferred and an unpromised one as neither, both keeping the primary's verdict (#2810, #5008)", async () => {
 		// #2810 round-4 F1, runner half of the chain: the two coverage classes
-		// must not collapse into one status. A scanner the touch marked
-		// collect-later is `deferred` (its findings arrive at turn end); one the
-		// touch has no delivery path for stays `skipped` (#1470's honest gap).
+		// must not collapse into one answer. A scanner the touch marked
+		// collect-later is named in `deferredServerIds` (its findings arrive at
+		// turn end); one the touch has no delivery path for is named in
+		// `unconfirmedServerIds` alone (#1470's honest gap). #5008: the primary
+		// answered both times, so the run is still a verdict about the primary's
+		// blockers and the status says nothing about the auxiliaries.
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;
 		const env = setupTestEnvironment("pi-lens-lsp-late-status-");
@@ -917,18 +1146,19 @@ describe("runner status/semantic edge cases", () => {
 					deferredServerIds: ["typos"],
 				}),
 			);
-			expect(
-				(await runner.run(ctx(filePath, env.tmpDir) as never)).status,
-			).toBe("deferred");
+			const late = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(late.status).toBe("succeeded");
+			expect(late.deferredServerIds).toEqual(["typos"]);
 			touchFile.mockResolvedValue(
 				diagsResult([], {
 					confirmation: "partial",
 					unconfirmedServerIds: ["typos"],
 				}),
 			);
-			expect(
-				(await runner.run(ctx(filePath, env.tmpDir) as never)).status,
-			).toBe("skipped");
+			const unpromised = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(unpromised.status).toBe("succeeded");
+			expect(unpromised.deferredServerIds).toBeUndefined();
+			expect(unpromised.unconfirmedServerIds).toEqual(["typos"]);
 		} finally {
 			env.cleanup();
 		}
@@ -1019,13 +1249,16 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
-	it("lsp runner returns skipped for a warm-attached EMPTY result whose auxiliary was cut off (#1470)", async () => {
+	it("answers for the primary on the warm-attach route while an auxiliary keeps its gap (#1470, #5008)", async () => {
 		// The same #1470 shape as the incumbent-touch test above, but on the
 		// warm-attach IPC route: `available: true` with an empty diagnostics
 		// array and `unconfirmedServerIds` on the response DTO. The wrapper this
 		// runner builds from a warm-attach answer must carry that field through
 		// to `touchCoverageGap`, not drop it — a hung opengrep must not read as
-		// a clean bill of health here either.
+		// a clean bill of health here either. #5008: the incumbent's
+		// `confirmation` is the field that says the primary answered, so dropping
+		// THAT would read every warm answer as a primary that never completed its
+		// policy.
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;
 		const env = setupTestEnvironment("pi-lens-lsp-warm-cutoff-");
@@ -1043,8 +1276,9 @@ describe("runner status/semantic edge cases", () => {
 			});
 
 			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
-			expect(result.status).toBe("skipped");
+			expect(result.status).toBe("succeeded");
 			expect(result.diagnostics).toEqual([]);
+			expect(result.unconfirmedServerIds).toEqual(["opengrep"]);
 			expect(touchFile).not.toHaveBeenCalled();
 		} finally {
 			env.cleanup();

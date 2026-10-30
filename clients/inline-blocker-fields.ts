@@ -61,13 +61,74 @@ export function inlineBlockerLines(
 	blockers: readonly Diagnostic[],
 	filePath: string,
 ): number[] {
+	return inlineBlockerPlaces(blockers, filePath).map((place) => place.line);
+}
+
+/** One place a blocker is cited in `filePath`: the line, and the rule that
+ *  reported it. */
+export interface InlineBlockerPlace {
+	line: number;
+	rule: string;
+}
+
+/**
+ * #5008 review r3 (F6): the counted blockers these bytes cannot place, split by
+ * WHY. Both causes have a line; only the first one has it in THIS file.
+ */
+export interface UnplacedBlockerCounts {
+	/** Carried from older bytes of this file: the line exists, but not here. */
+	movedLine: number;
+	/** Another file's row (a chart-wide runner naming `values.yaml` while the
+	 *  template is processed), or a blocker with no line at all. */
+	noLineInThisFile: number;
+}
+
+/**
+ * #5008: the places a blocker set is cited at, one per blocker that HAS a place
+ * in these bytes, plus the counted remainder by cause. `inlineBlockerLines` is
+ * the places' line column, so the record's line list and the agent-facing
+ * `Still unfixed` line cannot disagree about which blockers are placeable, and
+ * the rendered count cannot disagree with the list it counts (AGENTS.md shape
+ * 83: one owner per rule).
+ *
+ * `rule` falls back to the same source id `inlineBlockerSourceOf` derives, so an
+ * untagged blocker reads as `unknown` rather than citing an empty rule.
+ */
+export function inlineBlockerPlacement(
+	blockers: readonly Diagnostic[],
+	filePath: string,
+): { places: InlineBlockerPlace[]; unplaced: UnplacedBlockerCounts } {
 	const own = normalizeEphemeralMapKey(filePath);
-	return blockers
-		.filter(
+	const places: InlineBlockerPlace[] = [];
+	let movedLine = 0;
+	for (const d of blockers) {
+		// Another file's row (#1641) and a blocker with no line are both "no line
+		// in this file"; only a stale carry of THIS file has a line to report.
+		if (normalizeEphemeralMapKey(d.filePath) !== own) continue;
+		if (typeof d.line !== "number") continue;
+		if (d.positionStale) {
 			// #4509 (N3): a stale entry's line is from older bytes, so it cites
 			// none: the past-EOF sweep would retire the whole record on it.
-			(d) => !d.positionStale && normalizeEphemeralMapKey(d.filePath) === own,
-		)
-		.map((d) => d.line)
-		.filter((line): line is number => typeof line === "number");
+			movedLine += 1;
+			continue;
+		}
+		places.push({
+			line: d.line,
+			rule: d.rule?.trim() || inlineBlockerSourceOf(d),
+		});
+	}
+	return {
+		places,
+		unplaced: {
+			movedLine,
+			noLineInThisFile: blockers.length - places.length - movedLine,
+		},
+	};
+}
+
+export function inlineBlockerPlaces(
+	blockers: readonly Diagnostic[],
+	filePath: string,
+): InlineBlockerPlace[] {
+	return inlineBlockerPlacement(blockers, filePath).places;
 }
