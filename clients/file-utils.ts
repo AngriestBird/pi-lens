@@ -923,6 +923,80 @@ function matchesGitignorePattern(
 	});
 }
 
+/**
+ * The pattern that decides `relativePath` among `patterns`: gitignore order,
+ * so the LAST match wins and a later `!` pattern lifts an earlier ignore.
+ */
+function lastMatchingPattern(
+	patterns: readonly GitignorePattern[],
+	relativePath: string,
+	isDirectory: boolean,
+	matchExpanded: (value: string, expanded: string) => boolean,
+): GitignorePattern | undefined {
+	let winner: GitignorePattern | undefined;
+	for (const pattern of patterns) {
+		if (
+			matchesGitignorePattern(pattern, relativePath, isDirectory, matchExpanded)
+		)
+			winner = pattern;
+	}
+	return winner;
+}
+
+/**
+ * Glob options and a compile-once matcher shared by every gitignore pattern
+ * match: the project ignore matcher below (one per matcher instance, so the
+ * instance lifetime bounds the cache) and {@link isIgnoredByGitignoreLines}
+ * (one per call).
+ */
+const gitignoreGlobOptions: MinimatchOptions = {
+	dot: true,
+	nocase: process.platform === "win32",
+};
+
+function createExpandedGlobMatcher(): (
+	value: string,
+	expanded: string,
+) => boolean {
+	const compiledGlobs = new Map<string, Minimatch>();
+	return (value, expanded) => {
+		let compiled = compiledGlobs.get(expanded);
+		if (compiled === undefined) {
+			compiled = new Minimatch(expanded, gitignoreGlobOptions);
+			compiledGlobs.set(expanded, compiled);
+		}
+		return compiled.match(value);
+	};
+}
+
+/**
+ * Whether `filePath` is ignored by `lines`, read as the `ignore` field reads
+ * them (#783): each line is parsed as a `.gitignore` line anchored to
+ * `baseDir` (a leading `/` roots it there, a slashless line matches below it
+ * at any depth), and the LAST line that matches decides, so `!` re-includes.
+ * A file outside `baseDir` is never ignored (a `../` escape matches nothing),
+ * and a file the lines never name is not. This is the one gitignore evaluator
+ * `rules.<id>.ignorePaths` (#5029) shares with {@link createProjectIgnoreMatcher}:
+ * both resolve a pattern list through `lastMatchingPattern`.
+ */
+export function isIgnoredByGitignoreLines(
+	lines: readonly string[],
+	baseDir: string,
+	filePath: string,
+	isDirectory = false,
+): boolean {
+	const absolute = path.resolve(filePath);
+	const base = path.resolve(baseDir);
+	if (!isWithinPathForm(absolute, base)) return false;
+	const winner = lastMatchingPattern(
+		parseGitignoreContent(lines.join("\n"), "pilens"),
+		normalizeIgnorePath(path.relative(base, absolute)),
+		isDirectory,
+		createExpandedGlobMatcher(),
+	);
+	return winner !== undefined && !winner.negated;
+}
+
 function readGitignorePatterns(
 	rootDir: string,
 	layer: GitignorePatternLayer = "gitignore",
@@ -1203,19 +1277,7 @@ function buildProjectIgnoreMatcher(
 	// Compile expanded gitignore globs once per matcher instance. Relative-path
 	// resolution remains outside this cache, so nested ignore scopes cannot leak
 	// verdicts between sibling trees. The instance lifetime bounds this map.
-	const gitignoreGlobOptions: MinimatchOptions = {
-		dot: true,
-		nocase: process.platform === "win32",
-	};
-	const compiledGlobs = new Map<string, Minimatch>();
-	const matchExpanded = (value: string, expanded: string): boolean => {
-		let compiled = compiledGlobs.get(expanded);
-		if (compiled === undefined) {
-			compiled = new Minimatch(expanded, gitignoreGlobOptions);
-			compiledGlobs.set(expanded, compiled);
-		}
-		return compiled.match(value);
-	};
+	const matchExpanded = createExpandedGlobMatcher();
 
 	// #703 perf follow-up: `normalizeEphemeralMapKey` (cheap slash-fold +
 	// Windows-lowercase, zero fs I/O), NOT `normalizeMapKey` (realpath-backed).
@@ -1283,18 +1345,15 @@ function buildProjectIgnoreMatcher(
 						if (dirPatterns.length === 0) continue;
 						const relative = path.relative(dir, resolved);
 						const normalized = normalizeIgnorePath(relative);
-						for (const pattern of dirPatterns) {
-							if (
-								!matchesGitignorePattern(
-									pattern,
-									normalized,
-									isDirectory,
-									matchExpanded,
-								)
-							)
-								continue;
-							ignored = !pattern.negated;
-							layer = pattern.layer;
+						const winner = lastMatchingPattern(
+							dirPatterns,
+							normalized,
+							isDirectory,
+							matchExpanded,
+						);
+						if (winner) {
+							ignored = !winner.negated;
+							layer = winner.layer;
 						}
 					}
 					verdict = { ignored, layer };
