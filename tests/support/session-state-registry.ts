@@ -2582,10 +2582,14 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// was back to `workspaceConfigs` + `configInFlight`.
 	// #2518: 2 -> 1. `workspaceConfigs` is gone — the per-root config is now the
 	// session-root registry's own value (`lsp/session-roots.ts`), so a config
-	// cannot be evicted while its root is still served. `configInFlight` alone
+	// cannot be evicted while its root is still served. `configInFlight`
 	// remains here.
+	// #5036 N1: `configInFlight` + `EMPTY_CONFIG.disabledServerIds` +
+	// `EMPTY_CONFIG.serverOverrides` (the module-level literal's members).
 	"lsp/config.ts": 3,
 	"lsp/created-import-targets.ts": 0,
+	// #5036 N1: `DocumentDriftTracker.synced` + `DocumentDriftTracker.pendingResync`
+	// (class fields) + `SKIPPED.queued` (a module-level literal's member).
 	"lsp/document-drift.ts": 3,
 	// #2372 slice 3: 2 -> 1. The never-mutated `OPTIONAL_LSP_SERVER_IDS` set
 	// moved to lsp/client-registry.ts with the spawn path that reads it; that
@@ -2625,6 +2629,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// entry above.
 	"mcp/session.ts": 4,
 	"metrics-client.ts": 1,
+	// #5036 N1: `NO_LSP.byName` (a member of the module-level `NO_LSP` literal).
 	"module-report-lsp.ts": 1,
 	"module-report.ts": 3,
 	// #2423: the frozen built-in tool-name table plus the call-scoped
@@ -2778,6 +2783,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"tree-sitter-symbol-extractor.ts": 2,
 	"turn-context.ts": 0,
 	"turn-summary.ts": 1,
+	// #5036 N1: `state.servedDiagnosticHashes` (a member of the module-level
+	// `state` literal).
 	"warm-attach.ts": 1,
 	// #2275 added `renderedDependencyDriftFiles` (the drained per-turn footer
 	// delivery set) alongside the existing two.

@@ -2031,4 +2031,47 @@ describe("session-state scan — containers with no reset, and class fields (#50
 			);
 		});
 	});
+
+	// #5036 N2 (greptile PRRT_kwDORt8rec6yJr0B, coderabbit PRRT_kwDORt8rec6yJuxG).
+	// `sawParen` in `fieldInitialisers` drops a class field whose type annotation
+	// is parenthesised, and with no other state the file leaves the candidate
+	// list. Live population 0; disclosed in SWEEP_HEURISTIC_LIMITS, and the
+	// predicate is left as it is. The plain-annotation control proves the file is
+	// scanned at all, so the omission is the parenthesis alone.
+	describe("parenthesised field annotation, disclosed (#5036 N2)", () => {
+		const fieldsOf = (source: string): string[] | undefined => {
+			let out: string[] | undefined;
+			withScanTree({ "holder.ts": source }, (dir) => {
+				out = scanSessionStateCandidates(dir)
+					.find((c) => c.file === "holder.ts")
+					?.instanceFields.map((f) => f.name);
+			});
+			return out;
+		};
+
+		it.each([
+			["a union in parentheses", "private queue: (string | number)[] = [];"],
+			["a function-type array", "private listeners: (() => void)[] = [];"],
+			[
+				"a bare function type",
+				"private cache: () => Map<string, string> = new Map();",
+			],
+		])(
+			"omits a class field typed with %s, and the file with it",
+			(_name, field) => {
+				expect(
+					fieldsOf(`export class Holder {\n\t${field}\n}\n`),
+				).toBeUndefined();
+			},
+		);
+
+		it("reads the plain annotation, and states the parenthesis miss", () => {
+			expect(
+				fieldsOf("export class Holder {\n\tprivate queue: string[] = [];\n}\n"),
+			).toEqual(["Holder.queue"]);
+			expect(SWEEP_HEURISTIC_LIMITS.join(" ")).toContain(
+				"whose type annotation is parenthesised",
+			);
+		});
+	});
 });
