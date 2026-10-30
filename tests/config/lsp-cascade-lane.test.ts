@@ -20,6 +20,7 @@ type Step = {
 	if?: unknown;
 	run?: string;
 	"continue-on-error"?: unknown;
+	env?: Record<string, string>;
 	"timeout-minutes"?: number;
 	with?: Record<string, unknown>;
 };
@@ -47,6 +48,27 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 		// handshook and then never concluded (red) through the census file the
 		// handshake step leaves in the job's shared PI_LENS_HOME.
 		expect(at("lsp_cascade")).toBeGreaterThan(at("lsp_handshake"));
+	});
+
+	it("hands each self-provisioned server's path to the cascade step alone", () => {
+		// Recurrence: #3400, jdtls has no managed installer, so a lane that waited
+		// for the handshake census skipped it every night. The path travels in the
+		// cascade step's own env: through GITHUB_ENV/GITHUB_PATH it would reach the
+		// capability, clean-signal and idle-eviction measurements that run after it
+		// and change their server population.
+		const provisioned = CASCADE_FIXTURES.filter((f) => f.provisionedBy);
+		expect(provisioned.map((f) => f.lang)).toEqual(["java"]);
+		for (const fixture of provisioned) {
+			const install = steps.find((s) => s.id === "jdtls");
+			expect(at("jdtls")).toBeLessThan(at("lsp_cascade"));
+			expect(cascade.env?.[fixture.provisionedBy as string]).toBe(
+				"${{ steps.jdtls.outputs.path }}",
+			);
+			expect(install?.run).not.toMatch(/GITHUB_ENV|GITHUB_PATH/);
+			// The archive is verified against a pinned digest before it is unpacked.
+			expect(install?.run).toMatch(/sha256sum --check/);
+			expect(install?.run).toMatch(/digest="[0-9a-f]{64}"/);
+		}
 	});
 
 	it("keeps the exit status of node through the tee", () => {

@@ -33,6 +33,12 @@ export const CASCADE_RETRY_INTERVAL_MS = 2_000;
  *
  * `symbol` is the exported function the edit breaks; each neighbour calls it.
  *
+ * `provisionedBy: "<ENV>"` marks a server pi-lens cannot install itself
+ * (jdtls has no managed installer, #3400): the workflow step provisions it and
+ * hands the lane its path in that variable. The handshake census, which ran
+ * without it, is not consulted: the variable set means the server MUST answer
+ * (a miss is red), unset means it was not provisioned here (a warning).
+ *
  * `expectInconclusive: "<reason>"` declares that this server is known not to
  * conclude within the deadline, with the reason. The lane then passes only
  * while the neighbours stay unconfirmed, and fails when they conclude, so the
@@ -76,6 +82,7 @@ export const CASCADE_FIXTURES = [
 		edit: { from: "int foo(int x)", to: "String foo(String x)" },
 		expectFindings: "not applicable|mismatch|cannot convert",
 		warmDeadlineMs: 180_000,
+		provisionedBy: "JDTLS_PATH",
 	},
 ];
 
@@ -191,12 +198,12 @@ export function cascadeRow(fx, m) {
 			? {
 					...base,
 					state: "fail",
-					detail: `handshook in the handshake step but never answered a touch in ${m.warmMs} ms`,
+					detail: `expected to answer (handshake passed or provisioned here) but never answered a touch in ${m.warmMs} ms`,
 				}
 			: {
 					...base,
 					state: "skip",
-					detail: `${base.runner} unavailable (no answer in ${m.warmMs} ms${m.handshook === false ? "; handshake did not complete" : ""})`,
+					detail: `${base.runner} unavailable (no answer in ${m.warmMs} ms${m.handshook === false ? "; not provisioned, or the handshake did not complete" : ""})`,
 				};
 	}
 	if (m.concluded?.state === "conclusive") {

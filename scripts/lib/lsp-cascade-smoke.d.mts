@@ -16,6 +16,8 @@ export interface CascadeFixture {
 	expectFindings?: string;
 	/** Known not to conclude in the deadline, with the reason. */
 	expectInconclusive?: string;
+	/** Env var the workflow sets when it provisioned this server itself. */
+	provisionedBy?: string;
 	warmDeadlineMs?: number;
 	conclusiveDeadlineMs?: number;
 	serverHint?: string;

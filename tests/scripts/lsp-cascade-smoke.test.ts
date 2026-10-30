@@ -404,7 +404,7 @@ describe("runLspCascade (#1712)", () => {
 			run: concludes,
 		});
 		expect(failures).toBeGreaterThan(0);
-		expect(output).toContain("handshook in the handshake step");
+		expect(output).toContain("never answered a touch");
 		expect(deps.computeCascadeForFile).not.toHaveBeenCalled();
 	});
 
@@ -419,6 +419,40 @@ describe("runLspCascade (#1712)", () => {
 		// deadline (4.5 minutes for two absent servers, measured 2026-10-30).
 		expect(deps.touchFile).not.toHaveBeenCalled();
 		expect(deps.computeCascadeForFile).not.toHaveBeenCalled();
+	});
+
+	it("takes a provisioned server's availability from its env var, not the census", async () => {
+		// Recurrence: #1712/#3400, jdtls has no managed installer, so the nightly's
+		// handshake step never starts it and its census row says skip every night.
+		// A lane that read that row would skip java forever; one that ignored an
+		// unset variable would red a developer's machine.
+		const fixture = { provisionedBy: "PI_LENS_TEST_PROVISIONED_SERVER" };
+		const savedVar = process.env[fixture.provisionedBy];
+		try {
+			delete process.env[fixture.provisionedBy];
+			const missing = await runLane({
+				census: "skip",
+				fixture,
+				answers: false,
+				run: concludes,
+			});
+			expect(missing.output).toContain("⚠  typescript7");
+			expect(missing.deps.touchFile).not.toHaveBeenCalled();
+
+			process.env[fixture.provisionedBy] = "/opt/server/bin/server";
+			const present = await runLane({
+				census: "skip",
+				fixture,
+				answers: false,
+				run: concludes,
+			});
+			expect(present.failures).toBeGreaterThan(0);
+			expect(present.output).toContain("never answered a touch");
+			expect(present.deps.touchFile).toHaveBeenCalled();
+		} finally {
+			if (savedVar === undefined) delete process.env[fixture.provisionedBy];
+			else process.env[fixture.provisionedBy] = savedVar;
+		}
 	});
 
 	it("reds a silent fallback to the classic server", async () => {

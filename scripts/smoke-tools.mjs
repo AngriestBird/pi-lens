@@ -3344,9 +3344,14 @@ export async function runLspCascade({
 					`[${fx.lang}] ensureTool(${toolId}) → ${resolved ?? "UNAVAILABLE"}`,
 				),
 		);
-		const handshook = handshakeCensus
-			? handshakeCensus[fx.lang]?.state === "pass"
-			: undefined;
+		// A server the workflow provisions itself (`provisionedBy`) was not started
+		// by the handshake step, so the census says nothing about it: the variable
+		// is the claim that it is there.
+		const handshook = fx.provisionedBy
+			? Boolean(process.env[fx.provisionedBy]?.trim())
+			: handshakeCensus
+				? handshakeCensus[fx.lang]?.state === "pass"
+				: undefined;
 		let workspace;
 		let cleanup;
 		try {

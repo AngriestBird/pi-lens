@@ -438,6 +438,31 @@ jobs:
           set -o pipefail
           node scripts/smoke-tools.mjs --lsp-gate --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-gate.log"
 
+      # jdtls has no managed installer (#3400), so the handshake and gate layers
+      # above skip it every night and the cascade layer could not cover it.
+      # Provision the pinned milestone here, verified against the digest Eclipse
+      # publishes beside it, and hand its path to the cascade step ALONE (a
+      # step `env`, never `GITHUB_ENV` or `GITHUB_PATH`): the later capability,
+      # clean-signal and idle-eviction measurements keep measuring the same
+      # server population they did before this step existed. The launcher is a
+      # python script (setup-python above) that runs the setup-java JDK.
+      - name: Install jdtls 1.63.0 for the cascade layer
+        id: jdtls
+        run: |
+          set -euo pipefail
+          version="1.63.0"
+          archive="jdt-language-server-1.63.0-202610191322.tar.gz"
+          digest="b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
+          dest="$RUNNER_TEMP/pi-lens-jdtls"
+          mkdir -p "$dest"
+          curl --fail --location --proto '=https' --proto-redir '=https' --silent --show-error \
+            "https://download.eclipse.org/jdtls/milestones/$version/$archive" \
+            --output "$dest/$archive"
+          printf '%s  %s\n' "$digest" "$dest/$archive" | sha256sum --check --status
+          tar -xzf "$dest/$archive" -C "$dest"
+          chmod +x "$dest/bin/jdtls"
+          echo "path=$dest/bin/jdtls" >> "$GITHUB_OUTPUT"
+
       # Cascade layer (#1712): the handshake proves initialize and the clean gate
       # proves a finding on the file itself; neither proves the path an agent's
       # write takes to learn it broke an IMPORTER. This edits an exporter in a
@@ -454,9 +479,11 @@ jobs:
       - name: LSP cascade layer (edit an exporter, importers conclude)
         id: lsp_cascade
         timeout-minutes: 20
+        env:
+          JDTLS_PATH: ${{ steps.jdtls.outputs.path }}
         run: |
           set -o pipefail
-          node scripts/smoke-tools.mjs --lsp-cascade --install --verbose --min-pass=1 --times-out="$RUNNER_TEMP/tool-smoke-lsp-cascade-times.json" 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-cascade.log"
+          node scripts/smoke-tools.mjs --lsp-cascade --install --verbose --min-pass=3 --times-out="$RUNNER_TEMP/tool-smoke-lsp-cascade-times.json" 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-cascade.log"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
