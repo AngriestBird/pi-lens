@@ -47,6 +47,7 @@ const DENIED_SERVER = "typos";
 const dirs: string[] = [];
 let previousStartupMode: string | undefined;
 let previousHome: string | undefined;
+let previousPersistDelay: string | undefined;
 /** The session this file last started: the one teardown shuts down. */
 let lastSession:
 	| { pi: ReturnType<typeof createPiMock>; ctx: ReturnType<typeof makeCtx> }
@@ -79,6 +80,13 @@ beforeEach(() => {
 	process.env.PI_LENS_STARTUP_MODE = "minimal";
 	previousHome = process.env.PI_LENS_HOME;
 	process.env.PI_LENS_HOME = tempRoot("home");
+	// #5024: the leak is a persist that lands after teardown. A 200 ms worker
+	// delay plants that late write in every case, so the settle is what the
+	// file observes instead of a race with the worker's own timing. Set before
+	// `session_start`, which reads it when it posts the persist.
+	previousPersistDelay =
+		process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
+	process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "200";
 	_resetSessionLifecycleForTests();
 	resetLSPConfigStateForTests();
 });
@@ -123,6 +131,11 @@ afterEach(async () => {
 	else process.env.PI_LENS_STARTUP_MODE = previousStartupMode;
 	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 	else process.env.PI_LENS_HOME = previousHome;
+	if (previousPersistDelay === undefined)
+		delete process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
+	else
+		process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS =
+			previousPersistDelay;
 	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 });
 
