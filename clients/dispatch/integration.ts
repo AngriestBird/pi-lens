@@ -959,6 +959,9 @@ export const CASCADE_GRAPH_KINDS = new Set([
 	"rust",
 	"ruby",
 	"cxx",
+	// #1712: the graph resolves Java imports to `imports` edges
+	// (import-resolvers.ts `resolveJava`); a Java edit asks its importers.
+	"java",
 ]);
 
 /**
@@ -969,7 +972,7 @@ export const CASCADE_GRAPH_KINDS = new Set([
  * read from the passive snapshot instead of touching neighbors actively.
  *
  * Degraded fallback: when the graph produces no neighbors (ungraphed languages
- * like Java/Kotlin/C#), fall back to the passive LSP snapshot from getAllDiagnostics
+ * like Kotlin/C#), fall back to the passive LSP snapshot from getAllDiagnostics
  * to preserve cascade coverage.
  */
 /**

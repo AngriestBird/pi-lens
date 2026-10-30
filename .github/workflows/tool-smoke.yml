@@ -765,14 +765,19 @@ jobs:
       # jdtls), calls the production `computeCascadeForFile`, and requires each
       # importer to reach a conclusive verdict with the server's own finding. A
       # server that handshook and then never concludes inside the deadline reds
-      # the step (a declared `expectInconclusive` excepted, with its reason).
+      # the step. typescript-go's row also runs the rename phase (#1677): it
+      # restores the exporter, moves it through the rename tool's service call
+      # and requires each importer to reach the verdict its file calls for.
       # `--times-out` leaves the measured time-to-conclusive per server, uploaded
       # below as the #1549 budget input; the first measured table is committed
       # as tests/fixtures/lsp-cascade/measurements.json. The step reads the handshake census above
       # (same PI_LENS_HOME), so a server that never handshook is a warning, not
       # a red. One unavailable server is a warning; `--min-pass=3` (of four)
       # reds the night when fewer than three servers prove the lane, and keeps
-      # an all-unavailable night from reading green.
+      # an all-unavailable night from reading green. java counts as a pass only
+      # when jdtls concludes its importers; a jdtls that is not provisioned
+      # (empty JDTLS_PATH) is the one allowed warning, and one that is
+      # provisioned and answers but does not conclude is a red row.
       - name: LSP cascade layer (edit an exporter, importers conclude)
         id: lsp_cascade
         timeout-minutes: 20

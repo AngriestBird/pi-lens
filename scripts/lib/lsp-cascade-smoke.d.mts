@@ -14,15 +14,46 @@ export interface CascadeFixture {
 	edit: { from: string; to: string };
 	/** Pattern the server's own message must match in each neighbour's block. */
 	expectFindings?: string;
-	/** Known not to conclude in the deadline, with the reason. */
-	expectInconclusive?: string;
-	/** The skip reason the run must report for `expectInconclusive` to hold. */
-	expectSkipReason?: string;
+	/** The rename phase (#1677): move the exporter, then ask the importers. */
+	rename?: RenameFixture;
+	/** A defect the server shows on some nights: the one outcome it excuses. */
+	expectDefect?: { state: "wrong-verdict"; reason: string };
 	/** Env var the workflow sets when it provisioned this server itself. */
 	provisionedBy?: string;
 	warmDeadlineMs?: number;
 	conclusiveDeadlineMs?: number;
 	serverHint?: string;
+}
+
+export interface RenameFixture {
+	/** The exporter's new path, relative to the workspace. */
+	to: string;
+	/** What an importer spells while the server offered no rewrite for it. */
+	staleSpecifier: string;
+	/** Pattern the server's message must match in a stale importer. */
+	expectFindings: string;
+}
+
+export type RenameImporterVerdict =
+	| "unconfirmed"
+	| "concluded"
+	| "stale-clean"
+	| "wrong-finding";
+
+export interface RenameMeasurement {
+	state:
+		| "concluded"
+		| "no-baseline"
+		| "rename-failed"
+		| "notify-failed"
+		| "unconcluded";
+	detail: string;
+	renameMs?: number;
+	/** Importers the server's `willRenameFiles` edit rewrote. */
+	importersRewritten?: number;
+	/** From the start of the rename call to every importer concluded. */
+	timeToConclusiveMs?: number;
+	importers?: Record<string, RenameImporterVerdict>;
 }
 
 export type NeighbourVerdict = "unconfirmed" | "findings" | "clean";
@@ -54,6 +85,7 @@ export interface CascadeMeasurement {
 	why?: string;
 	neighbours?: Record<string, NeighbourVerdict>;
 	concluded?: CascadeClassification;
+	rename?: RenameMeasurement;
 }
 
 export interface CascadeRow {
@@ -80,6 +112,10 @@ export function classifyCascadeRun(
 	fx: Pick<CascadeFixture, "neighbours" | "expectFindings">,
 	workspace: string,
 ): CascadeClassification;
+export function classifyRenameImporter(
+	rename: RenameFixture,
+	seen: { content: string; messages: string[] | undefined },
+): RenameImporterVerdict;
 export function cascadeRow(
 	fx: Partial<CascadeFixture> & { lang: string },
 	m: CascadeMeasurement,

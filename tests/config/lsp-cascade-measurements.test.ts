@@ -42,18 +42,25 @@ describe("tests/fixtures/lsp-cascade/measurements.json (#1712)", () => {
 		expect(table.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 	});
 
-	it("has one row per fixture, concluded exactly where no inconclusive is declared", () => {
-		// Recurrence: a fixture added without a measurement, or a declared
-		// inconclusive server carrying a time-to-conclusive it never had.
+	it("has one row per fixture, passing unless the fixture declares the defect it showed", () => {
+		// Recurrence: a fixture added without a measurement, or a night where the
+		// declared jdtls defect (#1712) showed and the row carries a time it never
+		// had. A skip row is committed as the night produced it, with no time.
 		expect(table.rows.map((r) => r.lang)).toEqual(
 			CASCADE_FIXTURES.map((f) => f.lang),
 		);
 		for (const fixture of CASCADE_FIXTURES) {
 			const row = table.rows.find((r) => r.lang === fixture.lang);
-			expect(row?.state).toBe("pass");
-			expect(row?.timeToConclusiveMs === null).toBe(
-				"expectInconclusive" in fixture,
-			);
+			if (row?.state === "skip") {
+				expect(
+					fixture.expectDefect,
+					`${fixture.lang} may be skipped`,
+				).toBeTruthy();
+				expect(row.timeToConclusiveMs).toBeNull();
+			} else {
+				expect(row?.state).toBe("pass");
+				expect(row?.timeToConclusiveMs).toEqual(expect.any(Number));
+			}
 		}
 	});
 

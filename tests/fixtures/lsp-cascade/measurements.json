@@ -54,7 +54,7 @@
 		{
 			"lang": "java",
 			"server": "jdtls",
-			"state": "pass",
+			"state": "skip",
 			"warmMs": 7041,
 			"firstCascadeMs": 0,
 			"timeToConclusiveMs": null,
