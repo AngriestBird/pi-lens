@@ -738,14 +738,18 @@ describe("#5020 witness: a cross-file row retires once its cited file is clean o
 
 	/**
 	 * Negative: the cited file is written but helm still reports it, so the
-	 * runner's verdict on it is not clean and the row, and the gate, stay.
+	 * runner's verdict on it is not clean. The row stays in the record of the
+	 * file it was recorded against, which turn end still lists beside the
+	 * cited file's own record (the gate alone would stay shut on the latter).
 	 */
 	it("keeps the row while the cited file is still reported", async () => {
 		const { b, body, s } = await recordRowAgainstA("still-bad-b");
 		await s.write(b, `${body("Service")}# edit\n`);
 		expect(await s.commitBlocked()).toBe(true);
 		const end = await s.endTurn();
-		expect(end).toContain("other-b.yaml:2");
+		expect(end).toContain(
+			"Unresolved from this turn \u2014 charts/still-bad-b/templates/deploy-a.yaml",
+		);
 		await s.shutdown();
 	});
 });
