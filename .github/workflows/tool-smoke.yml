@@ -496,8 +496,8 @@ jobs:
       # server that handshook and then never concludes inside the deadline reds
       # the step (a declared `expectInconclusive` excepted, with its reason).
       # `--times-out` leaves the measured time-to-conclusive per server, uploaded
-      # below as the #1549 budget input and staged for the first measured table
-      # in docs/lsp-cascade-times.md. The step reads the handshake census above
+      # below as the #1549 budget input; the first measured table is committed
+      # as tests/fixtures/lsp-cascade/measurements.json. The step reads the handshake census above
       # (same PI_LENS_HOME), so a server that never handshook is a warning, not
       # a red; `--min-pass` keeps an all-unavailable night from reading green.
       - name: LSP cascade layer (edit an exporter, importers conclude)
