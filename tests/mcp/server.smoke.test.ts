@@ -1819,4 +1819,158 @@ describe("non-pi workspace trust (#4300)", () => {
 			env.cleanup();
 		}
 	}, 60_000);
+
+	// #5014 (shape 10): a fallback that answers in place of a primary that never
+	// did must not read as the primary's "confirmed clean". The recurrence: the
+	// `python` primary was refused or failed to start, `python-jedi` (a
+	// `fallbackFor: "python"` language server) answered with nothing, and
+	// `unansweredPrimaries` took the fallback's presence for the primary's, so
+	// `pilens_diagnostics` printed "Primary LSP (python): confirmed clean."
+	describe("a fallback's answer never confirms a primary that did not answer (#5014)", () => {
+		type Primary = "fails" | "killed" | "answers" | "project-local-refused";
+		function pythonFamily(prefix: string, primary: Primary) {
+			const env = setupTestEnvironment(prefix);
+			const home = path.join(env.tmpDir, "home");
+			fs.mkdirSync(home);
+			const fake = new URL("../fixtures/fake-lsp-server.mjs", import.meta.url)
+				.href;
+			const answer = path.join(env.tmpDir, "answer.mjs");
+			// Push-only, one empty publish: how jedi-language-server answers a
+			// clean file (clients/lsp/wait-policy/strategies.ts "python-jedi").
+			fs.writeFileSync(
+				answer,
+				`process.env.FAKE_LSP_NO_DIAGNOSTIC_PROVIDER = "1";\nprocess.env.FAKE_LSP_PUBLISH_SEQUENCE = "empty";\nawait import(${JSON.stringify(fake)});\n`,
+			);
+			const fail = path.join(env.tmpDir, "fail.mjs");
+			fs.writeFileSync(fail, "process.exit(1);\n");
+			// A cause nothing names: the process dies by signal before it speaks.
+			const killed = path.join(env.tmpDir, "killed.mjs");
+			fs.writeFileSync(killed, 'process.kill(process.pid, "SIGKILL");\n');
+			fs.writeFileSync(
+				path.join(home, "lsp.json"),
+				JSON.stringify({
+					serverOverrides: {
+						"python-jedi": { command: [process.execPath, answer] },
+						...(primary === "fails" && {
+							python: { command: [process.execPath, fail] },
+						}),
+						...(primary === "killed" && {
+							python: { command: [process.execPath, killed] },
+						}),
+						...(primary === "answers" && {
+							python: { command: [process.execPath, answer] },
+						}),
+					},
+					disabledServers: ["ast-grep", "typos", "opengrep"],
+				}),
+			);
+			// A `pi-lens-` prefixed directory is a pi-owned temp artifact the
+			// analysis-root rule never adopts (clients/analysis-root.ts), and the
+			// fixture's own `.git` marker would make the shared parent both
+			// projects' root: neither may hide the adopted-root split driven here.
+			fs.rmSync(path.join(env.tmpDir, ".git"), {
+				recursive: true,
+				force: true,
+			});
+			const sessionRoot = path.join(env.tmpDir, "projA");
+			const fileRoot = path.join(env.tmpDir, "projB");
+			for (const root of [sessionRoot, fileRoot]) {
+				fs.mkdirSync(root);
+				fs.writeFileSync(path.join(root, "pyproject.toml"), "[project]\n");
+			}
+			if (primary === "project-local-refused") {
+				// A project-supplied checker in a root the session only adopted: the
+				// registry refuses it unrun (clients/lsp/client-registry.ts).
+				const bin = path.join(fileRoot, "node_modules", ".bin");
+				fs.mkdirSync(bin, { recursive: true });
+				fs.writeFileSync(
+					path.join(bin, "pyright-langserver"),
+					"#!/bin/sh\nexit 1\n",
+					{ mode: 0o755 },
+				);
+			}
+			const file = path.join(fileRoot, "probe.py");
+			fs.writeFileSync(file, "x = 1  # fake-lsp-clean\n");
+			return { env, home, sessionRoot, fileRoot, file };
+		}
+
+		/** One server per workspace (`dispose` removes its cwd): both scopes in turn. */
+		async function verdicts(
+			ws: ReturnType<typeof pythonFamily>,
+			cwd: string,
+			serverScopes: readonly ("all" | "primary")[],
+		): Promise<string[]> {
+			const child = new McpHarness({
+				cwd,
+				env: { PI_LENS_HOME: ws.home, PI_LENS_TEST_MODE: "0" },
+			});
+			try {
+				const texts: string[] = [];
+				for (const [index, serverScope] of serverScopes.entries()) {
+					const res = await child.request(
+						5014 + index,
+						"tools/call",
+						{
+							name: "pilens_diagnostics",
+							arguments: {
+								source: "lsp",
+								scope: "paths",
+								path: ws.file,
+								serverScope,
+								severity: "all",
+								waitMs: 5000,
+							},
+						},
+						60_000,
+					);
+					texts.push(
+						(res.result as { content: { text: string }[] }).content[0].text,
+					);
+				}
+				return texts;
+			} finally {
+				child.dispose();
+			}
+		}
+
+		it.each([
+			["a spawn failure", "fails", "fileRoot"],
+			["a failure no cause names (killed by signal)", "killed", "fileRoot"],
+			[
+				"a project-local checker refused in an adopted root",
+				"project-local-refused",
+				"sessionRoot",
+			],
+		] as const)(
+			"%s is not confirmed clean by the fallback, for both server scopes",
+			async (_label, primary, cwdKey) => {
+				const ws = pythonFamily("fallback5014-", primary);
+				try {
+					const scopes = ["all", "primary"] as const;
+					const texts = await verdicts(ws, ws[cwdKey], scopes);
+					for (const [index, text] of texts.entries()) {
+						expect(text, `${scopes[index]}: ${text}`).not.toContain(
+							"confirmed clean",
+						);
+						expect(text, `${scopes[index]}: ${text}`).toContain(
+							"Primary LSP (python): not available",
+						);
+					}
+				} finally {
+					ws.env.cleanup();
+				}
+			},
+			120_000,
+		);
+
+		it("still confirms clean when the python primary itself answers", async () => {
+			const ws = pythonFamily("fallback5014ok-", "answers");
+			try {
+				const [text] = await verdicts(ws, ws.fileRoot, ["all"]);
+				expect(text).toContain("Primary LSP (python): confirmed clean.");
+			} finally {
+				ws.env.cleanup();
+			}
+		}, 90_000);
+	});
 });

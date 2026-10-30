@@ -582,12 +582,15 @@ export interface LSPDiagnosticsHealth {
  * primary that resolved a root for this file (`resolvedPrimaryRoots`, filled by
  * `ensureClientForServer` before it spawns) was tried and not acquired. A file
  * with no rootable primary (an auxiliary-only language) has none; a touch that
- * acquired any primary, a `fallbackFor` alternate included, has none either.
+ * acquired a primary has none either. #5014: a `fallbackFor` alternate is not
+ * its owner. It counts as the primary only when its owner never resolved a root
+ * or the operator turned the owner off; otherwise the owner is named here, so a
+ * fallback's answer never reads as the owner's "confirmed clean".
  * #4403: a primary the operator disabled for this file did not answer either
  * (`disabledPrimaryServerIds`, clients/lsp/session-roots.ts), so it is
  * named too, and listed apart so a reader can say why.
  */
-interface UnansweredPrimaries {
+export interface UnansweredPrimaries {
 	serverIds: string[];
 	disabledServerIds: string[];
 	/**
@@ -599,17 +602,35 @@ interface UnansweredPrimaries {
 	cause: PrimaryUnavailableCause;
 }
 
-function unansweredPrimaries(
+export function unansweredPrimaries(
 	spawned: readonly SpawnedServer[],
 	resolvedPrimaryRoots: ReadonlyMap<string, string>,
 	filePath: string,
 ): UnansweredPrimaries {
-	if (spawned.some((entry) => !isAuxiliary(entry.info)))
-		return { serverIds: [], disabledServerIds: [], cause: "unstarted" };
 	const { disabledServerIds, fallbackServerIds } = disabledPrimaries(filePath);
+	// #5014 (shape 10): a primary answered only when the acquired server is not
+	// a `fallbackFor` alternate, or is one standing in for an owner the operator
+	// turned off. An alternate beside an owner that resolved a root and was not
+	// acquired (trust-refused, spawn failed, breaker open, not installed, any
+	// cause not listed here) answers for itself, never for the owner.
+	const standIns = new Set(fallbackServerIds);
+	const acquired = new Set<string>();
+	for (const entry of spawned) {
+		if (isAuxiliary(entry.info)) continue;
+		if (entry.info.fallbackFor === undefined || standIns.has(entry.info.id))
+			return { serverIds: [], disabledServerIds: [], cause: "unstarted" };
+		acquired.add(entry.info.id);
+	}
 	const serverIds = [
-		...new Set([...resolvedPrimaryRoots.keys(), ...disabledServerIds]),
+		...new Set([
+			...[...resolvedPrimaryRoots.keys()].filter((id) => !acquired.has(id)),
+			...disabledServerIds,
+		]),
 	];
+	// An alternate acquired while its owner never resolved a root (deno beside
+	// an unrooted typescript) is the file's only candidate: nothing is missing.
+	if (acquired.size > 0 && serverIds.length === 0)
+		return { serverIds: [], disabledServerIds: [], cause: "unstarted" };
 	return {
 		serverIds,
 		disabledServerIds,
