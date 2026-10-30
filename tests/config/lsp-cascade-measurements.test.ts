@@ -28,6 +28,27 @@ const table = JSON.parse(
 	}[];
 };
 
+type Row = (typeof table.rows)[number];
+
+/** What is wrong with one committed row for its fixture, or null. */
+function rowProblem(
+	row: Row | undefined,
+	fixture: { lang: string; expectDefect?: unknown },
+): string | null {
+	if (row?.state === "known-defect") {
+		if (!fixture.expectDefect) return `${fixture.lang} may be a known defect`;
+		if (row.timeToConclusiveMs !== null) return "a known defect has no time";
+		if (!row.detail?.includes("known defect"))
+			return "a known defect names its cause";
+		return null;
+	}
+	if (row?.state !== "pass")
+		return `${fixture.lang} must be a pass or a known defect`;
+	return typeof row.timeToConclusiveMs === "number"
+		? null
+		: "a pass has a time";
+}
+
 describe("tests/fixtures/lsp-cascade/measurements.json (#1712)", () => {
 	it("is a record of the schema the lane writes, taken on a CI runner", () => {
 		// Recurrence: a table typed by hand, or taken on a laptop, would set the
@@ -46,29 +67,40 @@ describe("tests/fixtures/lsp-cascade/measurements.json (#1712)", () => {
 	it("has one row per fixture: a pass with a time, or a declared known defect with none", () => {
 		// Recurrence: a fixture added without a measurement, a night where the
 		// declared defect showed and the row carries a time it never had, or an
-		// unavailable server (`skip`) committed as if it had been measured. A
-		// `known-defect` row is the defect's own state and needs its declaration
-		// and its cause; `skip` means unavailable and is never a committed row.
-		// The java `pass` row is the sample taken while java was in the cascade
-		// set (PR #5035 head 49b88c8cd, since held out until #5040); the next
-		// refreshed table replaces it with a `known-defect` row.
+		// unavailable server (`skip`) committed as if it had been measured. The
+		// java `pass` row is the sample taken while java was in the cascade set
+		// (PR #5035 head 49b88c8cd, since held out until #5040); the next refreshed
+		// table replaces it with a `known-defect` row.
 		expect(table.rows.map((r) => r.lang)).toEqual(
 			CASCADE_FIXTURES.map((f) => f.lang),
 		);
 		for (const fixture of CASCADE_FIXTURES) {
 			const row = table.rows.find((r) => r.lang === fixture.lang);
-			if (row?.state === "known-defect") {
-				expect(
-					fixture.expectDefect,
-					`${fixture.lang} may be a known defect`,
-				).toBeTruthy();
-				expect(row.timeToConclusiveMs).toBeNull();
-				expect(row.detail).toEqual(expect.stringContaining("known defect"));
-			} else {
-				expect(row?.state).toBe("pass");
-				expect(row?.timeToConclusiveMs).toEqual(expect.any(Number));
-			}
+			expect(rowProblem(row, fixture), fixture.lang).toBeNull();
 		}
+	});
+
+	it("reads a known-defect row only for a declaring fixture, with its cause and no time", () => {
+		// Recurrence: #1712 review M2. `known-defect` is the declared defect's own
+		// state: a row for a fixture that declares nothing, one carrying a time,
+		// and one without its cause are each a table the lane cannot have written;
+		// `skip` means unavailable and is never a committed row.
+		const declares = { lang: "java", expectDefect: { skipReason: "non_code" } };
+		const row = {
+			lang: "java",
+			state: "known-defect",
+			detail: "known defect (held out): cascade skipped: non_code",
+			timeToConclusiveMs: null,
+		};
+		expect(rowProblem(row, declares)).toBeNull();
+		expect(rowProblem(row, { lang: "java" })).toMatch(/may be a known defect/);
+		expect(rowProblem({ ...row, timeToConclusiveMs: 1803 }, declares)).toMatch(
+			/no time/,
+		);
+		expect(rowProblem({ ...row, detail: "" }, declares)).toMatch(/its cause/);
+		expect(rowProblem({ ...row, state: "skip" }, declares)).toMatch(
+			/must be a pass/,
+		);
 	});
 
 	it("leaves every conclusive deadline at least ten times the measured time", () => {
