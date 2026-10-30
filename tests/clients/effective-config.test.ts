@@ -42,6 +42,7 @@ import {
 // same function the view uses rather than spelled as a literal that would
 // agree with a wrong implementation on one platform.
 import { homeRelativePath } from "../../clients/path-utils.js";
+import { createEffectiveConfigTool } from "../../tools/effective-config.js";
 import { removeTempDirSync } from "./test-utils.js";
 import {
 	resetProjectTrust,
@@ -508,6 +509,39 @@ describe("effectiveConfig — why is X running (#2415 AC)", () => {
 
 			expect(deniedBuild(view)?.reason).toBe("disabled-by-config");
 			expect(deniedBuild(view)?.decidedBy?.tier).toBe("project");
+		});
+
+		it("states the denied runner count in the effective_config summary line", async () => {
+			const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-effcfg-"));
+			tempRoots.push(home);
+			fs.mkdirSync(path.join(home, ".pi-lens"), { recursive: true });
+			fs.writeFileSync(
+				path.join(home, ".pi-lens", "config.json"),
+				JSON.stringify({ dispatch: { disabledRunners: ["dotnet-build"] } }),
+			);
+			const projectDir = path.join(home, "proj");
+			fs.mkdirSync(projectDir, { recursive: true });
+			const previousHome = process.env.PI_LENS_HOME;
+			process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
+			setConfigPath(path.join(home, ".pi-lens", "config.json"));
+			resetLSPConfigStateForTests();
+			resetLSPConfigWarnCache();
+			try {
+				const tool = createEffectiveConfigTool(() => projectDir);
+				const result = await tool.execute(
+					"t",
+					{ file: "Program.cs" },
+					undefined,
+					undefined,
+					{},
+				);
+				expect(result.details.summary).toMatch(
+					/\d+ tool\(s\), 1 denied by config$/,
+				);
+			} finally {
+				if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+				else process.env.PI_LENS_HOME = previousHome;
+			}
 		});
 
 		it("selects the runner when nothing denies it", async () => {
