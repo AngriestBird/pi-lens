@@ -1804,21 +1804,27 @@ export async function dispatchForFile(
 		ctx.facts.getFileFact<string>(ctx.filePath, "file.content") ?? "";
 	// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`).
 	//
-	// Resolved from the file's config owner under `ctx.projectRoot` (falling
-	// back to `ctx.cwd`), NOT `ctx.projectConfig` — `ctx.projectConfig` is
-	// loaded from the nested LANGUAGE root (`resolveLanguageRootForFile`), and
-	// `discoverPiLensProjectConfig`'s upward walk stops at the first config, so
-	// it never sees a repo-root policy. The owner's resolution layers the
-	// global tier, the repo root's file, and each nested file between.
+	// Each finding is filtered by its OWN file's config owner under
+	// `ctx.projectRoot` (falling back to `ctx.cwd`), NOT `ctx.projectConfig` —
+	// `ctx.projectConfig` is loaded from the nested LANGUAGE root
+	// (`resolveLanguageRootForFile`), and `discoverPiLensProjectConfig`'s upward
+	// walk stops at the first config, so it never sees a repo-root policy. The
+	// owner's resolution layers the global tier, the repo root's file, and each
+	// nested file between. A runner may report on files other than the edited
+	// one (helm-lint puts chart-level findings on `Chart.yaml`), so one owner's
+	// map must not filter another owner's finding (#5011 r8, F24).
 	// `lens_diagnostics` reads the same owner per file (`loadProjectRulePolicy`),
 	// which keeps the two surfaces in agreement. `ctx.projectConfig` itself is
 	// untouched — thresholds and mutation flags keep their existing
 	// language-root resolution. A context `createDispatchContext` built carries
-	// the map (possibly empty); one built elsewhere resolves it here.
-	const rulePolicy =
+	// the edited file's map (possibly empty), which that owner reuses.
+	const rulePolicyRoot = ctx.projectRoot ?? ctx.cwd;
+	const rulePolicy = projectRulePolicy(
+		rulePolicyRoot,
 		"rulePolicy" in ctx
-			? ctx.rulePolicy
-			: projectRulePolicy(ctx.projectRoot ?? ctx.cwd).forFile(ctx.filePath);
+			? { filePath: ctx.filePath, map: ctx.rulePolicy }
+			: undefined,
+	);
 	// The output-only filter pipeline: LSP/docker overlap suppression + inline
 	// `pi-lens-ignore` + agent/user dispositions + project rule policy. Applied
 	// AFTER dedupe so the pi renderer, widget, and delta all see one filtered
@@ -1850,7 +1856,7 @@ export async function dispatchForFile(
 			fileContent,
 		);
 		return applyRulePolicy(disposition, rulePolicy, {
-			root: ctx.projectRoot ?? ctx.cwd,
+			root: rulePolicyRoot,
 			filePath: ctx.filePath,
 		});
 	};

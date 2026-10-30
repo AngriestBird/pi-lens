@@ -24,6 +24,7 @@ import {
 	loadProjectRulePolicy,
 } from "../../../clients/dispatch/finding-policy.js";
 import { applyRulePolicy } from "../../../clients/dispatch/rule-policy.js";
+import { parseHelmLintOutput } from "../../../clients/dispatch/runners/helm-lint.js";
 import type {
 	Diagnostic,
 	RunnerDefinition,
@@ -168,6 +169,109 @@ describe("rules.<id> — dispatch reads the file's config owner", () => {
 	});
 });
 
+/**
+ * PR #5011 round 8, F24 (greptile thread PRRT_kwDORt8rec6yLB8W): the dispatch
+ * output filter applied the EDITED file's owner map to every finding, so a
+ * runner that reports on several files (helm-lint attributes chart-level
+ * findings to `Chart.yaml`, helm-lint.ts:55) had a nested `.pi-lens.json` hide
+ * a finding outside its directory, and skip its own files when the edit was
+ * elsewhere. Each case drives the real `createDispatchContext` +
+ * `dispatchForFile`; only the runner is a stand-in.
+ */
+describe("rules.<id> — dispatch filters each finding by its own file's owner", () => {
+	async function dispatchFindings(
+		edited: string,
+		diagnostics: (edited: string) => Diagnostic[],
+		runnerId = "ast-grep",
+	): Promise<string[]> {
+		fs.mkdirSync(path.dirname(edited), { recursive: true });
+		fs.writeFileSync(edited, "eval('1');\n");
+		const registry = new RunnerRegistry();
+		registry.register({
+			...runnerReporting(diagnostics(edited)),
+			id: runnerId,
+			appliesTo: ["jsts", "helm-template"],
+		});
+		const ctx = createDispatchContext(
+			edited,
+			path.dirname(edited),
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+			undefined,
+			repo,
+		);
+		const groups: RunnerGroup[] = [{ mode: "all", runnerIds: [runnerId] }];
+		return (await dispatchForFile(ctx, groups, registry)).diagnostics
+			.map((d) => path.relative(repo, d.filePath))
+			.sort();
+	}
+
+	// Recurrence: F24 direction 1, a nested disable hid another package's finding.
+	it("keeps a finding outside the nested owner when the edit is inside it", async () => {
+		writeConfig(pkg, { rules: { "no-eval": { disable: ["no-eval"] } } });
+		const other = path.join(repo, "other", "b.ts");
+
+		const kept = await dispatchFindings(path.join(pkg, "a.ts"), (edited) => [
+			finding(edited),
+			finding(other),
+		]);
+
+		expect(kept).toEqual([path.join("other", "b.ts")]);
+	});
+
+	// Recurrence: F24 direction 2, the nested owner's disable skipped its own file.
+	it("applies the nested owner's disable to its own file when the edit is elsewhere", async () => {
+		writeConfig(pkg, { rules: { "no-eval": { disable: ["no-eval"] } } });
+		const inPkg = path.join(pkg, "a.ts");
+
+		const kept = await dispatchFindings(
+			path.join(repo, "other", "b.ts"),
+			(edited) => [finding(edited), finding(inPkg)],
+		);
+
+		expect(kept).toEqual([path.join("other", "b.ts")]);
+	});
+
+	// Recurrence: F24 live population, greptile's helm case: a chart-level error
+	// parsed onto `chart/Chart.yaml` (helm-lint.ts:55) while the edit is a template.
+	it("keeps a helm-lint chart-level error outside a templates/ owner that disables it", async () => {
+		const chart = path.join(repo, "chart");
+		fs.mkdirSync(chart, { recursive: true });
+		fs.writeFileSync(path.join(chart, "Chart.yaml"), "name: chart\n");
+		writeConfig(path.join(chart, "templates"), {
+			rules: { helm: { disable: ["error"] } },
+		});
+
+		const kept = await dispatchFindings(
+			path.join(chart, "templates", "deploy.yaml"),
+			() =>
+				parseHelmLintOutput(
+					[
+						"[ERROR] templates/deploy.yaml: unable to parse YAML",
+						"[ERROR] chart metadata is missing these dependencies: sub",
+					].join("\n"),
+					chart,
+				),
+			"helm-lint",
+		);
+
+		expect(kept).toEqual([path.join("chart", "Chart.yaml")]);
+	});
+
+	// Recurrence: F24's rule for a finding with no file: it reads the edited
+	// file's owner, never the workspace root's (`forFile("")` resolves the root).
+	it("filters a finding with an empty filePath by the edited file's owner", async () => {
+		writeConfig(pkg, { rules: { "no-eval": { disable: ["no-eval"] } } });
+
+		const kept = await dispatchFindings(path.join(pkg, "a.ts"), () => [
+			{ ...finding(""), filePath: "" },
+		]);
+
+		expect(kept).toEqual([]);
+	});
+});
+
 describe("rules.<id> — a project policy reads each file's own owner", () => {
 	const inRoot = () => path.join(repo, "legacy", "b.ts");
 	const inPkgGenerated = () => path.join(pkg, "legacy", "a.ts");
@@ -249,6 +353,38 @@ describe("rules.<id> — a project policy reads each file's own owner", () => {
 			).toEqual([
 				path.relative(repo, path.join(dir, "src", "c.ts")),
 				path.relative(repo, neighbour),
+			]);
+		},
+	);
+
+	// PR #5011 round 8, F25 (CodeRabbit thread PRRT_kwDORt8rec6yLD-8): config
+	// discovery records the nested document under its real path, and the
+	// prefix was the lexical relative from a symlink-spelled root
+	// (`../real/pkg`), so the carve-out matched nothing. lens_diagnostics hands
+	// its tool cwd to `loadProjectRulePolicy` as spelled.
+	it.skipIf(process.platform === "win32")(
+		"anchors a nested ignorePaths glob under a root spelled through a symlink",
+		() => {
+			writeConfig(pkg, {
+				rules: { "no-eval": { ignorePaths: ["legacy/**"] } },
+			});
+			const link = path.join(tmpDir, "repo-link");
+			fs.symlinkSync(repo, link, "dir");
+			const files = [
+				path.join(link, "legacy", "b.ts"),
+				path.join(link, "pkg", "legacy", "a.ts"),
+				path.join(link, "pkg", "src", "c.ts"),
+			];
+
+			const kept = applyRulePolicy(
+				files.map((file) => finding(file)),
+				loadProjectRulePolicy(link),
+				{ root: link, filePath: link },
+			).map((d) => path.relative(link, d.filePath));
+
+			expect(kept).toEqual([
+				path.join("legacy", "b.ts"),
+				path.join("pkg", "src", "c.ts"),
 			]);
 		},
 	);

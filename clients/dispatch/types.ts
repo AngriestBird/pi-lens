@@ -697,7 +697,12 @@ export interface DispatchContext {
 	readonly facts: import("./fact-store.js").FactStore;
 	/** Project-local .pi-lens.json config captured for this dispatch. */
 	readonly projectConfig?: PiLensProjectConfig;
-	/** Shared global+project rule policy, including path-scoped denials. */
+	/**
+	 * The EDITED file's config owner's rule policy, including path-scoped
+	 * denials: runners read it to skip a rule on this file, and the output filter
+	 * reuses it for findings under the same owner (every other owner's finding
+	 * reads its own, #5011 r8 F24).
+	 */
 	readonly rulePolicy?: RulePolicyMap;
 	/**
 	 * Runner ids the operator denied through `dispatch.disabledRunners`

@@ -35,7 +35,7 @@ import {
 	isUnderDir,
 	isWindowsPath,
 	pathsEqual,
-	toPosix,
+	toProjectRelativePath,
 } from "../path-utils.js";
 import { isRuleIgnoredForPath } from "./rule-ignores.js";
 
@@ -177,7 +177,11 @@ function anchorPrefix(
 		dir = pathApi.dirname(dir);
 	}
 	if (pathsEqual(dir, root) || !isUnderDir(dir, root)) return undefined;
-	return toPosix(pathApi.relative(root, dir));
+	// Config discovery records `document.file` under its real path, and `root`
+	// may be the caller's link spelling: the relative is lexical when the two
+	// spellings agree and taken on the identity axis when they do not, so a
+	// symlinked root anchors `pkg/`, never `../real/pkg/` (#5011 r8, F25).
+	return toProjectRelativePath(dir, root);
 }
 
 function anchorPattern(pattern: string, prefix: string): string {
@@ -203,25 +207,41 @@ function anchorPattern(pattern: string, prefix: string): string {
  * config owner's map ({@link rulePolicyMapFromResolution}), so a nested
  * `.pi-lens.json` governs the files under it on every surface that filters by
  * it. Owners and maps are memoized for the life of the object; build one per
- * sweep or per call so a config edit applies on the next one.
+ * sweep or per call so a config edit applies on the next one. `known` is a map
+ * already resolved for one file's owner (the dispatcher's `ctx.rulePolicy`):
+ * that owner reads it instead of resolving again, and every other owner still
+ * resolves its own.
  */
 export interface ProjectRulePolicy {
 	readonly root: string;
 	forFile(filePath: string): RulePolicyMap | undefined;
 }
 
-export function projectRulePolicy(root: string): ProjectRulePolicy {
+export function projectRulePolicy(
+	root: string,
+	known?: { filePath: string; map: RulePolicyMap | undefined },
+): ProjectRulePolicy {
 	const ownerByDir = new Map<string, string>();
 	const mapByOwner = new Map<string, RulePolicyMap | undefined>();
+	const ownerOf = (filePath: string): string => {
+		const dir = nodePath.dirname(nodePath.resolve(root, filePath));
+		let owner = ownerByDir.get(dir);
+		if (owner === undefined) {
+			owner = configOwnerFor(filePath, root);
+			ownerByDir.set(dir, owner);
+		}
+		return owner;
+	};
+	// Seeded on the first lookup, so a dispatch with no findings walks nothing.
+	let unseeded = known;
 	return {
 		root,
 		forFile(filePath) {
-			const dir = nodePath.dirname(nodePath.resolve(root, filePath));
-			let owner = ownerByDir.get(dir);
-			if (owner === undefined) {
-				owner = configOwnerFor(filePath, root);
-				ownerByDir.set(dir, owner);
+			if (unseeded) {
+				mapByOwner.set(ownerOf(unseeded.filePath), unseeded.map);
+				unseeded = undefined;
 			}
+			const owner = ownerOf(filePath);
 			if (!mapByOwner.has(owner)) {
 				mapByOwner.set(
 					owner,
@@ -327,9 +347,9 @@ function matchesRule(entry: string, raw: string, normalized: string): boolean {
  * Used by both the per-edit dispatcher and the `lens-diagnostics` tool's
  * `mode=delta`/`mode=all`/`mode=full` paths so a project's own policy
  * applies consistently across every output surface. `policy` is one file's
- * map (the dispatcher's `ctx.rulePolicy`) or a {@link ProjectRulePolicy},
- * which a surface spanning several files passes so each diagnostic reads its
- * own file's config owner.
+ * map, applied to every diagnostic, or a {@link ProjectRulePolicy}, which
+ * every surface that can see several files passes (the dispatcher included)
+ * so each diagnostic reads its own file's config owner.
  */
 export function applyRulePolicy<T extends { rule?: string; code?: string }>(
 	diagnostics: T[],
@@ -343,9 +363,11 @@ export function applyRulePolicy<T extends { rule?: string; code?: string }>(
 	// the root the owner's map was anchored to.
 	const anchored = project ? { ...options, root: project.root } : options;
 	return diagnostics.filter((d) => {
+		// A finding with no file reads the owner of `options.filePath` (the
+		// edited file); `forFile("")` would read the workspace root's.
 		const map = project
 			? project.forFile(
-					(d as T & { filePath?: string }).filePath ?? options.filePath,
+					(d as T & { filePath?: string }).filePath || options.filePath,
 				)
 			: (policy as RulePolicyMap);
 		return !map || !hasOutputFilter(map) || keptByRulePolicy(d, map, anchored);
