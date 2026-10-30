@@ -18,6 +18,7 @@ import {
 	isEffectiveFileViewError,
 } from "../clients/lens-engine.js";
 import { compactRenderResult } from "./render-compact.js";
+import { readFilePath } from "./shared.js";
 
 /** One line per decision, for the compact renderer. */
 function summarize(view: EffectiveConfigView): string {
@@ -60,7 +61,7 @@ export function createEffectiveConfigTool(
 					: (details?.summary ?? "effective_config"),
 		),
 		parameters: Type.Object({
-			file: Type.Optional(
+			path: Type.Optional(
 				Type.String({
 					description:
 						"Path to explain: adds the resolved language plus the per-server and " +
@@ -70,18 +71,28 @@ export function createEffectiveConfigTool(
 						"re-query with `cwd` set to that file's own workspace instead.",
 				}),
 			),
+			file: Type.Optional(Type.String({ description: "Alias for `path`." })),
 		}),
 		async execute(
 			_toolCallId: string,
-			params: { file?: string },
+			params: { path?: string; file?: string },
 			_signal: AbortSignal | undefined,
 			_onUpdate: unknown,
 			ctx: { cwd?: string },
 		) {
 			const cwd = getProjectRoot() || ctx.cwd || ".";
+			// #5041: `path` is canonical, `file` the older spelling.
+			const fileRead = readFilePath(params);
+			if (fileRead.refusal) {
+				return {
+					content: [{ type: "text" as const, text: fileRead.refusal }],
+					isError: true,
+					details: { summary: "effective_config — failed" },
+				};
+			}
 			const view = await effectiveConfig({
 				cwd,
-				...(params.file === undefined ? {} : { file: params.file }),
+				...(fileRead.path ? { file: fileRead.path } : {}),
 				redact: true,
 				noTools: getNoTools?.(),
 			});

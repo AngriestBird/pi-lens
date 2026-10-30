@@ -6,6 +6,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as path from "node:path";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import { toPosix } from "../../clients/path-utils.js";
 import {
@@ -461,11 +462,68 @@ describe("symbol_search tool", () => {
 				env.cleanup();
 			}
 		});
-	});
 
-	// #1450: lang:/file:/ext: prefix filters (+ `-` negation) embedded in the
-	// query STRING itself — distinct from the structured `paths`/`lang` params
-	// tested above (#771), and exercised through the same tool entry point.
+		// #5038: the parameter says "same shape/semantics as ast_grep_search's
+		// `paths`", but the matcher only ever saw the root-relative spelling, so
+		// `./src` and an absolute directory returned no hits — a zero-hit answer
+		// that reads as "no match". `limit` had the sibling problem against
+		// `project_report`'s `max(1, floor)`.
+		it("scopes `src`, `./src` and the absolute directory to the same hits (#5038)", async () => {
+			const env = setupTestEnvironment("pi-lens-symbolsearch-5038-");
+			try {
+				makeFixture(env);
+				const tool = createSymbolSearchTool(() => env.tmpDir);
+				const hitsFor = async (paths: string[]) => {
+					const result = await tool.execute(
+						"1",
+						{ query: "authenticate user", paths },
+						undefined,
+						null,
+						{ cwd: env.tmpDir },
+					);
+					const text = String(result.content[0]?.text);
+					const payload = JSON.parse(text.slice(text.indexOf("{"))) as {
+						results: Array<{ file: string }>;
+					};
+					return payload.results.map((hit) => toPosix(hit.file));
+				};
+				const expected = ["src/auth/login.ts"];
+				expect(await hitsFor(["src"]), "src").toEqual(expected);
+				expect(await hitsFor(["./src"]), "./src").toEqual(expected);
+				expect(
+					await hitsFor([path.join(env.tmpDir, "src")]),
+					"absolute",
+				).toEqual(expected);
+				// #771 asked for globs, so the resolved spelling stays a pattern.
+				expect(await hitsFor(["src/**/*.ts"]), "glob").toEqual(expected);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("clamps `limit` to max(1, floor) like project_report (#5038)", async () => {
+			const env = setupTestEnvironment("pi-lens-symbolsearch-5038-limit-");
+			try {
+				makeFixture(env);
+				const tool = createSymbolSearchTool(() => env.tmpDir);
+				const countFor = async (limit: number) => {
+					const result = await tool.execute(
+						"1",
+						{ query: "authenticate user", limit },
+						undefined,
+						null,
+						{ cwd: env.tmpDir },
+					);
+					return (result.details as { count?: number } | undefined)?.count;
+				};
+				expect(await countFor(0), "limit 0").toBe(1);
+				expect(await countFor(-2), "limit -2").toBe(1);
+				expect(await countFor(1.8), "limit 1.8").toBe(1);
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
 	describe("inline query prefix filters (#1450)", () => {
 		function makeFixture(env: { tmpDir: string }) {
 			const tsFile = createTempFile(

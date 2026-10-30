@@ -29,7 +29,7 @@ function errorTextWithHint(raw: string): string {
 	const hint = astGrepRemediationHint(classifyAstGrepError(raw));
 	return hint ? `Error: ${raw}\n\n${hint}` : `Error: ${raw}`;
 }
-import { readAstGrepLang, resolveAstGrepPaths } from "./shared.js";
+import { readAstGrepLang, readPathsArgument } from "./shared.js";
 
 function lineCount(value: string): number {
 	if (!value) return 0;
@@ -207,6 +207,22 @@ export function createAstGrepReplaceTool(
 					details: {},
 				};
 			}
+			// #5041: replace used to forward `paths` unchecked, so a non-string
+			// entry, a blank entry or an over-cap list reached the CLI as argv.
+			const pathsRead = readPathsArgument(paths, {
+				cwd: ctx.cwd,
+				absent: "cwd",
+			});
+			if (pathsRead.refusal) {
+				logOutcome("error", { errorRaw: pathsRead.refusal });
+				return {
+					content: [
+						{ type: "text" as const, text: `Error: ${pathsRead.refusal}` },
+					],
+					isError: true,
+					details: {},
+				};
+			}
 			if (!(await astGrepClient.ensureAvailable())) {
 				logOutcome("error", { errorRaw: "ast-grep CLI not found" });
 				return {
@@ -220,7 +236,7 @@ export function createAstGrepReplaceTool(
 					details: {},
 				};
 			}
-			const searchPaths = resolveAstGrepPaths(paths, ctx.cwd);
+			const searchPaths = pathsRead.entries;
 
 			// Phase 3: structural-intent params → synthesize YAML with fix: field
 			if (

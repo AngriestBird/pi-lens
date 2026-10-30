@@ -101,7 +101,7 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			responses: [
 				fauxAssistantMessage([
 					fauxText("checking"),
-					fauxToolCall("lens_diagnostics", { paths: [] }),
+					fauxToolCall("lens_diagnostics", {}),
 				]),
 				fauxAssistantMessage(fauxText("done")),
 			],

@@ -383,21 +383,24 @@ export function symbolSearchFileMatchesLang(
 
 /** Same glob semantics as ast_grep_search's `paths`: a bare directory/file
  * entry scopes its whole subtree (via a `/**` suffix match), a full glob
- * pattern is matched as-is. Matched relative to `cwd` so absolute index paths
- * and repo-relative globs line up regardless of platform path separators. */
+ * pattern is matched as-is. Matched against the candidate's `cwd`-relative path
+ * AND its absolute path: `paths` entries arrive host-resolved (#5038), so
+ * `src`, `./src` and the absolute directory all scope the same files, while a
+ * glob a caller wrote (`src/**\/*.ts`) still matches. */
 function fileMatchesPathGlobs(
 	file: string,
 	cwd: string,
 	globs: readonly string[],
 ): boolean {
 	const rel = path.relative(cwd, file).split(path.sep).join("/");
+	const abs = path.resolve(file).split(path.sep).join("/");
 	const options = { dot: true, nocase: process.platform === "win32" };
 	return globs.some((raw) => {
 		const pattern = toPosix(raw);
-		return (
-			minimatch(rel, pattern, options) ||
-			minimatch(rel, `${pattern}/**`, options)
-		);
+		const match = (candidate: string) =>
+			minimatch(candidate, pattern, options) ||
+			minimatch(candidate, `${pattern}/**`, options);
+		return match(rel) || (abs !== rel && match(abs));
 	});
 }
 
@@ -522,6 +525,13 @@ export async function symbolSearch(
 	limit = 20,
 	options: SymbolSearchOptions = {},
 ): Promise<SymbolSearchResult> {
+	// #5038: `limit` follows the same `max(1, floor)` rule as `project_report`.
+	// A zero, negative or fractional limit used to reach `searchWordIndex`
+	// unchanged, and `limit: 0` answered "no files matched" — a wrong answer for
+	// a call that only mis-spelled its budget.
+	const effectiveLimit = Number.isFinite(limit)
+		? Math.max(1, Math.floor(limit))
+		: 20;
 	const warmLease = acquireWarmWordIndex(cwd);
 	const snapshot = loadProjectSnapshotWithoutWordIndex(cwd);
 	const index = warmLease.index;
@@ -563,7 +573,11 @@ export async function symbolSearch(
 			(file) => normalizeMapKey(path.resolve(file)),
 		);
 		const fileFilter = buildSymbolSearchFileFilter(cwd, options);
-		results = searchWordIndex(index, query, { limit, centrality, fileFilter });
+		results = searchWordIndex(index, query, {
+			limit: effectiveLimit,
+			centrality,
+			fileFilter,
+		});
 	} finally {
 		warmLease.release();
 	}

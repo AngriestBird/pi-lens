@@ -57,6 +57,11 @@ import {
 	rulePolicyMapFromConfig,
 } from "../clients/dispatch/rule-policy.js";
 import { compactRenderResult } from "./render-compact.js";
+import {
+	MAX_PATHS_ENTRIES,
+	readFilePath,
+	readPathsArgument,
+} from "./shared.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
 import {
 	getProjectIgnoreMatcher,
@@ -68,7 +73,6 @@ import {
 	normalizeFilePath,
 	normalizeMapKey,
 	realpathOrResolve,
-	resolveHostToolPath,
 	toProjectRelativePath,
 } from "../clients/path-utils.js";
 import { getLSPService } from "../clients/lsp/capabilities.js";
@@ -152,7 +156,6 @@ import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
 import {
 	createLspDiagnosticsTool,
 	LSP_SEVERITY_FILTERS,
-	MAX_BATCH_FILES,
 	renderBatchOutcomeLines,
 	mergeWithheld,
 	withheldCompileNote,
@@ -174,8 +177,7 @@ const MAX_DIAGNOSTICS_PER_FILE = 50;
 // only"), not a bulk-listing mechanism — a wrapper that hits this needs to
 // narrow, not paginate. Erroring (rather than silently truncating) means a
 // caller can never believe it checked files it didn't (issue's stated
-// invariant).
-const MAX_PATHS_ENTRIES = MAX_BATCH_FILES;
+// invariant). The cap itself is the shared one every tool applies (#5041).
 
 // #1623: the reason rendered for every heavyweight-analyzer lane (gitleaks,
 // trivy, govulncheck, dead-code, knip, jscpd, madge, opengrep, test-runner)
@@ -566,6 +568,10 @@ export function createLensDiagnosticsTool(
 					description: "One file or directory for source=lsp checks.",
 				}),
 			),
+			file: Type.Optional(Type.String({ description: "Alias for `path`." })),
+			filePath: Type.Optional(
+				Type.String({ description: "Alias for `path`." }),
+			),
 			concurrency: Type.Optional(
 				Type.Number({
 					description: "Source=lsp batch concurrency (maximum 16).",
@@ -647,6 +653,43 @@ export function createLensDiagnosticsTool(
 						: "delta"
 					: "workspace");
 			const cwd = ctx.cwd ?? getCwd();
+			// #5041: `path` is the canonical single-file parameter; `file` and
+			// `filePath` stay accepted so a caller written against either keeps
+			// working (#2418). A conflicting pair is refused rather than guessed at.
+			const singlePath = readFilePath(params);
+			if (singlePath.refusal) {
+				return {
+					content: [{ type: "text" as const, text: singlePath.refusal }],
+					isError: true,
+					details: {},
+				};
+			}
+			// #5041: one reader owns the `paths` entry rules (non-string, blank,
+			// empty list, cap) and the host-path spelling, on both routes below.
+			const pathsRead = readPathsArgument(params.paths, { cwd });
+			if (pathsRead.refusal) {
+				return {
+					content: [{ type: "text" as const, text: pathsRead.refusal }],
+					isError: true,
+					details: { mode: legacyMode ?? "delta", pathsError: true },
+				};
+			}
+			params = {
+				...params,
+				...(singlePath.path ? { path: singlePath.path } : {}),
+				paths: pathsRead.entries,
+			};
+			// #5041: a caller that named ONE file must not get the default scope's
+			// answer. On the cache routes the scope is built from entries, so the
+			// single `path` joins them as its own one-entry list; the `source=lsp`
+			// route returns below and keeps its file route (a directory `path` under
+			// `scope=workspace` still scans that directory, #2052).
+			const pathEntries = singlePath.path
+				? [
+						...pathsRead.entries,
+						...readPathsArgument([singlePath.path], { cwd }).entries,
+					]
+				: pathsRead.entries;
 			if (source === "lsp") {
 				const lspParams = { ...params };
 				delete lspParams.source;
@@ -731,21 +774,7 @@ export function createLensDiagnosticsTool(
 			const maxLspFiles = parsePositiveInt(params.maxLspFiles);
 			const includeGenerated = params.includeGenerated === true;
 
-			let pathsScope: PathsScope | undefined;
-			try {
-				pathsScope = resolvePathsScope(cwd, params.paths);
-			} catch (err) {
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: err instanceof Error ? err.message : String(err),
-						},
-					],
-					isError: true,
-					details: { mode, pathsError: true },
-				};
-			}
+			const pathsScope: PathsScope | undefined = resolvePathsScope(pathEntries);
 
 			// Escape aborts the agent *turn*, which fires ctx.signal (the turn-wired
 			// abort); the positional signal is the tool-call signal. A registered
@@ -1507,33 +1536,13 @@ interface PathsScope {
 }
 
 /**
- * Resolves the `paths` param into a scope predicate. Returns `undefined` when
- * `paths` was not provided (callers fall back to no restriction). Throws a
- * plain `Error` when the cap is exceeded — the caller turns that into a
- * clear tool error rather than silently truncating (a wrapper must not
- * believe it checked files it didn't).
+ * Resolves the `paths` entries into a scope predicate. Returns `undefined` when
+ * the caller sent none (callers then fall back to no restriction). The entries
+ * arrive from `readPathsArgument` (#5041): admitted, absolute and host-resolved
+ * already, so this function owns the filesystem classification only.
  */
-function resolvePathsScope(
-	cwd: string,
-	rawPaths: unknown,
-): PathsScope | undefined {
-	if (!Array.isArray(rawPaths) || rawPaths.length === 0) return undefined;
-	if (rawPaths.length > MAX_PATHS_ENTRIES) {
-		throw new Error(
-			`paths has ${rawPaths.length} entries, over the ${MAX_PATHS_ENTRIES} cap. ` +
-				"Narrow the list or omit paths to scan without a restriction.",
-		);
-	}
-	const entries = rawPaths
-		.filter(
-			(entry): entry is string =>
-				typeof entry === "string" && entry.trim().length > 0,
-		)
-		// #4576: `paths` is a host-supplied tool input like any other, so it
-		// goes through the same resolver (`~`, `file://`, `@` prefix, unicode
-		// spaces) instead of a bare `path.resolve` that pinned a literal `~`
-		// under the session cwd.
-		.map((entry) => resolveHostToolPath(entry, cwd));
+function resolvePathsScope(entries: string[]): PathsScope | undefined {
+	if (entries.length === 0) return undefined;
 
 	const missing: string[] = [];
 	const fileEntries: string[] = [];

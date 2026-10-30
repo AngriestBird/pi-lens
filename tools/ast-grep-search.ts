@@ -29,7 +29,11 @@ import {
 } from "../clients/tool-config.js";
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
-import { readAstGrepLang, resolveAstGrepPaths } from "./shared.js";
+import {
+	readAstGrepLang,
+	MAX_PATHS_ENTRIES,
+	readPathsArgument,
+} from "./shared.js";
 
 /**
  * Build the agent-facing error text, appending a remediation hint derived from
@@ -81,7 +85,6 @@ function toSearchReads(matches: AstGrepMatch[]): SearchReadLocation[] {
 // multi-file tools, while a single directory path remains a valid project scope.
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
-const MAX_PATHS = 200;
 const AST_GREP_SEARCH_TIMEOUT_MS = 30_000;
 
 /**
@@ -362,7 +365,7 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 			}),
 			paths: Type.Optional(
 				Type.Array(Type.String(), {
-					maxItems: MAX_PATHS,
+					maxItems: MAX_PATHS_ENTRIES,
 					description: "Files or directories to search.",
 				}),
 			),
@@ -556,13 +559,13 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 				const hasPattern = Boolean(pattern.trim());
 				const hasNodeKind = normalizedNodeKind.length > 0;
 				const rawPaths = params.paths;
-				if (
-					rawPaths !== undefined &&
-					(!Array.isArray(rawPaths) ||
-						rawPaths.length > MAX_PATHS ||
-						rawPaths.some((value) => typeof value !== "string"))
-				) {
-					const errorRaw = `paths must contain at most ${MAX_PATHS} string entries`;
+				// #5041: one reader owns the `paths` entry rules for every tool.
+				const pathsRead = readPathsArgument(rawPaths, {
+					cwd: ctx.cwd,
+					absent: "cwd",
+				});
+				if (pathsRead.refusal) {
+					const errorRaw = pathsRead.refusal;
 					logOutcome("error", { errorRaw });
 					return {
 						content: [{ type: "text" as const, text: `Error: ${errorRaw}` }],
@@ -740,7 +743,7 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 						details: {},
 					};
 				}
-				const searchPaths = resolveAstGrepPaths(paths, ctx.cwd);
+				const searchPaths = pathsRead.entries;
 				const PAGE_SIZE = Math.max(
 					1,
 					Math.min(
