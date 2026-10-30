@@ -1547,6 +1547,76 @@ describe.each([false, true])(
 			});
 		});
 
+		// #4617 population A through the govulncheck LANE: the section reports the
+		// call site each CVE is reachable from, so the lane hands back those files
+		// as the section's subject. A change to one of them supersedes the text.
+		it("keeps a govulncheck advisory current, bound to the call site it names", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-govulncheck-${guard}`,
+				incident:
+					"A Go CVE advisory was labelled historical on a bash-only turn",
+				issue: "#4617",
+				async run(h) {
+					const callSite = h.write(
+						"src/go/main.go",
+						"package main\n\nfunc main() {}\n",
+					);
+					h.scan("govulncheck", {
+						findings: [
+							{
+								osv: "GO-2024-1111",
+								module: "example.com/module",
+								trace: [{ filename: callSite, line: 3 }],
+							},
+						],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Go CVEs reachable from this code");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("labels a govulncheck advisory historical when its call site changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-govulncheck-older-${guard}`,
+				incident: "A call-site edit must supersede the cached Go CVE list",
+				issue: "#4617",
+				async run(h) {
+					const callSite = h.write(
+						"src/go/main.go",
+						"package main\n\nfunc main() {}\n",
+					);
+					h.scan("govulncheck", {
+						findings: [
+							{
+								osv: "GO-2024-1111",
+								module: "example.com/module",
+								trace: [{ filename: callSite, line: 3 }],
+							},
+						],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(
+								callSite,
+								"package main\n\nfunc main() { println(1) }\n",
+							);
+						},
+					});
+					expect(view.text).toContain("Go CVEs reachable from this code");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// #4617 population B: a part with no file it could be stale against. The
 		// deferred runner's crash note names no file, so the message had no stamp
 		// subject at all and read historical however fresh the failure was.
