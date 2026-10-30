@@ -71,6 +71,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			LSP_HANDSHAKE_LOG: writeLog(dir, "lsp-handshake.log", REPLAY_LOG),
 			LSP_GATE_OUTCOME: "skipped",
 			LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ""),
+			LSP_CASCADE_OUTCOME: "skipped",
+			LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 			LENS_FULL_OUTCOME: "skipped",
 			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 			FORMAT_LAYER_OUTCOME: "skipped",
@@ -108,6 +110,7 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			...ok("TOOL_LAYER"),
 			...ok("LSP_HANDSHAKE"),
 			...ok("LSP_GATE"),
+			...ok("LSP_CASCADE"),
 			...ok("LENS_FULL"),
 			...ok("FORMAT_LAYER"),
 			...ok("RESOLUTION_LAYER"),
@@ -125,6 +128,35 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 		expect(out).toContain(
 			"`characterize-lsp` / `evaluated floor` — evaluated 21, below the floor of 35",
 		);
+	});
+
+	// #1712: the live cascade layer is a gating step. A night where only it
+	// failed must file under its own name with its log, not as "(outside the
+	// tracked layers)" (the #2723 shape).
+	it("files a tracker naming the LSP cascade layer when only that step failed (#1712)", () => {
+		const dir = mkTempDir("pi-lens-tool-smoke-cascade-");
+		const ok = (name: string) => ({
+			[`${name}_OUTCOME`]: "success",
+			[`${name}_LOG`]: writeLog(dir, `${name}.log`, ""),
+		});
+		const out = runDryRun({
+			...ok("TOOL_LAYER"),
+			...ok("LSP_HANDSHAKE"),
+			...ok("LSP_GATE"),
+			...ok("LENS_FULL"),
+			...ok("FORMAT_LAYER"),
+			...ok("RESOLUTION_LAYER"),
+			...ok("EVALUATED_FLOOR"),
+			...ok("SAVE_VERDICT"),
+			LSP_CASCADE_OUTCOME: "failure",
+			LSP_CASCADE_LOG: writeLog(
+				dir,
+				"lsp-cascade.log",
+				"✗  java         jdtls                        0     src/app/B.java unconfirmed after 31 attempt(s), 61000 ms\n",
+			),
+		});
+		expect(out).toContain("action=file-or-refresh");
+		expect(out).toContain("Failing layer: **LSP cascade layer**");
 	});
 
 	// #3405/#4999 F5: the save-verdict probe is the eighth step outside
@@ -145,6 +177,7 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			...ok("TOOL_LAYER"),
 			...ok("LSP_HANDSHAKE"),
 			...ok("LSP_GATE"),
+			...ok("LSP_CASCADE"),
 			...ok("LENS_FULL"),
 			...ok("FORMAT_LAYER"),
 			...ok("RESOLUTION_LAYER"),
@@ -182,6 +215,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 				"lsp-gate.log",
 				"38 passed · 0 failed · 0 setup-failed · 0 skipped\n",
 			),
+			LSP_CASCADE_OUTCOME: "success",
+			LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 			LENS_FULL_OUTCOME: "success",
 			LENS_FULL_LOG: writeLog(
 				dir,
@@ -229,6 +264,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 				"lsp-gate.log",
 				"✗  lua          lua-language-server          0     lens_diagnostics returned 0 diagnostic(s) but 0 primary findings\n1 passed · 1 failed · 0 setup-failed · 0 skipped\n",
 			),
+			LSP_CASCADE_OUTCOME: "skipped",
+			LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 			LENS_FULL_OUTCOME: "skipped",
 			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 			FORMAT_LAYER_OUTCOME: "skipped",
@@ -265,6 +302,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 				"lsp-gate.log",
 				"1 passed · 0 failed · 0 setup-failed · 0 skipped\n",
 			),
+			LSP_CASCADE_OUTCOME: "success",
+			LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 			LENS_FULL_OUTCOME: "failure",
 			LENS_FULL_LOG: writeLog(
 				dir,
@@ -306,6 +345,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			LSP_HANDSHAKE_LOG: writeLog(dir, "lsp.log", ok),
 			LSP_GATE_OUTCOME: "success",
 			LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ok),
+			LSP_CASCADE_OUTCOME: "success",
+			LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 			LENS_FULL_OUTCOME: "success",
 			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ok),
 			FORMAT_LAYER_OUTCOME: "success",
@@ -343,6 +384,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			LSP_HANDSHAKE_LOG: writeLog(dir, "lsp.log", ""),
 			LSP_GATE_OUTCOME: "skipped",
 			LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ""),
+			LSP_CASCADE_OUTCOME: "skipped",
+			LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 			LENS_FULL_OUTCOME: "skipped",
 			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 			FORMAT_LAYER_OUTCOME: "skipped",
@@ -376,6 +419,8 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 			LSP_HANDSHAKE_LOG: writeLog(dir, "lsp.log", ""),
 			LSP_GATE_OUTCOME: "skipped",
 			LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ""),
+			LSP_CASCADE_OUTCOME: "skipped",
+			LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 			LENS_FULL_OUTCOME: "skipped",
 			LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 			FORMAT_LAYER_OUTCOME: "skipped",
@@ -398,6 +443,7 @@ describe("notify-tool-smoke-red.mjs --dry-run (#2723)", () => {
 				TOOL_LAYER_OUTCOME: undefined as unknown as string,
 				LSP_HANDSHAKE_OUTCOME: undefined as unknown as string,
 				LSP_GATE_OUTCOME: undefined as unknown as string,
+				LSP_CASCADE_OUTCOME: undefined as unknown as string,
 				LENS_FULL_OUTCOME: undefined as unknown as string,
 				FORMAT_LAYER_OUTCOME: undefined as unknown as string,
 				RESOLUTION_LAYER_OUTCOME: undefined as unknown as string,
@@ -485,6 +531,8 @@ const RED_ENV = (dir: string) => ({
 	LSP_HANDSHAKE_LOG: writeLog(dir, "lsp.log", REPLAY_LOG),
 	LSP_GATE_OUTCOME: "skipped",
 	LSP_GATE_LOG: writeLog(dir, "lsp-gate.log", ""),
+	LSP_CASCADE_OUTCOME: "skipped",
+	LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 	LENS_FULL_OUTCOME: "skipped",
 	LENS_FULL_LOG: writeLog(dir, "lens-full.log", ""),
 	FORMAT_LAYER_OUTCOME: "skipped",
@@ -516,6 +564,8 @@ const GREEN_ENV = (dir: string) => ({
 		"lsp-gate.log",
 		"38 passed · 0 failed · 0 setup-failed · 0 skipped\n",
 	),
+	LSP_CASCADE_OUTCOME: "success",
+	LSP_CASCADE_LOG: writeLog(dir, "lsp-cascade.log", ""),
 	LENS_FULL_OUTCOME: "success",
 	LENS_FULL_LOG: writeLog(
 		dir,
