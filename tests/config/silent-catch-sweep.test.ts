@@ -1336,10 +1336,12 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :110, :188, :222, :337, :387, :412
 	"tools/lens-diagnostics.ts": {
-		silent: 7,
-		identities: "0939abd4809b0410",
+		// 7 -> 6 (#5041): the `paths` cap guard's try/catch is gone, because the
+		// shared reader refuses an over-cap list before the scope is built.
+		silent: 6,
+		identities: "58466145d579efae",
 		reason: PRE_RULE,
-	}, // :254, :678, :879, :939, :1391, :1471, :2162
+	}, // :276, :980, :1040, :1495, :1555, :2269
 	"tools/lsp-diagnostics.ts": {
 		silent: 10,
 		identities: "2e5c32f96dcee285",
