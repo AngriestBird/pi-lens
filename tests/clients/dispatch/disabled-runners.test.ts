@@ -439,9 +439,84 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		const result = await dispatchForFile(ctx, fallbackGroup, registry);
 
 		expect(result.unconfirmedStatus).toContain("could not be started");
-		// The status line still names the runner's denial beside the LSP's cause.
+		// Both surfaces name the runner's denial beside the LSP's cause.
 		expect(result.unconfirmedStatus).toContain("dispatch.disabledRunners");
-		expect(result.output).not.toContain("dispatch.disabledRunners");
+		expect(result.output).toContain("failed to run");
+		expect(result.output).toContain("dispatch.disabledRunners");
+	});
+
+	it("still names a sibling runner's failure when another runner is denied", async () => {
+		writeProject({ dispatch: { disabledRunners: ["lsp"] } });
+		const csharp = path.join(projectDir, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		const registry = new RunnerRegistry();
+		registry.register({
+			...countingRunner("lsp", SUCCEEDED).runner,
+			appliesTo: ["csharp"],
+		});
+		// A tool that broke: no verdict, no stated skip reason.
+		registry.register({
+			...countingRunner("dotnet-build", {
+				status: "failed",
+				diagnostics: [],
+				semantic: "none",
+			}).runner,
+			appliesTo: ["csharp"],
+		});
+		const ctx = createDispatchContext(
+			csharp,
+			projectDir,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+
+		clearCoverageNoticeState();
+		const result = await dispatchForFile(ctx, fallbackGroup, registry);
+
+		expect(result.output).toContain("failed to run");
+		expect(result.output).toContain("dispatch.disabledRunners");
+		expect(result.output).not.toContain("so no runner checks these files");
+		expect(result.unconfirmedStatus).toContain("failed to run");
+		expect(result.unconfirmedStatus).toContain("dispatch.disabledRunners");
+	});
+
+	it("still names a sibling runner's failure when lsp.disabledServers turned the primary off", async () => {
+		const csharp = path.join(projectDir, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		const registry = new RunnerRegistry();
+		registry.register({
+			...countingRunner("lsp", {
+				...SKIPPED,
+				primaryUnavailableCause: "disabled",
+				disabledPrimaryServerIds: ["csharp"],
+			}).runner,
+			appliesTo: ["csharp"],
+		});
+		registry.register({
+			...countingRunner("dotnet-build", {
+				status: "failed",
+				diagnostics: [],
+				semantic: "none",
+			}).runner,
+			appliesTo: ["csharp"],
+		});
+		const ctx = createDispatchContext(
+			csharp,
+			projectDir,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+
+		clearCoverageNoticeState();
+		const result = await dispatchForFile(ctx, fallbackGroup, registry);
+
+		expect(result.output).toContain("failed to run");
+		expect(result.output).not.toContain(
+			"so no language server checks these files",
+		);
+		expect(result.unconfirmedStatus).toContain("no language server answered");
 	});
 
 	it("names both keys when lsp.disabledServers and dispatch.disabledRunners deny the file's checkers", async () => {

@@ -77,12 +77,13 @@ import { laneCopyStandsFor, semanticRank } from "./lane-copies.js";
 import { normalizeRuleId } from "./rule-id-normalize.js";
 import {
 	applyRulePolicy,
-	resolveDispatchPolicyConfig,
-	rulePolicyMapFromConfig,
+	projectRulePolicy,
+	resolveDispatchPolicyConfigForFile,
+	rulePolicyMapFromResolution,
 } from "./rule-policy.js";
 import {
 	DISABLED_BY_CONFIG_SKIP_REASON,
-	disabledRunnerIdsForFile,
+	disabledRunnerIdsFor,
 } from "./disabled-runners.js";
 import { getToolProfile } from "./tool-profile.js";
 import { classifyPreExisting, preEditSeedFactKey } from "./pre-edit-seed.js";
@@ -399,15 +400,17 @@ export function createDispatchContext(
 				})
 			: undefined;
 	const projectConfig = loadPiLensProjectConfig(normalizedCwd);
-	const rootConfig = resolveDispatchPolicyConfig(normalizedProjectRoot);
-	const rulePolicy = rulePolicyMapFromConfig(
-		rootConfig.value.rules as Record<string, unknown> | undefined,
-	);
-	const disabledRunnerIds = disabledRunnerIdsForFile(
+	// One resolution from the file's config owner, read by both policy keys,
+	// so a nested `.pi-lens.json` governs its own files' rules and denials.
+	const policyConfig = resolveDispatchPolicyConfigForFile(
 		absoluteFilePath,
 		normalizedProjectRoot,
-		rootConfig,
 	);
+	const rulePolicy = rulePolicyMapFromResolution(
+		policyConfig,
+		normalizedProjectRoot,
+	);
+	const disabledRunnerIds = disabledRunnerIdsFor(policyConfig);
 
 	return {
 		filePath: normalizedFilePath,
@@ -885,16 +888,30 @@ function buildCoverageNotice(
 		.filter((r) => r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON)
 		.map((r) => r.runnerId);
 	const deniedNote = `${deniedRunnerIds.join(", ")} disabled in config by dispatch.disabledRunners`;
+	// A row the operator switched off: a runner denial, or a primary LSP
+	// `lsp.disabledServers` turned off (with or without its fallback). The
+	// config-only wording holds only when every row is one; any other row is a
+	// tool that is missing, timed out, or failed, and the notice must still say
+	// so rather than let the denial hide it.
+	const onlySwitchedOff = relevant.every(
+		(r) =>
+			r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON ||
+			r.primaryUnavailableCause === "disabled" ||
+			r.primaryUnavailableCause === "disabledFallback",
+	);
 	const unconfirmedStatus = cause
 		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})${deniedRunnerIds.length > 0 ? `; ${deniedNote}` : ""}`
 		: deniedRunnerIds.length > 0
-			? `not checked (${deniedNote})`
+			? onlySwitchedOff
+				? `not checked (${deniedNote})`
+				: `not fully checked (a language tool is missing, timed out, or failed to run; ${deniedNote})`
 			: "not fully checked (a language tool is missing, timed out, or failed to run)";
 
 	if (
-		cause === "disabled" ||
-		cause === "disabledFallback" ||
-		(cause === undefined && deniedRunnerIds.length > 0)
+		onlySwitchedOff &&
+		(cause === "disabled" ||
+			cause === "disabledFallback" ||
+			(cause === undefined && deniedRunnerIds.length > 0))
 	) {
 		// #4403: the operator turned the primary off on purpose. That is not a
 		// tool that is missing or failed, and it holds for every file the
@@ -942,7 +959,7 @@ function buildCoverageNotice(
 	return {
 		notice: {
 			id: `coverage-unavailable:${ctx.kind}:${path.basename(ctx.filePath)}`,
-			message: `Pi-lens ${ctx.kind} analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).`,
+			message: `Pi-lens ${ctx.kind} analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).${deniedRunnerIds.length > 0 ? ` Runner (${deniedRunnerIds.join(", ")}) is also disabled in config by dispatch.disabledRunners.` : ""}`,
 			filePath: ctx.filePath,
 			severity: "warning",
 			semantic: "warning",
@@ -1765,20 +1782,21 @@ export async function dispatchForFile(
 		ctx.facts.getFileFact<string>(ctx.filePath, "file.content") ?? "";
 	// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`).
 	//
-	// Resolved from `ctx.projectRoot` (falling back to `ctx.cwd`), NOT
-	// `ctx.projectConfig` — `ctx.projectConfig` is loaded from the nested
-	// LANGUAGE root (`resolveLanguageRootForFile`), so in a monorepo where a
-	// package directory has its own `.pi-lens.json`, `discoverPiLensProjectConfig`'s
-	// upward walk stops there and never sees a repo-root policy.
-	// `lens_diagnostics` loads its policy map from `runtime.projectRoot`; using
-	// the same root here keeps the two surfaces in agreement. `ctx.projectConfig`
-	// itself is untouched — thresholds and mutation flags keep their existing
-	// language-root resolution.
+	// Resolved from the file's config owner under `ctx.projectRoot` (falling
+	// back to `ctx.cwd`), NOT `ctx.projectConfig` — `ctx.projectConfig` is
+	// loaded from the nested LANGUAGE root (`resolveLanguageRootForFile`), and
+	// `discoverPiLensProjectConfig`'s upward walk stops at the first config, so
+	// it never sees a repo-root policy. The owner's resolution layers the
+	// global tier, the repo root's file, and each nested file between.
+	// `lens_diagnostics` reads the same owner per file (`loadProjectRulePolicy`),
+	// which keeps the two surfaces in agreement. `ctx.projectConfig` itself is
+	// untouched — thresholds and mutation flags keep their existing
+	// language-root resolution. A context `createDispatchContext` built carries
+	// the map (possibly empty); one built elsewhere resolves it here.
 	const rulePolicy =
-		ctx.rulePolicy ??
-		rulePolicyMapFromConfig(
-			loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
-		);
+		"rulePolicy" in ctx
+			? ctx.rulePolicy
+			: projectRulePolicy(ctx.projectRoot ?? ctx.cwd).forFile(ctx.filePath);
 	// The output-only filter pipeline: LSP/docker overlap suppression + inline
 	// `pi-lens-ignore` + agent/user dispositions + project rule policy. Applied
 	// AFTER dedupe so the pi renderer, widget, and delta all see one filtered

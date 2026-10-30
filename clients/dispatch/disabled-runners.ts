@@ -7,7 +7,9 @@
  * tier's members: `~/.pi-lens/config.json`, the project `.pi-lens.json`, and
  * each nested one. A nearer tier can add a runner and can never re-enable one a
  * farther tier denied, which is what lets a user switch a runner off once for
- * every project without a repository lifting the denial.
+ * every project without a repository lifting the denial. The dispatcher hands
+ * it the file's config-owner resolution (`resolveDispatchPolicyConfigForFile`),
+ * the same one `rules` reads, so a nested file governs only its own files.
  *
  * SEMANTICS. A disabled runner never runs: the dispatcher skips it with
  * {@link DISABLED_BY_CONFIG_SKIP_REASON} before its `when` or `run`, so its tool
@@ -23,7 +25,6 @@
  * same fail direction `lsp.servers.<id>.covers` takes.
  */
 
-import { resolveSessionConfigRoot } from "../analysis-root.js";
 import {
 	type PiLensConfigResolution,
 	reportPiLensConfigRecords,
@@ -38,7 +39,6 @@ import {
 	isKnownRunnerId,
 	runnerIdentityPopulated,
 } from "./known-runner-ids.js";
-import { resolveDispatchPolicyConfig } from "./rule-policy.js";
 
 /** The closed skip reason a disabled runner reports (`RUNNER_SKIP_REASONS`). */
 export const DISABLED_BY_CONFIG_SKIP_REASON = "disabled-by-config" as const;
@@ -141,22 +141,4 @@ export function disabledRunnerIdsFor(
 	return resolved.runners.length === 0
 		? undefined
 		: new Set(resolved.runners.map((runner) => runner.id));
-}
-
-/**
- * The denied ids for one file: read from the file's config owner, so a nested
- * `.pi-lens.json` governs its own files (`rules` stays on the workspace root).
- * `rootConfig` is the caller's resolution of `projectRoot`, reused when the
- * owner is the root itself.
- */
-export function disabledRunnerIdsForFile(
-	filePath: string,
-	projectRoot: string,
-	rootConfig: PiLensConfigResolution,
-): ReadonlySet<string> | undefined {
-	const owner =
-		resolveSessionConfigRoot(filePath, projectRoot).register ?? projectRoot;
-	return disabledRunnerIdsFor(
-		owner === projectRoot ? rootConfig : resolveDispatchPolicyConfig(owner),
-	);
 }

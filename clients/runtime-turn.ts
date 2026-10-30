@@ -1083,7 +1083,7 @@ function formatWriteOrdinal(n: number): string {
  * record. The probe answers per project (#4701 F1) — a `defer` recorded in
  * another project cannot turn this pass on.
  * That second condition is load-bearing on cost, not cosmetic —
- * `applyInlineBlockerPolicy` pays `loadProjectRulePolicyMap` per record
+ * `applyInlineBlockerPolicy` pays `loadProjectRulePolicy` per record
  * (measured 1.39 ms p50, the same price an edit turn already pays for this
  * population), so without it a blocked but unmarked session would re-read every
  * live blocker's file on every reply.
