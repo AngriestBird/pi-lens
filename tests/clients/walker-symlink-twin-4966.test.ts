@@ -31,7 +31,10 @@
  * test that pins it. A new walker file reds until it is registered. The
  * registry is file-granular: a file with many climbs (`clients/lsp/server.ts`
  * 7, `clients/tool-policy.ts` 44 seam calls) runs one representative, which
- * is why #4966 stays open (Refs). The hand-rolled loops that bypass
+ * is why #4966 stays open (Refs). The census misses a seam climber named
+ * through a computed member (`pu["walkUpDirs"]`) or consumed through an
+ * in-file re-export; live population 0 (#5037 r3 F9), and the redesign stays
+ * on #4966. The hand-rolled loops that bypass
  * the seam are the other half: `tests/config/path-identity-sweep.test.ts`
  * (`hand-rolled-upward-walk`).
  */

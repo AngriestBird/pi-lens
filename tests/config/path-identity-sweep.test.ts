@@ -47,7 +47,12 @@
  *   a climb through `new URL("..", base)`, or a parent call hidden inside a
  *   helper arrow bound to a name (`const up = (p) => path.dirname(p)`, called
  *   in the loop; the loop calls `up`, and the `dirname` sits in another
- *   function). Live population 0 for each. The twin suite
+ *   function), a recursive climb whose parent call is bound before the
+ *   recursion (`const parent = path.dirname(dir); return climb(parent)`), a
+ *   `dirname` reached through `.bind` or an in-file re-export
+ *   (`export { dirname as up }`). Live population 0 for each (#5037 r3 F9).
+ *   Each review round closed one spelling and found the next, so the redesign
+ *   (a call-graph population instead of named parents) stays on #4966. The twin suite
  *   (`tests/clients/walker-symlink-twin-4966.test.ts`) runs the registered
  *   walkers from a symlink twin instead of reading their spelling.
  * - a `walkUpDirs(…, { spelling: true })` call. The option is the seam's own
