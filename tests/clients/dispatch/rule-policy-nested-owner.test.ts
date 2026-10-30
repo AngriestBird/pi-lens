@@ -230,6 +230,7 @@ describe("rules.<id> — a project policy reads each file's own owner", () => {
 	it.each([
 		["!docs", "a leading bang"],
 		["{pkg,src}", "braces"],
+		["#pkg", "a leading hash"],
 	])(
 		"anchors a nested ignorePaths glob under a config directory named %s (%s)",
 		(name) => {
