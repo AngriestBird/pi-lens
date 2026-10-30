@@ -182,7 +182,7 @@ describe("#4483 witness: --no-delta, where every finding is reported anyway", ()
 		const { out, rows } = await editOnce("delta", false);
 		expect(out).not.toContain("🔴 STOP");
 		expect(out).toMatch(
-			/Pre-existing: 1 linter error .*\(L2\); not blocking\./,
+			/Pre-existing: 1 linter error .*\(L2 [^)]*\); not blocking\./,
 		);
 		// The capture read the bytes before the edit; the record says so.
 		expect(boundary.sh.runs[0]).toBe(OLD_ERROR);

@@ -570,6 +570,12 @@ describe("the language-server verdict the clean advisory reads (#4734 r3)", () =
 		/** Dispatch this many times on the push surface; the last result counts. */
 		pushes?: number;
 		expected: true | undefined;
+		/**
+		 * #5008 review r2 (F1): the status line the latched partial notice still
+		 * owes. The latch suppresses the NOTICE, not the claim, so this row no
+		 * longer reaches the pipeline as the clean-line shape.
+		 */
+		expectedUnconfirmed?: string;
 	};
 	const succeeded = async (): Promise<RunnerResult> => ({
 		status: "succeeded",
@@ -628,6 +634,29 @@ describe("the language-server verdict the clean advisory reads (#4734 r3)", () =
 			groups: [{ mode: "all", runnerIds: ["lsp"] }],
 			pushes: 2,
 			expected: undefined,
+			expectedUnconfirmed: "opengrep silent (diagnostics are incomplete)",
+		},
+		{
+			// Review r3 (F7): the status sentence's DEFERRED half, the sibling of
+			// row 11. Recurrence: emptying `statusParts.push` for the deferred set
+			// survived every suite, so a #2810 late-delivery scanner's latched
+			// notice rendered `unconfirmed —  (diagnostics are incomplete)` — the
+			// same unnamed-scanner defect row 11 covers, one scanner class over.
+			label: "row 11b: a deferred server's partial notice, latched",
+			file: "test.ts",
+			runners: {
+				lsp: async () => ({
+					status: "deferred",
+					diagnostics: [],
+					semantic: "none",
+					unconfirmedServerIds: ["typos"],
+					deferredServerIds: ["typos"],
+				}),
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp"] }],
+			pushes: 2,
+			expected: undefined,
+			expectedUnconfirmed: "typos deferred (diagnostics are incomplete)",
 		},
 		{
 			label: "row 12: the lsp runner is deferred",
@@ -686,14 +715,16 @@ describe("the language-server verdict the clean advisory reads (#4734 r3)", () =
 		}
 
 		// Every row but 14 reaches the pipeline as the clean-line shape: no text,
-		// no `unconfirmedStatus`. Only the verdict tells them apart.
+		// no `unconfirmedStatus`. Only the verdict tells them apart. Row 11 is the
+		// exception since review r2: its notice is latched away on the second
+		// push, and the write must still name the silent scanner.
 		expect({
 			output: result.output,
 			unconfirmedStatus: result.unconfirmedStatus,
 			primaryLspChecked: result.primaryLspChecked,
 		}).toEqual({
 			output: "",
-			unconfirmedStatus: undefined,
+			unconfirmedStatus: row.expectedUnconfirmed,
 			primaryLspChecked: row.expected,
 		});
 	});

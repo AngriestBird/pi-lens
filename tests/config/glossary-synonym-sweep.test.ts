@@ -636,10 +636,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/govulncheck-client.ts": 1,
 		"clients/gradle-ktfmt-style.ts": 1,
 		"clients/inline-blocker-dispositions.ts": 1,
-		// 2 (#3814 r2): the pipeline's own-file line filter and its number filter,
-		// moved verbatim from `clients/pipeline.ts` (6 -> 4) so the collect-later
-		// merge calls them instead of re-deriving them; no new filter.
-		"clients/inline-blocker-fields.ts": 2,
+		// `clients/inline-blocker-fields.ts`'s row is GONE (#5008 r3): the 2
+		// (#3814 r2) pinned `.filter(` calls — the own-file line filter and its
+		// number filter — became one classification loop in
+		// `inlineBlockerPlacement`, which returns the places AND the counts of what
+		// it could not place. No delivery filter left the tree; the file has no
+		// `filter` use left to pin.
 		"clients/installer/index.ts": 4,
 		"clients/installer/managed-tool-refresh.ts": 2,
 		"clients/instance-reaper.ts": 3,
@@ -1400,7 +1402,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-query-loader.ts": 18,
 		"clients/tree-sitter-shared.ts": 2,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
-		"clients/trivy-client.ts": 4,
+		// 4 -> 5 (#4617 review F1): a rendered trivy report cites its own rows'
+		// `target` resolved against the scan root, one more `path` operation, same
+		// sense as the four above (a filesystem path operation).
+		"clients/trivy-client.ts": 5,
 		"clients/warm-attach.ts": 3,
 		"clients/widget-state.ts": 7,
 		"clients/word-index-logger.ts": 2,
@@ -1454,7 +1459,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 	},
 	record: {
 		"clients/actionable-warnings.ts": 14,
-		"clients/advisory-provenance.ts": 8,
+		// 8 -> 9 (#4617): the well-formed check reads the new `filelessParts`
+		// flag on the record it validates, so one more `record.` use exists.
+		"clients/advisory-provenance.ts": 9,
 		"clients/cache-observability.ts": 2,
 		"clients/config-core/merge.ts": 3,
 		"clients/config-core/normalize.ts": 12,
@@ -1604,7 +1611,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/htmlhint.ts": 3,
 		"clients/dispatch/runners/javac.ts": 4,
 		"clients/dispatch/runners/ktlint.ts": 2,
-		"clients/dispatch/runners/lsp.ts": 10,
+		// 10 -> 11 (#5008 review r2): the all-clear arm's stale-bound answer
+		// returns `status: "skipped"` instead of `succeeded` — the same
+		// `RunnerResult.status` member sense as every other row here.
+		"clients/dispatch/runners/lsp.ts": 11,
 		"clients/dispatch/runners/markdownlint.ts": 4,
 		"clients/dispatch/runners/mypy.ts": 2,
 		"clients/dispatch/runners/oxlint.ts": 11,
@@ -1829,7 +1839,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/pipeline.ts": 6,
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/runtime-agent-end.ts": 6,
-		"clients/runtime-turn.ts": 16,
+		// 16 -> 18 (#4617): the code-quality advisory cites the `filePath` of each
+		// kept `warning` the report was built from, so the loop variable is read
+		// twice more.
+		"clients/runtime-turn.ts": 18,
 		"clients/secret-findings.ts": 3,
 		"clients/widget-state.ts": 1,
 		"tools/ast-grep-search.ts": 6,

@@ -46,7 +46,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadPiLensProjectConfig } from "./project-lens-config.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
-import { toPosix } from "./path-utils.js";
+import { isUnderDir, normalizeMapKey, toPosix } from "./path-utils.js";
 import {
 	getScratchTreeGlobPatterns,
 	nestedWorktreeOffsets,
@@ -157,14 +157,69 @@ const DEPENDENCY_MANIFESTS = [
  * Exported for tests and gate-before-construct callers.
  */
 export function hasAnyDependencyManifest(cwd: string): boolean {
+	return existingDependencyManifests(cwd).length > 0;
+}
+
+/**
+ * #4617: the manifests a `trivy fs` pass at `cwd` reads, as absolute paths —
+ * the DEPENDENCY SURFACE probe (`hasAnyDependencyManifest`) and, at turn end,
+ * the citation fallback for a report whose rows name no target.
+ *
+ * These are the manifests at `cwd` only, which is narrower than the scan: the
+ * walk reads nested manifests too, so a rendered row cites its own `Target`
+ * through `trivyEvidenceFiles` (below) and this list answers only when no
+ * shown row cites one. The one place the manifest list is turned into paths, so
+ * the detection gate and the fallback cannot disagree about which files sit at
+ * the root.
+ */
+export function existingDependencyManifests(cwd: string): string[] {
+	const found: string[] = [];
 	for (const manifest of DEPENDENCY_MANIFESTS) {
 		try {
-			if (fs.existsSync(path.join(cwd, manifest))) return true;
+			const candidate = path.join(cwd, manifest);
+			if (fs.existsSync(candidate)) found.push(candidate);
 		} catch {
 			// non-fatal — keep probing the remaining manifests
 		}
 	}
-	return false;
+	return found;
+}
+
+/**
+ * #4617 review F1: the declarations one rendered trivy report was read from, as
+ * absolute paths — each row's target (a result's `Target`, or a license row's
+ * `FilePath`, which falls back to its result's `Target`) resolved against the
+ * scan root, deduped.
+ *
+ * `trivy fs` walks the whole tree, so the root manifests alone under-covered
+ * the scan: a monorepo package's own lockfile could move on and the CVE row
+ * still read current. A row that names no target, or one the scan root does
+ * not contain (a `..` or an absolute path outside it, review V3), contributes
+ * nothing, and a report whose rows all contribute nothing falls back to
+ * `existingDependencyManifests`
+ * (the same list the opt-in gate probes) so the tier keeps a subject — an
+ * uncited part fails the provenance stamp closed, which would label a live
+ * report historical.
+ *
+ * Bounded by the caller: it is handed the rows the report SHOWS, so a scan with
+ * hundreds of CVE rows never pushes the stamp past its file cap.
+ */
+export function trivyEvidenceFiles(
+	scanRoot: string,
+	targets: readonly (string | undefined)[],
+): string[] {
+	const files = new Set<string>();
+	for (const target of targets) {
+		if (target === undefined || target.trim() === "") continue;
+		const resolved = path.resolve(scanRoot, target);
+		// #4617 review V3: a declaration outside the scan root is not one this
+		// scan read, so it never decides the label.
+		if (!isUnderDir(resolved, scanRoot)) continue;
+		// The set is a map key: two spellings of one lockfile must collapse to one
+		// subject, and the stamp keys by the same derivation (`advisoryPathKey`).
+		files.add(normalizeMapKey(resolved));
+	}
+	return files.size > 0 ? [...files] : existingDependencyManifests(scanRoot);
 }
 
 /**
