@@ -470,6 +470,10 @@ jobs:
           echo "jdtls launcher probe: exit $?"
           head -c 3000 "$RUNNER_TEMP/pi-lens-jdtls-probe.out"
           command -v python3 java || true
+          cat "$dest"/configuration/*.log 2>/dev/null | head -c 4000
+          echo "jdtls launcher probe 2 (no -data, as the lane launches it):"
+          (cd tests/fixtures/lsp-cascade/java && timeout 30 "$dest/bin/jdtls" </dev/null 2>&1 | head -c 2000; echo "exit ${PIPESTATUS[0]}")
+          cat "$dest"/configuration/*.log 2>/dev/null | head -c 4000
 
       # Cascade layer (#1712): the handshake proves initialize and the clean gate
       # proves a finding on the file itself; neither proves the path an agent's
