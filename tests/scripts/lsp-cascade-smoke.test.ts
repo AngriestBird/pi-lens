@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	CASCADE_FIXTURES,
+	CASCADE_RETRY_INTERVAL_MS,
 	type CascadeFixture,
 	type CascadeMeasurement,
 	type CascadeRunLike,
@@ -59,6 +60,20 @@ describe("classifyCascadeRun (#1712)", () => {
 			state: "conclusive",
 			neighbours: { "src/b.ts": "findings", "src/c.ts": "findings" },
 			detail: "all neighbours concluded",
+		});
+	});
+
+	it("reads a skip reason as a cascade that never asked, even with every neighbour observed", () => {
+		// Recurrence: #5021 review F3. computeCascadeForFile can return
+		// skipReason "indeterminate" beside observedNeighborPaths (a graph that
+		// failed to build after neighbours were selected); the observed paths must
+		// not turn that into a conclusive run.
+		expect(
+			classifyCascadeRun(liveRun({ skipReason: "indeterminate" }), fx, WS),
+		).toMatchObject({
+			state: "inconclusive",
+			skipReason: "indeterminate",
+			detail: "cascade skipped: indeterminate",
 		});
 	});
 
@@ -131,7 +146,13 @@ describe("cascadeRow (#1712)", () => {
 	const concluded = (
 		state: "conclusive" | "inconclusive" | "wrong-verdict",
 		detail = "x",
-	) => ({ state, detail, neighbours: {} });
+		skipReason?: string,
+	) => ({
+		state,
+		detail,
+		neighbours: {},
+		...(skipReason ? { skipReason } : {}),
+	});
 	const m = (over: Partial<CascadeMeasurement> = {}): CascadeMeasurement => ({
 		answered: true,
 		warmMs: 10,
@@ -179,14 +200,60 @@ describe("cascadeRow (#1712)", () => {
 	});
 
 	it("passes a declared-inconclusive run while it stays inconclusive", () => {
-		const declared = { ...fx, expectInconclusive: "server never pushes" };
+		const declared = {
+			...fx,
+			expectInconclusive: "server never pushes",
+			expectSkipReason: "non_code",
+		};
 		const row = cascadeRow(
 			declared,
-			m({ concluded: concluded("inconclusive", "src/c.ts unconfirmed") }),
+			m({
+				concluded: concluded(
+					"inconclusive",
+					"cascade skipped: non_code",
+					"non_code",
+				),
+			}),
 		);
 		expect(row.state).toBe("pass");
 		expect(row.detail).toContain("server never pushes");
 	});
+
+	it.each([
+		[
+			"another skip reason",
+			concluded(
+				"inconclusive",
+				"cascade skipped: indeterminate",
+				"indeterminate",
+			),
+			"skip indeterminate",
+		],
+		[
+			"an unconfirmed neighbour",
+			concluded("inconclusive", "src/c.ts unconfirmed"),
+			"src/c.ts unconfirmed",
+		],
+	])(
+		"reds a declared-inconclusive run that reports %s, not the declared cause",
+		(_name, outcome, observed) => {
+			// Recurrence: #5021 review F4, a declaration that names a cause (java is
+			// not in CASCADE_GRAPH_KINDS, so the run skips with non_code) must not
+			// paint a degraded review graph (indeterminate) or a server that stopped
+			// answering green with the declared reason: the #1023 silent all-clear.
+			const row = cascadeRow(
+				{
+					...fx,
+					expectInconclusive: "no graph for it",
+					expectSkipReason: "non_code",
+				},
+				m({ concluded: outcome }),
+			);
+			expect(row.state).toBe("fail");
+			expect(row.detail).toContain(observed);
+			expect(row.detail).toContain("skips with non_code");
+		},
+	);
 
 	it("reds a declared-inconclusive run that concluded (a stale declaration)", () => {
 		// Recurrence: an expected-inconclusive declaration that outlives the
@@ -323,10 +390,14 @@ describe("cascade fixtures (#1712)", () => {
 		}
 	});
 
-	it("declares no expected-inconclusive server without a reason", () => {
+	it("declares no expected-inconclusive server without a reason and a skip reason", () => {
 		for (const f of CASCADE_FIXTURES)
-			if ("expectInconclusive" in f)
+			if ("expectInconclusive" in f) {
 				expect(String(f.expectInconclusive).length).toBeGreaterThan(10);
+				expect(f.expectSkipReason, `${f.lang} names its skip reason`).toBe(
+					"non_code",
+				);
+			}
 	});
 });
 
@@ -356,6 +427,7 @@ describe("runLspCascade (#1712)", () => {
 		census?: string;
 		answers?: boolean;
 		launchVariant?: string;
+		minPass?: number;
 		run: (workspace: string, attempt: number) => CascadeRunLike;
 	}) {
 		const base = CASCADE_FIXTURES[0];
@@ -415,6 +487,7 @@ describe("runLspCascade (#1712)", () => {
 			install: false,
 			verbose: false,
 			timesOut,
+			minPass: opts.minPass ?? null,
 			deps,
 		});
 		const times = fs.existsSync(timesOut)
@@ -540,6 +613,63 @@ describe("runLspCascade (#1712)", () => {
 			if (savedVar === undefined) delete process.env[fixture.provisionedBy];
 			else process.env[fixture.provisionedBy] = savedVar;
 		}
+	});
+
+	it("asks the cascade again after a first unconfirmed answer and passes when the retry concludes", async () => {
+		// Recurrence: #5021 review F3. rust-analyzer's first cascade call returns
+		// in 62 ms and its neighbours conclude at 2887 ms (the committed table), so
+		// a lane collapsed to one attempt reds most rust nights. Only setTimeout
+		// is faked: the retry sleep resolves when the test advances it, and the
+		// deadline clock stays real and far away.
+		vi.useFakeTimers({ toFake: ["setTimeout"] });
+		try {
+			const lane = runLane({
+				census: "pass",
+				fixture: { conclusiveDeadlineMs: 60_000, warmDeadlineMs: 60_000 },
+				run: (workspace, attempt) =>
+					attempt === 1
+						? liveRun({
+								observedNeighborPaths: [path.join(workspace, "src/b.ts")],
+								unconfirmed: {
+									servers: [{ paths: [path.join(workspace, "src/c.ts")] }],
+								},
+							})
+						: concludes(workspace),
+			});
+			let settled = false;
+			void lane.finally(() => {
+				settled = true;
+			});
+			while (!settled)
+				await vi.advanceTimersByTimeAsync(CASCADE_RETRY_INTERVAL_MS);
+			const { failures, times, deps } = await lane;
+			expect(failures).toBe(0);
+			expect(deps.computeCascadeForFile).toHaveBeenCalledTimes(2);
+			expect(times.rows[0]).toMatchObject({
+				state: "pass",
+				attempts: 2,
+				timeToConclusiveMs: expect.any(Number),
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("reds a lane that passed fewer servers than its floor, and tolerates one unavailable server above it", async () => {
+		// Recurrence: #5021 review F2. A floor equal to the fixture population
+		// reds one unavailable server as "installs nothing"; a floor of zero lets
+		// an all-unavailable night read green. One passing server against a floor
+		// of two is red, against a floor of one it is not.
+		const breached = await runLane({
+			census: "pass",
+			minPass: 2,
+			run: concludes,
+		});
+		// The row itself passed; the one failure is the floor breach.
+		expect(breached.output).toContain("✓  typescript7");
+		expect(breached.failures).toBe(1);
+		const held = await runLane({ census: "pass", minPass: 1, run: concludes });
+		expect(held.failures).toBe(0);
 	});
 
 	it("reds a silent fallback to the classic server", async () => {

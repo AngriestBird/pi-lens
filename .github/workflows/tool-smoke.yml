@@ -459,8 +459,15 @@ jobs:
           distribution: temurin
           java-version: '25'
           set-default: false
+      # A failed download or digest check must not skip the gating layers that
+      # follow (a step without `if:` is skipped after a failed one): the output
+      # `path` is written only after the archive is verified and unpacked, so a
+      # failure leaves it empty, and the cascade step reads java as not
+      # provisioned here (a warning row) while the other three servers still
+      # prove the lane (#5021 review, CodeRabbit).
       - name: Install jdtls 1.63.0 for the cascade layer
         id: jdtls
+        continue-on-error: true
         env:
           JAVA_HOME: ${{ steps.java25.outputs.path }}
         run: |
@@ -508,7 +515,7 @@ jobs:
           JAVA_HOME: ${{ steps.java25.outputs.path }}
         run: |
           set -o pipefail
-          node scripts/smoke-tools.mjs --lsp-cascade --install --verbose --min-pass=4 --times-out="$RUNNER_TEMP/tool-smoke-lsp-cascade-times.json" 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-cascade.log"
+          node scripts/smoke-tools.mjs --lsp-cascade --install --verbose --min-pass=3 --times-out="$RUNNER_TEMP/tool-smoke-lsp-cascade-times.json" 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-cascade.log"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

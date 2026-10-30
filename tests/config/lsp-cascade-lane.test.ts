@@ -69,6 +69,17 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 			// JDK 21 (its bundles require JavaSE 25), so the java row never
 			// answered. The JDK it needs is a second install that leaves the job
 			// default alone, and its path reaches both jdtls steps and no other.
+			// Recurrence: #5021 review (CodeRabbit), a failed eclipse.org download
+			// failed the step and skipped every later gating layer. The install is
+			// best-effort, and its output path is written only after the digest
+			// check and the unpack, so a failure reads as "not provisioned".
+			expect(install?.["continue-on-error"]).toBe(true);
+			const run = install?.run ?? "";
+			expect(run.indexOf("sha256sum --check")).toBeGreaterThan(-1);
+			expect(run.indexOf('echo "path=')).toBeGreaterThan(
+				run.indexOf("sha256sum --check"),
+			);
+			expect(run.indexOf('echo "path=')).toBeGreaterThan(run.indexOf("tar -x"));
 			const jdk = steps.find((s) => s.id === "java25");
 			expect(at("java25")).toBeLessThan(at("jdtls"));
 			expect(jdk?.with?.["java-version"]).toBe("25");
@@ -85,9 +96,14 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 		expect(cascade.run).toMatch(/^\s*set -o pipefail\s*$/m);
 	});
 
-	it("floors the pass count so an all-unavailable night cannot read green", () => {
+	it("floors the pass count so an all-unavailable night cannot read green, below the population", () => {
 		// Recurrence: #4514, a layer that evaluated nothing read green for days.
-		expect(cascade.run).toMatch(/--min-pass=[1-9]\d*\b/);
+		// And #5021 review F2: a floor equal to the fixture population (4 of 4)
+		// reds one unavailable server with "installs nothing", though the step
+		// comment promises a warning for a server that never handshook.
+		const floor = Number(/--min-pass=(\d+)\b/.exec(cascade.run ?? "")?.[1]);
+		expect(floor).toBeGreaterThanOrEqual(1);
+		expect(floor).toBeLessThan(CASCADE_FIXTURES.length);
 	});
 
 	it("uploads the file the lane writes as its time-to-conclusive telemetry", () => {

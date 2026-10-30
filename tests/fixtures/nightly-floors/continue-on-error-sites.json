@@ -266,6 +266,10 @@
 		".github/workflows/tool-smoke.yml#tool-smoke#Install JDK 25 for the cascade layer's jdtls": {
 			"status": "no-floor",
 			"reason": "JDK 25 install for the jdtls cascade row, not a producer: an absent JDK leaves JAVA_HOME empty, jdtls 1.63.0 cannot resolve its bundles on the job's JDK 21, and the \"LSP cascade layer\" step in the same job reds on the java row (a provisioned server that never answers), so an install that silently did nothing cannot read green."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#Install jdtls 1.63.0 for the cascade layer": {
+			"status": "no-floor",
+			"reason": "jdtls install for the cascade row, not a producer: a failed download or digest check leaves the step output path empty, the \"LSP cascade layer\" step in the same job reads java as not provisioned (a warning row), and its --min-pass floor of 3 of 4 still reds the night when the other servers do not prove the lane, so an install that silently did nothing cannot read green."
 		}
 	}
 }

@@ -16,6 +16,8 @@ export interface CascadeFixture {
 	expectFindings?: string;
 	/** Known not to conclude in the deadline, with the reason. */
 	expectInconclusive?: string;
+	/** The skip reason the run must report for `expectInconclusive` to hold. */
+	expectSkipReason?: string;
 	/** Env var the workflow sets when it provisioned this server itself. */
 	provisionedBy?: string;
 	warmDeadlineMs?: number;
@@ -35,6 +37,8 @@ export interface CascadeRunLike {
 export interface CascadeClassification {
 	state: "conclusive" | "wrong-verdict" | "inconclusive";
 	neighbours: Record<string, NeighbourVerdict>;
+	/** Set when the run was classified inconclusive by a skip reason. */
+	skipReason?: string;
 	detail: string;
 }
 

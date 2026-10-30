@@ -42,7 +42,10 @@ export const CASCADE_RETRY_INTERVAL_MS = 2_000;
  * `expectInconclusive: "<reason>"` declares that this server is known not to
  * conclude within the deadline, with the reason. The lane then passes only
  * while the neighbours stay unconfirmed, and fails when they conclude, so the
- * declaration cannot outlive the defect it records. Declared today: java.
+ * declaration cannot outlive the defect it records. `expectSkipReason` names
+ * the `CascadeSkipReason` the run must report for the declaration to hold; any
+ * other outcome (another skip, an unconfirmed neighbour) is red. Declared
+ * today: java.
  */
 export const CASCADE_FIXTURES = [
 	{
@@ -94,6 +97,7 @@ export const CASCADE_FIXTURES = [
 		// deadline is because retrying a structural skip proves nothing.
 		expectInconclusive:
 			"java is not in CASCADE_GRAPH_KINDS, so the cascade has no import graph for it and skips with non_code",
+		expectSkipReason: "non_code",
 		conclusiveDeadlineMs: 10_000,
 	},
 ];
@@ -159,6 +163,7 @@ export function classifyCascadeRun(run, fx, workspace) {
 		return {
 			state: "inconclusive",
 			neighbours,
+			skipReason: run.skipReason,
 			detail: `cascade skipped: ${run.skipReason}`,
 		};
 	}
@@ -278,6 +283,17 @@ export function cascadeRow(fx, m) {
 	}
 	const why = `${m.concluded?.detail ?? "no cascade ran"} after ${m.attempts} attempt(s), ${m.elapsedMs} ms`;
 	if (m.concluded?.state === "inconclusive" && fx.expectInconclusive) {
+		// A declaration names its cause, and holds only while that is the cause
+		// the run reports: any other skip (a graph that failed to build, a blocked
+		// primary) or an unconfirmed neighbour is a different defect that the
+		// declared reason would otherwise paint over (#5021 review F4).
+		if (m.concluded.skipReason !== fx.expectSkipReason) {
+			return {
+				...base,
+				state: "fail",
+				detail: `declared inconclusive (${fx.expectInconclusive}) because the cascade skips with ${fx.expectSkipReason}, but this run reported ${m.concluded.skipReason ? `skip ${m.concluded.skipReason}` : m.concluded.detail}: ${why}`,
+			};
+		}
 		return {
 			...base,
 			state: "pass",
