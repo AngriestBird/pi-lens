@@ -207,8 +207,11 @@ describe("cascadeRow (#1712)", () => {
 describe("describeLastTouch (#1712)", () => {
 	// Lines as latency.log writes them for a jdtls that never launched.
 	const file = "/ws/src/lib/Lib.java";
-	const line = (phase: string, metadata: object, filePath = file) =>
-		JSON.stringify({ type: "phase", phase, filePath, metadata });
+	const line = (
+		phase: string,
+		metadata: Record<string, unknown>,
+		filePath = file,
+	) => JSON.stringify({ type: "phase", phase, filePath, metadata });
 	const log = [
 		line("lsp_client_selected", { serverId: "java", outcome: "spawn-failure" }),
 		line("lsp_touch_file", {
