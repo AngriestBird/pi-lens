@@ -35,6 +35,7 @@ import {
 	normalizeToLF,
 	restoreLineEndings,
 } from "../host-edit-normalize.js";
+import { toPosix, walkUpDirs } from "../path-utils.js";
 
 interface LSPPosition {
 	line: number;
@@ -1171,7 +1172,7 @@ export function __planWorkspaceEditForTest(edit: {
 
 function relativeToCwd(filePath: string, cwd: string): string {
 	const rel = path.relative(cwd, filePath) || path.basename(filePath);
-	return rel.replace(/\\/g, "/");
+	return toPosix(rel);
 }
 
 // Matches an import declaration or a re-export-from declaration — the two
@@ -1304,19 +1305,20 @@ async function assertParentIsUsable(
 	filePath: string,
 	stateFor: (filePath: string) => Promise<VirtualFile>,
 ): Promise<void> {
-	let current = path.dirname(filePath);
-	while (true) {
+	// `filePath` is the confined identity and `stateFor` keys its overlay by it,
+	// so the climb takes the names as given: a second resolution would look up
+	// a directory the overlay never recorded.
+	for (const current of walkUpDirs(path.dirname(filePath), {
+		spelling: true,
+	})) {
 		const known = await stateFor(current);
 		if (known.exists) {
 			if (!known.directory)
 				throw new Error(`resource parent is not a directory: ${current}`);
 			return;
 		}
-		const parent = path.dirname(current);
-		if (parent === current)
-			throw new Error(`resource parent does not exist: ${filePath}`);
-		current = parent;
-	}
+	} // The walk ran off the filesystem root: no ancestor exists.
+	throw new Error(`resource parent does not exist: ${filePath}`);
 }
 
 /**
@@ -1565,10 +1567,7 @@ async function preflightWorkspaceEdit(
 			// treat a same-key-different-case pair as a real rename below.
 			const oldDisk = uriToDiskPath(op.oldUri);
 			const newDisk = uriToDiskPath(op.newUri);
-			if (
-				path.resolve(oldDisk).replace(/\\/g, "/") ===
-				path.resolve(newDisk).replace(/\\/g, "/")
-			) {
+			if (toPosix(path.resolve(oldDisk)) === toPosix(path.resolve(newDisk))) {
 				throw new Error("rename source and destination must differ");
 			}
 			const source = await stateFor(oldPath);

@@ -1,5 +1,6 @@
 // flake-shape: service-double — the late-auxiliary cell: a real auxiliary client is an external child process, so the LSP service seam answers its cached publication (#4617)
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	recordDeliveredCascadeNeighbor,
@@ -507,6 +508,86 @@ describe.each([false, true])(
 			return runnerFile;
 		};
 
+		/**
+		 * A runner that crashed: no usable result, so the drain states the failure
+		 * itself (`❌ Deferred runner <id> failed`) and the note names no file.
+		 */
+		const deferBrokenRunner = (
+			h: { write: (rel: string, body: string) => string; cwd: string },
+			runnerId: string,
+		): void => {
+			const runnerFile = h.write("src/broken.sh", "echo broken\n");
+			deferRunnerFindings({
+				filePath: runnerFile,
+				cwd: h.cwd,
+				projectRoot: h.cwd,
+				runnerId,
+				markedAtMs: Date.now() - 2000,
+				promise: Promise.resolve({
+					status: "failed",
+					failureKind: "spawn_failed",
+					semantic: "warning",
+					diagnostics: [],
+				} as RunnerResult),
+			});
+		};
+
+		/** A runner whose findings are long enough to spend the turn-end cap. */
+		const deferNoisyRunner = (
+			h: { write: (rel: string, body: string) => string; cwd: string },
+			count: number,
+		): void => {
+			const runnerFile = h.write(
+				"src/noisy.sh",
+				Array.from({ length: count }, () => "echo noisy").join("\n") + "\n",
+			);
+			const past = new Date(Date.now() - 10_000);
+			fs.utimesSync(runnerFile, past, past);
+			deferRunnerFindings({
+				filePath: runnerFile,
+				cwd: h.cwd,
+				projectRoot: h.cwd,
+				runnerId: "shellcheck",
+				markedAtMs: Date.now() - 2000,
+				promise: Promise.resolve({
+					status: "failed",
+					failureKind: "blocking_diagnostics",
+					semantic: "warning",
+					diagnostics: Array.from({ length: count }, (_, i) => ({
+						id: `noisy-${i}`,
+						message: "noisy late runner finding",
+						filePath: runnerFile,
+						line: i + 1,
+						column: 1,
+						severity: "warning" as const,
+						semantic: "warning" as const,
+						tool: "shellcheck",
+						rule: "SC2086",
+					})),
+				} as RunnerResult),
+			});
+		};
+
+		/**
+		 * A Go CVE whose trace has no filename frame: the govulncheck lane renders
+		 * it as `(module)` and reports no file, so the section reaches the stamp
+		 * with an empty citation and no fileless declaration — the fail-closed
+		 * state the census keeps for a producer nobody registered.
+		 */
+		const seedModuleOnlyGoCve = (h: {
+			scan: (store: string, result: Record<string, unknown>) => void;
+		}): void => {
+			h.scan("govulncheck", {
+				findings: [
+					{
+						osv: "GO-2024-9999",
+						module: "example.com/module",
+						trace: [],
+					},
+				],
+			});
+		};
+
 		it("keeps a blocking-only late runner finding current", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-late-runner-blocking-${guard}`,
@@ -556,41 +637,25 @@ describe.each([false, true])(
 
 		// Recurrence (#4962 r3, CodeRabbit thread): one cited part made a
 		// no-write turn's stamp well-formed, so it spoke for the whole message.
-		// A part beside it that cited nothing read current although the file it
-		// reports changed after the turn end. Before the citations that message
-		// was historical; a stamp missing a part's files must not read current.
-		it("labels a message historical when one of its parts cites no file", async () => {
+		// A part beside it that the stamp cannot speak for must not read current.
+		// #4617 moved the population: every file-bound producer now cites, so the
+		// unaccounted part left is the one NO producer can bind — a Go CVE with no
+		// traced filename, which the govulncheck lane renders as `(module)` and
+		// reports no file for. The rule still has to fail closed on it.
+		it("labels a message historical when one of its parts is accounted for by neither files nor a fileless subject", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-mixed-${guard}`,
 				incident:
-					"A cited replay vouched for an uncited secrets blocker in the same message",
+					"A cited replay vouched for an unaccounted module-only CVE in the same message",
 				issue: "#4617",
 				async run(h) {
 					deferBlockingLateRunner(h, "late-runner-mixed-1");
-					const secretFile = h.write(
-						"src/config.ts",
-						"const key = 'AKIA0000000000000000';\n",
-					);
-					h.scan("gitleaks", {
-						findings: [
-							{
-								ruleId: "aws-access-token",
-								file: secretFile,
-								startLine: 1,
-								description: "AWS key",
-							},
-						],
-					});
+					seedModuleOnlyGoCve(h);
 					await new Promise<void>((resolve) => setImmediate(resolve));
 					h.runtime.beginTurn();
-					const view = await h.turnEnd({
-						flags,
-						beforeDelivery: () => {
-							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
-						},
-					});
+					const view = await h.turnEnd({ flags });
 					expect(view.text).toContain("Unresolved from this turn");
-					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain("Go CVEs reachable from this code");
 					expect(view.text).toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
@@ -602,67 +667,36 @@ describe.each([false, true])(
 		// #4954 coverage advisory and a confirmed-clean resolution. The mixed cell
 		// above pins only the late-runner citation, so a rule narrowed to that
 		// citation would drop both flips without a red.
-		it("labels a coverage advisory historical beside a part that cites no file", async () => {
+		it("labels a coverage advisory historical beside a part accounted for by neither", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-mixed-advisory-${guard}`,
 				incident:
-					"A cited coverage advisory vouched for an uncited secrets blocker in the same message",
+					"A cited coverage advisory vouched for an unaccounted module-only CVE in the same message",
 				issue: "#4617",
 				async run(h) {
 					const primary = h.write("src/a.ts", "export const a = 1;\n");
-					const secretFile = h.write(
-						"src/config.ts",
-						"const key = 'AKIA0000000000000000';\n",
-					);
-					h.scan("gitleaks", {
-						findings: [
-							{
-								ruleId: "aws-access-token",
-								file: secretFile,
-								startLine: 1,
-								description: "AWS key",
-							},
-						],
-					});
+					seedModuleOnlyGoCve(h);
 					await new Promise<void>((resolve) => setImmediate(resolve));
 					h.runtime.beginTurn();
 					h.runtime.appendCascadeRun(indeterminateRun(primary));
-					const view = await h.turnEnd({
-						flags,
-						beforeDelivery: () => {
-							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
-						},
-					});
+					const view = await h.turnEnd({ flags });
 					expect(view.text).toContain("Cascade could not compute");
-					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain("Go CVEs reachable from this code");
 					expect(view.text).toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
 			});
 		});
 
-		it("labels a resolution historical beside a part that cites no file", async () => {
+		it("labels a resolution historical beside a part accounted for by neither", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-mixed-resolution-${guard}`,
 				incident:
-					"A confirmed-clean resolution vouched for an uncited secrets blocker in the same message",
+					"A confirmed-clean resolution vouched for an unaccounted module-only CVE in the same message",
 				issue: "#4617",
 				async run(h) {
 					const file = h.write("src/value.ts", "export const value = 1;\n");
-					const secretFile = h.write(
-						"src/config.ts",
-						"const key = 'AKIA0000000000000000';\n",
-					);
-					h.scan("gitleaks", {
-						findings: [
-							{
-								ruleId: "aws-access-token",
-								file: secretFile,
-								startLine: 1,
-								description: "AWS key",
-							},
-						],
-					});
+					seedModuleOnlyGoCve(h);
 					await new Promise<void>((resolve) => setImmediate(resolve));
 					h.runtime.beginTurn();
 					h.blocker("src/value.ts", "L1: type mismatch");
@@ -673,14 +707,9 @@ describe.each([false, true])(
 							["lsp"],
 						),
 					).toBe(true);
-					const view = await h.turnEnd({
-						flags,
-						beforeDelivery: () => {
-							fs.writeFileSync(secretFile, "const key = process.env.KEY;\n");
-						},
-					});
+					const view = await h.turnEnd({ flags });
 					expect(view.text).toContain("confirmed clean");
-					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain("Go CVEs reachable from this code");
 					expect(view.text).toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
@@ -691,7 +720,7 @@ describe.each([false, true])(
 		// as it did before #4617, so a part beside them that cites no file
 		// leaves it current. Applying the completeness rule there would label
 		// every write turn with such a part historical.
-		it("keeps a write turn current beside a part that cites no file", async () => {
+		it("keeps a write turn current beside a part accounted for by neither", async () => {
 			await runTurnScenario({
 				id: `no-write-provenance-write-uncited-${guard}`,
 				incident:
@@ -699,22 +728,9 @@ describe.each([false, true])(
 				issue: "#4617",
 				async run(h) {
 					h.edit("src/app.ts", "export const app = 1;\n");
-					const secretFile = h.write(
-						"src/config.ts",
-						"const key = 'AKIA0000000000000000';\n",
-					);
-					h.scan("gitleaks", {
-						findings: [
-							{
-								ruleId: "aws-access-token",
-								file: secretFile,
-								startLine: 1,
-								description: "AWS key",
-							},
-						],
-					});
+					seedModuleOnlyGoCve(h);
 					const view = await h.turnEnd({ flags });
-					expect(view.text).toContain("hardcoded secrets detected");
+					expect(view.text).toContain("Go CVEs reachable from this code");
 					expect(view.text).not.toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
 				},
@@ -1374,6 +1390,632 @@ describe.each([false, true])(
 					expect(view.text).toContain("type mismatch");
 					expect(view.text).toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 population A (the #4954 F2 remainder): the demoted-secrets tier
+		// is rendered by the secrets lane from a scanned file, and every rendered
+		// part names that file — but the producer registered no citation, so a
+		// no-write turn's stamp had no subject and the whole message read
+		// historical. The live cell is the 🔑 ACTION NEEDED tier.
+		it("keeps a stale-secret ACTION NEEDED tier current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-stale-secret-${guard}`,
+				incident:
+					"A demoted gitleaks finding was labelled historical on a bash-only turn",
+				issue: "#4617",
+				async run(h) {
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					// Written after the scan by something pi never saw: the finding is
+					// demoted to the ACTION NEEDED tier, and the turn wrote nothing.
+					h.advance(5_000);
+					h.write("src/config.ts", "const key = process.env.KEY;\n");
+					// The fall-through trigger of a bash-only turn: a cascade run no
+					// section renders.
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("ACTION NEEDED");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The negative direction of the cell above: the citation binds the tier to
+		// the file it names, so a change AFTER the capture still labels it.
+		it("labels a stale-secret ACTION NEEDED tier historical when its file changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-stale-secret-older-${guard}`,
+				incident:
+					"A cited demoted-secret tier must not read current once its file moves on",
+				issue: "#4617",
+				async run(h) {
+					const secretFile = h.write(
+						"src/config.ts",
+						"const key = 'AKIA0000000000000000';\n",
+					);
+					h.scan("gitleaks", {
+						findings: [
+							{
+								ruleId: "aws-access-token",
+								file: secretFile,
+								startLine: 1,
+								description: "AWS key",
+							},
+						],
+					});
+					h.advance(5_000);
+					h.write("src/config.ts", "const key = process.env.KEY;\n");
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							h.write("src/config.ts", "const key = process.env.OTHER;\n");
+						},
+					});
+					expect(view.text).toContain("ACTION NEEDED");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 population A, the cell the file stamp could not reach: a trivy row
+		// names a PACKAGE, so there is no file:line to stat. Its evidence is the
+		// dependency declaration the scan read, so the advisory cites the
+		// manifests — and a lockfile edit after the turn end supersedes it.
+		it("keeps a trivy CVE advisory current, bound to the manifest it read", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-${guard}`,
+				incident:
+					"A session-start CVE advisory was labelled historical on a bash-only turn",
+				issue: "#4617",
+				async run(h) {
+					h.write("package-lock.json", "{\n}\n");
+					h.scan("trivy", {
+						findings: [
+							{
+								vulnerabilityId: "CVE-2024-0001",
+								pkgName: "left-pad",
+								installedVersion: "1.0.0",
+								fixedVersion: "1.0.1",
+								severity: "HIGH",
+							},
+						],
+						licenses: [],
+						secrets: [],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Dependency CVEs (trivy");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The negative direction: the manifest IS the subject, so a lockfile edit
+		// after the capture supersedes the message.
+		it("labels a trivy CVE advisory historical when the lockfile changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-older-${guard}`,
+				incident: "A lockfile edit must supersede the cached CVE list",
+				issue: "#4617",
+				async run(h) {
+					const manifest = h.write("package-lock.json", "{\n}\n");
+					h.scan("trivy", {
+						findings: [
+							{
+								vulnerabilityId: "CVE-2024-0001",
+								pkgName: "left-pad",
+								installedVersion: "1.0.0",
+								fixedVersion: "1.0.1",
+								severity: "HIGH",
+							},
+						],
+						licenses: [],
+						secrets: [],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(manifest, '{\n  "x": 1\n}\n');
+						},
+					});
+					expect(view.text).toContain("Dependency CVEs (trivy");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 review F1 (probe C): `trivy fs` walks the whole tree, so a nested
+		// lockfile is a declaration the scan read. Citing only the manifests at
+		// `cwd` left a monorepo's CVE list reading current after its own package's
+		// lockfile moved on.
+		it("labels a trivy CVE advisory historical when a nested lockfile the scan named changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-nested-${guard}`,
+				incident:
+					"A nested lockfile edit left a monorepo's CVE advisory labelled current",
+				issue: "#4617",
+				async run(h) {
+					h.write("package.json", '{\n  "name": "root"\n}\n');
+					h.write("package-lock.json", "{\n}\n");
+					const nested = h.write("packages/a/package-lock.json", "{\n}\n");
+					h.scan("trivy", {
+						findings: [
+							{
+								vulnerabilityId: "CVE-2024-0001",
+								pkgName: "left-pad",
+								installedVersion: "1.0.0",
+								fixedVersion: "1.0.1",
+								severity: "HIGH",
+								target: "packages/a/package-lock.json",
+							},
+						],
+						licenses: [],
+						secrets: [],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(nested, '{\n  "x": 1\n}\n');
+						},
+					});
+					expect(view.text).toContain("Dependency CVEs (trivy");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 review V3 (probes P1b/P1c): a target the scan root does not
+		// contain is not a declaration this scan read. Cited, a file outside the
+		// workspace decided the label and the root manifests went unwatched; it
+		// now falls through to the root-manifest fallback like a row with none.
+		it("binds a trivy CVE advisory to the root manifests when its row names a target outside the scan root", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-outside-root-${guard}`,
+				incident:
+					"A CVE row naming a lockfile outside the workspace left a root lockfile edit unwatched",
+				issue: "#4617",
+				async run(h) {
+					// `pi-lens-` prefixed: the tmp-root hygiene census owns that
+					// namespace, and the finally removes it.
+					const outsideDir = path.join(
+						h.cwd,
+						"..",
+						`pi-lens-trivy-outside-${process.pid}-${guard}`,
+					);
+					try {
+						fs.mkdirSync(outsideDir, { recursive: true });
+						const outside = path.join(outsideDir, "package-lock.json");
+						fs.writeFileSync(outside, "{\n}\n");
+						const manifest = h.write("package-lock.json", "{\n}\n");
+						h.scan("trivy", {
+							findings: [
+								{
+									vulnerabilityId: "CVE-2024-0001",
+									pkgName: "left-pad",
+									installedVersion: "1.0.0",
+									fixedVersion: "1.0.1",
+									severity: "HIGH",
+									target: path.relative(h.cwd, outside),
+								},
+							],
+							licenses: [],
+							secrets: [],
+						});
+						h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+						h.runtime.beginTurn();
+						const view = await h.turnEnd({
+							flags,
+							beforeDelivery: () => {
+								fs.writeFileSync(manifest, '{\n  "x": 1\n}\n');
+							},
+						});
+						expect(view.text).toContain("Dependency CVEs (trivy");
+						expect(view.text).toContain(HISTORICAL);
+						expect(view.text).not.toContain(UNKNOWN_STAMP);
+					} finally {
+						fs.rmSync(outsideDir, { recursive: true, force: true });
+					}
+				},
+			});
+		});
+
+		// #4617 review V5: a blank target resolves to the scan root itself, a
+		// directory and not a declaration, so it counts as a row that names no
+		// target and the report falls back to the root manifests. Cited instead,
+		// the directory left the live advisory reading historical.
+		it("keeps a trivy CVE advisory current, bound to the root manifests, when its row names a blank target", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-blank-target-${guard}`,
+				incident:
+					"A CVE row with a blank target cited the workspace directory instead of its lockfile",
+				issue: "#4617",
+				async run(h) {
+					h.write("package-lock.json", "{\n}\n");
+					h.scan("trivy", {
+						findings: [
+							{
+								vulnerabilityId: "CVE-2024-0001",
+								pkgName: "left-pad",
+								installedVersion: "1.0.0",
+								fixedVersion: "1.0.1",
+								severity: "HIGH",
+								target: "",
+							},
+						],
+						licenses: [],
+						secrets: [],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Dependency CVEs (trivy");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 population A through the govulncheck LANE: the section reports the
+		// call site each CVE is reachable from, so the lane hands back those files
+		// as the section's subject. A change to one of them supersedes the text.
+		it("keeps a govulncheck advisory current, bound to the call site it names", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-govulncheck-${guard}`,
+				incident:
+					"A Go CVE advisory was labelled historical on a bash-only turn",
+				issue: "#4617",
+				async run(h) {
+					const callSite = h.write(
+						"src/go/main.go",
+						"package main\n\nfunc main() {}\n",
+					);
+					h.scan("govulncheck", {
+						findings: [
+							{
+								osv: "GO-2024-1111",
+								module: "example.com/module",
+								trace: [{ filename: callSite, line: 3 }],
+							},
+						],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Go CVEs reachable from this code");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		it("labels a govulncheck advisory historical when its call site changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-govulncheck-older-${guard}`,
+				incident: "A call-site edit must supersede the cached Go CVE list",
+				issue: "#4617",
+				async run(h) {
+					const callSite = h.write(
+						"src/go/main.go",
+						"package main\n\nfunc main() {}\n",
+					);
+					h.scan("govulncheck", {
+						findings: [
+							{
+								osv: "GO-2024-1111",
+								module: "example.com/module",
+								trace: [{ filename: callSite, line: 3 }],
+							},
+						],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(
+								callSite,
+								"package main\n\nfunc main() { println(1) }\n",
+							);
+						},
+					});
+					expect(view.text).toContain("Go CVEs reachable from this code");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 population B: a part with no file it could be stale against. The
+		// deferred runner's crash note names no file, so the message had no stamp
+		// subject at all and read historical however fresh the failure was.
+		it("keeps a deferred runner failure note current", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-${guard}`,
+				incident:
+					"A runner that crashed during this turn was reported as historical",
+				issue: "#4617",
+				async run(h) {
+					deferBrokenRunner(h, "shellcheck");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Deferred runner shellcheck failed");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 review F2 (probe A): the dominant carry path is not the cap. A run
+		// the drain leaves unanswered at this turn's end settles later, and the
+		// note it renders reports the earlier turn's bytes — so it reads carried
+		// whatever mechanism delayed it.
+		it("labels a runner failure note historical when its run settled after its own turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-late-settle-${guard}`,
+				incident:
+					"A crash note for a run deferred before this turn read as this turn's news",
+				issue: "#4617",
+				async run(h) {
+					let settle = (): void => {};
+					const inFlight = new Promise<RunnerResult>((resolve) => {
+						settle = () =>
+							resolve({
+								status: "failed",
+								failureKind: "spawn_failed",
+								semantic: "warning",
+								diagnostics: [],
+							} as RunnerResult);
+					});
+					deferRunnerFindings({
+						filePath: h.write("src/broken.sh", "echo broken\n"),
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: inFlight,
+					});
+					h.runtime.beginTurn();
+					const first = await h.turnEnd({ flags });
+					expect(first.text).not.toContain("Deferred runner shellcheck failed");
+					// The in-flight run settles only after the turn that dispatched it
+					// has ended: production's own drain budget is zero.
+					settle();
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const second = await h.turnEnd({ flags });
+					expect(second.text).toContain("Deferred runner shellcheck failed");
+					expect(second.text).toContain(HISTORICAL);
+					expect(second.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		/**
+		 * A crash note whose run stays in flight until `settle()`, dispatched by
+		 * `sessionId` (a concurrent secondary's turn when it is not the
+		 * coordinator's own).
+		 */
+		const deferInFlightBrokenRunner = (
+			h: { write: (rel: string, body: string) => string; cwd: string },
+			sessionId: string,
+		): (() => void) => {
+			let settle = (): void => {};
+			const inFlight = new Promise<RunnerResult>((resolve) => {
+				settle = () =>
+					resolve({
+						status: "failed",
+						failureKind: "spawn_failed",
+						semantic: "warning",
+						diagnostics: [],
+					} as RunnerResult);
+			});
+			deferRunnerFindings({
+				filePath: h.write("src/broken.sh", "echo broken\n"),
+				cwd: h.cwd,
+				projectRoot: h.cwd,
+				runnerId: "shellcheck",
+				markedAtMs: Date.now() - 2000,
+				promise: inFlight,
+				sessionId,
+			});
+			return () => settle();
+		};
+
+		// #4617 review V1 (probe P4a, CodeRabbit PRRT_kwDORt8rec6x5fOh): a
+		// concurrent secondary's turn does not move the coordinator's
+		// `turnIndex`, so a carry measured on that clock never crossed anything
+		// for the secondary and its late crash note read as this turn's news.
+		// The secondary's own clock is `turnKey(sessionId)`.
+		it("labels a secondary session's runner failure note historical when its run settled after that session's turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-secondary-late-settle-${guard}`,
+				incident:
+					"A subagent's crash note for a run its earlier turn left waiting read as this turn's news",
+				issue: "#4617",
+				async run(h) {
+					const secondary = "secondary-session-1";
+					const settle = deferInFlightBrokenRunner(h, secondary);
+					h.runtime.beginTurn(secondary);
+					const first = await h.turnEnd({ flags, sessionId: secondary });
+					expect(first.text).not.toContain("Deferred runner shellcheck failed");
+					settle();
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn(secondary);
+					const second = await h.turnEnd({ flags, sessionId: secondary });
+					expect(second.text).toContain("Deferred runner shellcheck failed");
+					expect(second.text).toContain(HISTORICAL);
+					expect(second.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 review V1, the other half (probe P4b, CodeRabbit
+		// PRRT_kwDORt8rec6x5fOd): the coordinator's turn end keeps a secondary's
+		// run it may not deliver. A stamp there records the COORDINATOR's
+		// boundary, which the secondary never crossed, so on the secondary's own
+		// clock its first turn end would read a fresh failure as historical.
+		it("keeps a secondary session's runner failure note current when only the coordinator's turn ended before it settled", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-secondary-fresh-${guard}`,
+				incident:
+					"A subagent's crash note from its own turn read as historical after the main session's turn end",
+				issue: "#4617",
+				async run(h) {
+					const secondary = "secondary-session-1";
+					h.runtime.beginTurn();
+					h.runtime.beginTurn(secondary);
+					const settle = deferInFlightBrokenRunner(h, secondary);
+					const primary = await h.turnEnd({ flags });
+					expect(primary.text).not.toContain(
+						"Deferred runner shellcheck failed",
+					);
+					settle();
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					const own = await h.turnEnd({ flags, sessionId: secondary });
+					expect(own.text).toContain("Deferred runner shellcheck failed");
+					expect(own.text).not.toContain(HISTORICAL);
+					expect(own.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 review F3 (probe H, CodeRabbit PRRT_kwDORt8rec6x4WEe): the
+		// registry is keyed by part TEXT, so a fresh note identical to the
+		// cap-held one overwrites `carried` with `this-turn` and the earlier-turn
+		// evidence is lost. The carried arm wins over a later same-text write.
+		it("labels a message historical when a carried crash note collides with an identical note from this turn", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-collision-${guard}`,
+				incident:
+					"A repeated runner failure overwrote the carried note's provenance",
+				issue: "#4617",
+				async run(h) {
+					deferNoisyRunner(h, 25);
+					deferBrokenRunner(h, "shellcheck");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const first = await h.turnEnd({ flags });
+					expect(first.text).not.toContain("Deferred runner shellcheck failed");
+					// A second failure of the same runner with the same text: the cap-held
+					// note drains first, this turn's identical one second.
+					deferBrokenRunner(h, "shellcheck");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const second = await h.turnEnd({ flags });
+					expect(second.text).toContain("Deferred runner shellcheck failed");
+					expect(second.text).toContain(HISTORICAL);
+					expect(second.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Acceptance 3 (#4617): the mixed message. Every part qualifies — one
+		// cited, one fileless — so the message is current; the cases below pin
+		// that a part which is NEITHER still fails the whole message closed.
+		it("keeps a message current when a cited part and a fileless part both qualify", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-qualified-${guard}`,
+				incident:
+					"A cited replay and a runner-crash note were both live this turn",
+				issue: "#4617",
+				async run(h) {
+					deferBlockingLateRunner(h, "late-runner-mixed-qualified-1");
+					deferBrokenRunner(h, "shellcheck");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Unresolved from this turn");
+					expect(view.text).toContain("Deferred runner shellcheck failed");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The mixed message's negative direction: the fileless half qualifies, the
+		// cited half does not, so the message is historical.
+		it("labels a mixed message historical when its cited part's file changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-mixed-older-${guard}`,
+				incident: "A stale cited part beside a live fileless part read current",
+				issue: "#4617",
+				async run(h) {
+					const runnerFile = deferBlockingLateRunner(
+						h,
+						"late-runner-mixed-older-1",
+					);
+					deferBrokenRunner(h, "shellcheck");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(runnerFile, "echo changed\n");
+						},
+					});
+					expect(view.text).toContain("Deferred runner shellcheck failed");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// Acceptance 2, the carried half (#4617): a fileless part produced in an
+		// EARLIER turn stays historical. The cap cuts the crash note this turn, the
+		// delivery hold re-queues the failure, and the next turn re-renders it —
+		// evidence captured a turn ago, not this one.
+		it("labels a runner failure note carried from an earlier turn historical", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-carried-${guard}`,
+				incident: "A crash note the cap held last turn re-delivered as current",
+				issue: "#4617",
+				async run(h) {
+					// A burst of late findings fills the cap so the crash note after it
+					// is the part cut.
+					deferNoisyRunner(h, 25);
+					deferBrokenRunner(h, "shellcheck");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const first = await h.turnEnd({ flags });
+					expect(first.text).not.toContain("Deferred runner shellcheck failed");
+					// Next turn: the held failure is re-queued, re-rendered, and is
+					// the only part left.
+					h.runtime.beginTurn();
+					const second = await h.turnEnd({ flags });
+					expect(second.text).toContain("Deferred runner shellcheck failed");
+					expect(second.text).toContain(HISTORICAL);
+					expect(second.text).not.toContain(UNKNOWN_STAMP);
+					// The carried part is a shape the composer knows, so the stamp is
+					// well formed and truncated rather than "malformed-or-legacy".
+					expect(second.text).toContain("session turn-harness-session");
 				},
 			});
 		});

@@ -295,6 +295,15 @@ async function witnessTurn(
 	// golden records the messages pi-lens APPENDED. The assertion pins that the
 	// head is still at index 0: losing it would shift this golden.
 	expect((injected?.messages ?? [])[0]?.role).toBe("system");
+	// Each turn is its own host session and shuts down when it ends. Left live,
+	// the first turn's session kept the process registration, so a case that ran
+	// afterwards started as a declined secondary and delivered nothing (#4483's
+	// teardown carries the same rule).
+	await pi.emit(
+		"session_shutdown",
+		{ type: "session_shutdown", reason: "quit" },
+		makeCtx({ cwd: tmpDir, sessionId: "pi-lens-3190-witness" }),
+	);
 	return {
 		chartRoot,
 		toolResult:
@@ -387,6 +396,61 @@ describe("#3190 witness: a retracted deleted-path blocker through pi", () => {
 				"--- turn_end context message ---",
 				intact.turnEnd,
 			].join("\n"),
+		);
+	});
+
+	/**
+	 * #5008 review round 3 (F6): the count ending the `Still unfixed` line splits
+	 * its causes. A chart-wide runner reports a blocking row for ANOTHER file in
+	 * the chart (`values.yaml`, while the edited template is the file the write
+	 * is about). That row has a line, just not in these bytes, so it is the cause
+	 * the `; N with no line in this file` clause owns. The other clause names a
+	 * same-file stale carry, guarded in
+	 * `tests/index-4484-unfixed-blocker-witness.test.ts` (rows 34/35 and the
+	 * acceptance-3 count cell).
+	 *
+	 * Recurrence: the round-2 wording called every unplaced blocker `with no line
+	 * in this file`, which is false for the same-file carry those rows hold and
+	 * true only for this one.
+	 */
+	it("counts another file's blocker row as having no line in this file (#5008 review r3)", async () => {
+		const { template } = createChart("foreign-row");
+		spawnRouter.state.helmLintStdout = [
+			"==> Linting .",
+			"[ERROR] values.yaml:1: replicas must be an integer, got string",
+		].join("\n");
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const ctx = () =>
+			makeCtx({ cwd: tmpDir, sessionId: "pi-lens-3190-foreign-row" });
+		await pi.emit("session_start", makeSessionStartEvent(), ctx());
+		await pi.emit("turn_start", {}, ctx());
+		const write = async (content: string): Promise<string> => {
+			fs.writeFileSync(template, content);
+			const returned = (await pi.emit(
+				"tool_result",
+				{
+					toolName: "write",
+					input: { path: template, content },
+					content: [{ type: "text", text: "wrote" }],
+				},
+				ctx(),
+			)) as { content?: Array<{ text?: string }> } | undefined;
+			return scrub(
+				(returned?.content ?? []).map((part) => part.text ?? "").join("\n"),
+			);
+		};
+		const before = fs.readFileSync(template, "utf8");
+		expect(await write(`${before}# note one\n`)).toContain("🔴 STOP");
+		const second = await write(`${before}# note two\n`);
+		expect(second).toMatch(
+			/Still unfixed: 1 blocker reported earlier; 1 with no line in this file\./,
+		);
+		expect(second).not.toMatch(/could not be re-placed in these bytes/);
+		await pi.emit(
+			"session_shutdown",
+			{ type: "session_shutdown", reason: "quit" },
+			ctx(),
 		);
 	});
 });

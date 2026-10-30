@@ -46,7 +46,11 @@ import { readFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logExtension } from "./extension-log.js";
-import { findNearestMarkerRoot, walkUpDirs } from "./path-utils.js";
+import {
+	findNearestMarkerRoot,
+	realpathOrResolve,
+	walkUpDirs,
+} from "./path-utils.js";
 
 export async function readTextFileOrUndefined(
 	filePath: string,
@@ -449,7 +453,8 @@ export async function resolveCargoPackageEdition(
 	filePath: string,
 	homeDir: string = os.homedir(),
 ): Promise<string | undefined> {
-	const startDir = path.dirname(path.resolve(filePath));
+	// The file's identity: a file link's own directory belongs to the link (#4966).
+	const startDir = path.dirname(realpathOrResolve(filePath));
 	const packageDir = findNearestMarkerRoot(startDir, ["Cargo.toml"], {
 		homeDir,
 	});

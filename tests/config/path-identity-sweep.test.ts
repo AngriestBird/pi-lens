@@ -41,6 +41,23 @@
  * - a comparison between axes: a key (path identity) tested against a root
  *   held as a spelling, or the reverse. No needle sees which axis a value is
  *   on; `isUnderDir` answers containment on either axis instead (#4689 r2).
+ * - an upward climb written without a parent call the third needle
+ *   (`hand-rolled-upward-walk`, #4966) reads: a `reduce`, a regex or
+ *   `slice`/`lastIndexOf` strip of the last segment, a split on the separator,
+ *   a climb through `new URL("..", base)`, or a parent call hidden inside a
+ *   helper arrow bound to a name (`const up = (p) => path.dirname(p)`, called
+ *   in the loop; the loop calls `up`, and the `dirname` sits in another
+ *   function), a recursive climb whose parent call is bound before the
+ *   recursion (`const parent = path.dirname(dir); return climb(parent)`), a
+ *   `dirname` reached through `.bind` or an in-file re-export
+ *   (`export { dirname as up }`). Live population 0 for each (#5037 r3 F9).
+ *   Each review round closed one spelling and found the next, so the redesign
+ *   (a call-graph population instead of named parents) stays on #4966. The twin suite
+ *   (`tests/clients/walker-symlink-twin-4966.test.ts`) runs the registered
+ *   walkers from a symlink twin instead of reading their spelling.
+ * - a `walkUpDirs(…, { spelling: true })` call. The option is the seam's own
+ *   named escape; the census of files that climb is the twin suite's, whose
+ *   exemptions name each spelled-by-design file and the suite pinning it.
  *
  * Scope: the shipped runtime, `clients/`, `tools/`, `mcp/` and `index.ts`,
  * without tests; `clients/path-utils.ts` is the seam and is not scanned.
@@ -105,6 +122,15 @@ const FOREIGN_CHECKOUT_FAIL_CLOSED =
 const INSTALL_SELF_CONTAINED =
 	"clients/install-diagnostics.ts is the paste-able report for an install whose runtime dependencies did not resolve (#285/#335) and imports nothing from clients/: clients/path-utils.ts imports minimatch, so routing its one realpath (the symlinked-install probe, which compares the kernel-real package dir with the spelled one on purpose) through realpathOrResolve would stop the report loading exactly when it is needed; the import census in tests/clients/install-diagnostics.test.ts refuses any relative or bare specifier there, so that swap reds it";
 
+const INSTALL_ANCHOR_WALK =
+	"clients/install-diagnostics.ts walks up from its own module to the package.json that holds its version, six levels at most, to describe an install whose dependencies did not resolve (#285/#335); it imports nothing from clients/ (INSTALL_SELF_CONTAINED), so walkUpDirs is out of reach, and the walk is compared with the spelled package dir on purpose to report a symlinked install";
+
+const URI_KEY_INDEX_WALK =
+	"clients/lsp/edits.ts addIndex climbs the segments of a normalized URI index KEY (the descendants index of a workspace edit), not a directory on disk: the key's own separator and root semantics decide the ancestors, and walkUpDirs would resolve each one through the host filesystem and change the keys the index is read back by";
+
+const PYTHON_RELATIVE_LEVELS =
+	"a Python relative import climbs a COUNTED number of package levels (the leading dots), not to a marker: `from ..x import y` is `dots - 1` parents of the importing file's directory by package nesting, which the language defines on the spelled module path, so there is no ceiling or root to compare and no identity to take";
+
 interface Pin {
 	sites: number;
 	identities: string;
@@ -134,9 +160,9 @@ const PINS: Readonly<Record<string, Pin>> = {
 	}, // :225, :228, :229, :231
 	"clients/dispatch/runners/helm-render.ts#raw-realpath": {
 		sites: 3,
-		identities: "ef1b14076168e8a6",
+		identities: "cf011114b0d18c1c",
 		reason: HELM_CONTAINMENT,
-	}, // :224, :225, :239
+	}, // :216, :217, :231
 	"clients/dispatch/runners/helm-render.ts#path-resolve-keyed": {
 		sites: 5,
 		identities: "6842ad1422412589",
@@ -327,6 +353,21 @@ const PINS: Readonly<Record<string, Pin>> = {
 		identities: "66db1fe5f84f9efe",
 		reason: SPELLING_MEMO,
 	}, // :696
+	"clients/install-diagnostics.ts#hand-rolled-upward-walk": {
+		sites: 1,
+		identities: "04674fe2776e3519",
+		reason: INSTALL_ANCHOR_WALK,
+	}, // :135
+	"clients/lsp/edits.ts#hand-rolled-upward-walk": {
+		sites: 1,
+		identities: "6bf01490cf649768",
+		reason: URI_KEY_INDEX_WALK,
+	},
+	"clients/review-graph/import-resolvers.ts#hand-rolled-upward-walk": {
+		sites: 1,
+		identities: "06064201b76ebaf1",
+		reason: PYTHON_RELATIVE_LEVELS,
+	}, // :415
 };
 
 interface Occurrence {
@@ -431,19 +472,24 @@ describe("path identity sweep (#4689)", () => {
 		// Calibration on the authoring head: 530 runtime files under clients/,
 		// tools/ and mcp/ plus index.ts (seam excluded); half is 265. The live
 		// populations are 31 raw-realpath and 158 path-resolve-keyed sites,
-		// floored at 5.
+		// floored at 5; the hand-rolled upward walks (#4966) are floored at 1.
 		assertNonEmptyScan(
 			"path identity sweep: runtime files scanned",
 			scanned,
 			265,
 		);
-		for (const needle of ["raw-realpath", "path-resolve-keyed"] as const)
+		for (const [needle, floor] of [
+			["raw-realpath", 5],
+			["path-resolve-keyed", 5],
+			// The folds of #4966 left the few climbs that stay, each with a reason.
+			["hand-rolled-upward-walk", 1],
+		] as const)
 			assertNonEmptyScan(
 				`path identity sweep: ${needle} sites`,
 				occurrences.filter((occurrence) =>
 					occurrence.row.endsWith(`#${needle}`),
 				).length,
-				5,
+				floor,
 			);
 		expect(
 			auditPins(occurrences, PINS),

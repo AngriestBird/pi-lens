@@ -1,8 +1,8 @@
 /**
  * #2556 — path containment over a `path.relative` result has one owner.
  *
- * `clients/path-utils.ts` owns containment: `isUnderDir`, `isWithinForm` and
- * the home-ceiling predicate `isAtOrAboveHomeDir`. Every other containment test
+ * `clients/path-utils.ts` owns containment: `relativeInside` (the lexical test),
+ * `isUnderDir`, `isWithinForm` and `isWithinIdentity`. Every other containment test
  * is a copy of a rule that seam already owns (AGENTS.md shape 83), and the
  * copies are wrong in two measured ways:
  *
@@ -162,6 +162,19 @@ const DOTDOT_NAME =
 	"`..`-name arm (#4835): it tests the `..` PREFIX, so a directory named `..foo` — inside the root it belongs to — reads as outside. Unreproduced on a production call path and already paired with isAbsolute, so it stays baselined; pairing it with isWithinForm/isUnderDir is #2556's remainder.";
 
 /**
+ * A site whose relative text is a component of a DURABLE finding id (#2556
+ * remainder, measured on the fold). Routing it through `relativeInside` would
+ * change the id for exactly the inputs the two spellings disagree on (a
+ * directory named `..foo`, a cross-drive path): a stored id stops matching its
+ * finding and the record is orphaned once (the #533 class). The fold's deletion
+ * test names it: removing the seam would not send this copy back to hand-rolling,
+ * because the copy's output, not its predicate, is the contract. It stays a
+ * copy, baselined, until an id migration owns the change.
+ */
+const DURABLE_ID =
+	"durable id component (shape 83 residual, not folded): it tests the `..` prefix and pairs no isAbsolute arm, so a directory named `..foo` and a cross-drive path read as outside, and the text it returns is hashed into a stored finding id. Folding it onto `relativeInside` would change that id for those inputs and orphan the stored record once; no production call path produces either input today, so it stays baselined until an id migration owns the change.";
+
+/**
  * A hand-rolled copy that answers the seam's question CORRECTLY today: a `..`
  * SEGMENT (`..` + separator, or `../`), the exact parent (`rel === ".."`), and
  * the cross-drive absolute form (`isAbsolute(rel)`) are all rejected, so a
@@ -177,12 +190,13 @@ const SEAM_COPY =
 
 /**
  * The seam's own predicate. Containment is admitted ONLY through
- * `clients/path-utils.ts`, so this file's site is an admission with a reason,
- * not a baseline row: a second containment test inside it still reds as
- * unlisted, and `isUnderDir`/`isWithinForm` fold it in #2556's remainder.
+ * `clients/path-utils.ts#relativeInside`, so this file's site is an admission
+ * with a reason, not a baseline row: a second containment test inside it still reds as
+ * unlisted.
  */
 const SEAM_ADMISSIONS: Readonly<Record<string, string>> = {
-	"clients/path-utils.ts#isAtOrAboveHomeDir": `${CROSS_DRIVE} This IS the home-ceiling predicate: it pairs !isAbsolute(rel), which the 16 hand-rolled copies mostly do not, and it is the shape #2544 round 2 collapsed onto one expression. The seam owns it until it is expressed through isWithinForm.`,
+	"clients/path-utils.ts#relativeInside":
+		"The seam's own predicate (#2556): the one `path.relative` containment test in the tree, with `..` exactly, a `..` SEGMENT and an absolute result as its three outside arms. `isAtOrAboveHomeDir`, `toProjectRelativePath` and every runtime site that needs a relative text or a verdict call it, so a second containment test anywhere else still reds as unlisted.",
 };
 
 /**
@@ -206,23 +220,14 @@ const SEAM_ADMISSIONS: Readonly<Record<string, string>> = {
  * 42 rows plus the seam's one admission made the 43 sites this census printed
  * on the authoring head. #2556's `..`-name fold then routed ten runtime
  * `..`-prefix rows through `isUnderDir`/`isWithinForm`/`toProjectRelativePath`
- * and deleted them: 32 rows plus the admission make the 33 sites printed now.
+ * and deleted them: 32 rows plus the admission made the 33 sites printed then.
+ * The `relativeInside` fold (#2556's remainder) then routed twelve more runtime
+ * rows and the admission itself through the seam: 20 rows plus the seam's new
+ * admission make the 21 sites printed now.
  */
 const BASELINE: Readonly<Record<string, string>> = {
-	"clients/actionable-warnings.ts#legacyActionableWarningId": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree file, so a legacy finding id keeps a relative component for a path outside the project; it fails toward a duplicate id, never toward a dropped finding.`,
-	"clients/cache-manager.ts#CacheManager.toTurnStateKey": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree key, so the turn-state key for a file outside cwd stays relative instead of falling back to the absolute form.`,
-	"clients/dispatch/rule-ignores.ts#isRuleIgnoredForPath": `${SEAM_COPY} Here \`outsideRoot\` decides whether the display path is the absolute spelling, which is the question \`toProjectRelativePath\` owns; the template-literal spelling is what the hand census did not see.`,
-	"clients/dispatch/runner-context.ts#toRunnerDisplayPath": `${CROSS_DRIVE} A cross-drive relative reads as a display path, so a runner diagnostic for a file on another drive keeps an absolute form in a relative slot.`,
-	"clients/dispatch/runners/go-vet.ts#run": `${CROSS_DRIVE} A cross-drive \`fileRel\` reads as under the module root, so \`./\` is prefixed to an absolute path and go vet's package argument names no package. The callee is a named \`relative\` import, which the hand census's \`path.relative\` grep did not reach.`,
-	"clients/dispatch/runners/helm-lint.ts#isWithin": `${SEAM_COPY} Here it decides whether a helm diagnostic's file is mapped onto a chart-relative path, and it gates the file at \`diagnosticLocation\`.`,
-	"clients/dispatch/runners/helm-render.ts#isWithin": `${SEAM_COPY} Here it gates the rendered-to-source mapping, and it is the second member of the shape inside this file.`,
-	"clients/finding-identity.ts#relativeFile": `${CROSS_DRIVE} A cross-drive relative reads as an in-tree file, so a finding id carries an absolute path where a relative component is expected: two ids for one file rather than a lost one.`,
-	"clients/gitleaks-client.ts#isInsideNestedGitRepository": `${SEAM_COPY} Here it decides whether a finding is classified \`nested-repository\`, and the walk above it runs only when the answer is inside.`,
-	"clients/lsp/workspace-diagnostics-cache.ts#clearWorkspaceDiagnosticsCacheAtAndAbove": `${SEAM_COPY} Here it stops the ancestor prune at the workspace ceiling, so a wrong answer would prune above the ceiling rather than at it.`,
-	"clients/path-utils.ts#inside": `${SEAM_COPY} A third containment predicate inside the seam's own module (\`toProjectRelativePath\`), baselined rather than folded because this lane changes no production site; moving it onto \`isWithinForm\` is #2556's remainder.`,
-	"clients/python-environment.ts#isUvWorkspaceMember": `${SEAM_COPY} Here it decides whether a project inherits the uv workspace's settings, and the \`toPosix\` fold above it makes the separator match on both arms.`,
-	"clients/python-environment.ts#isWithinProjectRoot": `${SEAM_COPY} Here it decides whether an ambient environment root is borrowed for the project, and the template-literal separator spelling is what the hand census missed.`,
-	"clients/test-runner-client.ts#isExcludedTestTarget": `${SEAM_COPY} Here a lexical inside answer is the fast path and an outside answer falls through to the canonical \`isUnderDir\` check, so the copy already defers to the seam for the hard cases.`,
+	"clients/actionable-warnings.ts#legacyActionableWarningId": `${DURABLE_ID} This one rebuilds the id older releases wrote so a stored record can be migrated, so its spelling is the old release's by definition.`,
+	"clients/finding-identity.ts#relativeFile": `${DURABLE_ID} This one is the relative component of every \`dd:\`/\`ddw:\`/\`aw:\`/\`cq:\` finding id.`,
 	"scripts/hooks/guard-bash.mjs#hasNodeModulesSymlinkOutside": `${SEAM_COPY} It cannot fold because the hook is a bare-Node \`.mjs\` that Claude Code runs before any build, so it may not import a TypeScript seam. Baselined as the record that the copy was read.`,
 	"scripts/hooks/guard-bash.mjs#isUnderTmpRoot": `${SEAM_COPY} The same bare-Node boundary (no build step, so no TypeScript seam import) is why it stays a copy.`,
 	"scripts/lib/pr-worktree.mjs#nestedDestinationError": `${SEAM_COPY} It runs on the same bare-Node boundary as the git guard: a \`.mjs\` script that cannot import the TypeScript seam.`,
@@ -346,8 +351,8 @@ describe("path containment sweep (#2556)", () => {
 				// A DEAD-SCAN floor, not a population pin: a detector that stopped
 				// matching reads here, while the population itself is held by the
 				// shrink-only audit below (a lost site reds as a stale row, which is
-				// exact where a floor is only a lower bound). Live: 33 sites.
-				minFlagged: 21,
+				// exact where a floor is only a lower bound). Live: 21 sites.
+				minFlagged: 14,
 				minReasonLength: 80,
 				remediation:
 					"Fold the test onto clients/path-utils.ts (isUnderDir for two spellings or identities, isWithinForm for two paths already in one form), or add a baseline row `<file>#<anchor>` naming the reason it stays. Refs #2556.",
@@ -383,7 +388,7 @@ describe("path containment sweep (#2556)", () => {
 		);
 		expect(overlap).toEqual([]);
 		expect(Object.keys(SEAM_ADMISSIONS)).toEqual([
-			"clients/path-utils.ts#isAtOrAboveHomeDir",
+			"clients/path-utils.ts#relativeInside",
 		]);
 	});
 });

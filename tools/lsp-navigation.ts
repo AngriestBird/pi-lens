@@ -15,7 +15,11 @@ import {
 	type LspMutationContext,
 } from "../clients/lsp-mutation.js";
 import type { LSPCallHierarchyItem } from "../clients/lsp/client.js";
-import { resolveHostToolPath, uriToPath } from "../clients/path-utils.js";
+import {
+	resolveHostToolPath,
+	toPosix,
+	uriToPath,
+} from "../clients/path-utils.js";
 import { escapeRegExp } from "../clients/string-utils.js";
 import { isRecordableProjectPath } from "../clients/file-utils.js";
 import { compactRenderResult } from "./render-compact.js";
@@ -1018,7 +1022,7 @@ export function createLspNavigationTool(
 				) {
 					recordLspMutationOutcome(mutationContext, "failed");
 				}
-				const normalizedFilePath = meta.filePath.replace(/\\/g, "/");
+				const normalizedFilePath = toPosix(meta.filePath);
 				logLatency({
 					type: "phase",
 					phase: "lsp_navigation_result",

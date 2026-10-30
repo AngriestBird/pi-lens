@@ -639,10 +639,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/govulncheck-client.ts": 1,
 		"clients/gradle-ktfmt-style.ts": 1,
 		"clients/inline-blocker-dispositions.ts": 1,
-		// 2 (#3814 r2): the pipeline's own-file line filter and its number filter,
-		// moved verbatim from `clients/pipeline.ts` (6 -> 4) so the collect-later
-		// merge calls them instead of re-deriving them; no new filter.
-		"clients/inline-blocker-fields.ts": 2,
+		// `clients/inline-blocker-fields.ts`'s row is GONE (#5008 r3): the 2
+		// (#3814 r2) pinned `.filter(` calls — the own-file line filter and its
+		// number filter — became one classification loop in
+		// `inlineBlockerPlacement`, which returns the places AND the counts of what
+		// it could not place. No delivery filter left the tree; the file has no
+		// `filter` use left to pin.
 		"clients/installer/index.ts": 4,
 		"clients/installer/managed-tool-refresh.ts": 2,
 		"clients/instance-reaper.ts": 3,
@@ -711,6 +713,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `Array.prototype.filter` call.
 		"clients/opaque-mutation-scan.ts": 2,
 		"clients/opengrep-client.ts": 2,
+		// 1 (#5009): the venv interpreter candidates are filtered to directories
+		// and symlinks BEFORE the cap, an `Array.prototype.filter` call, not a
+		// delivery filter.
+		"clients/out-of-band-changes.ts": 1,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
 		// 4 -> 6 (#4484): `liveBlockers.filter` and `recordBlockers.filter` split the
@@ -939,12 +945,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 17 -> 19 (#3274): `readCacheAsync` builds the same two store paths its
 		// synchronous sibling does (`cachePath`, `metaPath`). Same sense, one more
 		// reader of the same two files.
-		"clients/cache-manager.ts": 19,
+		"clients/cache-manager.ts": 18,
 		// 7 -> 5 (#3930 r2): the shared fingerprint replaces the cache's
 		// duplicated path operations with one owner.
 		"clients/cache/rule-cache.ts": 5,
 		"clients/call-graph.ts": 4,
-		"clients/cargo-manifest.ts": 6,
+		// 6 -> 5 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/cargo-manifest.ts": 5,
 		"clients/cascade-logger.ts": 2,
 		"clients/code-quality-warnings.ts": 5,
 		// 5 -> 4 (#4689 r2): the entry's file is rendered by
@@ -981,7 +988,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/rule-ignores.ts": 3,
 		// 11 -> 10 (#4689 batch 7): the absolute runner path is `realpathOrResolve`,
 		// not a `path.resolve` of the spelling the tool reported.
-		"clients/dispatch/runner-context.ts": 10,
+		"clients/dispatch/runner-context.ts": 9,
 		"clients/dispatch/runners/actionlint.ts": 4,
 		"clients/dispatch/runners/ast-grep-napi.ts": 4,
 		"clients/dispatch/runners/biome-check.ts": 6,
@@ -996,8 +1003,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/gleam-check.ts": 3,
 		"clients/dispatch/runners/golangci-lint.ts": 3,
 		"clients/dispatch/runners/hadolint.ts": 4,
-		"clients/dispatch/runners/helm-lint.ts": 11,
-		"clients/dispatch/runners/helm-render.ts": 15,
+		"clients/dispatch/runners/helm-lint.ts": 8,
+		"clients/dispatch/runners/helm-render.ts": 12,
 		"clients/dispatch/runners/htmlhint.ts": 4,
 		"clients/dispatch/runners/javac.ts": 5,
 		"clients/dispatch/runners/ktlint.ts": 4,
@@ -1063,7 +1070,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 65 -> 68 (#4876 r2): `projectPathKey` keys a dot-segment spelling by its
 		// DIRECTORY's identity (`path.dirname` + `path.basename` of the caller's
 		// own spelling), so the kernel — not `path.resolve` — folds the `..`.
-		"clients/file-utils.ts": 68,
+		// 68 -> 67 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/file-utils.ts": 67,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realpathOrResolve`,
@@ -1078,10 +1086,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
 		"clients/git-tracked-ignore.ts": 3,
-		"clients/gitleaks-client.ts": 23,
+		// 20 -> 19 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/gitleaks-client.ts": 19,
 		"clients/go-client.ts": 2,
 		"clients/govulncheck-client.ts": 7,
-		"clients/gradle-ktfmt-style.ts": 5,
+		// 5 -> 4 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/gradle-ktfmt-style.ts": 4,
 		"clients/grammar-source.ts": 4,
 		"clients/gzip-stage-write.ts": 2,
 		"clients/inline-blocker-dispositions.ts": 2,
@@ -1124,12 +1134,14 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (`path.resolve` / `path.dirname` / `path.basename` / `path.join`) is
 		// deleted; the confinement asks `realpathOrResolveAsync` for the root and
 		// each URI's identity, so four `path` uses leave the module.
-		"clients/lsp/edits.ts": 19,
+		// 19 -> 18 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/lsp/edits.ts": 18,
 		// #4532: the environment-gap gate resolves its walk-up from the file's
 		// own directory, so these are real filesystem `path` calls. 5 -> 8
 		// (#4532 round 5): the manifest walk-up reads `package.json` at each
 		// level on the same bounded ancestry.
-		"clients/lsp/environment-gap.ts": 8,
+		// 8 -> 5 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/lsp/environment-gap.ts": 5,
 		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
 		// #4346: Go package directories and TS/JS extensions of the implicit
@@ -1168,11 +1180,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 121 -> 124 (#4914): `findEffectTsgoLsp` joins the `@effect/tsgo` manifest
 		// path, the `.bin/effect-tsgo` path, and `findNativeTypeScriptLsp` hands
 		// back its `node_modules` directory: three `path.join` filesystem calls.
-		"clients/lsp/server.ts": 122,
+		// 122 -> 111 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/lsp/server.ts": 111,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
-		"clients/lsp/workspace-diagnostics-cache.ts": 15,
+		// 12 -> 11 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/lsp/workspace-diagnostics-cache.ts": 11,
 		// #4346: a creation record carries the created file's path.
 		"clients/lsp/workspace-diagnostics-session.ts": 2,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
@@ -1186,7 +1200,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/ipc.ts": 7,
 		"clients/mcp/session.ts": 3,
 		"clients/metrics-client.ts": 6,
-		"clients/metrics-history.ts": 7,
+		// 7 -> 6 (#4966): the two `path.dirname(filePath)` starts of the commit lookup become one inside `getCurrentCommit`.
+		"clients/metrics-history.ts": 6,
 		"clients/module-report.ts": 30,
 		// 6 -> 9 (#3650): MutationLineResult.path field, the adapter-declared
 		// preference, and the readToolResultPathField return.
@@ -1238,7 +1253,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `typeof path.posix` parser), and `kernelAttemptAsync` carries the same
 		// argument its sync twin does; the fold and fallback calls are the same
 		// senses counted above.
-		"clients/path-utils.ts": 39,
+		// 39 -> 41 (#2556): `relativeInside` takes a `pathImpl: typeof path = path`
+		// argument so callers can pass the win32 dialect; the default and its
+		// annotation are the two senses.
+		// 41 -> 40 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/path-utils.ts": 40,
 		"clients/php-cs-fixer-config.ts": 4,
 		// 26 -> 24 (#4689 batch 3): the changed-file set is a PathKeyedMap, so two
 		// `path.resolve` calls are gone. 24 -> 22: the postMutation gate compares
@@ -1267,7 +1286,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
 		// path operations at the shared Python resolver seam; r3 restored the
 		// `path.isAbsolute` leg that rejects another Windows drive (V1).
-		"clients/python-environment.ts": 19,
+		// 19 -> 18 (#5009): the two root-level venv candidates became one
+		// `path.join` inside the list the resolver and the install stamp share.
+		"clients/python-environment.ts": 13,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
@@ -1280,7 +1301,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 10 -> 11 (#4508): the walk joins the `.git` entry and its HEAD.
 		"clients/review-graph/git-identity.ts": 11,
 		// 61 -> 64 (#4346 final lane): `fileAnswerNames`, moved from builder.ts.
-		"clients/review-graph/import-resolvers.ts": 64,
+		// 64 -> 61 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/review-graph/import-resolvers.ts": 61,
 		"clients/review-graph/tsconfig-paths.ts": 35,
 		"clients/review-graph/workspace-modules.ts": 27,
 		"clients/ruff-client.ts": 4,
@@ -1375,7 +1397,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// for pytest, PHPUnit, Mix, and generic runner locations.
 		// 74 -> 72 (#4689 batch 2): two `path.resolve` locals dropped from the root and
 		// failed-target keys.
-		"clients/test-runner-client.ts": 70,
+		"clients/test-runner-client.ts": 68,
 		"clients/todo-scanner.ts": 3,
 		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
 		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,
@@ -1383,8 +1405,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (a path operation).
 		"clients/tool-agreement.ts": 10,
 		// 13 -> 12 (#4689 item 6): the file is resolved by `realpathOrResolve`.
-		"clients/tool-cwd.ts": 12,
-		"clients/tool-policy.ts": 64,
+		// 12 -> 10 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/tool-cwd.ts": 10,
+		// 64 -> 62 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"clients/tool-policy.ts": 62,
 		// 19 -> 18 (#4689 batch 7): the grammar write probe climbs `walkUpDirs`, so
 		// its own `path.dirname` step is the seam's.
 		"clients/tree-sitter-client.ts": 18,
@@ -1394,7 +1418,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-query-loader.ts": 18,
 		"clients/tree-sitter-shared.ts": 2,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
-		"clients/trivy-client.ts": 4,
+		// 4 -> 5 (#4617 review F1): a rendered trivy report cites its own rows'
+		// `target` resolved against the scan root, one more `path` operation, same
+		// sense as the four above (a filesystem path operation).
+		"clients/trivy-client.ts": 5,
 		"clients/warm-attach.ts": 3,
 		"clients/widget-state.ts": 7,
 		"clients/word-index-logger.ts": 2,
@@ -1443,12 +1470,15 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/symbol-search.ts": 5,
 		"mcp/analyze-cli.ts": 4,
 		"mcp/cli.ts": 2,
-		"mcp/server.ts": 31,
+		// 31 -> 30 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
+		"mcp/server.ts": 30,
 		"index.ts": 20,
 	},
 	record: {
 		"clients/actionable-warnings.ts": 14,
-		"clients/advisory-provenance.ts": 8,
+		// 8 -> 9 (#4617): the well-formed check reads the new `filelessParts`
+		// flag on the record it validates, so one more `record.` use exists.
+		"clients/advisory-provenance.ts": 9,
 		"clients/cache-observability.ts": 2,
 		"clients/config-core/merge.ts": 3,
 		"clients/config-core/normalize.ts": 12,
@@ -1600,7 +1630,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/htmlhint.ts": 3,
 		"clients/dispatch/runners/javac.ts": 4,
 		"clients/dispatch/runners/ktlint.ts": 2,
-		"clients/dispatch/runners/lsp.ts": 10,
+		// 10 -> 11 (#5008 review r2): the all-clear arm's stale-bound answer
+		// returns `status: "skipped"` instead of `succeeded` — the same
+		// `RunnerResult.status` member sense as every other row here.
+		"clients/dispatch/runners/lsp.ts": 11,
 		"clients/dispatch/runners/markdownlint.ts": 4,
 		"clients/dispatch/runners/mypy.ts": 2,
 		"clients/dispatch/runners/oxlint.ts": 11,
@@ -1825,7 +1858,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/pipeline.ts": 6,
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/runtime-agent-end.ts": 6,
-		"clients/runtime-turn.ts": 16,
+		// 16 -> 18 (#4617): the code-quality advisory cites the `filePath` of each
+		// kept `warning` the report was built from, so the loop variable is read
+		// twice more.
+		"clients/runtime-turn.ts": 18,
 		"clients/secret-findings.ts": 3,
 		"clients/widget-state.ts": 1,
 		"tools/ast-grep-search.ts": 6,

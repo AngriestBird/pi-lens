@@ -41,6 +41,7 @@
  *   node scripts/smoke-tools.mjs [lang ...] [--step2] [--tier1] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --lsp [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --lsp-gate [lang ...] [--install] [--verbose]
+ *   node scripts/smoke-tools.mjs --lsp-cascade [lang ...] [--install] [--verbose] [--times-out=<file>] [--min-pass=N]
  *   node scripts/smoke-tools.mjs --lens-full [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --format [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --resolution [--verbose]
@@ -68,6 +69,16 @@ import {
 	sweepScratchDirs,
 } from "./lib/scratch-dir.mjs";
 import { safeRm } from "./lib/safe-rm.mjs";
+import {
+	CASCADE_CONCLUSIVE_DEADLINE_MS,
+	CASCADE_FIXTURES,
+	CASCADE_RETRY_INTERVAL_MS,
+	CASCADE_WARM_DEADLINE_MS,
+	cascadeRow,
+	cascadeTimesRecord,
+	classifyCascadeRun,
+	describeLastTouch,
+} from "./lib/lsp-cascade-smoke.mjs";
 import { touchAnsweredDiagnostics } from "./lib/touch-result.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -661,6 +672,24 @@ const LSP_FIXTURES = [
 			ancestorMarker: "requirements.txt",
 			rootMarker: "setup.py",
 		},
+		// #4532 gap 3: `runVenvInstallWitness` (a `pip install` into a project
+		// `.venv` with no lockfile wrote nothing the look stamped, so pyright kept
+		// its cached missing import for the server's life).
+		venvInstall: {
+			ext: ".py",
+			importerText: (name) => `import ${name}\n\nprint(${name}.VALUE)\n`,
+			packageText: "VALUE = 1\n",
+			reportsMissing: (text, name) =>
+				text.includes(`Import "${name}" could not be resolved`),
+			// pyright reads a venv through its own config, so the fixture needs no
+			// interpreter (and no `pip`): `venvPath`/`venv` point at a directory
+			// tree shaped exactly like the one `python -m venv` writes, and the
+			// install is the two entries `pip install` adds to `site-packages`.
+			configFile: "pyrightconfig.json",
+			configText: JSON.stringify({ venvPath: ".", venv: ".venv" }),
+			sitePackages: [".venv", "lib", "python3.12", "site-packages"],
+			rootMarker: "setup.py",
+		},
 	},
 	// Clean (no-diagnostic) counterpart — bench-only signal for the clean-file edit
 	// path (#240). Every other fixture is intentionally broken, which masks how long
@@ -1147,6 +1176,11 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "typst",
+		// #3405: the fixture's lang is the file family, the server is tinymist.
+		// Declared here so a script that keys a row by SERVER id (the save-verdict
+		// probe's table) resolves the fixture to "tinymist" without a second
+		// alias table.
+		serverId: "tinymist",
 		dir: "tests/fixtures/tool-smoke/typst",
 		file: "main.typ",
 		serverHint: "tinymist",
@@ -1831,6 +1865,8 @@ function parseArgs(argv) {
 	let install = false;
 	let lsp = false;
 	let lspGate = false;
+	let lspCascade = false;
+	let timesOut = null;
 	let lensFull = false;
 	let format = false;
 	let resolution = false;
@@ -1846,6 +1882,9 @@ function parseArgs(argv) {
 		else if (arg === "--install") install = true;
 		else if (arg === "--lsp") lsp = true;
 		else if (arg === "--lsp-gate") lspGate = true;
+		else if (arg === "--lsp-cascade") lspCascade = true;
+		else if (arg.startsWith("--times-out="))
+			timesOut = arg.slice("--times-out=".length);
 		else if (arg === "--lens-full") lensFull = true;
 		else if (arg === "--format") format = true;
 		else if (arg === "--resolution") resolution = true;
@@ -1865,6 +1904,8 @@ function parseArgs(argv) {
 		install,
 		lsp,
 		lspGate,
+		lspCascade,
+		timesOut,
 		lensFull,
 		format,
 		resolution,
@@ -2020,8 +2061,14 @@ export function passFloorBreach(rows, minPass) {
 	});
 	if (verdict.ok) return null;
 	const unavailable = rows.filter((r) => r.state === "skip").length;
+	// The sentence follows what happened: "installs nothing" is only true when
+	// nothing passed (#5021 verify F10).
+	const conclusion =
+		verdict.evaluated === 0
+			? "A lane that installs nothing proves nothing"
+			: "A lane that proves fewer servers than its floor proves too little";
 	return `
-✗ pass floor: ${verdict.evaluated} runner(s) passed, at least ${verdict.floor} required (${unavailable} unavailable). A lane that installs nothing proves nothing — treat this as red, not as flaky tooling.`;
+✗ pass floor: ${verdict.evaluated} runner(s) passed, at least ${verdict.floor} required (${unavailable} unavailable). ${conclusion} — treat this as red, not as flaky tooling.`;
 }
 
 // A transient/offline registry condition — the runner has no network, or the
@@ -2483,9 +2530,12 @@ const INCONCLUSIVE_ANSWER = /NOT the same as 0 diagnostics/;
 /**
  * One `lsp_diagnostics` call on `file`, as the born-after-start phases read it
  * (the primary server's answer, as text). `before` runs first: the host's
- * `tool_call` look, when the phase stands in for the pi hook (#4532).
+ * `tool_call` look, when the phase stands in for the pi hook (#4532). `cwd` is
+ * the session directory the call runs from, which is also the root the answer
+ * route's own look keys on (`tools/lsp-diagnostics.ts`); a phase whose fixture
+ * root is not the workspace passes its own (#4532 gap 3).
  */
-function diagnoseFile(execute, workspace, lang, file, before) {
+function diagnoseFile(execute, workspace, lang, file, before, cwd = workspace) {
 	return async () => {
 		if (before) await before();
 		const result = await execute(
@@ -2493,9 +2543,15 @@ function diagnoseFile(execute, workspace, lang, file, before) {
 			{ path: file, waitMs: LSP_DIAGNOSTICS_WAIT_MS, serverScope: "primary" },
 			undefined,
 			null,
-			{ cwd: workspace },
+			{ cwd },
 		);
-		return String(result?.content?.[0]?.text ?? "");
+		return {
+			text: String(result?.content?.[0]?.text ?? ""),
+			// The answer's status, not only its text: an error result ("LSP service
+			// not available.") is no diagnostic answer, so a witness that reads only
+			// the text can count it as cleared on its first call (review 5009).
+			isError: result?.isError === true,
+		};
 	};
 }
 
@@ -2539,7 +2595,8 @@ export async function runCreatedModuleWitness(
 ) {
 	const witness = fx.createdModuleWitness;
 	const tag = `${process.pid}_${Date.now().toString(36)}`;
-	const diagnose = (file) => diagnoseFile(execute, workspace, fx.lang, file)();
+	const diagnose = async (file) =>
+		(await diagnoseFile(execute, workspace, fx.lang, file)()).text;
 	const cases = [
 		{
 			label: "pi write",
@@ -2756,7 +2813,7 @@ export async function runBornAfterStartConfigWitness(
 				await diagnoseFile(execute, workspace, fx.lang, born.host.file)();
 			}
 			const ready = await pollUntil(
-				async () => witness.reportsMissing(await diagnose(), name),
+				async () => witness.reportsMissing((await diagnose()).text, name),
 				{ deadlineMs, intervalMs },
 			);
 			if (!ready.ok) {
@@ -2772,7 +2829,7 @@ export async function runBornAfterStartConfigWitness(
 			born.birth(born.root);
 			const cleared = await pollUntil(
 				async () => {
-					const text = await diagnose();
+					const text = (await diagnose()).text;
 					return (
 						!INCONCLUSIVE_ANSWER.test(text) &&
 						!witness.reportsMissing(text, name)
@@ -2810,6 +2867,110 @@ export async function runBornAfterStartConfigWitness(
 		}
 	}
 	return rows;
+}
+
+/**
+ * Born-after-start phase for a package installed into a project `.venv` that
+ * keeps no lockfile (#4532 gap 3). The lockfile and `node_modules` install
+ * stamp was blind to `pip install` in this shape, so nothing published, no
+ * primary client restarted and pyright kept the `Import "x" could not be
+ * resolved` it had cached for its whole life (real pyright 1.1.414: stale
+ * through 40 calls over 20 s on the pre-fix tree; the same install behind a
+ * published change cleared on call 1).
+ *
+ * The workspace is hosted as its own root with its config and its empty venv
+ * written BEFORE the first call (the server reads both once, at start), so the
+ * import is genuinely unresolved when the phase starts. The install is then
+ * written from outside pi-lens, as `pip install` leaves it: the package's
+ * directory and its `<name>-1.0.dist-info` entry inside `site-packages`, which
+ * is what moves the directory's own identity. One row.
+ */
+export async function runVenvInstallWitness(
+	fx,
+	{
+		workspace,
+		execute,
+		deadlineMs = BORN_AFTER_START_DEADLINE_MS,
+		intervalMs = BORN_AFTER_START_POLL_MS,
+	},
+) {
+	const lang = fx?.lang ?? "unknown";
+	const runner = `${fx?.serverHint} venv install (no lockfile)`;
+	try {
+		// Inside the try: a caller with no `venvInstall` fixture gets a red row, not
+		// a rejection out of the helper (review 5009).
+		const witness = fx.venvInstall;
+		const tag = `${process.pid}_${Date.now().toString(36)}`;
+		const root = path.join(workspace, `witness_venv_${tag}`);
+		const name = `witness_pkg_${tag}`;
+		const importer = path.join(root, `witness_user_venv${witness.ext}`);
+		const site = path.join(root, ...witness.sitePackages);
+		fs.mkdirSync(root, { recursive: true });
+		fs.mkdirSync(site, { recursive: true });
+		fs.writeFileSync(path.join(root, witness.configFile), witness.configText);
+		fs.writeFileSync(path.join(root, witness.rootMarker), "");
+		fs.writeFileSync(importer, witness.importerText(name));
+		const diagnose = diagnoseFile(
+			execute,
+			workspace,
+			fx.lang,
+			importer,
+			undefined,
+			root,
+		);
+		const ready = await pollUntil(
+			async () => witness.reportsMissing((await diagnose()).text, name),
+			{ deadlineMs, intervalMs },
+		);
+		if (!ready.ok) {
+			return [
+				{
+					lang,
+					runner,
+					state: "fail",
+					detail: `precondition: the missing import of ${name} was not reported in ${ready.polls} calls over ${ready.elapsedMs} ms before it was installed`,
+					diags: 0,
+				},
+			];
+		}
+		fs.mkdirSync(path.join(site, name));
+		fs.writeFileSync(path.join(site, name, "__init__.py"), witness.packageText);
+		fs.mkdirSync(path.join(site, `${name}-1.0.dist-info`));
+		const cleared = await pollUntil(
+			async () => {
+				const answer = await diagnose();
+				// An error result is not an answer: it is neither "cleared" nor a
+				// missing-import report, so the poll keeps waiting (review 5009).
+				return (
+					!answer.isError &&
+					!INCONCLUSIVE_ANSWER.test(answer.text) &&
+					!witness.reportsMissing(answer.text, name)
+				);
+			},
+			{ deadlineMs, intervalMs },
+		);
+		return [
+			{
+				lang,
+				runner,
+				state: cleared.ok ? "pass" : "fail",
+				detail: cleared.ok
+					? `the importer's missing import cleared on call ${cleared.polls} (${cleared.elapsedMs} ms after the package was installed into the venv)`
+					: `the importer still reports ${name} missing, or answers inconclusively, after ${cleared.polls} calls over ${cleared.elapsedMs} ms (installed into a lockfile-less .venv; #4532 gap 3)`,
+				diags: cleared.ok ? 0 : 1,
+			},
+		];
+	} catch (err) {
+		return [
+			{
+				lang,
+				runner,
+				state: "fail",
+				detail: `witness error: ${err?.message ?? err}`,
+				diags: 0,
+			},
+		];
+	}
 }
 
 /**
@@ -3041,6 +3202,15 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 					})),
 				);
 			}
+			if (fx.venvInstall && verdict.state === "pass") {
+				witnessRows.push(
+					...(await runVenvInstallWitness(fx, {
+						workspace,
+						execute: (...args) => createLspDiagnosticsTool().execute(...args),
+						...deps?.createdModulePoll,
+					})),
+				);
+			}
 		} catch (err) {
 			rows.push({
 				lang: fx.lang,
@@ -3063,6 +3233,295 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 	return (
 		failures + report(witnessRows, "LSP created-module witness (#4320/#4346)")
 	);
+}
+
+/**
+ * Live cascade layer (`--lsp-cascade`, #1712). Per `CASCADE_FIXTURES` row:
+ * warm the exporter and its importers through `LSPService.touchFile`, break the
+ * exporter's signature on disk, then call the production
+ * `computeCascadeForFile` (repeated until the neighbours conclude or the
+ * deadline passes) and classify the run (`scripts/lib/lsp-cascade-smoke.mjs`).
+ * A server that handshook and never concludes reds the lane. The measured
+ * times are the lane's telemetry (`--times-out`).
+ */
+export async function runLspCascade({
+	langs = [],
+	install,
+	verbose,
+	timesOut = null,
+	minPass = null,
+	deps,
+} = {}) {
+	const lspEntry = path.join(repoRoot, "dist", "clients", "lsp", "index.js");
+	const cascadeEntry = path.join(
+		repoRoot,
+		"dist",
+		"clients",
+		"dispatch",
+		"integration.js",
+	);
+	const configEntry = path.join(
+		repoRoot,
+		"dist",
+		"clients",
+		"lsp",
+		"config.js",
+	);
+	if (!deps && !(fs.existsSync(lspEntry) && fs.existsSync(cascadeEntry))) {
+		console.error(
+			`dist build missing: ${lspEntry}\nRun \`npm run build:dist\` first.`,
+		);
+		process.exit(2);
+	}
+	let getLSPService;
+	let computeCascadeForFile;
+	let initLSPConfig;
+	let ensureTool;
+	let getInstallAttempt;
+	if (deps) {
+		({
+			getLSPService,
+			computeCascadeForFile,
+			initLSPConfig,
+			ensureTool,
+			getInstallAttempt,
+		} = deps);
+	} else {
+		({ getLSPService } = await import(pathToFileURL(lspEntry).href));
+		({ computeCascadeForFile } = await import(
+			pathToFileURL(cascadeEntry).href
+		));
+		({ initLSPConfig } = await import(pathToFileURL(configEntry).href));
+		({ ensureTool, getInstallAttempt } = await import(
+			pathToFileURL(
+				path.join(repoRoot, "dist", "clients", "installer", "index.js"),
+			).href
+		));
+	}
+	// A standalone host, as the other LSP layers: the copied fixture is a
+	// trusted project, through the seam pi uses.
+	await adoptFixtureProjectTrust({
+		repoRoot,
+		adopt: deps?.adoptProjectTrustFromContext,
+	});
+	const selected = (deps?.fixtures ?? CASCADE_FIXTURES).filter(
+		(f) => !langs.length || langs.includes(f.lang),
+	);
+	if (selected.length === 0) {
+		console.error(`No cascade fixtures matched: ${langs.join(", ")}`);
+		return 1;
+	}
+	let handshakeCensus;
+	const censusPath = process.env.PI_LENS_HOME
+		? path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json")
+		: undefined;
+	if (censusPath && fs.existsSync(censusPath)) {
+		try {
+			handshakeCensus = JSON.parse(fs.readFileSync(censusPath, "utf8"));
+		} catch {
+			// A malformed census says nothing about the handshake.
+		}
+	}
+	const lsp = getLSPService();
+	const touchOptions = {
+		diagnostics: "document",
+		collectDiagnostics: true,
+		clientScope: "primary",
+		maxClientWaitMs: LSP_CLIENT_WAIT_MS,
+		maxDiagnosticsWaitMs: LSP_DIAGNOSTICS_WAIT_MS,
+		source: "smoke-lsp-cascade",
+	};
+	const rows = [];
+	const measurements = {};
+	let seq = 0;
+	for (const cascadeFx of selected) {
+		const base = LSP_FIXTURES.find((f) => f.lang === cascadeFx.lang);
+		const fx = { ...base, ...cascadeFx };
+		const push = (state, detail, diags = 0) =>
+			rows.push({ lang: fx.lang, runner: fx.serverHint, state, detail, diags });
+		await ensureFixtureTools(
+			fx.tools ?? [],
+			install
+				? ensureTool
+				: (toolId) => ensureTool(toolId, { allowInstall: false }),
+			getInstallAttempt,
+			(toolId, resolved) =>
+				verbose &&
+				console.error(
+					`[${fx.lang}] ensureTool(${toolId}) → ${resolved ?? "UNAVAILABLE"}`,
+				),
+		);
+		// A server the workflow provisions itself (`provisionedBy`) was not started
+		// by the handshake step, so the census says nothing about it: the variable
+		// is the claim that it is there.
+		const handshook = fx.provisionedBy
+			? Boolean(process.env[fx.provisionedBy]?.trim())
+			: handshakeCensus
+				? handshakeCensus[fx.lang]?.state === "pass"
+				: undefined;
+		let workspace;
+		let cleanup;
+		try {
+			let absPrimary;
+			({
+				workspace,
+				absFile: absPrimary,
+				cleanup,
+			} = await (deps?.bootstrapFixtureWorkspace ?? bootstrapFixtureWorkspace)(
+				fx,
+				{
+					initLSPConfig,
+					repoRoot,
+					tmpPrefix: "pi-lens-smoke-cascade-",
+				},
+			));
+			if (fx.setup) {
+				const setupResult = runFixtureSetup(fx.setup, workspace, verbose);
+				if (!setupResult.ok) {
+					push("setup-failed", setupResult.detail);
+					continue;
+				}
+			}
+			const measured = { handshook, answered: false, warmMs: 0, attempts: 0 };
+			measurements[fx.lang] = measured;
+			// A server the handshake step could not start is unavailable on this
+			// runner (the gate's rule): waiting out the warm-up deadline for it
+			// would spend minutes proving nothing.
+			if (handshook === false) {
+				const row = cascadeRow(fx, measured);
+				push(row.state, row.detail);
+				continue;
+			}
+			// Warm: every file open, with a snapshot from before the edit.
+			const abs = (rel) => path.join(workspace, rel);
+			const warmDeadlineMs = fx.warmDeadlineMs ?? CASCADE_WARM_DEADLINE_MS;
+			const warmStart = Date.now();
+			for (const rel of [fx.file, ...fx.neighbours]) {
+				const content = fs.readFileSync(abs(rel), "utf8");
+				const left = Math.max(0, warmDeadlineMs - (Date.now() - warmStart));
+				const ready = await pollUntil(
+					async () => {
+						const touched = await lsp.touchFile(
+							abs(rel),
+							content,
+							touchOptions,
+						);
+						const diags = touchAnsweredDiagnostics(touched, touchOptions, lsp);
+						if (diags !== undefined) measured.answered = true;
+						return diags !== undefined && !touched?.inconclusive;
+					},
+					{ deadlineMs: left, intervalMs: 1000 },
+				);
+				if (verbose)
+					console.error(
+						`[${fx.lang}] warm ${rel}: ${ready.ok ? "answered" : "no conclusive answer"} after ${ready.polls} touch(es), ${ready.elapsedMs} ms`,
+					);
+				if (!measured.answered) break;
+			}
+			measured.warmMs = Date.now() - warmStart;
+			if (measured.answered && fx.expectLaunchVariant) {
+				const snapshots = await lsp.getCapabilitySnapshots(absPrimary);
+				if (
+					!snapshots.some((s) => s.launchVariant === fx.expectLaunchVariant)
+				) {
+					push(
+						"fail",
+						`expected launchVariant '${fx.expectLaunchVariant}', got [${snapshots.map((s) => s.launchVariant ?? "(unset)").join(",")}] — silent fallback?`,
+					);
+					continue;
+				}
+			}
+			if (!measured.answered) {
+				try {
+					const logDir = process.env.PI_LENS_HOME ?? "";
+					const readLog = (name) => {
+						try {
+							return fs.readFileSync(path.join(logDir, name), "utf8");
+						} catch {
+							return "";
+						}
+					};
+					measured.why = describeLastTouch(
+						readLog("latency.log"),
+						absPrimary,
+						readLog("extension.log"),
+					);
+				} catch {
+					// No latency log to read: the row keeps its plain wording.
+				}
+				const row = cascadeRow(fx, measured);
+				push(row.state, row.detail);
+				continue;
+			}
+			// The edit: the exporter's signature changes, as an agent's write would.
+			const before = fs.readFileSync(absPrimary, "utf8");
+			const after = before.replace(fx.edit.from, fx.edit.to);
+			if (after === before) {
+				push(
+					"fail",
+					`fixture drift: '${fx.edit.from}' not found in ${fx.file}`,
+				);
+				continue;
+			}
+			const deadlineMs =
+				fx.conclusiveDeadlineMs ?? CASCADE_CONCLUSIVE_DEADLINE_MS;
+			const editStart = Date.now();
+			fs.writeFileSync(absPrimary, after);
+			await lsp.touchFile(absPrimary, after, touchOptions);
+			for (;;) {
+				measured.attempts += 1;
+				seq += 1;
+				const cascadeStart = Date.now();
+				const run = await computeCascadeForFile(absPrimary, workspace, {
+					turnSeq: seq,
+					writeSeq: seq,
+					projectRoot: workspace,
+				});
+				if (measured.attempts === 1)
+					measured.firstCascadeMs = Date.now() - cascadeStart;
+				const prior = measured.concluded?.detail;
+				measured.concluded = classifyCascadeRun(run, fx, workspace);
+				measured.neighbours = measured.concluded.neighbours;
+				measured.elapsedMs = Date.now() - editStart;
+				if (verbose && measured.concluded.detail !== prior)
+					console.error(
+						`[${fx.lang}] cascade attempt ${measured.attempts}: ${measured.concluded.state} (${measured.concluded.detail}) skipReason=${run.skipReason ?? "-"} observed=${JSON.stringify(run.observedNeighborPaths ?? [])} unconfirmed=${run.unconfirmed?.count ?? 0}${measured.concluded.state === "wrong-verdict" ? `\n${run.result?.formatted ?? "(no cascade output)"}` : ""}`,
+					);
+				if (measured.concluded.state === "conclusive") {
+					measured.timeToConclusiveMs = measured.elapsedMs;
+					break;
+				}
+				if (measured.elapsedMs + CASCADE_RETRY_INTERVAL_MS > deadlineMs) break;
+				await sleep(CASCADE_RETRY_INTERVAL_MS);
+			}
+			const row = cascadeRow(fx, measured);
+			push(row.state, row.detail, row.diags);
+		} catch (err) {
+			push("fail", `cascade error: ${err?.message ?? err}`);
+		} finally {
+			cleanup?.();
+		}
+	}
+	try {
+		await lsp.shutdown();
+	} catch {
+		// best-effort teardown
+	}
+	const failures = report(
+		rows,
+		"LSP cascade (edit the exporter → importers conclude)",
+		{ failOnSkipOnly: true },
+	);
+	if (timesOut) {
+		fs.writeFileSync(
+			timesOut,
+			`${JSON.stringify(cascadeTimesRecord(rows, measurements), null, 2)}\n`,
+		);
+		if (verbose) console.error(`[lsp-cascade] times written to ${timesOut}`);
+	}
+	const floorBreach = passFloorBreach(rows, minPass);
+	if (floorBreach) console.error(floorBreach);
+	return failures + (floorBreach ? 1 : 0);
 }
 
 /**
@@ -4161,6 +4620,8 @@ async function main() {
 		install,
 		lsp,
 		lspGate,
+		lspCascade,
+		timesOut,
 		lensFull,
 		format,
 		resolution,
@@ -4190,6 +4651,14 @@ async function main() {
 
 	if (lspGate) {
 		process.exit((await runLspGate({ langs, install, verbose })) > 0 ? 1 : 0);
+	}
+
+	if (lspCascade) {
+		process.exit(
+			(await runLspCascade({ langs, install, verbose, timesOut, minPass })) > 0
+				? 1
+				: 0,
+		);
 	}
 
 	if (lensFull) {

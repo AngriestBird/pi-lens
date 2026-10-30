@@ -328,55 +328,111 @@ and were characterized `push-only` in the run above).
 
 Population: every server that declares `textDocumentSync.save` in
 `docs/servercapabilities.md` (15 `save`, 5 `save+text`), plus zizmor, which
-registers `textDocument/didSave` dynamically. Verdicts are moved from the #4768
-PR body (merged as 11cf30f8d) and re-read on origin/master d21f7d267: each
-server's registry entry is in `clients/lsp/server.ts`, and each save declaration
-matches `docs/servercapabilities.md`. `publishes after save only` is `no` when
-the server publishes without a save, `yes` when only a save publishes, and
-`unknown` when nothing was measured. A `source` row cites an external
-repository at the pinned commit; those commits were not re-fetched here.
+registers `textDocument/didSave` dynamically and therefore never receives one
+from pi-lens (its `didSave` registration is dynamic and pi-lens maps only the
+static `initialize` reply). The `server` column is the registry id in
+`clients/lsp/server.ts`, so a row can be matched against the capability
+inventory mechanically.
+
+`publishes after save only` states whether only a save makes the server answer:
+
+| value | meaning |
+|---|---|
+| `no` | the seeded finding arrived without a save |
+| `no (pull)` | pull mode: the `textDocument/diagnostic` request answered without a save, so no publish is involved |
+| `yes` | the same bytes produced the finding only after a save |
+| `yes (saved write)` | only a diagnostic-neutral edit plus a save produced it |
+| `inconclusive` | no arm produced the finding, or the answer landed in the untriggered window between two arms and so belongs to no arm |
+| `cannot measure` | no runner can install the server; the reason follows |
+| `unknown` | no run has measured this row yet |
+
+Regenerate it with
+
+```text
+node scripts/probe-save-verdict.mjs [lang ...] [--install] [--wait-ms <ms>] [--doc <path>]
+```
+
+The nightly `tool-smoke.yml` step "LSP save verdict (#3405)" runs it with
+`--install` on the tool-smoke fixtures, so the measurement columns self-populate
+through the same docs-refresh PR as `mode` and `clean-behavior` (#390). The probe
+drives the real client and reports four arms of equal length: the seeded bytes
+with `saved: false` (didOpen/didChange only), an untriggered window of the same
+length, the SAME bytes with `saved: true` (so a publish has the save as its only
+new input), and, only when nothing else answered, a diagnostic-neutral edit
+plus a save. `scripts/lib/save-verdict.mjs` owns the classification, the wording
+and the merge guard; a run rewrites the three measurement columns of the rows it
+reached and copies every other row verbatim, so a runner that could not install a
+server never blanks a measured cell.
+
+A pull-mode server answers a `textDocument/diagnostic` request rather than
+publishing, so no arm of its run has the save as its only new input: it reads
+`no (pull)` when the request answered without a save and `inconclusive`
+otherwise, never `yes`.
+
+The cells carry what a run OBSERVED, never when or where: each arm's elapsed time
+and the `src` token that says CI or a dev box go to the run log, so a
+re-measurement that changes only those is not a capability flip and the refresh PR
+stays armed for auto-merge (#4512).
+
+A row whose evidence names this command is a measurement by it. A row that names
+a prior probe, a workflow run or a source commit instead is provenance from
+before the command existed (or from a server no local run could reach), and the
+dispatched nightly replaces it on the first night that reaches the server.
 
 | server | save as declared | publishes after save only | verdict | evidence |
 |---|---|---|---|---|
-| expert | `save` | no | Measured: answers with no `didSave` once the seed is under `lib/`. Gated (`lspGate: true`). | #4768 arms A, B, C; nightly run 39852672584 (answered on call 6, 10955 ms); `tests/fixtures/nightly-floors/expert-readiness.json` |
-| cpp (clangd 22.1.0) | `save` | no | Measured: publishes on `didOpen` alone (97 ms, 3 diagnostics). Gated. Open conflict with #4527, see note 2. | #4768 local probe; #4527 wire scenario (issue comment) |
-| lua | `save` | no | Measured: the first publish carries 6 diagnostics at 135 ms; a save adds a late republish at 3.7 s. Gated. | #4768 local probe |
-| python-jedi | `save` | no | Measured: publishes on `didOpen` alone (about 1 s). Gated. | #4768 local probe; `clients/python-environment.ts:421` (id) |
-| opengrep (aux) | `save` | no | Measured: a save rescans and republishes (#3482); it also publishes on open once its rules load. Auxiliary, not gated. | `clients/lsp/wait-policy/strategies.ts:100`; Key findings above (#4763) |
-| gleam | `save` | no | Source: a save only marks the project changed and drops the in-memory cache; the publish comes from `CompilePlease`. Gated. | gleam-lang/gleam `0d9fa18ddb69`, `language-server/src/server.rs` (`SourceFileSaved`, `discard_in_memory_cache`, `compile_please`) |
-| go (gopls) | `save` | no | Source: `DidSave` calls `didModifyFiles`, the path a change takes. Gated. | golang/tools `02c9e4cb4c2f`, `gopls/internal/server/text_synchronization.go` |
-| zig (zls) | `save` | no | Source: a save runs the build-on-save watch update and autofix; ast-check diagnostics come from changes. Gated. | zigtools/zls `82ba5351ca8a`, `src/Server.zig` (`saveDocumentHandler`) |
-| rust (rust-analyzer) | `save` | no | Source: a save starts flycheck (`cargo check`); native diagnostics come from pull mode and do not wait for it. Exempt: runner availability. | rust-lang/rust-analyzer `0c4d74686b21`, `crates/rust-analyzer/src/handlers/notification.rs` (`handle_did_save_text_document`); matrix tier 1 |
-| terraform | `save` | no | Source: `terraform validate` runs on save only with the experimental `ValidateOnSave`, off by default. Gated. | hashicorp/terraform-ls `3dbe85a2b4e1`, `internal/langserver/handlers/did_save.go` |
+| expert | `save` | no | Prior measurement: answers with no `didSave` once the seed is under `lib/`. Gated. | #4768 arms A, B, C; nightly run 39852672584 (answered on call 6, 10955 ms); `tests/fixtures/nightly-floors/expert-readiness.json` |
+| cpp | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture cpp) |
+| lua | `save` | no | Measured: answers without a save (2 publish events on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture lua) |
+| python-jedi | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture jedi) |
+| opengrep | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Auxiliary, not gated. | `node scripts/probe-save-verdict.mjs` (fixture opengrep) |
+| gleam | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture gleam) |
+| go | `save` | no | Source: `DidSave` calls `didModifyFiles`, the path a change takes. Gated. | golang/tools `02c9e4cb4c2f`, `gopls/internal/server/text_synchronization.go` |
+| zig | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture zig) |
+| rust | `save` | inconclusive | Measured: inconclusive — pull mode: every arm is a textDocument/diagnostic request, so no arm has the save as its only new input (arms: no-save silent (6000 ms), save alone silent (6000 ms), saved write silent (6000 ms)). Exempt from the clean gate. | `node scripts/probe-save-verdict.mjs` (fixture rust) |
+| terraform | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture terraform) |
 | fsharp | `save+text` | no | Source: a save holds the source and refreshes code lenses; diagnostics come from open and change checks. Exempt: 0 findings in every run. | ionide/FsAutoComplete `8f011f1395a4`, `src/FsAutoComplete/LspServers/AdaptiveFSharpLspServer.fs` (`TextDocumentDidSave`); nightly run 39845687189 |
-| zizmor (dynamic) | not declared (`textDocumentSync` only) | no | Source: `didSave` is registered dynamically and pi-lens does not map that registration, so no save is sent. Auxiliary. | zizmor `crates/zizmor/src/lsp.rs` (`initialized`); `clients/lsp/wait-policy/strategies.ts:400-410` (#3548) |
-| clojure | `save+text` | unknown | Unverified: not measured. Gated; one save per write. | none |
-| fish | `save+text` | unknown | Unverified: not measured. Gated; one save per write. | none |
-| tinymist | `save` | unknown | Unverified: not measured. Gated (typst fixture); one save per write. | none |
-| cue | `save` | unknown | Unverified: not measured. Gated; one save per write. | none |
-| csharp | `save+text` | unknown | Unverified: not measured. Pull mode, so diagnostics are requested and a save is unlikely to be the only trigger. Gated. | matrix row (csharp-ls, tier 1) |
-| deno | `save` | unknown | Unverified: not measured. Pull mode. Gated. | matrix row (deno, tier 1) |
-| svelte | `save` | unknown | Unverified: not measured. Pull mode. Gated. | matrix row (svelte-language-server, tier 1) |
+| zizmor | · (registered dynamically) | no | Source: `didSave` is registered dynamically and pi-lens does not map that registration, so no save is sent. Auxiliary, not gated. | zizmor `crates/zizmor/src/lsp.rs` (`initialized`); `clients/lsp/wait-policy/strategies.ts:400-410` (#3548) |
+| clojure | `save+text` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture clojure) |
+| fish | `save+text` | unknown | Unverified: not measured. Gated. | none |
+| tinymist | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: 1 publish event. Gated. | `node scripts/probe-save-verdict.mjs` (fixture typst) |
+| cue | `save` | no | Measured: answers without a save (1 publish event on didOpen); a later save alone: silent (6000 ms). Gated. | `node scripts/probe-save-verdict.mjs` (fixture cue) |
+| csharp | `save+text` | unknown | Unverified: not measured. Pull mode, so diagnostics are requested and a save is unlikely to be the only trigger. Gated. | none |
+| deno | `save` | no (pull) | Measured: pull mode — no save needed; a later save+request answered: 1 diagnostic. Gated. | `node scripts/probe-save-verdict.mjs` (fixture deno) |
+| svelte | `save` | no (pull) | Measured: pull mode — no save needed; a later save+request answered: 2 diagnostics. Gated. | `node scripts/probe-save-verdict.mjs` (fixture svelte) |
 | powershell | `save+text` | unknown | Unverified: not measured. Exempt: intermittent. | none |
-| cmake | `save` | unknown | Unverified: the local probe published nothing in either arm (12 s each) with an `if(` seed, so inconclusive. Exempt: upstream documents no diagnostics. | #4768 local probe (no named command) |
+| cmake | `save` | inconclusive | Measured: inconclusive — no arm published, so this fixture does not distinguish a save-triggered server from one that never diagnoses it (arms: no-save silent (6000 ms), save alone silent (6000 ms), saved write silent (6000 ms)). Exempt from the clean gate. | `node scripts/probe-save-verdict.mjs` (fixture cmake) |
 
 Notes.
 
-1. Probe. The only command #4768 names is `node scripts/smoke-tools.mjs --lsp-gate`
-   (the nightly `tool-smoke.yml` step "LSP diagnostics clean-gate"). It runs
-   the gated fixture rows and does not write per-server save verdicts. The local
-   probes behind the cpp, lua, python-jedi and cmake rows, and the Expert arms
-   run outside CI, are not named in #4768's body, so no command regenerates this
-   table. Each row cites its own evidence instead.
-2. Open conflict, cpp. #4527 records a clangd 22.1.0 wire scenario in which the
-   save sender changes the outcome (base 1 of 5, head 5 of 5). #4768 records clangd
-   publishing on `didOpen` alone. The two records are not reconciled here; the row
-   keeps #4768's verdict.
+1. Probe. `node scripts/probe-save-verdict.mjs` is the command that produces this
+   table (see the paragraph above). It reuses the tool-smoke fixtures and the
+   nightly that already installs those servers, so it is one measurement path, not
+   a second driver. The only other command #4768 named is
+   `node scripts/smoke-tools.mjs --lsp-gate`; that step drives the clean gate and
+   writes no save verdict.
+2. clangd reconciled. #4527 recorded "base 1 of 5, head 5 of 5" and #4768 recorded
+   clangd publishing on `didOpen` alone; both hold, and they counted different
+   things. The 5 checks are the rows of the `lsp-did-save/analyze` verify scenario,
+   four of which require a `textDocument/didSave` on the wire, so its one passing
+   check on base is `control: clangd answered for a.c`: clangd published the
+   finding with `0 didSave(s)` captured. The sender was missing, not the
+   publish. The probe reproduces both arms with one seed and one window (6000 ms
+   each, one client): the no-save arm published on `didOpen`, and the save arm,
+   with the identical bytes and the save on the wire, published nothing, because
+   clangd does not republish identical bytes, the same property #4527 measured
+   when its own re-push left the cold query inconclusive. So #4768's verdict
+   stands, #4527's 1-of-5 → 5-of-5 is a sender measurement, and no clangd arm
+   reads `yes`.
 3. Citations corrected against master. #4768 cites `clients/lsp/client.ts:4410`
    for `sendDidSave`; it is at `clients/lsp/client.ts:4909`, with the save-capability
    gate at line 4917. The opengrep rescan claim is at
    `clients/lsp/wait-policy/strategies.ts:100`; line 345 is the
    `emptyUntilRulesRefreshed` hold.
+4. Clean-gate policy in a measured row is the fixture's own declaration, not
+   hand prose: `Gated.` is `lspGate: true`, `Auxiliary, not gated.` an auxiliary
+   scanner, and `Exempt from the clean gate.` a fixture whose `lspGateExempt`
+   reason lives in `scripts/smoke-tools.mjs`.
 
 ## Completing the matrix
 The fixtures (`tests/fixtures/tool-smoke/<lang>/`) are durable and cover every

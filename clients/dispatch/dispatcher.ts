@@ -788,8 +788,25 @@ function buildCoverageNotice(
 		// scanner that recovered a delivery path (or lost one) kept the stale
 		// wording for the rest of the session.
 		const onceKey = `${ctx.kind}:${ctx.filePath}:${dedupeSet(silentServerIds)}|${dedupeSet(deferredServerIds)}`;
+		// #5008 review r2 (F1): the latch suppresses the NOTICE, never the CLAIM.
+		// This block is one of the rule's "found no full coverage" answers, so it
+		// carries `unconfirmedStatus` on BOTH returns exactly as the no-coverage
+		// paths below do (`types.ts` says the field is set whenever the rule finds
+		// no coverage). Without it, write 2..N on the same file with the same
+		// silent scanner hit the dedupe key and `buildAllClearOutput` rendered
+		// `\u2713 <lang> clean` — the reporter's 133-write session claimed a clean
+		// security lane on every edit after the first. On the notice return the
+		// field is redundant TODAY (the notice is output, so the all-clear line is
+		// unreachable there) and it is spelled anyway, so the rule's answer never
+		// depends on which write paid the latch.
+		const statusParts: string[] = [];
+		if (deferredServerIds.length > 0)
+			statusParts.push(`${markerFor(deferredServerIds)} deferred`);
+		if (silentServerIds.length > 0)
+			statusParts.push(`${markerFor(silentServerIds)} silent`);
+		const unconfirmedStatus = `${statusParts.join(", ")} (diagnostics are incomplete)`;
 		if (dedupe) {
-			if (coverageNoticeSeen.has(onceKey)) return {};
+			if (coverageNoticeSeen.has(onceKey)) return { unconfirmedStatus };
 			coverageNoticeSeen.add(onceKey);
 		}
 		const coverageParts: string[] = [];
@@ -812,6 +829,7 @@ function buildCoverageNotice(
 				semantic: "warning",
 				tool: "pi-lens",
 			},
+			unconfirmedStatus,
 		};
 	}
 

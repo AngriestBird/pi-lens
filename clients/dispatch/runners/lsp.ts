@@ -17,6 +17,7 @@ import { getLspCapableKinds } from "../../language-policy.js";
 import { exceedsLspSyncLimits } from "../../lsp/content-limits.js";
 import {
 	primaryUnavailableCause,
+	touchCompletedConfirmationPolicy,
 	touchCoverageGap,
 } from "../../lsp/diagnostic-binding.js";
 import { getLSPService } from "../../lsp/capabilities.js";
@@ -200,6 +201,25 @@ const lspRunner: RunnerDefinition = {
 		// diagnostics means clean".
 		let unconfirmedServerIds: readonly string[] = [];
 		let deferredServerIds: readonly string[] = [];
+		// #5008: did the PRIMARY answer these bytes? A collecting touch says so by
+		// completing its confirmation policy (`confirmed`, or `partial` when only
+		// an auxiliary went missing) — the one owner of that question. Only that
+		// verdict retires a recorded blocker of the primary's; an unconfirmed
+		// auxiliary withdraws the claim of full coverage, not the primary's answer.
+		// A touch that says neither (`inconclusive` names the negative evidence,
+		// handled below) keeps the pre-#5008 reading.
+		let primaryAnswered = false;
+		// #5008 review r2 (F4): `confirmation` says the primary ANSWERED;
+		// `binding` says whether that answer was computed for THESE bytes. They
+		// are attached independently (`clients/lsp/index.ts` sets both under the
+		// same `collected !== undefined`), so a version-less primary whose publish
+		// describes the previous revision produces `confirmation: "partial"`
+		// beside `boundToCurrentDisk: false`. An answer for other bytes is not an
+		// observation of these — the contributor filter below withholds its rows
+		// (#4231, #5017) — so it withholds the verdict: `keepUnobserved`
+		// otherwise retires a live recorded blocker on it. Absent or "unknown"
+		// keeps the pre-r2 reading; only an explicit `false` withholds it.
+		let primaryAnswerStale = false;
 		let usedWarmAttach = false;
 		// #4645: the warm incumbent's answer to the membership probe this runner
 		// may not send itself; it stands in for that probe below.
@@ -260,6 +280,14 @@ const lspRunner: RunnerDefinition = {
 			const touched = answer
 				? {
 						diags: answer.diagnostics,
+						// #5008: `confirmation` is what says the PRIMARY answered
+						// (`primaryAnswered` below). The incumbent's DTO carries it for
+						// exactly this reason, and dropping it here would read every warm
+						// answer as a primary that never completed its policy — the #1179
+						// side-channel loss class, one field further on.
+						...(answer.confirmation !== undefined && {
+							confirmation: answer.confirmation,
+						}),
 						...(answer.unconfirmedServerIds !== undefined && {
 							unconfirmedServerIds: answer.unconfirmedServerIds,
 						}),
@@ -303,20 +331,29 @@ const lspRunner: RunnerDefinition = {
 					]),
 				];
 				deferredServerIds = touched.deferredServerIds ?? [];
-				if (
-					diagnosticsInconclusive &&
-					touched.binding?.boundToCurrentDisk === false
-				) {
-					// #4231: an inconclusive primary may contribute its last-known
-					// diagnostics while the current notify/diagnostics wait is wedged.
-					// The service already attributes each diagnostic and names the
-					// unconfirmed servers; retain only answered contributors. Without
-					// both pieces of provenance, fail closed rather than publish a
-					// stale blocking finding from the aggregate binding.
+				primaryAnswered =
+					touchCompletedConfirmationPolicy(touched) &&
+					touched.binding?.boundToCurrentDisk !== false;
+				primaryAnswerStale = touched.binding?.boundToCurrentDisk === false;
+				if (primaryAnswerStale) {
+					// #4231, #5017: a stale-bound answer is not an observation of these
+					// bytes, so a row stays only with provenance that its server
+					// answered them. An inconclusive touch names the servers that did
+					// not (#4231: an inconclusive primary may contribute its last-known
+					// diagnostics while its wait is wedged), and the service attributes
+					// each row, so the other attributed rows stand. A touch that
+					// completed its policy against older bytes names none, so no row
+					// has that provenance and every row is withheld: the run then takes
+					// the no-rows arm below, which reaches no verdict. Without both
+					// pieces of provenance, fail closed rather than publish a stale
+					// finding from the aggregate binding (#5017: `hasErrors` read such
+					// rows as a `failed` verdict, and `keepUnobserved` retired a live
+					// recorded blocker on findings about other bytes).
 					const unconfirmed = new Set(unconfirmedServerIds);
 					const currentContentDiags: typeof lspDiags = [];
 					for (const diagnostic of lspDiags) {
 						if (
+							diagnosticsInconclusive &&
 							diagnostic.serverId !== undefined &&
 							!unconfirmed.has(diagnostic.serverId)
 						) {
@@ -413,9 +450,13 @@ const lspRunner: RunnerDefinition = {
 		}
 
 		if (lspDiags.length === 0) {
+			// #5008: the primary's empty answer is a verdict about ITS blockers even
+			// while an auxiliary is unconfirmed or deferred. The named ids are what
+			// withdraws the claim of FULL coverage (the coverage notice) and keeps
+			// that auxiliary's own recorded blockers.
 			if (deferredServerIds.length > 0) {
 				return {
-					status: "deferred",
+					status: primaryAnswered ? "succeeded" : "deferred",
 					diagnostics: [],
 					semantic: "none",
 					unconfirmedServerIds: [...unconfirmedServerIds],
@@ -427,17 +468,32 @@ const lspRunner: RunnerDefinition = {
 				// timer, or silent with nothing published for this content — so this
 				// empty merged result is missing whatever that scanner would have said.
 				// A hung OR silent opengrep must not read as a clean bill of health on
-				// the security lane. The empty result remains skipped, while the correlated
-				// server ids let the coverage notice name the missing scanners once. Nothing
-				// is thrown away: the primary answered with zero findings, so there is nothing to
-				// report; when it DOES have findings the branches below still report
-				// them (see the non-empty path), which is how a trustworthy primary
-				// stays trustworthy under an auxiliary that never reported.
+				// the security lane. The correlated server ids therefore keep the run
+				// from claiming FULL coverage (the coverage notice names them), and the
+				// result stays `skipped` unless the touch says the primary completed its
+				// policy (#5008) — a silent scanner withdraws the coverage claim, never
+				// the primary's answer. Nothing is thrown away either way: the primary
+				// answered with zero findings, so there is nothing to report; when it
+				// DOES have findings the branch below still reports them, which is how a
+				// trustworthy primary stays trustworthy under a silent scanner.
+				return {
+					status: primaryAnswered ? "succeeded" : "skipped",
+					diagnostics: [],
+					semantic: "none",
+					unconfirmedServerIds: [...unconfirmedServerIds],
+				};
+			}
+			if (primaryAnswerStale) {
+				// #5008 review r2 (F4): nothing is unconfirmed and no scanner is
+				// deferred, so no id names the gap — only the binding says the answer
+				// describes other bytes. `skipped` is this runner's no-verdict status
+				// (`reachedNoVerdict`), which is what keeps the primary's recorded
+				// blockers pending instead of retiring them on a clean claim. A
+				// stale-bound findings run lands here too, its rows withheld (#5017).
 				return {
 					status: "skipped",
 					diagnostics: [],
 					semantic: "none",
-					unconfirmedServerIds: [...unconfirmedServerIds],
 				};
 			}
 			return {
@@ -608,11 +664,21 @@ const lspRunner: RunnerDefinition = {
 			...findingsResult(keptDiagnostics, {
 				status: hasErrors
 					? "failed"
-					: deferredServerIds.length > 0
+					: deferredServerIds.length > 0 && !primaryAnswered
 						? "deferred"
 						: "succeeded",
 				semantic: resultSemantic,
 			}),
+			// #5008: findings a run DOES report do not make it a verdict about the
+			// primary's own recorded blockers when the primary did not answer. A
+			// `failed` run with its own findings is `hasUsableResult`, so without
+			// this flag it would retire them (the inverse cell of the state table),
+			// and a settled collect-later run would too. `inconclusive` is the
+			// touch's own positive evidence that a primary deadline lapsed or no
+			// primary was acquired — a touch that says neither keeps the pre-#5008
+			// reading (a navigation-only primary, an incumbent built before the
+			// confirmation field), which is today's behaviour.
+			...(diagnosticsInconclusive && { inconclusive: true as const }),
 			...(unconfirmedServerIds.length > 0 && {
 				unconfirmedServerIds: [...unconfirmedServerIds],
 			}),

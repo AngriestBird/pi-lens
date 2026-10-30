@@ -33,6 +33,7 @@ import {
 	realpathOrResolve,
 	toPosix,
 	toProjectRelativePath,
+	walkUpDirs,
 } from "./path-utils.js";
 import { STAGE_TMP_PATTERN, stagePathFor } from "./atomic-write-staging.js";
 import { writeFileAtomic } from "./atomic-write.js";
@@ -608,7 +609,7 @@ export function displayProjectDataPath(
 	...segments: string[]
 ): string {
 	const absolute = path.resolve(getProjectDataDir(cwd), ...segments);
-	const absolutePosix = absolute.replace(/\\/g, "/");
+	const absolutePosix = toPosix(absolute);
 	const relative = toProjectRelativePath(absolute, cwd);
 	if (relative !== absolutePosix) {
 		return relative;
@@ -811,14 +812,10 @@ function resolveGitIgnoreRoot(startDir: string): string {
 	// of a project (or a link into one of its subdirectories) reaches the same
 	// `.git` and the same matcher as the real path. Every ignore verdict and
 	// cache key below is taken against this identity root.
-	const fallback = realpathOrResolve(startDir);
-	let current = fallback;
-	while (true) {
+	for (const current of walkUpDirs(startDir)) {
 		if (fs.existsSync(path.join(current, ".git"))) return current;
-		const parent = path.dirname(current);
-		if (parent === current) return fallback;
-		current = parent;
 	}
+	return realpathOrResolve(startDir);
 }
 
 function collapseSlashes(value: string): string {
@@ -1729,7 +1726,7 @@ export async function detectFileChangedAfterCommand(
  */
 export function isTestFile(filePath: string): boolean {
 	if (detectFileRole(filePath) === "test") return true;
-	const normalized = filePath.replace(/\\/g, "/");
+	const normalized = toPosix(filePath);
 	return (
 		normalized.includes("test-utils") ||
 		normalized.startsWith("test-") ||

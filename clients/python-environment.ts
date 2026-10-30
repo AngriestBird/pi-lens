@@ -12,7 +12,7 @@ import { parseJsonc } from "./review-graph/tsconfig-paths.js";
 import {
 	matchesWorkspaceMemberPattern,
 	realpathOrResolve,
-	toPosix,
+	relativeInside,
 	UV_WORKSPACE_EXCLUDE_DIALECT,
 	UV_WORKSPACE_MEMBERS_DIALECT,
 	walkUpDirs,
@@ -155,15 +155,8 @@ function isUvWorkspaceMember(
 	// `.venv`, `exclude` included, because equality was tested before the
 	// walk result was consulted (review round 3, S2). The relative-path guard
 	// below returns false for the root itself, which is the intended answer.
-	const relative = toPosix(path.relative(workspace.root, projectRoot));
-	if (
-		relative.length === 0 ||
-		relative === ".." ||
-		relative.startsWith("../") ||
-		path.isAbsolute(relative)
-	) {
-		return false;
-	}
+	const relative = relativeInside(workspace.root, projectRoot);
+	if (!relative) return false;
 
 	const matches =
 		(dialect: WorkspaceMemberGlobDialect) =>
@@ -192,6 +185,27 @@ const PROJECT_SOURCED_PYTHON_SOURCES = new Set<PythonEnvironmentSource>([
 	"project-venv",
 	"uv-workspace",
 ]);
+
+/**
+ * The root-level venv directories this module resolves, in the order it prefers
+ * them. One list, so a reader that stamps what an install into one of them
+ * writes (`clients/out-of-band-changes.ts`, #4532 gap 3) cannot disagree with
+ * the detector about which names a project's environment can be.
+ */
+const PROJECT_VENV_DIRS: ReadonlyArray<{
+	dir: string;
+	source: PythonEnvironmentSource;
+}> = [
+	{ dir: ".venv", source: "project-dot-venv" },
+	{ dir: "venv", source: "project-venv" },
+];
+
+/**
+ * The root-level venv directory names `detectPythonEnvironment` resolves, for
+ * the readers that stamp an install into one of them (#4532 gap 3).
+ */
+export const PROJECT_VENV_DIR_NAMES: ReadonlyArray<string> =
+	PROJECT_VENV_DIRS.map((venv) => venv.dir);
 
 const AMBIENT_ENVIRONMENT_VARIABLES = {
 	"uv-project-environment": "UV_PROJECT_ENVIRONMENT",
@@ -252,14 +266,9 @@ export async function detectPythonEnvironment(
 	const isWithinProjectRoot = (candidateRoot: string): boolean => {
 		// Both sides are identities (#4847 review F1): an ambient root spelled
 		// through a link to the project is inside it.
-		const relative = path.relative(root, realpathOrResolve(candidateRoot));
-		return (
-			relative !== ".." &&
-			!relative.startsWith(`..${path.sep}`) &&
-			// #3871 V1: another Windows drive has no relative path, so
-			// `path.relative` returns the absolute target: no `..`, not inside.
-			!path.isAbsolute(relative)
-		);
+		// #3871 V1: another Windows drive has no relative path; the seam reads
+		// the absolute `path.relative` result as outside.
+		return relativeInside(root, realpathOrResolve(candidateRoot)) !== undefined;
 	};
 	const candidates: Array<{
 		root: string | undefined;
@@ -285,8 +294,10 @@ export async function detectPythonEnvironment(
 			: []),
 		{ root: process.env.VIRTUAL_ENV, source: "virtual-env" },
 		{ root: process.env.CONDA_PREFIX, source: "conda" },
-		{ root: path.join(root, ".venv"), source: "project-dot-venv" },
-		{ root: path.join(root, "venv"), source: "project-venv" },
+		...PROJECT_VENV_DIRS.map((venv) => ({
+			root: path.join(root, venv.dir),
+			source: venv.source,
+		})),
 	];
 
 	for (const candidate of candidates) {

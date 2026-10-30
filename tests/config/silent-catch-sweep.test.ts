@@ -827,7 +827,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		// unreadable `@effect/tsgo` manifest and skips a missing bin candidate, the
 		// same shape as `findNativeTypeScriptLsp`'s probe; either way the launch
 		// falls back to the native `tsc`, whose own session-start line names it.
-		identities: "badb29b973468d1c",
+		identities: "b84df3748a14a0b7",
 		reason: PRE_RULE,
 	}, // :223, :377, :890, :921, :1150, :1350, :1483, :1615, :1806, :1953, :1975, :2306, :2385, :2400, :2414, :2431, :2449, :2481, :2508, :2521, :2601, :2613, :2634, :2659, :2700, :2714, :2928, :2936, :2966, :3610
 	"clients/lsp/service-singleton.ts": {

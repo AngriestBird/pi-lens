@@ -2785,6 +2785,171 @@ describe("PR body lint (#1844)", () => {
 		});
 	});
 
+	// Recurrence: #5019 — #5018 re-spelled `if (!isWithin(chartRoot, candidate))
+	// return null;` to `if (!isWithinIdentity(candidate, chartRoot)) return null;`
+	// in `clients/dispatch/runners/helm-render.ts`. The scan tested each added
+	// line alone, so the unchanged `return null` read as a new failure path and
+	// `pr-body.sh edit 5018` refused both the honest sentence and a `none:` line.
+	describe("failure-token credit for a re-spelled line (#5019)", () => {
+		const sentence = "No new failure path; no record added.";
+		const withObservability = (text: string) =>
+			body.replace("The advisory check run is the record.", text);
+		const refusal = "not valid when the added lines contain a failure path";
+		// One hunk as git prints it: `[mark, text]` in diff order, where `mark` is
+		// " " for unchanged, "-" for removed and "+" for added. The post-image is
+		// every line that is not removed, which is what `headFiles` carries.
+		const hunk = (file: string, lines: [string, string][]) => {
+			const rows = lines
+				.filter(([mark]) => mark !== "-")
+				.map(([, text]) => text);
+			return {
+				diff: [
+					`diff --git a/${file} b/${file}`,
+					`@@ -1,${lines.filter(([mark]) => mark !== "+").length} +1,${rows.length} @@`,
+					...lines.map(([mark, text]) => `${mark}${text}`),
+				].join("\n"),
+				headFiles: new Map([[file, rows.join("\n")]]),
+			};
+		};
+		// The subject is the Observability section, so unrelated rows (a runtime
+		// file also owes a Mutation row) are not read as a failure-path verdict.
+		const observabilityErrors = (fixture: {
+			diff: string;
+			headFiles: Map<string, string>;
+		}) =>
+			lintPrBody(withObservability(sentence), fixture).errors.filter((error) =>
+				error.startsWith("PR body Observability"),
+			);
+
+		it("accepts #5018's helm-render respell that keeps one `return null`", () => {
+			expect(
+				observabilityErrors(
+					hunk("clients/dispatch/runners/helm-render.ts", [
+						["-", "\tif (!isWithin(chartRoot, candidate)) return null;"],
+						[
+							"+",
+							"\tif (!isWithinIdentity(candidate, chartRoot)) return null;",
+						],
+					]),
+				),
+			).toEqual([]);
+		});
+
+		it("credits a hunk that removes more of a kind than it adds", () => {
+			expect(
+				observabilityErrors(
+					hunk("clients/example.ts", [
+						["-", "\tif (!a) return null;"],
+						["-", "\tif (!b) return null;"],
+						["-", "\tif (!c) return null;"],
+						["+", "\tif (!b) return null;"],
+						["+", "\tif (!a) return null;"],
+					]),
+				),
+			).toEqual([]);
+		});
+
+		it("does not credit a `return null` removal against an added `throw`", () => {
+			expect(
+				observabilityErrors(
+					hunk("clients/example.ts", [
+						["-", "\tif (!ready) return null;"],
+						["+", '\tif (!ready) throw new Error("unready");'],
+					]),
+				).join("\n"),
+			).toContain(refusal);
+		});
+
+		it("still refuses an added `throw` with no removed counterpart", () => {
+			expect(
+				observabilityErrors(
+					hunk("clients/example.ts", [
+						[" ", "\tconst ready = true;"],
+						["+", '\tif (!ready) throw new Error("unready");'],
+					]),
+				).join("\n"),
+			).toContain(refusal);
+		});
+
+		it("does not credit a removal in one hunk against another hunk's addition", () => {
+			const file = "clients/example.ts";
+			const rows = ["\tif (!ready) report();", '\tthrow new Error("later");'];
+			expect(
+				observabilityErrors({
+					diff: [
+						`diff --git a/${file} b/${file}`,
+						"@@ -1,1 +1,1 @@",
+						'-\tif (!ready) throw new Error("early");',
+						"+\tif (!ready) report();",
+						"@@ -2,0 +2,1 @@",
+						'+\tthrow new Error("later");',
+					].join("\n"),
+					headFiles: new Map([[file, rows.join("\n")]]),
+				}).join("\n"),
+			).toContain(refusal);
+		});
+
+		it("does not credit one file's removal against another file's addition", () => {
+			const removal = hunk("clients/example-a.ts", [
+				["-", '\tif (!ready) throw new Error("early");'],
+				["+", "\tif (!ready) report();"],
+			]);
+			const addition = hunk("clients/example-b.ts", [
+				[" ", "\tconst ready = true;"],
+				["+", '\tif (!ready) throw new Error("later");'],
+			]);
+			expect(
+				observabilityErrors({
+					diff: [removal.diff, addition.diff].join("\n"),
+					headFiles: new Map([...removal.headFiles, ...addition.headFiles]),
+				}).join("\n"),
+			).toContain(refusal);
+		});
+
+		// A hand-built diff with no `@@` header is still one hunk: its added line
+		// must not escape the scan because no hunk record claimed it.
+		it("still refuses a bare fixture whose added line carries a token", () => {
+			const file = "clients/example.ts";
+			expect(
+				observabilityErrors({
+					diff: [
+						`diff --git a/${file} b/${file}`,
+						'+\tthrow new Error("bare");',
+					].join("\n"),
+					headFiles: new Map([[file, '\tthrow new Error("bare");']]),
+				}).join("\n"),
+			).toContain(refusal);
+		});
+
+		// State-table plants P1 and P2: a token in a removed comment or string is
+		// prose, not a removal, so it credits nothing. The reconstructed pre-image
+		// decides it; blanking the removed text line by line would credit both.
+		it("does not credit a token in a removed JSDoc continuation", () => {
+			expect(
+				observabilityErrors(
+					hunk("clients/example.ts", [
+						[" ", "/**"],
+						["-", " * a retry may catch the error"],
+						[" ", " */"],
+						["+", "\ttry { adopt(); } catch (error) { warn(error); }"],
+					]),
+				).join("\n"),
+			).toContain(refusal);
+		});
+
+		it("does not credit a token in a removed string literal", () => {
+			expect(
+				observabilityErrors(
+					hunk("clients/example.ts", [
+						[" ", "\tconst ready = true;"],
+						["-", '\tconst note = "the caller must catch it";'],
+						["+", "\ttry { adopt(); } catch (error) { warn(error); }"],
+					]),
+				).join("\n"),
+			).toContain(refusal);
+		});
+	});
+
 	it("accepts an existing record named with its source location", () => {
 		const source = join(process.cwd(), "clients", "existing-record.ts");
 		mkdirSync(join(process.cwd(), "clients"), { recursive: true });

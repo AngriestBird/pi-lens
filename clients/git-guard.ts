@@ -11,6 +11,7 @@ import {
 	isOutsideProjectRoot,
 	isUnderDir,
 	pathsEqual,
+	toPosix,
 	toProjectRelativePath,
 } from "./path-utils.js";
 import {
@@ -314,7 +315,7 @@ function getShellCommand(input: unknown): string {
 }
 
 function executableName(value: string): string {
-	const normalized = value.replace(/\\/g, "/");
+	const normalized = toPosix(value);
 	let name = (
 		normalized.slice(normalized.lastIndexOf("/") + 1) ?? ""
 	).toLowerCase();

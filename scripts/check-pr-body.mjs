@@ -480,6 +480,22 @@ function isRuntimeObservabilityPath(name) {
 // 50-PR calibration in the #3875 body flagged nothing extra for them.
 const DECISION_BRANCH_G = /\bif\s*\(|\belse\b|\bswitch\s*\(|\bcase\b/g;
 
+// The failure-path tokens the Observability lint counts, by kind. Every spelling
+// of one kind is the same kind, so a re-spell of the whitespace between `return`
+// and `null` never reads as a new token (#5019).
+const FAILURE_TOKEN_G =
+	/\b(catch|recordDegradationOnce|throw|return\s+null)\b/g;
+
+// Failure tokens per kind in comment- and string-blanked text, added into
+// `counts` when a caller passes one.
+function countFailureTokens(text, counts = new Map()) {
+	for (const match of text.matchAll(FAILURE_TOKEN_G)) {
+		const kind = match[1].replace(/\s+/g, " ");
+		counts.set(kind, (counts.get(kind) ?? 0) + 1);
+	}
+	return counts;
+}
+
 function loadSeamMap(cwd = REPO_ROOT) {
 	try {
 		return loadCoverageMap(cwd);
@@ -583,6 +599,21 @@ function gitHeaderPaths(rest) {
 // itself starts with `++` is emitted as `+++…` and must be harvested, not
 // skipped (#3906 R3-B), and a removed `--…` line likewise must not advance the
 // POST cursor.
+//
+// Each hunk also records the POST lines it adds and the removed lines it
+// deletes, and removals are keyed by the POST line they follow, so a reader can
+// pair a hunk's removals against its additions and rebuild the pre-image it
+// came from (#5019).
+function hunkFor(current) {
+	// A bare fixture with no `@@` still gets one hunk, so its added lines are
+	// additions with nothing to credit them against.
+	if (!current.hunk) {
+		current.hunk = { added: [], removed: [] };
+		current.hunks.push(current.hunk);
+	}
+	return current.hunk;
+}
+
 export function parseRuntimeHunks(diff) {
 	const files = [];
 	let current = null;
@@ -598,6 +629,9 @@ export function parseRuntimeHunks(diff) {
 				added: new Map(),
 				deletedAfter: new Set(),
 				removed: [],
+				removedAfter: new Map(),
+				hunks: [],
+				hunk: null,
 				// The diff states a whole-file removal explicitly. It is the one
 				// post-image state that needs no read: there is nothing to classify
 				// (#4605 V2).
@@ -627,17 +661,27 @@ export function parseRuntimeHunks(diff) {
 		if (hunk) {
 			current.postLine = Number(hunk[1]);
 			inHunk = true;
+			current.hunk = { added: [], removed: [] };
+			current.hunks.push(current.hunk);
 			continue;
 		}
 		if (!inHunk && (line.startsWith("+++") || line.startsWith("---"))) continue;
 		if (line.startsWith("+")) {
-			current.added.set(current.postLine, line.slice(1));
+			const postLine = current.postLine;
+			current.added.set(postLine, line.slice(1));
+			hunkFor(current).added.push(postLine);
 			current.postLine += 1;
 		} else if (line.startsWith(" ")) current.postLine += 1;
 		else if (inHunk && line.startsWith("-")) {
 			// A deletion sits between post-image lines `postLine - 1` and `postLine`.
-			current.deletedAfter.add(current.postLine - 1);
+			const after = current.postLine - 1;
+			const index = current.removed.length;
+			current.deletedAfter.add(after);
 			current.removed.push(line.slice(1));
+			hunkFor(current).removed.push(index);
+			const bucket = current.removedAfter.get(after) ?? [];
+			bucket.push(index);
+			current.removedAfter.set(after, bucket);
 		}
 	}
 	return files;
@@ -647,10 +691,15 @@ export function parseRuntimeHunks(diff) {
 // `--unified=0` a call's closing brace may be unchanged and the opener may be
 // outside the hunk (#2915, #3906). Only a call whose span contains an added
 // POST-image line counts, so an untouched record never passes as new. The
-// failure-path and seam-branch scans read the added lines alone. A file whose
-// post-image is missing, unreadable, oversize, or does not match the diff's own
-// added text is reported `indeterminate` (visibly inconclusive), never
-// classified from the ambiguous hunk.
+// seam-branch scan reads the added lines alone; the failure-path scan credits a
+// hunk's removals of a token kind against that hunk's additions of the same
+// kind, because a re-spelled line is not a new failure path (#5019). The credit
+// is per hunk and per kind, never per file, so one hunk's removal cannot excuse
+// another hunk's or another file's addition, and a removed line is lexed as the
+// pre-image it came from so a token inside a comment or a string credits
+// nothing. A file whose post-image is missing, unreadable, oversize, or does not
+// match the diff's own added text is reported `indeterminate` (visibly
+// inconclusive), never classified from the ambiguous hunk.
 function runtimeObservabilityFromDiff(diff, seamMap, options = {}) {
 	const files = parseRuntimeHunks(diff);
 	const runtimeTouched = files.some(
@@ -717,11 +766,45 @@ function runtimeObservabilityFromDiff(diff, seamMap, options = {}) {
 				}
 			}
 		}
-		for (const postLine of file.added.keys()) {
-			failurePath ||=
-				/\bcatch\b|\brecordDegradationOnce\b|\bthrow\b|\breturn\s+null\b/.test(
-					blankedRows[postLine - 1] ?? "",
+		// The pre-image the diff removed these lines from: the post-image with its
+		// added lines dropped and its removed lines restored in diff order. Lexing
+		// it, not the removed text alone, keeps a removed JSDoc continuation or
+		// string from crediting a token it never carried as code (#5019). A file
+		// with no removed line builds none of it.
+		const preRows = [];
+		const preLineOfRemoved = [];
+		if (file.removed.length) {
+			for (let postLine = 1; postLine <= rows.length; postLine += 1) {
+				for (const removed of file.removedAfter.get(postLine - 1) ?? []) {
+					preLineOfRemoved[removed] = preRows.length;
+					preRows.push(file.removed[removed]);
+				}
+				if (!file.added.has(postLine)) preRows.push(rows[postLine - 1]);
+			}
+			for (const removed of file.removedAfter.get(rows.length) ?? []) {
+				preLineOfRemoved[removed] = preRows.length;
+				preRows.push(file.removed[removed]);
+			}
+		}
+		const preBlankedRows = file.removed.length
+			? blankCommentsAndStrings(preRows.join("\n")).text.split("\n")
+			: [];
+		for (const hunk of file.hunks) {
+			const credited = new Map();
+			for (const removed of hunk.removed)
+				countFailureTokens(
+					preBlankedRows[preLineOfRemoved[removed]] ?? "",
+					credited,
 				);
+			for (const postLine of hunk.added) {
+				for (const [kind, count] of countFailureTokens(
+					blankedRows[postLine - 1] ?? "",
+				)) {
+					const left = (credited.get(kind) ?? 0) - count;
+					credited.set(kind, Math.max(0, left));
+					if (left < 0) failurePath = true;
+				}
+			}
 		}
 		if (isSeamFile(file.post, seamMap)) {
 			let count = 0;
