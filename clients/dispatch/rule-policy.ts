@@ -363,11 +363,9 @@ export function applyRulePolicy<T extends { rule?: string; code?: string }>(
 	// the root the owner's map was anchored to.
 	const anchored = project ? { ...options, root: project.root } : options;
 	return diagnostics.filter((d) => {
-		// A finding with no file reads the owner of `options.filePath` (the
-		// edited file); `forFile("")` would read the workspace root's.
 		const map = project
 			? project.forFile(
-					(d as T & { filePath?: string }).filePath || options.filePath,
+					(d as T & { filePath?: string }).filePath ?? options.filePath,
 				)
 			: (policy as RulePolicyMap);
 		return !map || !hasOutputFilter(map) || keptByRulePolicy(d, map, anchored);

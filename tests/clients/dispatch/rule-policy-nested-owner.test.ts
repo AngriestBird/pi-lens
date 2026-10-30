@@ -259,8 +259,10 @@ describe("rules.<id> — dispatch filters each finding by its own file's owner",
 		expect(kept).toEqual([path.join("chart", "Chart.yaml")]);
 	});
 
-	// Recurrence: F24's rule for a finding with no file: it reads the edited
-	// file's owner, never the workspace root's (`forFile("")` resolves the root).
+	// F24's rule for a finding with no file: the dispatcher stamps the edited
+	// file on it before any filter (`normalizeDiagnosticFilePath`), so the
+	// edited file's owner filters it. Recurrence: a stamp that fell back to the
+	// workspace root would read the root's owner and deliver it.
 	it("filters a finding with an empty filePath by the edited file's owner", async () => {
 		writeConfig(pkg, { rules: { "no-eval": { disable: ["no-eval"] } } });
 
