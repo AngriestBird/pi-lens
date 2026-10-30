@@ -734,13 +734,18 @@ file-scoped worklist and receives no project-wide scanner output.
     built-in `Map`/`Set`/`WeakMap`/`WeakSet` declared `const` whose every use
     in `clients/`, `tools/`, `mcp/` and `index.ts` is a read; and for a class
     field or `this.x` assignment bound to `new <container or clients/ class>`
-    or `[]`. One symbol-count pin counts both. Partial: it walks `clients/`;
+    or `[]`, or a depth-1 `key: new <container>` member of a module-level
+    object literal (`globalState = { reads: new Map() }`). An admitted
+    constant removes the symbol, not the file: a file that also exports a
+    reset stays a candidate with a 0 pin. One symbol-count pin counts the
+    containers, fields and members. Partial: it walks `clients/`;
     `tools/` holds no candidate today, `index.ts` is censused by
     `tests/config/session-scope-sweep.test.ts` (#3611), and `mcp/server.ts`
     (`lspReadyCwds`) is outside the scan root. A field built by a factory call,
-    through another binding or an aliased constructor is not read
-    (`SWEEP_HEURISTIC_LIMITS`), and the owner value itself is a judgment the
-    audit only forces to be stated.
+    through another binding or an aliased constructor is not read, and an
+    admitted constant's `forEach` callback or stored value can be mutated
+    unseen (`SWEEP_HEURISTIC_LIMITS`; live population 0), and the owner value
+    itself is a judgment the audit only forces to be stated.
 
 87. **Factory-time read of a host value set later:** pi applies an extension flag's command-line value after every factory has run, so a flag read while the factory runs answers the registered default. Screen: does any flag read run while the factory runs, and does the host test apply the value after the factory, as pi does? Read it in a handler, a command or a tool, or once in `session_start`. Enforcer: `tests/config/factory-flag-read-sweep.test.ts` (partial: a reader handed to a callee that invokes it synchronously is not seen). Instances and dates: `HISTORY.md`.
 
