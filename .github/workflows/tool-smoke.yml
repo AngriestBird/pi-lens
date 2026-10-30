@@ -445,9 +445,24 @@ jobs:
       # step `env`, never `GITHUB_ENV` or `GITHUB_PATH`): the later capability,
       # clean-signal and idle-eviction measurements keep measuring the same
       # server population they did before this step existed. The launcher is a
-      # python script (setup-python above) that runs the setup-java JDK.
+      # python script (setup-python above) that runs a JDK: 1.63.0's bundles
+      # require JavaSE 25 (osgi.ee), which the JDK 21 above cannot resolve, so
+      # a second JDK is installed without becoming the job default
+      # (`set-default: false` leaves JAVA_HOME and PATH alone) and its path
+      # reaches only the jdtls steps below.
+      # yamllint disable-line rule:line-length
+      - name: Install JDK 25 for the cascade layer's jdtls
+        id: java25
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        continue-on-error: true
+        with:
+          distribution: temurin
+          java-version: '25'
+          set-default: false
       - name: Install jdtls 1.63.0 for the cascade layer
         id: jdtls
+        env:
+          JAVA_HOME: ${{ steps.java25.outputs.path }}
         run: |
           set -euo pipefail
           version="1.63.0"
@@ -462,18 +477,15 @@ jobs:
           tar -xzf "$dest/$archive" -C "$dest"
           chmod +x "$dest/bin/jdtls"
           echo "path=$dest/bin/jdtls" >> "$GITHUB_OUTPUT"
-          # Launcher probe (informational): the cascade row for a server that
-          # never answers can only say "spawn-failure"; this prints the
-          # launcher's own exit status and stderr beside it.
+          # Launcher probe (informational): a row for a server that never
+          # answers can only say "spawn-failure"; this prints the launcher's own
+          # exit status, stderr and Equinox configuration log beside it, run as
+          # the lane launches it (from the fixture, no arguments).
           set +e
-          timeout 30 "$dest/bin/jdtls" -data "$RUNNER_TEMP/pi-lens-jdtls-probe" </dev/null >"$RUNNER_TEMP/pi-lens-jdtls-probe.out" 2>&1
-          echo "jdtls launcher probe: exit $?"
-          head -c 3000 "$RUNNER_TEMP/pi-lens-jdtls-probe.out"
+          (cd tests/fixtures/lsp-cascade/java && timeout 30 "$dest/bin/jdtls" </dev/null >"$RUNNER_TEMP/pi-lens-jdtls-probe.out" 2>&1; echo "jdtls launcher probe: exit $?")
+          head -c 2000 "$RUNNER_TEMP/pi-lens-jdtls-probe.out"
+          cat "$dest"/configuration/*.log 2>/dev/null | head -c 3000
           command -v python3 java || true
-          cat "$dest"/configuration/*.log 2>/dev/null | head -c 4000
-          echo "jdtls launcher probe 2 (no -data, as the lane launches it):"
-          (cd tests/fixtures/lsp-cascade/java && timeout 30 "$dest/bin/jdtls" </dev/null 2>&1 | head -c 2000; echo "exit ${PIPESTATUS[0]}")
-          cat "$dest"/configuration/*.log 2>/dev/null | head -c 4000
 
       # Cascade layer (#1712): the handshake proves initialize and the clean gate
       # proves a finding on the file itself; neither proves the path an agent's
@@ -493,6 +505,7 @@ jobs:
         timeout-minutes: 20
         env:
           JDTLS_PATH: ${{ steps.jdtls.outputs.path }}
+          JAVA_HOME: ${{ steps.java25.outputs.path }}
         run: |
           set -o pipefail
           node scripts/smoke-tools.mjs --lsp-cascade --install --verbose --min-pass=3 --times-out="$RUNNER_TEMP/tool-smoke-lsp-cascade-times.json" 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-cascade.log"

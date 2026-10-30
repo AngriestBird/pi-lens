@@ -262,6 +262,10 @@
 		".github/workflows/untriaged-issues.yml#detect#Warn when a required CI job's p90 nears its timeout cap": {
 			"status": "no-floor",
 			"reason": "An advisory reporter, not a producer (#4691, #4989 r3): scripts/check-ci-job-p90.mjs prints one ::warning annotation per job over the ratio and one per required context it could not measure, and exits 1 only when its data read failed, so a blown read (a GitHub 502, run 40690133466) is visible in the run log and as this step's own failed outcome without reddening the nightly. The job's verdict is the untriaged-issue detector below it, which is not continue-on-error and still reds the job."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#Install JDK 25 for the cascade layer's jdtls": {
+			"status": "no-floor",
+			"reason": "JDK 25 install for the jdtls cascade row, not a producer: an absent JDK leaves JAVA_HOME empty, jdtls 1.63.0 cannot resolve its bundles on the job's JDK 21, and the \"LSP cascade layer\" step in the same job reds on the java row (a provisioned server that never answers), so an install that silently did nothing cannot read green."
 		}
 	}
 }

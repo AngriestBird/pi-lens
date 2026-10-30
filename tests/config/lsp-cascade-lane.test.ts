@@ -65,6 +65,16 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 				"${{ steps.jdtls.outputs.path }}",
 			);
 			expect(install?.run).not.toMatch(/GITHUB_ENV|GITHUB_PATH/);
+			// Recurrence: run 41025058980, jdtls 1.63.0 exited 13 on the job's
+			// JDK 21 (its bundles require JavaSE 25), so the java row never
+			// answered. The JDK it needs is a second install that leaves the job
+			// default alone, and its path reaches both jdtls steps and no other.
+			const jdk = steps.find((s) => s.id === "java25");
+			expect(at("java25")).toBeLessThan(at("jdtls"));
+			expect(jdk?.with?.["java-version"]).toBe("25");
+			expect(jdk?.with?.["set-default"]).toBe(false);
+			expect(install?.env?.JAVA_HOME).toBe("${{ steps.java25.outputs.path }}");
+			expect(cascade.env?.JAVA_HOME).toBe("${{ steps.java25.outputs.path }}");
 			// The archive is verified against a pinned digest before it is unpacked.
 			expect(install?.run).toMatch(/sha256sum --check/);
 			expect(install?.run).toMatch(/digest="[0-9a-f]{64}"/);
