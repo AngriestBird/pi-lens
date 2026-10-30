@@ -138,7 +138,12 @@ vi.mock("../clients/safe-spawn.js", async (importOriginal) => ({
 }));
 
 import extension from "../index.js";
+import { getDegradationSummary } from "../clients/degradation-ledger.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+import {
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../clients/latency-logger.js";
 import { readNdjsonRows } from "./support/ndjson-rows.js";
 import {
 	makeContextWithSystemEvent,
@@ -504,6 +509,36 @@ const ROW_B = [
 	"[ERROR] templates/other-b.yaml:2: nil pointer evaluating interface {}.image",
 ].join("\n");
 
+/**
+ * What the ledger holds for `chart`'s `cross-file-row-retired` retire: the
+ * durable row the real latency.log sink received (flushed first, no other
+ * await between) and the reason the in-memory summary kept.
+ */
+async function retiredRow(
+	chart: string,
+): Promise<{ durableRows: number; reasons: string[] }> {
+	await flushLatencyLog();
+	const read = readNdjsonRows(getLatencyLogPath());
+	// The ledger rows ARE the trace under test; a skipped line would shorten it.
+	expect(read.skipped).toBe(0);
+	const named = (subject: unknown) =>
+		String(subject ?? "").includes(`charts/${chart}/`);
+	return {
+		durableRows: read.rows.filter((row) => {
+			const metadata = row.metadata as Record<string, unknown> | undefined;
+			return (
+				row.phase === "degradation_ledger" &&
+				metadata?.kind === "cross-file-row-retired" &&
+				named(metadata.subject)
+			);
+		}).length,
+		reasons: (
+			getDegradationSummary().find((c) => c.kind === "cross-file-row-retired")
+				?.latestReasons ?? []
+		).flatMap((r) => (named(r.subject) ? [r.reason] : [])),
+	};
+}
+
 /** A cell that fails before its own shutdown must not leave the process-wide
  *  registration to the next cell (the second session would be declined). */
 let liveSession: { shutdown(): Promise<void> } | undefined;
@@ -637,6 +672,11 @@ describe("#5020 witness: a cross-file row retires once its cited file is clean o
 		expect(end).toMatch(
 			/Resolved this turn: charts\/fixed-b\/templates\/deploy-a\.yaml/,
 		);
+		// The retire is never silent: one ledger row, naming the clean verdict.
+		expect(await retiredRow("fixed-b")).toEqual({
+			durableRows: 1,
+			reasons: [expect.stringContaining("reported nothing on it")],
+		});
 		await s.shutdown();
 	});
 
@@ -652,6 +692,10 @@ describe("#5020 witness: a cross-file row retires once its cited file is clean o
 		// A deletion is not a clean verdict, so no file is reported "Resolved".
 		expect(end).not.toContain("Resolved this turn");
 		expect(await s.commitBlocked()).toBe(false);
+		expect(await retiredRow("deleted-b")).toEqual({
+			durableRows: 1,
+			reasons: [expect.stringContaining("no longer exists")],
+		});
 		await s.shutdown();
 	});
 
