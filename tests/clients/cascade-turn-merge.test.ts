@@ -1751,6 +1751,95 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 		}
 	});
 
+	// #5034 review r3 (F8). Recurrence: a neighbour no primary answered for is
+	// listed with its `fallbackFor` alternate's rows (round 2, F2) but is not an
+	// observation (no `observedNeighborPaths`). Its delivery REPLACED the
+	// primary's pending record with the fallback's rows, and the listing hid the
+	// record's unresolved line; a clean fallback answer then left the record
+	// silent with no way to clear it. Delivery must neither drop nor pin it.
+	// Three turns per cell: a fourth reaches the turn-cycle cap and returns
+	// before the cascade merge (`isMaxCyclesExceeded`).
+	it.each([
+		["with a finding of its own", ["fallback finding"]],
+		["clean", []],
+	])(
+		"a fallback-served neighbour answering %s neither replaces nor hides the primary's pending errors (#5034 F8)",
+		async (_label, fallbackRows) => {
+			const env = setupTestEnvironment("cascade-5034-f8-");
+			try {
+				const { cascadeStillPresentSince, listCascadePendingNeighbors } =
+					await import("../../clients/cascade-format.js");
+				const runtime = new RuntimeCoordinator();
+				const cacheManager = new CacheManager(false);
+				const a = path.join(env.tmpDir, "a.py");
+				const n1 = path.join(env.tmpDir, "n1.py");
+				const primaryError = diagnostic(n1, "primary error", 1);
+				const pending = () =>
+					listCascadePendingNeighbors().map((e) => e.errorCount);
+
+				// Turn 1: the primary answers and shows its error.
+				runtime.beginTurn();
+				edit(cacheManager, a, env.tmpDir);
+				runtime.appendCascadeRun({
+					filePath: a,
+					result: await computedResult(env.tmpDir, a, [
+						[n1, ["primary error"]],
+					]),
+					neighborCount: 1,
+					diagnosticCount: 1,
+					observedNeighborPaths: [n1],
+					checkedAt: Date.now(),
+				} as any);
+				expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).toContain(
+					"primary error",
+				);
+				expect(pending()).toEqual([1]);
+
+				// Turn 2: only the fallback answers. It confirms nothing (#5014),
+				// so the primary's error stays pending, unchanged, and named.
+				runtime.beginTurn();
+				edit(cacheManager, a, env.tmpDir);
+				const result = await computedResult(env.tmpDir, a, [
+					[n1, fallbackRows],
+				]);
+				result.neighbors[0].primaryUnavailable = {
+					serverIds: ["python"],
+					cause: "unstarted",
+				};
+				runtime.appendCascadeRun({
+					filePath: a,
+					result,
+					neighborCount: 1,
+					diagnosticCount: fallbackRows.length,
+					checkedAt: Date.now(),
+				} as any);
+				const second = await turnEndOf(runtime, cacheManager, env.tmpDir);
+				for (const row of fallbackRows) expect(second).toContain(row);
+				expect(second).toMatch(/n1\.py: 1 error\(s\) unresolved/);
+				expect(cascadeStillPresentSince(n1, primaryError, 99)).toBe(1);
+				expect(pending()).toEqual([1]);
+
+				// Turn 3: the primary answers clean, which clears it.
+				runtime.beginTurn();
+				edit(cacheManager, a, env.tmpDir);
+				runtime.appendCascadeRun({
+					filePath: a,
+					result: undefined,
+					neighborCount: 1,
+					diagnosticCount: 0,
+					skipReason: "clean",
+					observedNeighborPaths: [n1],
+				} as any);
+				expect(
+					await turnEndOf(runtime, cacheManager, env.tmpDir),
+				).not.toContain("n1.py");
+				expect(pending()).toEqual([]);
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
 	// Recurrence (#4689 review r1 F5): a cascade names its neighbours by path
 	// identity (review-graph keys) while turn_end holds the session root as
 	// spelled, so under a root reached through a link the pending line's

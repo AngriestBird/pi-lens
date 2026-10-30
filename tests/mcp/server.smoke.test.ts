@@ -1883,6 +1883,18 @@ describe("non-pi workspace trust (#4300)", () => {
 						...(primary === "answers" && {
 							python: { command: [process.execPath, answer] },
 						}),
+						// #5034 review r3 (F9): a binary that exists nowhere. The catalog
+						// search finds any host pyright: every LSP child's PATH gets
+						// node's own directory (`buildAugmentedPath`), where an `npm -g`
+						// pyright sits and which is /usr/bin on a distro node.
+						...(primary === "not-installed" && {
+							python: {
+								command: [
+									path.join(env.tmpDir, "not-installed", "pyright-langserver"),
+									"--stdio",
+								],
+							},
+						}),
 					},
 					disabledServers: ["ast-grep", "typos", "opengrep"],
 				}),
@@ -2015,7 +2027,7 @@ describe("non-pi workspace trust (#4300)", () => {
 				"project-local-refused",
 				"sessionRoot",
 			],
-			// #5034 review F5: no pyright on the pinned PATH, none installed.
+			// #5034 review F5, r3 F9: the primary's binary exists nowhere, none installed.
 			["a primary that is not installed", "not-installed", "fileRoot"],
 		] as const)(
 			"%s is not confirmed clean by the fallback, for both server scopes",
