@@ -178,6 +178,51 @@ export function classifyCascadeRun(run, fx, workspace) {
 }
 
 /**
+ * Why the last warm-up touch of `file` got no answer, read from the latency
+ * log's own phases (`lsp_client_selected`, `lsp_touch_file`): a red that says
+ * only "never answered" sends the next reader to a runner log it no longer has.
+ * `extensionLogText` adds the launcher's own spawn-failure classification.
+ * Returns an empty string when the logs hold nothing for the file.
+ */
+export function describeLastTouch(latencyLogText, file, extensionLogText = "") {
+	const rows = [];
+	for (const line of String(latencyLogText).split("\n").slice(-6000)) {
+		try {
+			const row = JSON.parse(line);
+			if (row?.filePath === file) rows.push(row);
+		} catch {
+			// A partial or non-JSON line says nothing about this file.
+		}
+	}
+	const last = (phase) => rows.filter((r) => r.phase === phase).at(-1);
+	const parts = [];
+	const selected = last("lsp_client_selected")?.metadata;
+	if (selected) parts.push(`client ${selected.serverId}: ${selected.outcome}`);
+	const touch = last("lsp_touch_file")?.metadata;
+	if (touch?.failureKind) parts.push(`touch ${touch.failureKind}`);
+	// The launcher's own classification (extension.log), for a server whose
+	// process never started: `kind` says why (tool-not-found, exit, timeout).
+	let spawn;
+	for (const line of String(extensionLogText).split("\n").slice(-6000)) {
+		try {
+			const row = JSON.parse(line);
+			const meta = row?.metadata;
+			if (
+				row?.message === "spawn failure classified" &&
+				typeof meta?.cwd === "string" &&
+				file.startsWith(meta.cwd)
+			)
+				spawn = meta;
+		} catch {
+			// A partial or non-JSON line says nothing about this file.
+		}
+	}
+	if (spawn)
+		parts.push(`spawn ${spawn.kind} (${path.basename(String(spawn.command))})`);
+	return parts.join("; ");
+}
+
+/**
  * The lane row from the measurements of one fixture.
  *
  * `answered` is false when the warm-up never got an answer from the server;
@@ -198,7 +243,7 @@ export function cascadeRow(fx, m) {
 			? {
 					...base,
 					state: "fail",
-					detail: `expected to answer (handshake passed or provisioned here) but never answered a touch in ${m.warmMs} ms`,
+					detail: `expected to answer (handshake passed or provisioned here) but never answered a touch in ${m.warmMs} ms${m.why ? ` (${m.why})` : ""}`,
 				}
 			: {
 					...base,

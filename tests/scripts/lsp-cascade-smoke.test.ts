@@ -17,6 +17,7 @@ import {
 	cascadeRow,
 	cascadeTimesRecord,
 	classifyCascadeRun,
+	describeLastTouch,
 	neighbourShowsFinding,
 	neighbourVerdict,
 } from "../../scripts/lib/lsp-cascade-smoke.mjs";
@@ -200,6 +201,66 @@ describe("cascadeRow (#1712)", () => {
 			m({ concluded: concluded("wrong-verdict", "read clean") }),
 		);
 		expect(row.state).toBe("fail");
+	});
+});
+
+describe("describeLastTouch (#1712)", () => {
+	// Lines as latency.log writes them for a jdtls that never launched.
+	const file = "/ws/src/lib/Lib.java";
+	const line = (phase: string, metadata: object, filePath = file) =>
+		JSON.stringify({ type: "phase", phase, filePath, metadata });
+	const log = [
+		line("lsp_client_selected", { serverId: "java", outcome: "spawn-failure" }),
+		line("lsp_touch_file", {
+			failureKind: "no_clients_none_spawning",
+			candidates: [{ serverId: "java", clientFound: "none" }],
+		}),
+		line("lsp_touch_file", { failureKind: "other-file" }, "/ws/other.java"),
+		"not json at all",
+	].join("\n");
+
+	it("names the launch outcome and the touch failure of the file", () => {
+		// Recurrence: #1712 CI run 41019475461, a jdtls red that said only
+		// "never answered a touch" and left the cause in a runner log.
+		expect(describeLastTouch(log, file)).toBe(
+			"client java: spawn-failure; touch no_clients_none_spawning",
+		);
+	});
+
+	it("adds the launcher's spawn classification for a process that never started", () => {
+		const extension = JSON.stringify({
+			message: "spawn failure classified",
+			metadata: {
+				kind: "tool-not-found",
+				command: "/runner/pi-lens-jdtls/bin/jdtls",
+				cwd: "/ws",
+			},
+		});
+		expect(describeLastTouch(log, file, extension)).toBe(
+			"client java: spawn-failure; touch no_clients_none_spawning; spawn tool-not-found (jdtls)",
+		);
+		// A failure in another workspace is not this file's.
+		expect(
+			describeLastTouch(log, file, extension.replace("/ws", "/elsewhere")),
+		).not.toContain("spawn tool-not-found");
+	});
+
+	it("says nothing for a file the log never mentions", () => {
+		expect(describeLastTouch(log, "/ws/missing.java")).toBe("");
+	});
+
+	it("puts the reason into the red row", () => {
+		const row = cascadeRow(
+			{ ...fx, provisionedBy: "X" },
+			{
+				answered: false,
+				handshook: true,
+				warmMs: 5,
+				attempts: 0,
+				why: "client java: spawn-failure",
+			},
+		);
+		expect(row.detail).toContain("(client java: spawn-failure)");
 	});
 });
 

@@ -77,6 +77,7 @@ import {
 	cascadeRow,
 	cascadeTimesRecord,
 	classifyCascadeRun,
+	describeLastTouch,
 } from "./lib/lsp-cascade-smoke.mjs";
 import { touchAnsweredDiagnostics } from "./lib/touch-result.mjs";
 
@@ -3425,6 +3426,23 @@ export async function runLspCascade({
 				}
 			}
 			if (!measured.answered) {
+				try {
+					const logDir = process.env.PI_LENS_HOME ?? "";
+					const readLog = (name) => {
+						try {
+							return fs.readFileSync(path.join(logDir, name), "utf8");
+						} catch {
+							return "";
+						}
+					};
+					measured.why = describeLastTouch(
+						readLog("latency.log"),
+						absPrimary,
+						readLog("extension.log"),
+					);
+				} catch {
+					// No latency log to read: the row keeps its plain wording.
+				}
 				const row = cascadeRow(fx, measured);
 				push(row.state, row.detail);
 				continue;

@@ -46,6 +46,8 @@ export interface CascadeMeasurement {
 	firstCascadeMs?: number;
 	elapsedMs?: number;
 	timeToConclusiveMs?: number;
+	/** Why the last warm-up touch went unanswered (latency-log phases). */
+	why?: string;
 	neighbours?: Record<string, NeighbourVerdict>;
 	concluded?: CascadeClassification;
 }
@@ -89,3 +91,9 @@ export function cascadeTimesRecord(
 	runner: Record<string, unknown>;
 	rows: Array<Record<string, unknown>>;
 };
+
+export function describeLastTouch(
+	latencyLogText: string,
+	file: string,
+	extensionLogText?: string,
+): string;
