@@ -4474,5 +4474,51 @@ describe("computeCascadeForFile", () => {
 				env.cleanup();
 			}
 		});
+
+		// Recurrence (#5034 review F2, #5014): a `fallbackFor` alternate answered
+		// the neighbour while its owner did not, so the touch named the owner and
+		// carried the alternate's findings. The primary-unavailable branch
+		// returned `diagnostics: []`: the line reached the agent, the findings
+		// did not. Once the line was delivered, the neighbour was dropped whole.
+		it("a fallback's findings on a neighbour whose primary did not answer are delivered with the line, and after it", async () => {
+			const { env, primary } = project("cascade-5014-fallback-");
+			try {
+				installLspService({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn(async () => ({
+						diags: [lspError("fallback finding")],
+						inconclusive: true,
+						inconclusiveReason: "primary-unavailable",
+						inconclusiveServerIds: ["typescript"],
+						primaryUnavailableCause: "unstarted",
+					})),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const { markCascadeUnansweredPrimariesDelivered } =
+					await import("../../clients/cascade-format.js");
+				const first = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+				expect(first.result?.formatted).toContain("fallback finding");
+				expect(first.result?.unansweredPrimaries?.notes).toHaveLength(1);
+				// A fallback never confirms the neighbour.
+				expect(first.observedNeighborPaths).toBeUndefined();
+				markCascadeUnansweredPrimariesDelivered(["typescript"]);
+
+				const later = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 2,
+					writeSeq: 1,
+				});
+				expect(later.result?.formatted).toContain("fallback finding");
+				expect(later.result?.unansweredPrimaries).toBeUndefined();
+				expect(later.observedNeighborPaths).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
 	});
 });

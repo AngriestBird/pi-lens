@@ -2443,12 +2443,17 @@ export async function computeCascadeForFile(
 					if (rawDiags.inconclusiveReason === "primary-unavailable") {
 						const serverIds = rawDiags.inconclusiveServerIds ?? [];
 						const cause = rawDiags.primaryUnavailableCause ?? "unstarted";
+						// #5014 r2 (F2): a `fallbackFor` alternate can answer while its
+						// owner is named here. Its findings are delivered beside the
+						// line; they never confirm the neighbour (no reconcile, no
+						// observation).
+						const diags = cascadeDisplay(rawDiags.diags, neighborPath, content);
 						const durationMs = Date.now() - neighborStart;
 						logCascade({
 							phase: "neighbor_touch",
 							filePath,
 							neighborFile: neighborPath,
-							diagnosticCount: 0,
+							diagnosticCount: diags.length,
 							durationMs,
 							lspTouched: true,
 							lspServerCount: configuredServerCount,
@@ -2462,7 +2467,7 @@ export async function computeCascadeForFile(
 						return {
 							filePath: neighborPath,
 							reason: neighborReason(importerSet, callerSet, neighborPath),
-							diagnostics: [],
+							diagnostics: diags,
 							lspTouched: true as const,
 							primaryUnavailable: { serverIds: [...serverIds], cause },
 							durationMs,
