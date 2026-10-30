@@ -2478,14 +2478,11 @@ export async function flushProbeCache(): Promise<ProbeCacheFlushResult> {
 /**
  * Test-only strict form of {@link flushProbeCache}: a flush that fails or is
  * deferred behind another process's lock arms a retry timer, and that retry
- * would write after a fixture root was removed. Flush until nothing is pending;
- * when a flush cannot land, cancel the retry and reject.
+ * would write after a fixture root was removed. Resolve only on a flush that
+ * left nothing pending; otherwise cancel the retry and reject.
  */
 async function settleProbeCacheForTests(): Promise<void> {
-	let result = await flushProbeCache();
-	for (let pass = 0; pass < 8 && result === "written-with-pending"; pass++) {
-		result = await flushProbeCache();
-	}
+	const result = await flushProbeCache();
 	if (result === "idle" || result === "written") return;
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
