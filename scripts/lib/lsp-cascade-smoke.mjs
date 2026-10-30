@@ -42,7 +42,7 @@ export const CASCADE_RETRY_INTERVAL_MS = 2_000;
  * `expectInconclusive: "<reason>"` declares that this server is known not to
  * conclude within the deadline, with the reason. The lane then passes only
  * while the neighbours stay unconfirmed, and fails when they conclude, so the
- * declaration cannot outlive the defect it records. None is declared today.
+ * declaration cannot outlive the defect it records. Declared today: java.
  */
 export const CASCADE_FIXTURES = [
 	{
@@ -83,6 +83,18 @@ export const CASCADE_FIXTURES = [
 		expectFindings: "not applicable|mismatch|cannot convert",
 		warmDeadlineMs: 180_000,
 		provisionedBy: "JDTLS_PATH",
+		// Measured in tool-smoke run 41027095385: jdtls answers every warm touch
+		// (5.3 s cold, 0.8 s per importer), and the production cascade then
+		// returns skipReason=non_code with no neighbour observed, 30 attempts
+		// in a row. `computeCascadeForFile` ends in the `unsupported_graph_kind`
+		// branch because CASCADE_GRAPH_KINDS (clients/dispatch/integration.ts)
+		// lists jsts, python, go, rust, ruby and cxx, and java is not among
+		// them: no import graph, so no importer to ask. A cascade defect, not a
+		// server one; filed in the hand-back, not fixed by this lane. The short
+		// deadline is because retrying a structural skip proves nothing.
+		expectInconclusive:
+			"java is not in CASCADE_GRAPH_KINDS, so the cascade has no import graph for it and skips with non_code",
+		conclusiveDeadlineMs: 10_000,
 	},
 ];
 

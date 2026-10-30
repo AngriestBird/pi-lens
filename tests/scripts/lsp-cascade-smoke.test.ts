@@ -21,6 +21,7 @@ import {
 	neighbourShowsFinding,
 	neighbourVerdict,
 } from "../../scripts/lib/lsp-cascade-smoke.mjs";
+import { CASCADE_GRAPH_KINDS } from "../../clients/dispatch/integration.js";
 import { LSP_FIXTURES, runLspCascade } from "../../scripts/smoke-tools.mjs";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -299,6 +300,28 @@ describe("cascade fixtures (#1712)", () => {
 			expect(() => new RegExp(f.expectFindings ?? "")).not.toThrow();
 		},
 	);
+
+	it("declares an inconclusive server exactly while the cascade graph lacks its language", () => {
+		// Recurrence: run 41027095385, jdtls answered every touch and the cascade
+		// still returned skipReason=non_code for java (CASCADE_GRAPH_KINDS has no
+		// java). The declaration records that fact; this pin reds the day java
+		// joins the graph set (remove the declaration then), and reds a fixture
+		// whose language the graph does model but is declared inconclusive anyway.
+		const graphKind: Record<string, string> = {
+			typescript7: "jsts",
+			rust: "rust",
+			go: "go",
+			java: "java",
+		};
+		for (const f of CASCADE_FIXTURES) {
+			const kind = graphKind[f.lang];
+			expect(kind, `a graph kind for ${f.lang}`).toBeTruthy();
+			expect(
+				"expectInconclusive" in f,
+				`${f.lang} declared inconclusive iff '${kind}' is not a cascade graph kind`,
+			).toBe(!CASCADE_GRAPH_KINDS.has(kind));
+		}
+	});
 
 	it("declares no expected-inconclusive server without a reason", () => {
 		for (const f of CASCADE_FIXTURES)
