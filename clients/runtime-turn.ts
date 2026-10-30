@@ -1594,6 +1594,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const runnerFindingsStart = Date.now();
 	const runnerDrainSignal = deps.signal;
 	const deliverySessionId = sessionId ?? runtime.telemetrySessionId;
+	// #4617 review V1: the delivering session's own turn clock. A concurrent
+	// secondary's turns do not move `runtime.turnIndex` (the coordinator's), so
+	// a carry measured there never crossed the secondary's own boundary.
+	const deliveryTurnKey = runtime.turnKey(deliverySessionId);
 	// Turn-end delivery is deliberately non-blocking. Collect already-settled
 	// results and requeue the rest; the edit path already paid the deferral
 	// decision, so another 2s wait would charge every turn while a runner is
@@ -1604,9 +1608,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				0,
 				runtime.sessionScope.capture(),
 				deliverySessionId,
-				// #4617 review F2: the index of the boundary that leaves a run waiting,
-				// so the note a later turn renders reads carried, not this-turn.
-				runtime.turnIndex,
+				// #4617 review F2: the boundary that leaves a run waiting, so the note
+				// a later turn renders reads carried, not this-turn.
+				deliveryTurnKey,
 			),
 			{
 				ms: HOOK_WALL_BUDGET_MS.turn_end,
@@ -1657,7 +1661,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					requeueRunnerFindings({
 						...pending,
 						result: { ...result, diagnostics: [] },
-						carriedFromTurnIndex: runtime.turnIndex,
+						carriedFromTurnIndex: deliveryTurnKey,
 					}),
 			});
 			// #4617 population B: the note names no file, so no file stamp can
@@ -1665,7 +1669,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// evidence; one the cap held last turn is not, and reads historical.
 			const carriedFailure =
 				pending.carriedFromTurnIndex !== undefined &&
-				pending.carriedFromTurnIndex < runtime.turnIndex;
+				pending.carriedFromTurnIndex < deliveryTurnKey;
 			if (carriedFailure) markCarriedPart(failedNote);
 			else markFilelessPart(failedNote);
 			// @delivery-surface: runtime-turn:late-runner-findings

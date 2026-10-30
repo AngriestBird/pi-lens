@@ -27,7 +27,10 @@ export interface PendingRunnerFindings {
 	 * (`requeueRunnerFindings`). A crash note re-rendered here reports evidence
 	 * an EARLIER turn captured, so the composing turn stamps it carried (never
 	 * current) whatever mechanism delayed it. Absent for a failure the current
-	 * turn's own drain settled, which is this turn's news.
+	 * turn's own drain settled, which is this turn's news. The value is the
+	 * owning session's turn key (`RuntimeCoordinator.turnKey`), never another
+	 * session's: a concurrent secondary's turns do not move the coordinator's
+	 * `turnIndex` (review V1).
 	 */
 	carriedFromTurnIndex?: number;
 }
@@ -169,32 +172,24 @@ function track(tracked: PendingRunnerPromise): void {
 
 /**
  * Resolve already-finished runner work for this turn. Unfinished work remains
- * owned by the store and is retried at the next turn boundary — and is stamped
- * with the index of the boundary that left it waiting, so a later drain reads
- * the note it renders as carried (#4617 review F2).
+ * owned by the store and is retried at the next turn boundary — and an entry
+ * this drain could have delivered is stamped with the boundary that left it
+ * waiting, so a later drain reads the note it renders as carried (#4617 review
+ * F2).
  */
 export async function drainPendingRunnerFindings(
 	maxWaitMs = 2_000,
 	currentSession?: GenerationHandle,
 	currentSessionId?: string,
-	/** #4617: this turn end's index; stamped on every entry it leaves waiting. */
-	turnIndex?: number,
+	/**
+	 * #4617: the draining session's own turn key (`turnKey(currentSessionId)`),
+	 * stamped on every entry of that session it leaves waiting (review V1).
+	 */
+	turnKey?: number,
 ): Promise<PendingRunnerFindings[]> {
 	if (pending.length === 0) return [];
 	const current = pending.splice(0, pending.length);
 	const results: PendingRunnerFindings[] = [];
-	/**
-	 * #4617 review F2: keep this entry for a later turn end, and record the turn
-	 * boundary that left it unanswered. Mutated in place, never spread: the
-	 * producer's own `promise` handler settles `settled`/`result` on THIS object,
-	 * so a copy would stay `settled: false` forever. The first boundary wins, so
-	 * the stamp stays the earliest turn this run is known to report about.
-	 */
-	const keep = (entry: PendingRunnerPromise): void => {
-		if (turnIndex !== undefined && entry.carriedFromTurnIndex === undefined)
-			entry.carriedFromTurnIndex = turnIndex;
-		pending.push(entry);
-	};
 	// Give already-resolved promises one microtask turn without introducing a
 	// wall-clock wait. This observes completed work while preserving the F5
 	// zero-budget contract for in-flight runners.
@@ -215,7 +210,7 @@ export async function drainPendingRunnerFindings(
 			entry.sessionId !== undefined &&
 			entry.sessionId !== currentSessionId
 		) {
-			keep(entry);
+			pending.push(entry);
 			continue;
 		}
 		if (
@@ -223,13 +218,22 @@ export async function drainPendingRunnerFindings(
 			entry.session !== undefined &&
 			entry.session.generation !== currentSession.generation
 		) {
-			keep(entry);
+			pending.push(entry);
 			continue;
 		}
 		if (entry.settled && entry.result) {
 			results.push(settledSnapshot(entry));
 		} else {
-			keep(entry);
+			// #4617 review F2/V1: only a drain that could have delivered this entry
+			// stamps it, on its own session's clock; the two branches above keep
+			// another session's or scope's entry unstamped, because their boundary is
+			// not one the owner crossed. Mutated in place, never spread: the
+			// producer's own `promise` handler settles `settled`/`result` on THIS
+			// object, so a copy would stay `settled: false` forever. The first
+			// boundary wins, so the stamp stays the earliest turn it reports about.
+			if (turnKey !== undefined && entry.carriedFromTurnIndex === undefined)
+				entry.carriedFromTurnIndex = turnKey;
+			pending.push(entry);
 		}
 	}
 	return results;

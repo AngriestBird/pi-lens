@@ -46,7 +46,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadPiLensProjectConfig } from "./project-lens-config.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
-import { normalizeMapKey, toPosix } from "./path-utils.js";
+import { isUnderDir, normalizeMapKey, toPosix } from "./path-utils.js";
 import {
 	getScratchTreeGlobPatterns,
 	nestedWorktreeOffsets,
@@ -167,8 +167,8 @@ export function hasAnyDependencyManifest(cwd: string): boolean {
  *
  * These are the manifests at `cwd` only, which is narrower than the scan: the
  * walk reads nested manifests too, so a rendered row cites its own `Target`
- * through `trivyEvidenceFiles` (below) and this list is only what answers for a
- * row that names none. The one place the manifest list is turned into paths, so
+ * through `trivyEvidenceFiles` (below) and this list answers only when no
+ * shown row names one. The one place the manifest list is turned into paths, so
  * the detection gate and the fallback cannot disagree about which files sit at
  * the root.
  */
@@ -193,8 +193,10 @@ export function existingDependencyManifests(cwd: string): string[] {
  *
  * `trivy fs` walks the whole tree, so the root manifests alone under-covered
  * the scan: a monorepo package's own lockfile could move on and the CVE row
- * still read current. A row that names no target contributes nothing, and a
- * report whose rows all name none falls back to `existingDependencyManifests`
+ * still read current. A row that names no target, or one the scan root does
+ * not contain (a `..` or an absolute path outside it, review V3), contributes
+ * nothing, and a report whose rows all contribute nothing falls back to
+ * `existingDependencyManifests`
  * (the same list the opt-in gate probes) so the tier keeps a subject — an
  * uncited part fails the provenance stamp closed, which would label a live
  * report historical.
@@ -209,9 +211,13 @@ export function trivyEvidenceFiles(
 	const files = new Set<string>();
 	for (const target of targets) {
 		if (target === undefined || target.trim() === "") continue;
+		const resolved = path.resolve(scanRoot, target);
+		// #4617 review V3: a declaration outside the scan root is not one this
+		// scan read, so it never decides the label.
+		if (!isUnderDir(resolved, scanRoot)) continue;
 		// The set is a map key: two spellings of one lockfile must collapse to one
 		// subject, and the stamp keys by the same derivation (`advisoryPathKey`).
-		files.add(normalizeMapKey(path.resolve(scanRoot, target)));
+		files.add(normalizeMapKey(resolved));
 	}
 	return files.size > 0 ? [...files] : existingDependencyManifests(scanRoot);
 }

@@ -1,5 +1,6 @@
 // flake-shape: service-double — the late-auxiliary cell: a real auxiliary client is an external child process, so the LSP service seam answers its cached publication (#4617)
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	recordDeliveredCascadeNeighbor,
@@ -1590,6 +1591,101 @@ describe.each([false, true])(
 			});
 		});
 
+		// #4617 review V3 (probes P1b/P1c): a target the scan root does not
+		// contain is not a declaration this scan read. Cited, a file outside the
+		// workspace decided the label and the root manifests went unwatched; it
+		// now falls through to the root-manifest fallback like a row with none.
+		it("binds a trivy CVE advisory to the root manifests when its row names a target outside the scan root", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-outside-root-${guard}`,
+				incident:
+					"A CVE row naming a lockfile outside the workspace left a root lockfile edit unwatched",
+				issue: "#4617",
+				async run(h) {
+					// `pi-lens-` prefixed: the tmp-root hygiene census owns that
+					// namespace, and the finally removes it.
+					const outsideDir = path.join(
+						h.cwd,
+						"..",
+						`pi-lens-trivy-outside-${process.pid}-${guard}`,
+					);
+					try {
+						fs.mkdirSync(outsideDir, { recursive: true });
+						const outside = path.join(outsideDir, "package-lock.json");
+						fs.writeFileSync(outside, "{\n}\n");
+						const manifest = h.write("package-lock.json", "{\n}\n");
+						h.scan("trivy", {
+							findings: [
+								{
+									vulnerabilityId: "CVE-2024-0001",
+									pkgName: "left-pad",
+									installedVersion: "1.0.0",
+									fixedVersion: "1.0.1",
+									severity: "HIGH",
+									target: path.relative(h.cwd, outside),
+								},
+							],
+							licenses: [],
+							secrets: [],
+						});
+						h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+						h.runtime.beginTurn();
+						const view = await h.turnEnd({
+							flags,
+							beforeDelivery: () => {
+								fs.writeFileSync(manifest, '{\n  "x": 1\n}\n');
+							},
+						});
+						expect(view.text).toContain("Dependency CVEs (trivy");
+						expect(view.text).toContain(HISTORICAL);
+						expect(view.text).not.toContain(UNKNOWN_STAMP);
+					} finally {
+						fs.rmSync(outsideDir, { recursive: true, force: true });
+					}
+				},
+			});
+		});
+
+		// #4617 review V5: a blank target resolves to the scan root itself, a
+		// directory and not a declaration, so it counts as a row that names none
+		// and the report falls back to the root manifests.
+		it("binds a trivy CVE advisory to the root manifests when its row names a blank target", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-blank-target-${guard}`,
+				incident:
+					"A CVE row with a blank target cited the workspace directory instead of its lockfile",
+				issue: "#4617",
+				async run(h) {
+					const manifest = h.write("package-lock.json", "{\n}\n");
+					h.scan("trivy", {
+						findings: [
+							{
+								vulnerabilityId: "CVE-2024-0001",
+								pkgName: "left-pad",
+								installedVersion: "1.0.0",
+								fixedVersion: "1.0.1",
+								severity: "HIGH",
+								target: "",
+							},
+						],
+						licenses: [],
+						secrets: [],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(manifest, '{\n  "x": 1\n}\n');
+						},
+					});
+					expect(view.text).toContain("Dependency CVEs (trivy");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// #4617 population A through the govulncheck LANE: the section reports the
 		// call site each CVE is reachable from, so the lane hands back those files
 		// as the section's subject. A change to one of them supersedes the text.
@@ -1722,6 +1818,95 @@ describe.each([false, true])(
 					expect(second.text).toContain("Deferred runner shellcheck failed");
 					expect(second.text).toContain(HISTORICAL);
 					expect(second.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		/**
+		 * A crash note whose run stays in flight until `settle()`, dispatched by
+		 * `sessionId` (a concurrent secondary's turn when it is not the
+		 * coordinator's own).
+		 */
+		const deferInFlightBrokenRunner = (
+			h: { write: (rel: string, body: string) => string; cwd: string },
+			sessionId: string,
+		): (() => void) => {
+			let settle = (): void => {};
+			const inFlight = new Promise<RunnerResult>((resolve) => {
+				settle = () =>
+					resolve({
+						status: "failed",
+						failureKind: "spawn_failed",
+						semantic: "warning",
+						diagnostics: [],
+					} as RunnerResult);
+			});
+			deferRunnerFindings({
+				filePath: h.write("src/broken.sh", "echo broken\n"),
+				cwd: h.cwd,
+				projectRoot: h.cwd,
+				runnerId: "shellcheck",
+				markedAtMs: Date.now() - 2000,
+				promise: inFlight,
+				sessionId,
+			});
+			return () => settle();
+		};
+
+		// #4617 review V1 (probe P4a, CodeRabbit PRRT_kwDORt8rec6x5fOh): a
+		// concurrent secondary's turn does not move the coordinator's
+		// `turnIndex`, so a carry measured on that clock never crossed anything
+		// for the secondary and its late crash note read as this turn's news.
+		// The secondary's own clock is `turnKey(sessionId)`.
+		it("labels a secondary session's runner failure note historical when its run settled after that session's turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-secondary-late-settle-${guard}`,
+				incident:
+					"A subagent's crash note for a run its earlier turn left waiting read as this turn's news",
+				issue: "#4617",
+				async run(h) {
+					const secondary = "secondary-session-1";
+					const settle = deferInFlightBrokenRunner(h, secondary);
+					h.runtime.beginTurn(secondary);
+					const first = await h.turnEnd({ flags, sessionId: secondary });
+					expect(first.text).not.toContain("Deferred runner shellcheck failed");
+					settle();
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn(secondary);
+					const second = await h.turnEnd({ flags, sessionId: secondary });
+					expect(second.text).toContain("Deferred runner shellcheck failed");
+					expect(second.text).toContain(HISTORICAL);
+					expect(second.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 review V1, the other half (probe P4b, CodeRabbit
+		// PRRT_kwDORt8rec6x5fOd): the coordinator's turn end keeps a secondary's
+		// run it may not deliver. A stamp there records the COORDINATOR's
+		// boundary, which the secondary never crossed, so on the secondary's own
+		// clock its first turn end would read a fresh failure as historical.
+		it("keeps a secondary session's runner failure note current when only the coordinator's turn ended before it settled", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-secondary-fresh-${guard}`,
+				incident:
+					"A subagent's crash note from its own turn read as historical after the main session's turn end",
+				issue: "#4617",
+				async run(h) {
+					const secondary = "secondary-session-1";
+					h.runtime.beginTurn();
+					h.runtime.beginTurn(secondary);
+					const settle = deferInFlightBrokenRunner(h, secondary);
+					const primary = await h.turnEnd({ flags });
+					expect(primary.text).not.toContain(
+						"Deferred runner shellcheck failed",
+					);
+					settle();
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					const own = await h.turnEnd({ flags, sessionId: secondary });
+					expect(own.text).toContain("Deferred runner shellcheck failed");
+					expect(own.text).not.toContain(HISTORICAL);
+					expect(own.text).not.toContain(UNKNOWN_STAMP);
 				},
 			});
 		});

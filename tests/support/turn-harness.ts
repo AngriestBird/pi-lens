@@ -244,6 +244,12 @@ interface TurnHarness {
 		 * agent's next context reads it: the window a later change lands in.
 		 */
 		beforeDelivery?: () => void;
+		/**
+		 * The turn's own session id, as `index.ts` passes `getStableSessionId(ctx)`.
+		 * Omitted, the turn is the coordinator's own; another id is a concurrent
+		 * secondary's turn, which `runtime.beginTurn(id)` started (#4617 r3).
+		 */
+		sessionId?: string;
 	}): Promise<TurnEndView>;
 
 	/**
@@ -388,6 +394,9 @@ function createTurnHarness(options: TurnHarnessOptions = {}): {
 				testRunnerClient: { getTestRunTarget: () => null },
 				resetLSPService: () => {},
 				resetFormatService: () => {},
+				...(options?.sessionId !== undefined && {
+					sessionId: options.sessionId,
+				}),
 				// biome-ignore lint/suspicious/noExplicitAny: the dep surface is a
 				// dozen client interfaces; scenarios state only what they exercise.
 			} as any);
