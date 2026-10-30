@@ -968,6 +968,14 @@ describe("tier-1 parser lane", () => {
 		expect(passFloorBreach(unavailable, 3)).toContain(
 			"1 runner(s) passed, at least 3 required (2 unavailable)",
 		);
+		// The sentence follows what happened (#5021 verify F10): a lane that
+		// passed servers did install something, so it must not say it installed
+		// nothing; one that passed nothing still says so.
+		expect(passFloorBreach(unavailable, 3)).not.toContain("installs nothing");
+		expect(passFloorBreach(unavailable, 3)).toContain("fewer servers");
+		expect(passFloorBreach([{ state: "skip" as const }], 1)).toContain(
+			"installs nothing",
+		);
 		// A floor that is not a number (`--min-pass=abc`) is red, never "no floor".
 		expect(() => passFloorBreach(unavailable, Number.NaN)).toThrow(TypeError);
 	});

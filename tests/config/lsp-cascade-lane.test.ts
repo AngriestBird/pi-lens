@@ -43,6 +43,35 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 		expect(cascade["continue-on-error"]).not.toBe(true);
 	});
 
+	it("runs after the best-effort layers, so a red cascade cannot hide them", () => {
+		// Recurrence: #5021 review (CodeRabbit PRRT_kwDORt8rec6x8Fpo). The cascade
+		// is gating and live; placed right after the gate, a red night skipped the
+		// capability matrix, clean-signal, save-verdict, inventory, idle-eviction,
+		// docs diff, census, Format, lens_full, Resolution and the tool-tree save.
+		// It sits after the last of them and before the floor that reports every
+		// layer.
+		const bestEffort = [
+			"lsp_matrix",
+			"clean_signal",
+			"save_verdict",
+			"server_capabilities",
+			"idle_measurement",
+			"docs_diff",
+			"lsp_census",
+			"format_layer",
+			"lens_full",
+			"resolution_layer",
+		];
+		for (const id of bestEffort) {
+			expect(at(id), `${id} is a step of the job`).toBeGreaterThan(-1);
+			expect(at(id), `${id} before lsp_cascade`).toBeLessThan(
+				at("lsp_cascade"),
+			);
+		}
+		expect(at("java25")).toBeGreaterThan(at("resolution_layer"));
+		expect(at("lsp_cascade")).toBeLessThan(at("evaluated_floor"));
+	});
+
 	it("reads the handshake census it follows (same PI_LENS_HOME, later step)", () => {
 		// The lane tells a server that never handshook (warning) from one that
 		// handshook and then never concluded (red) through the census file the
@@ -76,6 +105,11 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 			expect(install?.["continue-on-error"]).toBe(true);
 			const run = install?.run ?? "";
 			expect(run.indexOf("sha256sum --check")).toBeGreaterThan(-1);
+			// Recurrence: #5021 verify F9. The step is best-effort, so a digest
+			// mismatch must say what it saw (`--status` printed nothing, and a
+			// corrupt archive read as "no network tonight").
+			expect(run).not.toMatch(/sha256sum --check --status/);
+			expect(run).toMatch(/::error::jdtls archive failed its pinned digest/);
 			expect(run.indexOf('echo "path=')).toBeGreaterThan(
 				run.indexOf("sha256sum --check"),
 			);

@@ -23,7 +23,11 @@ import {
 	neighbourVerdict,
 } from "../../scripts/lib/lsp-cascade-smoke.mjs";
 import { CASCADE_GRAPH_KINDS } from "../../clients/dispatch/integration.js";
-import { LSP_FIXTURES, runLspCascade } from "../../scripts/smoke-tools.mjs";
+import {
+	LSP_FIXTURES,
+	report,
+	runLspCascade,
+} from "../../scripts/smoke-tools.mjs";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
@@ -655,7 +659,7 @@ describe("runLspCascade (#1712)", () => {
 		}
 	});
 
-	it("reds a lane that passed fewer servers than its floor, and tolerates one unavailable server above it", async () => {
+	it("reds a lane that passed fewer servers than its floor and holds one that met it", async () => {
 		// Recurrence: #5021 review F2. A floor equal to the fixture population
 		// reds one unavailable server as "installs nothing"; a floor of zero lets
 		// an all-unavailable night read green. One passing server against a floor
@@ -709,6 +713,29 @@ describe("runLspCascade (#1712)", () => {
 		expect(seen).toEqual([
 			"export function foo(x: string): string {\n\treturn x;\n}\n",
 		]);
+	});
+});
+
+describe("report with a skipped server (#1712)", () => {
+	// Recurrence: #5021 verify F8. Retuning the floor from 4 of 4 to 3 of 4 made
+	// "one unavailable server is a warning" load bearing: it holds only because a
+	// skip row adds nothing to the failure count. The verifier's mutation
+	// `failOnSkipOnly && counts.skip > 0` survived every cell before this one.
+	const rows = [
+		{ lang: "a", runner: "r", state: "pass" as const, detail: "", diags: 2 },
+		{ lang: "b", runner: "r", state: "skip" as const, detail: "", diags: 0 },
+	];
+
+	it("reads one unavailable server beside a pass as a warning, not a failure", () => {
+		vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(report(rows, "x", { failOnSkipOnly: true })).toBe(0);
+		vi.restoreAllMocks();
+	});
+
+	it("reads a lane that only skipped as a failure", () => {
+		vi.spyOn(console, "log").mockImplementation(() => undefined);
+		expect(report([rows[1]], "x", { failOnSkipOnly: true })).toBe(1);
+		vi.restoreAllMocks();
 	});
 });
 

@@ -2061,8 +2061,14 @@ export function passFloorBreach(rows, minPass) {
 	});
 	if (verdict.ok) return null;
 	const unavailable = rows.filter((r) => r.state === "skip").length;
+	// The sentence follows what happened: "installs nothing" is only true when
+	// nothing passed (#5021 verify F10).
+	const conclusion =
+		verdict.evaluated === 0
+			? "A lane that installs nothing proves nothing"
+			: "A lane that proves fewer servers than its floor proves too little";
 	return `
-✗ pass floor: ${verdict.evaluated} runner(s) passed, at least ${verdict.floor} required (${unavailable} unavailable). A lane that installs nothing proves nothing — treat this as red, not as flaky tooling.`;
+✗ pass floor: ${verdict.evaluated} runner(s) passed, at least ${verdict.floor} required (${unavailable} unavailable). ${conclusion} — treat this as red, not as flaky tooling.`;
 }
 
 // A transient/offline registry condition — the runner has no network, or the
