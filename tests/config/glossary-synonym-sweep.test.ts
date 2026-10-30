@@ -1397,7 +1397,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tree-sitter-query-loader.ts": 18,
 		"clients/tree-sitter-shared.ts": 2,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
-		"clients/trivy-client.ts": 4,
+		// 4 -> 5 (#4617 review F1): a rendered trivy report cites its own rows'
+		// `target` resolved against the scan root, one more `path` operation, same
+		// sense as the four above (a filesystem path operation).
+		"clients/trivy-client.ts": 5,
 		"clients/warm-attach.ts": 3,
 		"clients/widget-state.ts": 7,
 		"clients/word-index-logger.ts": 2,

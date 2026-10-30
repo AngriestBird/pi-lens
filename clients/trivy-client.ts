@@ -46,7 +46,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadPiLensProjectConfig } from "./project-lens-config.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
-import { toPosix } from "./path-utils.js";
+import { normalizeMapKey, toPosix } from "./path-utils.js";
 import {
 	getScratchTreeGlobPatterns,
 	nestedWorktreeOffsets,
@@ -209,7 +209,9 @@ export function trivyEvidenceFiles(
 	const files = new Set<string>();
 	for (const target of targets) {
 		if (target === undefined || target.trim() === "") continue;
-		files.add(path.resolve(scanRoot, target));
+		// The set is a map key: two spellings of one lockfile must collapse to one
+		// subject, and the stamp keys by the same derivation (`advisoryPathKey`).
+		files.add(normalizeMapKey(path.resolve(scanRoot, target)));
 	}
 	return files.size > 0 ? [...files] : existingDependencyManifests(scanRoot);
 }
