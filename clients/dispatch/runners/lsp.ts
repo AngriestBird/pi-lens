@@ -214,9 +214,9 @@ const lspRunner: RunnerDefinition = {
 		// are attached independently (`clients/lsp/index.ts` sets both under the
 		// same `collected !== undefined`), so a version-less primary whose publish
 		// describes the previous revision produces `confirmation: "partial"`
-		// beside `boundToCurrentDisk: false`. An empty answer for other bytes is
-		// not an observation of these — the rule #4231 already applies to its
-		// contributor filter below — so it withholds the verdict: `keepUnobserved`
+		// beside `boundToCurrentDisk: false`. An answer for other bytes is not an
+		// observation of these — the contributor filter below withholds its rows
+		// (#4231, #5017) — so it withholds the verdict: `keepUnobserved`
 		// otherwise retires a live recorded blocker on it. Absent or "unknown"
 		// keeps the pre-r2 reading; only an explicit `false` withholds it.
 		let primaryAnswerStale = false;
@@ -335,20 +335,25 @@ const lspRunner: RunnerDefinition = {
 					touchCompletedConfirmationPolicy(touched) &&
 					touched.binding?.boundToCurrentDisk !== false;
 				primaryAnswerStale = touched.binding?.boundToCurrentDisk === false;
-				if (
-					diagnosticsInconclusive &&
-					touched.binding?.boundToCurrentDisk === false
-				) {
-					// #4231: an inconclusive primary may contribute its last-known
-					// diagnostics while the current notify/diagnostics wait is wedged.
-					// The service already attributes each diagnostic and names the
-					// unconfirmed servers; retain only answered contributors. Without
-					// both pieces of provenance, fail closed rather than publish a
-					// stale blocking finding from the aggregate binding.
+				if (primaryAnswerStale) {
+					// #4231, #5017: a stale-bound answer is not an observation of these
+					// bytes, so a row stays only with provenance that its server
+					// answered them. An inconclusive touch names the servers that did
+					// not (#4231: an inconclusive primary may contribute its last-known
+					// diagnostics while its wait is wedged), and the service attributes
+					// each row, so the other attributed rows stand. A touch that
+					// completed its policy against older bytes names none, so no row
+					// has that provenance and every row is withheld: the run then takes
+					// the no-rows arm below, which reaches no verdict. Without both
+					// pieces of provenance, fail closed rather than publish a stale
+					// finding from the aggregate binding (#5017: `hasErrors` read such
+					// rows as a `failed` verdict, and `keepUnobserved` retired a live
+					// recorded blocker on findings about other bytes).
 					const unconfirmed = new Set(unconfirmedServerIds);
 					const currentContentDiags: typeof lspDiags = [];
 					for (const diagnostic of lspDiags) {
 						if (
+							diagnosticsInconclusive &&
 							diagnostic.serverId !== undefined &&
 							!unconfirmed.has(diagnostic.serverId)
 						) {
@@ -483,7 +488,8 @@ const lspRunner: RunnerDefinition = {
 				// deferred, so no id names the gap — only the binding says the answer
 				// describes other bytes. `skipped` is this runner's no-verdict status
 				// (`reachedNoVerdict`), which is what keeps the primary's recorded
-				// blockers pending instead of retiring them on a clean claim.
+				// blockers pending instead of retiring them on a clean claim. A
+				// stale-bound findings run lands here too, its rows withheld (#5017).
 				return {
 					status: "skipped",
 					diagnostics: [],
