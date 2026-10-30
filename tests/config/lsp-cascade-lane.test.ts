@@ -9,6 +9,7 @@ import yaml from "../../clients/deps/js-yaml.js";
 import {
 	CASCADE_CONCLUSIVE_DEADLINE_MS,
 	CASCADE_FIXTURES,
+	CASCADE_RENAME_EXTRA_DEADLINES,
 	CASCADE_WARM_DEADLINE_MS,
 } from "../../scripts/lib/lsp-cascade-smoke.mjs";
 
@@ -174,7 +175,7 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 				sum +
 				(f.warmDeadlineMs ?? CASCADE_WARM_DEADLINE_MS) +
 				(f.conclusiveDeadlineMs ?? CASCADE_CONCLUSIVE_DEADLINE_MS) *
-					(f.rename ? 3 : 1),
+					(1 + (f.rename ? CASCADE_RENAME_EXTRA_DEADLINES : 0)),
 			0,
 		);
 		expect(stepCap).toBeLessThan(jobCap);

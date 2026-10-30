@@ -1,6 +1,7 @@
 export const CASCADE_CONCLUSIVE_DEADLINE_MS: number;
 export const CASCADE_WARM_DEADLINE_MS: number;
 export const CASCADE_RETRY_INTERVAL_MS: number;
+export const CASCADE_RENAME_EXTRA_DEADLINES: number;
 
 export interface CascadeFixture {
 	/** The LSP_FIXTURES row whose tools, setup and handshake-census entry this reuses. */
@@ -16,8 +17,15 @@ export interface CascadeFixture {
 	expectFindings?: string;
 	/** The rename phase (#1677): move the exporter, then ask the importers. */
 	rename?: RenameFixture;
-	/** A defect the server shows on some nights: the one outcome it excuses. */
-	expectDefect?: { state: "wrong-verdict"; reason: string };
+	/**
+	 * A known defect of the cascade for this fixture: the one outcome it
+	 * excuses, as a `known-defect` row. Every other outcome is red.
+	 */
+	expectDefect?: {
+		state: "inconclusive";
+		skipReason: string;
+		reason: string;
+	};
 	/** Env var the workflow sets when it provisioned this server itself. */
 	provisionedBy?: string;
 	warmDeadlineMs?: number;
@@ -91,7 +99,7 @@ export interface CascadeMeasurement {
 export interface CascadeRow {
 	lang: string;
 	runner: string;
-	state: "pass" | "fail" | "skip";
+	state: "pass" | "fail" | "skip" | "known-defect";
 	detail: string;
 	diags: number;
 }

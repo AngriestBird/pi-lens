@@ -23,6 +23,7 @@ const table = JSON.parse(
 	rows: {
 		lang: string;
 		state: string;
+		detail?: string;
 		timeToConclusiveMs: number | null;
 	}[];
 };
@@ -42,21 +43,27 @@ describe("tests/fixtures/lsp-cascade/measurements.json (#1712)", () => {
 		expect(table.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 	});
 
-	it("has one row per fixture, passing unless the fixture declares the defect it showed", () => {
-		// Recurrence: a fixture added without a measurement, or a night where the
-		// declared jdtls defect (#1712) showed and the row carries a time it never
-		// had. A skip row is committed as the night produced it, with no time.
+	it("has one row per fixture: a pass with a time, or a declared known defect with none", () => {
+		// Recurrence: a fixture added without a measurement, a night where the
+		// declared defect showed and the row carries a time it never had, or an
+		// unavailable server (`skip`) committed as if it had been measured. A
+		// `known-defect` row is the defect's own state and needs its declaration
+		// and its cause; `skip` means unavailable and is never a committed row.
+		// The java `pass` row is the sample taken while java was in the cascade
+		// set (PR #5035 head 49b88c8cd, since held out until #5040); the next
+		// refreshed table replaces it with a `known-defect` row.
 		expect(table.rows.map((r) => r.lang)).toEqual(
 			CASCADE_FIXTURES.map((f) => f.lang),
 		);
 		for (const fixture of CASCADE_FIXTURES) {
 			const row = table.rows.find((r) => r.lang === fixture.lang);
-			if (row?.state === "skip") {
+			if (row?.state === "known-defect") {
 				expect(
 					fixture.expectDefect,
-					`${fixture.lang} may be skipped`,
+					`${fixture.lang} may be a known defect`,
 				).toBeTruthy();
 				expect(row.timeToConclusiveMs).toBeNull();
+				expect(row.detail).toEqual(expect.stringContaining("known defect"));
 			} else {
 				expect(row?.state).toBe("pass");
 				expect(row?.timeToConclusiveMs).toEqual(expect.any(Number));
@@ -70,6 +77,9 @@ describe("tests/fixtures/lsp-cascade/measurements.json (#1712)", () => {
 		for (const row of table.rows) {
 			if (row.timeToConclusiveMs === null) continue;
 			const fixture = CASCADE_FIXTURES.find((f) => f.lang === row.lang);
+			// A declared fixture's deadline is the short one that bounds a structural
+			// skip; the sample row above predates the hold and measures no budget.
+			if (fixture?.expectDefect) continue;
 			const deadline =
 				fixture?.conclusiveDeadlineMs ?? CASCADE_CONCLUSIVE_DEADLINE_MS;
 			expect(deadline).toBeGreaterThanOrEqual(10 * row.timeToConclusiveMs);

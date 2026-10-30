@@ -2055,9 +2055,14 @@ export function passFloorBreach(rows, minPass) {
 	if (minPass === null || minPass === undefined || minPass <= 0) return null;
 	// The comparison is the shared proof-of-work helper's (#4518); a NaN floor
 	// (`--min-pass=abc`) makes it throw, which main() turns into exit 2: red.
+	// A `known-defect` row (a fixture's declared defect, reached only after its
+	// server answered the warm-up) counts as work done, as the declared java row
+	// did before it had a state of its own (#1712); a `skip` (unavailable) never.
 	const verdict = assertEvaluated({
 		producer: "smoke-tools",
-		evaluated: rows.filter((r) => r.state === "pass").length,
+		evaluated: rows.filter(
+			(r) => r.state === "pass" || r.state === "known-defect",
+		).length,
 		expectedAtLeast: minPass,
 	});
 	if (verdict.ok) return null;
@@ -2484,7 +2489,13 @@ export function fixtureDispatchCwd(fixture, workspace) {
 // fixture's pre-touch setup step (e.g. `npm install typescript@7`) itself
 // broke — infrastructure, not the assertion under test — but it still counts
 // toward the failure exit code so it can't silently pass the nightly.
-const ICON = { pass: "✓", fail: "✗", skip: "⚠", "setup-failed": "✗" };
+const ICON = {
+	pass: "✓",
+	fail: "✗",
+	skip: "⚠",
+	"known-defect": "≈",
+	"setup-failed": "✗",
+};
 
 export function report(rows, title, { failOnSkipOnly = false } = {}) {
 	const pad = (s, n) => String(s).padEnd(n);
@@ -2497,17 +2508,26 @@ export function report(rows, title, { failOnSkipOnly = false } = {}) {
 			`${ICON[r.state]}  ${pad(r.lang, 12)} ${pad(r.runner, 28)} ${pad(r.diags, 5)} ${r.detail}`,
 		);
 	}
-	const counts = { pass: 0, fail: 0, skip: 0, "setup-failed": 0 };
+	const counts = {
+		pass: 0,
+		fail: 0,
+		skip: 0,
+		"known-defect": 0,
+		"setup-failed": 0,
+	};
 	for (const r of rows) counts[r.state]++;
-	const summary = `${counts.pass} passed · ${counts.fail} failed · ${counts["setup-failed"]} setup-failed · ${counts.skip} skipped (tool/config unavailable)`;
+	// The known-defect clause trails the line `tool-smoke-drift.mjs` parses, and
+	// appears only when a row has that state (#1712).
+	const summary = `${counts.pass} passed · ${counts.fail} failed · ${counts["setup-failed"]} setup-failed · ${counts.skip} skipped (tool/config unavailable)${counts["known-defect"] ? ` · ${counts["known-defect"]} known-defect (declared, not a pass)` : ""}`;
 	const skippedOnly =
 		counts.pass === 0 &&
 		counts.fail === 0 &&
 		counts["setup-failed"] === 0 &&
+		counts["known-defect"] === 0 &&
 		counts.skip > 0;
 	console.log(`\n${skippedOnly ? "SKIPPED: " : ""}${summary}`);
 	console.log(
-		"Legend: ✓ ok  ✗ failure/setup-failed  ⚠ unavailable (not a failure)\n",
+		`Legend: ✓ ok  ✗ failure/setup-failed  ⚠ unavailable (not a failure)${counts["known-defect"] ? "  ≈ known defect (declared, not a failure)" : ""}\n`,
 	);
 	return failOnSkipOnly && skippedOnly
 		? 1

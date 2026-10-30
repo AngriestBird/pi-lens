@@ -772,12 +772,14 @@ jobs:
       # below as the #1549 budget input; the first measured table is committed
       # as tests/fixtures/lsp-cascade/measurements.json. The step reads the handshake census above
       # (same PI_LENS_HOME), so a server that never handshook is a warning, not
-      # a red. One unavailable server is a warning; `--min-pass=3` (of four)
-      # reds the night when fewer than three servers prove the lane, and keeps
-      # an all-unavailable night from reading green. java counts as a pass only
-      # when jdtls concludes its importers; a jdtls that is not provisioned
-      # (empty JDTLS_PATH) is the one allowed warning, and one that is
-      # provisioned and answers but does not conclude is a red row.
+      # a red. One unavailable server (`skip`, a warning) is allowed;
+      # `--min-pass=3` (of four) reds the night when fewer than three rows are a
+      # pass or a known defect, and keeps an all-unavailable night from reading
+      # green. java is a declared known defect (`known-defect`, its own state,
+      # counted as work done) while java is held out of CASCADE_GRAPH_KINDS
+      # (#5040): a provisioned jdtls that answers and shows exactly the declared
+      # skip is that row; a jdtls that is not provisioned (empty JDTLS_PATH) is
+      # a `skip`; any other outcome, or a cascade that concludes, is a red row.
       - name: LSP cascade layer (edit an exporter, importers conclude)
         id: lsp_cascade
         timeout-minutes: 20

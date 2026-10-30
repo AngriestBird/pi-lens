@@ -25,6 +25,12 @@ export const CASCADE_CONCLUSIVE_DEADLINE_MS = 60_000;
 export const CASCADE_WARM_DEADLINE_MS = 90_000;
 /** Pause between cascade attempts that ended with a neighbour unconfirmed. */
 export const CASCADE_RETRY_INTERVAL_MS = 2_000;
+/**
+ * Conclusive deadlines a fixture's rename phase spends beyond its edit cascade:
+ * the restored exporter's importers returning to clean, then the importers
+ * after the move (`runCascadeRename`). The lane's worst-case bound reads it.
+ */
+export const CASCADE_RENAME_EXTRA_DEADLINES = 2;
 
 /**
  * The fixtures. `lang` names the LSP_FIXTURES row whose `tools`, `setup`,
@@ -42,13 +48,14 @@ export const CASCADE_RETRY_INTERVAL_MS = 2_000;
  * `rename: { to, staleSpecifier, expectFindings }` adds the rename phase
  * (#1677): see `classifyRenameImporter`.
  *
- * `expectDefect: { state, reason }` declares a defect this server shows on
- * some nights and not on others. A run the cascade classifies as `state`
- * (`wrong-verdict`: every importer observed, one of them reading clean after
- * the export broke) is then a warning row, not a red, and names the reason;
- * a run that concludes passes; any other outcome (an unconfirmed importer, a
- * skipped cascade) is red, so the declaration covers the one known shape and
- * nothing else. Declared today: java (see the fixture).
+ * `expectDefect: { state, skipReason, reason }` declares a known defect of the
+ * cascade for this fixture, with its cause. The row is then a `known-defect`
+ * (its own state, never `skip`, which means "unavailable"), and only while the
+ * run is exactly the declared shape: `state` `inconclusive` with the
+ * `skipReason` the cascade reports. Every other outcome is red, so the
+ * declaration covers the one known shape and nothing else: an unconfirmed
+ * importer, another skip reason, a wrong verdict, and a run that concluded
+ * (the defect is gone: remove the declaration). Declared today: java.
  */
 export const CASCADE_FIXTURES = [
 	{
@@ -100,21 +107,28 @@ export const CASCADE_FIXTURES = [
 		expectFindings: "not applicable|mismatch|cannot convert",
 		warmDeadlineMs: 180_000,
 		provisionedBy: "JDTLS_PATH",
-		// Measured against jdtls 1.63.0 with the pinned fixture (#1712): after the
-		// exporter's edit jdtls publishes diagnostics for one importer and, on most
-		// runs, never for the other. Wire capture of the same run: B.java got a
-		// publishDiagnostics with the error, C.java none at all, however long the
-		// run waited (25 s of settle time before the edit did not change it, and
-		// jdtls had announced ServiceReady). The cascade touches C with unchanged
+		// Held out of the cascade on purpose (#5040). `computeCascadeForFile` skips
+		// a Java edit with skipReason=non_code because CASCADE_GRAPH_KINDS
+		// (clients/dispatch/integration.ts) has no java, although the review graph
+		// resolves Java imports. Putting java in the set was measured against
+		// jdtls 1.63.0 with this fixture (#1712, PR #5035): jdtls concluded on 2 of
+		// 12 runs. After the exporter's edit it publishes diagnostics for one
+		// importer and, on most runs, never for the other (wire capture: B.java got
+		// a publishDiagnostics with the error, C.java none, however long the run
+		// waited; 25 s of settle time before the edit did not change it, and jdtls
+		// had announced ServiceReady). The cascade touches C with unchanged
 		// content, sends the server nothing, and reads the cached pre-edit clean
-		// as a confirmed answer once its wait lapses. A touch carrying changed
-		// content makes jdtls publish C's error. Remove this declaration when the
-		// cascade stops reading that cached answer as confirmed.
+		// as a confirmed answer once its wait lapses, so a broken importer reads
+		// as a clean cascade. #5040 fixes that read and then adds java to the set;
+		// that change removes this declaration. The short deadline is because
+		// retrying a structural skip proves nothing.
 		expectDefect: {
-			state: "wrong-verdict",
+			state: "inconclusive",
+			skipReason: "non_code",
 			reason:
-				"jdtls republishes some importers of an edited exporter and not others, and the cascade reads the importer's cached clean as confirmed",
+				"java is held out of CASCADE_GRAPH_KINDS until #5040: the cascade reads a push-only server's cached importer answer as confirmed clean, so the cascade skips with non_code",
 		},
+		conclusiveDeadlineMs: 10_000,
 	},
 ];
 
@@ -311,6 +325,15 @@ export function cascadeRow(fx, m) {
 					detail: `${base.runner} unavailable (no answer in ${m.warmMs} ms${m.handshook === false ? "; not provisioned, or the handshake did not complete" : ""})`,
 				};
 	}
+	const defect = fx.expectDefect;
+	if (defect && m.concluded?.state === "conclusive")
+		// A declaration cannot outlive the defect it records: the cascade that
+		// concludes is the cue to remove it.
+		return {
+			...base,
+			state: "fail",
+			detail: `declared known defect (${defect.reason}) but concluded in ${m.timeToConclusiveMs} ms: remove the declaration`,
+		};
 	if (m.concluded?.state === "conclusive") {
 		const cascade = `neighbours concluded in ${m.timeToConclusiveMs} ms (attempt ${m.attempts}; first cascade ${m.firstCascadeMs} ms)`;
 		if (!fx.rename) return { ...base, state: "pass", detail: cascade };
@@ -330,15 +353,18 @@ export function cascadeRow(fx, m) {
 		};
 	}
 	const why = `${m.concluded?.detail ?? "no cascade ran"} after ${m.attempts} attempt(s), ${m.elapsedMs} ms`;
-	if (fx.expectDefect && m.concluded?.state === fx.expectDefect.state) {
-		// The declared shape only: it is a warning that names its cause, and it
-		// counts toward neither the pass floor nor the failures.
+	if (
+		defect &&
+		m.concluded?.state === defect.state &&
+		m.concluded.skipReason === defect.skipReason
+	)
+		// The declared shape and nothing else. It is a row of its own, not a
+		// `skip` (unavailable): the durable record names the cause.
 		return {
 			...base,
-			state: "skip",
-			detail: `known defect (${fx.expectDefect.reason}): ${why}`,
+			state: "known-defect",
+			detail: `known defect (${defect.reason}): ${why}`,
 		};
-	}
 	return { ...base, state: "fail", detail: why };
 }
 
@@ -363,6 +389,8 @@ export function cascadeTimesRecord(rows, measurements, env = process.env) {
 				lang: row.lang,
 				server: row.runner,
 				state: row.state,
+				// A known-defect row keeps its cause: `state` alone cannot say why.
+				...(row.state === "known-defect" && { detail: row.detail }),
 				warmMs: m.warmMs ?? null,
 				firstCascadeMs: m.firstCascadeMs ?? null,
 				timeToConclusiveMs:

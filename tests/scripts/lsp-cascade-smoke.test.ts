@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	CASCADE_FIXTURES,
+	CASCADE_RENAME_EXTRA_DEADLINES,
 	CASCADE_RETRY_INTERVAL_MS,
 	type CascadeFixture,
 	type CascadeMeasurement,
@@ -26,6 +27,7 @@ import {
 import { CASCADE_GRAPH_KINDS } from "../../clients/dispatch/integration.js";
 import {
 	LSP_FIXTURES,
+	passFloorBreach,
 	report,
 	runLspCascade,
 } from "../../scripts/smoke-tools.mjs";
@@ -207,28 +209,36 @@ describe("cascadeRow (#1712)", () => {
 	const defectFx = {
 		...fx,
 		expectDefect: {
-			state: "wrong-verdict" as const,
-			reason: "server skips an importer",
+			state: "inconclusive" as const,
+			skipReason: "non_code",
+			reason: "the cascade skips the language",
 		},
 	};
+	const declaredShape = concluded(
+		"inconclusive",
+		"cascade skipped: non_code",
+		"non_code",
+	);
 
-	it("reads a declared defect's own outcome as a warning that names the cause", () => {
-		// Recurrence: #1712, jdtls publishes one importer of an edited exporter
-		// and not the other on most runs. A red every night would hide the next
-		// regression behind a lane nobody trusts; a pass would be the #1023 silent
-		// all-clear. The row is a warning, counted by neither the floor nor the
-		// failures, with the cause in its detail.
-		const row = cascadeRow(
-			defectFx,
-			m({ concluded: concluded("wrong-verdict", "src/c.ts read clean") }),
+	it("reads a declared defect's own outcome as a known-defect row that names the cause", () => {
+		// Recurrence: #1712 review M2. The declared shape was a `skip` row, the
+		// word for "unavailable", so the nightly log and the durable table read
+		// "jdtls was not provisioned" and "jdtls answered and showed the known
+		// defect" the same way.
+		const row = cascadeRow(defectFx, m({ concluded: declaredShape }));
+		expect(row.state).toBe("known-defect");
+		expect(row.detail).toContain(
+			"known defect (the cascade skips the language)",
 		);
-		expect(row.state).toBe("skip");
-		expect(row.detail).toContain("known defect (server skips an importer)");
-		expect(row.detail).toContain("src/c.ts read clean");
+		expect(row.detail).toContain("cascade skipped: non_code");
 	});
 
-	it("passes a declared-defect fixture on a night the defect does not show", () => {
-		expect(cascadeRow(defectFx, m()).state).toBe("pass");
+	it("reds a declared-defect fixture whose cascade concluded, so the declaration cannot outlive the defect", () => {
+		// Recurrence: #1712 review (named output). A declaration that a fixed
+		// server also passes stays forever and covers the next regression.
+		const row = cascadeRow(defectFx, m());
+		expect(row.state).toBe("fail");
+		expect(row.detail).toContain("remove the declaration");
 	});
 
 	it.each([
@@ -237,27 +247,32 @@ describe("cascadeRow (#1712)", () => {
 			concluded("inconclusive", "src/c.ts unconfirmed"),
 		],
 		[
-			"a cascade that skipped",
-			concluded("inconclusive", "cascade skipped: non_code", "non_code"),
+			"another skip reason",
+			concluded("inconclusive", "cascade skipped: blockers", "blockers"),
+		],
+		[
+			"an importer read clean after the export broke",
+			concluded("wrong-verdict", "src/c.ts read clean"),
+		],
+		[
+			"an importer whose finding is not the expected one",
+			concluded("wrong-verdict", "src/c.ts read findings"),
 		],
 	])(
 		"still reds a declared-defect fixture whose run is %s",
 		(_name, outcome) => {
-			// The declaration excuses the one shape it names: a server that stopped
-			// answering, or a cascade that never asked, is a different defect.
+			// Recurrence: #1712 review M1. A declaration that excuses a state, not a
+			// shape, painted a changed jdtls message and an unrelated importer error
+			// as the known defect: the lane exited 0 where the same run without the
+			// declaration exited 3.
 			expect(cascadeRow(defectFx, m({ concluded: outcome })).state).toBe(
 				"fail",
 			);
 		},
 	);
 
-	it("reds the same wrong verdict on a fixture that declares no defect", () => {
-		expect(
-			cascadeRow(
-				fx,
-				m({ concluded: concluded("wrong-verdict", "src/c.ts read clean") }),
-			).state,
-		).toBe("fail");
+	it("reds the declared shape on a fixture that declares no defect", () => {
+		expect(cascadeRow(fx, m({ concluded: declaredShape })).state).toBe("fail");
 	});
 
 	const renameFx = {
@@ -409,11 +424,13 @@ describe("cascade fixtures (#1712)", () => {
 		},
 	);
 
-	it("models every fixture's language in the cascade graph", () => {
+	it("holds a language out of the cascade graph only with the declaration that names it", () => {
 		// Recurrence: tool-smoke run 41027095385, jdtls answered every warm touch
 		// and the cascade still returned skipReason=non_code for java, because
-		// CASCADE_GRAPH_KINDS had no java: thirty attempts, no importer asked.
-		// A fixture for a language the cascade skips can only measure the skip.
+		// CASCADE_GRAPH_KINDS had no java: thirty attempts, no importer asked. A
+		// fixture for a language the cascade skips can only measure the skip, so
+		// it declares that skip; and a declaration for a language the cascade now
+		// models would excuse nothing and hide the next regression (#5040).
 		const graphKind: Record<string, string> = {
 			typescript7: "jsts",
 			rust: "rust",
@@ -425,18 +442,19 @@ describe("cascade fixtures (#1712)", () => {
 			expect(kind, `a graph kind for ${f.lang}`).toBeTruthy();
 			expect(
 				CASCADE_GRAPH_KINDS.has(kind),
-				`${f.lang} (${kind}) is a cascade graph kind`,
-			).toBe(true);
+				`${f.lang} (${kind}) is a cascade graph kind exactly when it declares no non_code skip`,
+			).toBe(f.expectDefect?.skipReason !== "non_code");
 		}
 	});
 
-	it("declares a defect only for jdtls, with a reason", () => {
+	it("declares a defect only for jdtls, with a reason and the skip it excuses", () => {
 		// Recurrence: #1712. An excuse that spreads to a second server turns the
 		// lane's red into a warning for every regression of that server.
 		const declared = CASCADE_FIXTURES.filter((f) => f.expectDefect);
 		expect(declared.map((f) => f.lang)).toEqual(["java"]);
 		for (const f of declared) {
-			expect(f.expectDefect?.state).toBe("wrong-verdict");
+			expect(f.expectDefect?.state).toBe("inconclusive");
+			expect(f.expectDefect?.skipReason).toBeTruthy();
 			expect(String(f.expectDefect?.reason).length).toBeGreaterThan(40);
 		}
 	});
@@ -530,6 +548,8 @@ describe("runLspCascade (#1712)", () => {
 		renameResult?: Record<string, unknown>;
 		/** Importers still report an error after the exporter is restored. */
 		neverClean?: boolean;
+		/** Importers report an error until this much (fake) time has passed. */
+		cleanAfterMs?: number;
 		run: (workspace: string, attempt: number) => CascadeRunLike;
 	}) {
 		const base = CASCADE_FIXTURES[0];
@@ -563,8 +583,13 @@ describe("runLspCascade (#1712)", () => {
 		// doubled: it answers a clean file as clean, and once the exporter has
 		// moved it answers an importer the way `afterRename` says.
 		let moved = false;
+		const startedAt = Date.now();
+		// Resolved, not suffix-matched: `path.join` spells a Windows path with
+		// backslashes, and `endsWith("src/b.ts")` then matches no importer.
 		const isImporter = (file: string) =>
-			(fixture.neighbours ?? []).some((rel) => file.endsWith(rel));
+			(fixture.neighbours ?? []).some(
+				(rel) => path.resolve(file) === path.resolve(workspace, rel),
+			);
 		const touchFile = vi.fn(async (file: string, content: string) => {
 			if (opts.answers === false) return undefined;
 			const missing = {
@@ -572,6 +597,13 @@ describe("runLspCascade (#1712)", () => {
 					"Cannot find module './a' or its corresponding type declarations.",
 			};
 			if (opts.neverClean && isImporter(file)) return { diags: [missing] };
+			if (
+				opts.cleanAfterMs !== undefined &&
+				!moved &&
+				isImporter(file) &&
+				Date.now() - startedAt < opts.cleanAfterMs
+			)
+				return { diags: [missing] };
 			const stale =
 				moved &&
 				isImporter(file) &&
@@ -697,30 +729,57 @@ describe("runLspCascade (#1712)", () => {
 		expect(output).toContain("concluded without a");
 	});
 
-	it("turns a declared defect's own outcome into a warning row with no time", async () => {
-		// Recurrence: #1712, jdtls. The excuse ends at a warning: the row is a skip
-		// (so it counts toward neither the failures nor the pass floor, and the
-		// one-skip-beside-a-pass rule of `report` applies) and carries no
-		// time-to-conclusive it never had.
-		const { output, times } = await runLane({
+	const declaredDefect = {
+		expectDefect: {
+			state: "inconclusive" as const,
+			skipReason: "non_code",
+			reason: "the cascade skips the language",
+		},
+	};
+
+	it("turns a declared defect's own outcome into a known-defect row with its cause and no time", async () => {
+		// Recurrence: #1712 review M2, jdtls. The excuse ends at a row of its own
+		// (not `skip`, the word for unavailable, which the durable table would
+		// then share): it counts toward no failure and carries the cause in the
+		// artifact, and no time-to-conclusive it never had.
+		const { failures, output, times } = await runLane({
 			census: "pass",
-			fixture: {
-				expectDefect: {
-					state: "wrong-verdict" as const,
-					reason: "server skips an importer",
-				},
-			},
+			fixture: declaredDefect,
+			run: () => ({ skipReason: "non_code" }),
+		});
+		expect(failures).toBe(0);
+		expect(output).toContain("≈  typescript7");
+		expect(output).toContain("known defect (the cascade skips the language)");
+		expect(output).toContain("1 known-defect (declared, not a pass)");
+		expect(times.rows[0]).toMatchObject({
+			state: "known-defect",
+			detail: expect.stringContaining("the cascade skips the language"),
+			timeToConclusiveMs: null,
+		});
+	});
+
+	it("reds a declared-defect fixture whose run is a different defect than the one named", async () => {
+		// Recurrence: #1712 review M1, through the production runner: the same run
+		// without the declaration exited 3, with it exited 0.
+		const withDeclaration = await runLane({
+			census: "pass",
+			fixture: declaredDefect,
 			run: (workspace) => ({
 				...concludes(workspace),
 				result: { formatted: "" },
 			}),
 		});
-		expect(output).toContain("⚠  typescript7");
-		expect(output).toContain("known defect (server skips an importer)");
-		expect(times.rows[0]).toMatchObject({
-			state: "skip",
-			timeToConclusiveMs: null,
+		const without = await runLane({
+			census: "pass",
+			run: (workspace) => ({
+				...concludes(workspace),
+				result: { formatted: "" },
+			}),
 		});
+		expect(without.failures).toBeGreaterThan(0);
+		expect(withDeclaration.failures).toBe(without.failures);
+		expect(withDeclaration.output).toContain("✗  typescript7");
+		expect(withDeclaration.times.rows[0].state).toBe("fail");
 	});
 
 	it("reds a server that handshook and answered nothing here", async () => {
@@ -836,6 +895,23 @@ describe("runLspCascade (#1712)", () => {
 		expect(breached.failures).toBe(1);
 		const held = await runLane({ census: "pass", minPass: 1, run: concludes });
 		expect(held.failures).toBe(0);
+	});
+
+	it("counts a known-defect row toward the floor and an unavailable one not", () => {
+		// Recurrence: #1712. The declared java row counted toward `--min-pass=3`
+		// before it had a state of its own (one unavailable server stays a
+		// warning); a `skip` is unavailable and proves nothing.
+		const row = (state: "pass" | "skip" | "known-defect") => ({
+			lang: state,
+			runner: "r",
+			state,
+			detail: "",
+			diags: 0,
+		});
+		expect(passFloorBreach([row("pass"), row("known-defect")], 2)).toBeNull();
+		expect(passFloorBreach([row("pass"), row("skip")], 2)).toContain(
+			"1 runner(s) passed, at least 2 required (1 unavailable)",
+		);
 	});
 
 	it("reds a silent fallback to the classic server", async () => {
@@ -964,6 +1040,43 @@ describe("runLspCascade (#1712)", () => {
 			expect(deps.renameFile).not.toHaveBeenCalled();
 		});
 
+		it("spends no more than the lane's rename deadlines beyond the edit cascade", async () => {
+			// Recurrence: #3123 (a lane hang costing the step cap), through the
+			// rename phase: tests/config/lsp-cascade-lane.test.ts bounds the lane
+			// by CASCADE_RENAME_EXTRA_DEADLINES; a third wait in the phase would
+			// spend more than the bound counts. The importers return to clean just
+			// before the baseline deadline, then never conclude after the move, so
+			// both waits run nearly their whole deadline (fake clock).
+			const deadlineMs = 20_000;
+			vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+			try {
+				const began = Date.now();
+				const lane = runLane({
+					census: "pass",
+					fixture: { conclusiveDeadlineMs: deadlineMs, warmDeadlineMs: 60_000 },
+					cleanAfterMs: deadlineMs - 3_000,
+					afterRename: "stays-clean",
+					run: concludes,
+				});
+				let settled = false;
+				void lane.finally(() => {
+					settled = true;
+				});
+				while (!settled) await vi.advanceTimersByTimeAsync(500);
+				const { times } = await lane;
+				const spent = Date.now() - began;
+				expect(times.rows[0].rename.state).toBe("unconcluded");
+				expect(spent).toBeGreaterThan(
+					(CASCADE_RENAME_EXTRA_DEADLINES - 0.5) * deadlineMs,
+				);
+				expect(spent).toBeLessThanOrEqual(
+					CASCADE_RENAME_EXTRA_DEADLINES * deadlineMs + 2_000,
+				);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
 		it("does not rename after an edit cascade that did not conclude", async () => {
 			const { deps } = await runLane({
 				census: "pass",
@@ -1013,6 +1126,30 @@ describe("report with a skipped server (#1712)", () => {
 	it("reads a lane that only skipped as a failure", () => {
 		vi.spyOn(console, "log").mockImplementation(() => undefined);
 		expect(report([rows[1]], "x", { failOnSkipOnly: true })).toBe(1);
+		vi.restoreAllMocks();
+	});
+
+	it("reads a known defect beside a skip as work done, and names it apart from the skip", () => {
+		// Recurrence: #1712 review M2. The summary counts a known defect under its
+		// own word after the `skipped` clause tool-smoke-drift parses, so a skip
+		// and a known defect never read the same.
+		const lines: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((...a) => {
+			lines.push(a.join(" "));
+		});
+		const known = {
+			lang: "c",
+			runner: "r",
+			state: "known-defect" as const,
+			detail: "",
+			diags: 0,
+		};
+		expect(report([rows[1], known], "x", { failOnSkipOnly: true })).toBe(0);
+		const text = lines.join("\n");
+		expect(text).toContain(
+			"0 passed · 0 failed · 0 setup-failed · 1 skipped (tool/config unavailable) · 1 known-defect (declared, not a pass)",
+		);
+		expect(text).not.toContain("SKIPPED:");
 		vi.restoreAllMocks();
 	});
 });
