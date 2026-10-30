@@ -178,6 +178,41 @@ describe("helm chart containment", () => {
 		expect(local?.filePath).toBe(path.join(chart, "templates", "..odd.yaml"));
 	});
 
+	it.skipIf(process.platform === "win32")(
+		// lane: dev-box-only — a symlink needs privilege on the Windows lanes.
+		"isWithinIdentity reads a real link spelling out of the root and into it",
+		() => {
+			// Recurrence: the cell below spells every operand literally, so a
+			// lexical `isWithinForm(normalizePathSpelling(...))` passes it. The
+			// seam's contract is the identity axis in BOTH directions: a
+			// lexically-inside link out of the root reads outside, and a
+			// lexically-outside link that lands in the root reads inside.
+			const chart = path.join(root, "chart");
+			const alias = path.join(root, "alias");
+			fs.mkdirSync(chart, { recursive: true });
+			touch("outside", "evil.yaml");
+			touch("real", "a.ts");
+			try {
+				fs.symlinkSync(path.join(root, "outside"), path.join(chart, "linked"));
+				fs.symlinkSync(path.join(root, "real"), alias);
+				// Both verdicts in one assertion, so one red shows both directions.
+				expect({
+					linkedOut: isWithinIdentity(
+						path.join(chart, "linked", "evil.yaml"),
+						chart,
+					),
+					linkedIn: isWithinIdentity(
+						path.join(alias, "a.ts"),
+						path.join(root, "real"),
+					),
+				}).toEqual({ linkedOut: false, linkedIn: true });
+			} finally {
+				fs.rmSync(path.join(chart, "linked"), { force: true });
+				fs.rmSync(alias, { force: true });
+			}
+		},
+	);
+
 	it("isWithinIdentity meets a link spelling at its target and nothing else", () => {
 		touch("real", "a.ts");
 		expect(
