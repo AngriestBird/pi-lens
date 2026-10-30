@@ -109,9 +109,11 @@ const VENV_LIB_DIR = "lib";
 const VENV_WINDOWS_SITE_PACKAGES = join("Lib", "site-packages");
 /**
  * Version directories under `<venv>/lib` statted per look. A venv holds one per
- * interpreter on the platform; the cap keeps a pathological `lib` from turning
- * every look into a stat storm, and a version directory past it only defers its
- * install to a look that lists it again.
+ * interpreter on the platform, so the cap never binds on a real environment; it
+ * exists so a pathological `lib` cannot turn every look into a stat storm, and
+ * a version directory past the cap is not stamped — an install there publishes
+ * nothing, which is the bound's stated cost, chosen over an unbounded stat per
+ * look.
  */
 const VENV_VERSION_DIRS_MAX = 4;
 
