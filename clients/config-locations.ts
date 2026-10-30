@@ -37,6 +37,7 @@ import {
 	isWindowsPath,
 	normalizeFilePath,
 	realpathOrResolve,
+	toPosix,
 	walkUpDirs,
 } from "./path-utils.js";
 
@@ -90,7 +91,7 @@ export const LEGACY_ROOT_LSP_KEYS: readonly string[] =
 	);
 
 function isLspScoped(relativePath: string): boolean {
-	const base = path.posix.basename(relativePath.replace(/\\/g, "/"));
+	const base = path.posix.basename(toPosix(relativePath));
 	return base === "lsp.json" || base === "pi-lsp.json";
 }
 

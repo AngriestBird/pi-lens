@@ -45,7 +45,7 @@ export function isRuleIgnoredForPath(
 	const displayPath = toPosix(outsideRoot ? filePath : relative);
 	return patterns.some(
 		(pattern) =>
-			(!outsideRoot || !pattern.replaceAll("\\", "/").endsWith("/**")) &&
+			(!outsideRoot || !toPosix(pattern).endsWith("/**")) &&
 			minimatch(displayPath, pattern, { dot: true }),
 	);
 }
