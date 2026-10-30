@@ -25,6 +25,7 @@ import {
 	PythonServer,
 } from "../../../clients/lsp/server.js";
 import type { LSPServerInfo } from "../../../clients/lsp/server.js";
+import { assertNonEmptyScan } from "../../support/sweep-kit.js";
 
 const FILE = "/proj/pkg/probe.py";
 const acquired = (...infos: LSPServerInfo[]) =>
@@ -33,6 +34,13 @@ const roots = (...ids: string[]) =>
 	new Map(ids.map((id) => [id, "/proj"] as const));
 
 afterEach(() => resetSessionRootsForTests());
+
+// The registered alternates: typescript/deno, python/python-jedi, csharp,
+// elixir and docker. An empty population must fail, not pass on nothing.
+const ALTERNATES = LSP_SERVERS.filter(
+	(server) => server.fallbackFor !== undefined,
+).map((server) => [server.id, server.fallbackFor as string] as const);
+assertNonEmptyScan("registered fallbackFor alternates", ALTERNATES.length, 5);
 
 describe("unansweredPrimaries names the owner a fallback stood in for (#5014)", () => {
 	it.each([
@@ -91,11 +99,7 @@ describe("unansweredPrimaries names the owner a fallback stood in for (#5014)", 
 
 	// Shape 10 population: every registered `fallbackFor` alternate (deno,
 	// python-jedi, the C#, Elixir and Docker alternates), not only python's.
-	it.each(
-		LSP_SERVERS.filter((server) => server.fallbackFor !== undefined).map(
-			(server) => [server.id, server.fallbackFor as string] as const,
-		),
-	)(
+	it.each(ALTERNATES)(
 		"%s answering for a rooted owner %s never stands in for it",
 		(alternate, owner) => {
 			const info = LSP_SERVERS.find((server) => server.id === alternate);
