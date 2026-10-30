@@ -134,9 +134,9 @@ const PINS: Readonly<Record<string, Pin>> = {
 	}, // :225, :228, :229, :231
 	"clients/dispatch/runners/helm-render.ts#raw-realpath": {
 		sites: 3,
-		identities: "ef1b14076168e8a6",
+		identities: "cf011114b0d18c1c",
 		reason: HELM_CONTAINMENT,
-	}, // :224, :225, :239
+	}, // :216, :217, :231
 	"clients/dispatch/runners/helm-render.ts#path-resolve-keyed": {
 		sites: 5,
 		identities: "6842ad1422412589",

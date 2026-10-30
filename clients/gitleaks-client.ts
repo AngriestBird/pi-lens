@@ -62,7 +62,11 @@ import {
 	collectTrackedFiles,
 	collectUntrackedIgnoredIds,
 } from "./git-tracked-ignore.js";
-import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
+import {
+	normalizeEphemeralMapKey,
+	normalizeMapKey,
+	relativeInside,
+} from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { SecurityScanClient } from "./security-scan-client.js";
 import {
@@ -474,13 +478,7 @@ function isInsideNestedGitRepository(file: string, cwd: string): boolean {
 	const absoluteFile = path.isAbsolute(file)
 		? path.resolve(file)
 		: path.resolve(root, file);
-	const relative = path.relative(root, absoluteFile);
-	if (
-		relative === ".." ||
-		relative.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relative)
-	)
-		return false;
+	if (relativeInside(root, absoluteFile) === undefined) return false;
 
 	let directory = path.dirname(absoluteFile);
 	while (directory !== root) {

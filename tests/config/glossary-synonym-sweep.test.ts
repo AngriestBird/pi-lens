@@ -940,7 +940,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 17 -> 19 (#3274): `readCacheAsync` builds the same two store paths its
 		// synchronous sibling does (`cachePath`, `metaPath`). Same sense, one more
 		// reader of the same two files.
-		"clients/cache-manager.ts": 19,
+		"clients/cache-manager.ts": 18,
 		// 7 -> 5 (#3930 r2): the shared fingerprint replaces the cache's
 		// duplicated path operations with one owner.
 		"clients/cache/rule-cache.ts": 5,
@@ -982,7 +982,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/rule-ignores.ts": 3,
 		// 11 -> 10 (#4689 batch 7): the absolute runner path is `realpathOrResolve`,
 		// not a `path.resolve` of the spelling the tool reported.
-		"clients/dispatch/runner-context.ts": 10,
+		"clients/dispatch/runner-context.ts": 9,
 		"clients/dispatch/runners/actionlint.ts": 4,
 		"clients/dispatch/runners/ast-grep-napi.ts": 4,
 		"clients/dispatch/runners/biome-check.ts": 6,
@@ -997,8 +997,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/gleam-check.ts": 3,
 		"clients/dispatch/runners/golangci-lint.ts": 3,
 		"clients/dispatch/runners/hadolint.ts": 4,
-		"clients/dispatch/runners/helm-lint.ts": 11,
-		"clients/dispatch/runners/helm-render.ts": 15,
+		"clients/dispatch/runners/helm-lint.ts": 8,
+		"clients/dispatch/runners/helm-render.ts": 12,
 		"clients/dispatch/runners/htmlhint.ts": 4,
 		"clients/dispatch/runners/javac.ts": 5,
 		"clients/dispatch/runners/ktlint.ts": 4,
@@ -1079,7 +1079,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
 		"clients/git-tracked-ignore.ts": 3,
-		"clients/gitleaks-client.ts": 23,
+		"clients/gitleaks-client.ts": 20,
 		"clients/go-client.ts": 2,
 		"clients/govulncheck-client.ts": 7,
 		"clients/gradle-ktfmt-style.ts": 5,
@@ -1173,7 +1173,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
-		"clients/lsp/workspace-diagnostics-cache.ts": 15,
+		"clients/lsp/workspace-diagnostics-cache.ts": 12,
 		// #4346: a creation record carries the created file's path.
 		"clients/lsp/workspace-diagnostics-session.ts": 2,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
@@ -1239,7 +1239,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `typeof path.posix` parser), and `kernelAttemptAsync` carries the same
 		// argument its sync twin does; the fold and fallback calls are the same
 		// senses counted above.
-		"clients/path-utils.ts": 39,
+		"clients/path-utils.ts": 41,
 		"clients/php-cs-fixer-config.ts": 4,
 		// 26 -> 24 (#4689 batch 3): the changed-file set is a PathKeyedMap, so two
 		// `path.resolve` calls are gone. 24 -> 22: the postMutation gate compares
@@ -1270,7 +1270,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.isAbsolute` leg that rejects another Windows drive (V1).
 		// 19 -> 18 (#5009): the two root-level venv candidates became one
 		// `path.join` inside the list the resolver and the install stamp share.
-		"clients/python-environment.ts": 18,
+		"clients/python-environment.ts": 13,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
@@ -1378,7 +1378,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// for pytest, PHPUnit, Mix, and generic runner locations.
 		// 74 -> 72 (#4689 batch 2): two `path.resolve` locals dropped from the root and
 		// failed-target keys.
-		"clients/test-runner-client.ts": 70,
+		"clients/test-runner-client.ts": 68,
 		"clients/todo-scanner.ts": 3,
 		// 4 -> 10 (#3655): the Node lockfile walk-up and supplier selection
 		// resolve pnpm/yarn evidence through `path.join`, `path.relative`,

@@ -76,6 +76,7 @@ import { logLatency } from "../../latency-logger.js";
 import { PathKeyedMap } from "../../path-keyed-map.js";
 import {
 	isAbsoluteFilePath,
+	isWithinIdentity,
 	normalizeMapKey,
 	toProjectRelativePath,
 } from "../../path-utils.js";
@@ -145,19 +146,6 @@ const SKIPPED: RunnerResult = {
 	semantic: "none",
 };
 
-function isWithin(root: string, candidate: string): boolean {
-	const relative = path.relative(
-		normalizeMapKey(root),
-		normalizeMapKey(candidate),
-	);
-	return (
-		relative === "" ||
-		(!relative.startsWith(`..${path.sep}`) &&
-			relative !== ".." &&
-			!path.isAbsolute(relative))
-	);
-}
-
 /**
  * Explicit opt-in for rendering. Rendering runs chart-authored template code,
  * so the default is OFF and only an explicit `helm.renderValidation.enabled`
@@ -191,7 +179,7 @@ export function isHelmRenderEnabled(workspaceRoot: string): boolean {
  *
  * A `# Source:` annotation is content the CHART wrote, which is the same trust
  * boundary the opt-in exists for, so containment has to hold on every OS. The
- * textual `isWithin` fold is not enough on its own: `normalizeFilePath` only
+ * textual `isWithinIdentity` fold is not enough on its own: `normalizeFilePath` only
  * canonicalizes through `realpath` on win32, so on Linux and macOS a symlinked
  * template passes the string test and is then followed by `stat`. Two checks
  * close it, and BOTH are needed (recurring defect shape 2 — verify on the CI OS,
@@ -219,14 +207,14 @@ export function resolveTemplateSource(
 		.filter((segment) => segment && segment !== ".");
 	if (segments.length < 2) return null;
 	const candidate = path.resolve(chartRoot, ...segments.slice(1));
-	if (!isWithin(chartRoot, candidate)) return null;
+	if (!isWithinIdentity(candidate, chartRoot)) return null;
 	try {
 		if (!fs.lstatSync(candidate).isFile()) return null;
 		// Canonicalize both sides: comparing a resolved path against an
 		// unresolved root would reject every chart that legitimately lives under
 		// a symlinked parent (a /tmp or /home symlink, or a linked worktree).
 		const root = realChartRoot ?? fs.realpathSync(chartRoot);
-		if (!isWithin(root, fs.realpathSync(candidate))) return null;
+		if (!isWithinIdentity(fs.realpathSync(candidate), root)) return null;
 	} catch {
 		return null;
 	}
@@ -1135,7 +1123,7 @@ const helmRenderRunner: RunnerDefinition = {
 		const discovered = findNearestDirWithMarker(startDir, "chartYamlPath");
 		if (!discovered) return SKIPPED;
 		const chartRoot = path.resolve(discovered);
-		if (!isWithin(workspaceRoot, chartRoot)) return SKIPPED;
+		if (!isWithinIdentity(chartRoot, workspaceRoot)) return SKIPPED;
 
 		// Gate 2 — project trust. `.pi-lens.json` is a TRACKED file, so consent
 		// can arrive inside a cloned repository: a hostile chart repo would

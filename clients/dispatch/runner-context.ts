@@ -3,6 +3,7 @@ import * as path from "node:path";
 import {
 	normalizeHostToolPath,
 	normalizeMapKey,
+	relativeInside,
 	toPosix,
 	walkUpDirs,
 } from "../path-utils.js";
@@ -68,9 +69,5 @@ export function resolveRunnerPath(cwd: string, filePath: string): string {
 export function toRunnerDisplayPath(cwd: string, filePath: string): string {
 	const cwdKey = normalizeMapKey(path.resolve(cwd));
 	const fileKey = resolveRunnerPath(cwd, filePath);
-	const relative = toPosix(path.relative(cwdKey, fileKey));
-	if (relative && relative !== "." && !relative.startsWith("../")) {
-		return relative;
-	}
-	return fileKey;
+	return relativeInside(cwdKey, fileKey) || fileKey;
 }
