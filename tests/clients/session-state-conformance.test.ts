@@ -1812,4 +1812,223 @@ describe("session-state scan — containers with no reset, and class fields (#50
 			expect(SWEEP_HEURISTIC_LIMITS.join(" ")).toContain("CLASS FIELD");
 		});
 	});
+
+	// #5036 F1. clients/file-time.ts kept `reads` and `locks` as members of the
+	// module object `globalState = { reads: new Map(), locks: new Map() }`; the
+	// file was absent from all 163 candidates and had no owner row, the #4955
+	// shape one level out (a field holding a store, escaped from the scan).
+	describe("members of a module-level object literal (#5036 F1)", () => {
+		const membersOf = (files: Record<string, string>, file = "holder.ts") => {
+			let out: string[] = [];
+			withScanTree(files, (dir) => {
+				out =
+					scanSessionStateCandidates(dir)
+						.find((c) => c.file === file)
+						?.instanceFields.map((f) => f.name) ?? [];
+			});
+			return out;
+		};
+
+		it.each([
+			[
+				"file-time.ts's globalState",
+				"const globalState = {\n\treads: new Map(),\n\tlocks: new Map(),\n};\n",
+				["globalState.reads", "globalState.locks"],
+			],
+			[
+				"an annotated, exported literal",
+				"export const state: State = {\n\tserved: new Set<string>(),\n};\n",
+				["state.served"],
+			],
+			[
+				"a let literal",
+				"let hub = { sessions: new WeakMap<object, string>() };\n",
+				["hub.sessions"],
+			],
+			[
+				"a member after a nested object, a call and a generic comma",
+				"const s = {\n\tcfg: { a: 1, b: new Map() },\n\tn: make(1, 2),\n\tseen: new Map<string, number>(),\n\tlate: new WeakSet(),\n};\n",
+				["s.seen", "s.late"],
+			],
+		])("flags %s", (_name, source, expected) => {
+			expect(membersOf({ "holder.ts": source })).toEqual(expected);
+		});
+
+		it("flags a member built by a clients/ container class", () => {
+			expect(
+				membersOf({
+					"read-guard.ts": "export class ReadGuard { reads = new Map(); }\n",
+					"holder.ts":
+						'import { ReadGuard } from "./read-guard.js";\nconst holder = { guard: new ReadGuard() };\n',
+				}),
+			).toEqual(["holder.guard"]);
+		});
+
+		it("counts a member in the one symbol pin, with the module containers", () => {
+			withScanTree(
+				{
+					"holder.ts":
+						"const knownBySession = new Map<string, string>();\nconst hub = { a: new Set<string>() };\n",
+				},
+				(dir) => {
+					const [candidate] = scanSessionStateCandidates(dir);
+					expect(symbolCount(candidate!)).toBe(2);
+				},
+			);
+		});
+
+		it.each([
+			["an array member", "const cfg = { items: [] };"],
+			["a nested object's member", "const cfg = { inner: { m: new Map() } };"],
+			["a shorthand member", "const m = 1;\nconst cfg = { m };"],
+			["a method", "const cfg = { reads() { return new Map(); } };"],
+			["an arrow value", "const cfg = { make: () => new Map() };"],
+			[
+				"a value that wraps the container",
+				"const cfg = { m: wrap(new Map()) };",
+			],
+			[
+				"a literal wrapped in a call",
+				"const cfg = Object.freeze({ m: new Map() });",
+			],
+			[
+				"a literal inside a function",
+				"function f() {\n\tconst cfg = { m: new Map() };\n\treturn cfg;\n}",
+			],
+			[
+				"a member named in a comment",
+				"// const cfg = { m: new Map() };\nconst x = 1;",
+			],
+			[
+				"a member named in a string",
+				'const note = "const cfg = { m: new Map() }";',
+			],
+		])("does not read %s", (_name, source) => {
+			expect(membersOf({ "holder.ts": `${source}\n` })).toEqual([]);
+		});
+
+		// The three spellings the detector's author did not design for: an
+		// alias, an indirect call and a value reached through another binding.
+		// None is read; each is named in SWEEP_HEURISTIC_LIMITS.
+		it("states the member spellings it does not read, rather than claiming them", () => {
+			expect(
+				membersOf({
+					"holder.ts": [
+						"const Store = Map;",
+						"const make = () => new Map();",
+						"const hub = { aliased: new Store(), made: make(), later: undefined };",
+						"hub.later = new Map();",
+						"",
+					].join("\n"),
+				}),
+			).toEqual([]);
+			expect(SWEEP_HEURISTIC_LIMITS.join(" ")).toContain("OBJECT LITERAL");
+		});
+	});
+
+	// #5036 F2. Three spellings the declaration regex could not read, live in
+	// clients/: `exitFlushers` in ndjson-logger.ts (a `=>` in the annotation and
+	// an `a ?? b ?? new Set()` initialiser; mutated at lines 434 and 238, no row,
+	// no pin) and the two multi-line ReadonlyMap tables of lens-flag-registry.ts
+	// and lsp/server-covers.ts.
+	describe("declaration spellings of a module container (#5036 F2)", () => {
+		const containersOf = (source: string): string[] => {
+			let out: string[] = [];
+			withScanTree({ "holder.ts": source }, (dir) => {
+				out =
+					scanSessionStateCandidates(dir, {
+						includeUnresetContainers: true,
+					}).find((c) => c.file === "holder.ts")?.containers ?? [];
+			});
+			return out;
+		};
+
+		it.each([
+			[
+				"an arrow function in the annotation and a ?? chain (ndjson-logger.ts)",
+				"const exitFlushers: Set<() => void> =\n\tstate?.exitFlushers ??\n\tlegacy?.exitFlushers ??\n\tnew Set<() => void>();\n",
+				["exitFlushers"],
+			],
+			[
+				"an annotation over several lines (server-covers.ts)",
+				'export const COVERS: ReadonlyMap<\n\tstring,\n\treadonly string[]\n> = new Map([["a", ["b"]]]);\n',
+				["COVERS"],
+			],
+			[
+				"a ?? chain on one line",
+				"const seen = globalThis.seen ?? new Set<string>();\n",
+				["seen"],
+			],
+			[
+				"a ?? chain with a non-null operand",
+				"let cache = host.cache! ?? new Map();\n",
+				["cache"],
+			],
+		])("reads %s", (_name, source, expected) => {
+			expect(containersOf(source)).toEqual(expected);
+		});
+
+		it.each([
+			[
+				"a bare declaration, then a container on the next line",
+				"let pending: number;\nconst real = new Map();\n",
+				["real"],
+			],
+			[
+				"an arrow function that returns a container",
+				"const make = (): Map<string, string> => new Map();\n",
+				[],
+			],
+			[
+				"a call operand ahead of the ??",
+				"const x = load() ?? new Map();\n",
+				[],
+			],
+			["an || chain", "const x = a || new Map();\n", []],
+			["a ternary", "const x = flag ? new Map() : other;\n", []],
+		])("does not read %s", (_name, source, expected) => {
+			expect(containersOf(source)).toEqual(expected);
+		});
+	});
+
+	// #5036 F3 (greptile PRRT_kwDORt8rec6yJBG-, coderabbit PRRT_kwDORt8rec6yJChX).
+	// READ_USE_AFTER admits forEach and the value-returning reads, so a container
+	// mutated through the callback's third argument and a value mutated in place
+	// stay admitted. Live population 0 in clients/, tools/, mcp/ and index.ts;
+	// disclosed in SWEEP_HEURISTIC_LIMITS rather than refusing the common read.
+	describe("mutation the read-form allowlist cannot see (#5036 F3)", () => {
+		const countOf = (source: string): number | undefined => {
+			let out: number | undefined;
+			withScanTree({ "planted.ts": source }, (dir) => {
+				const found = scanSessionStateCandidates(dir)[0];
+				out = found && symbolCount(found);
+			});
+			return out;
+		};
+
+		it("admits a container emptied through the forEach callback's third argument", () => {
+			expect(
+				countOf(
+					'const READ_OPS = new Set<string>(["a"]);\nexport function drop(): void {\n\tREAD_OPS.forEach((value, _key, set) => set.delete(value));\n}\nexport function reset(): void {}\n',
+				),
+			).toBe(0);
+			expect(SWEEP_HEURISTIC_LIMITS.join(" ")).toContain("forEach");
+		});
+
+		it("admits a value mutated in place after get, values, entries, keys or forEach", () => {
+			expect(
+				countOf(
+					'const COUNTS_BY_KIND = new Map<string, { n: number }>();\nexport function bump(): void {\n\tCOUNTS_BY_KIND.get("a")!.n++;\n}\nexport function reset(): void {}\n',
+				),
+			).toBe(0);
+			expect(
+				countOf(
+					'const LOOKUP = new Map<string, Set<string>>();\nexport function add(): void {\n\tLOOKUP.forEach((s) => s.add("x"));\n}\nexport function reset(): void {}\n',
+				),
+			).toBe(0);
+			expect(SWEEP_HEURISTIC_LIMITS.join(" ")).toContain(
+				"stored VALUE mutated in place",
+			);
+		});
+	});
 });

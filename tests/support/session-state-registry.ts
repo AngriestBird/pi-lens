@@ -1741,6 +1741,12 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
 			"process-wide: the bus publisher is registered once per process and holds no session answer",
 		reason: "bus publisher registration",
 	},
+	"complexity-client.ts": {
+		ownerKey:
+			"process-wide: frozen per-language node-kind tables built at import and only read",
+		reason:
+			"#5036 F1: the language tables are module objects whose members are Sets of tree-sitter node-kind names; nothing writes them after load, so a session boundary cannot change them",
+	},
 	"config-core/records.ts": {
 		ownerKey:
 			"process-wide: a call-scoped collector discarded with one config load and a frozen code vocabulary",
@@ -1898,6 +1904,13 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
 		ownerKey:
 			"process-wide: file-kind lookup tables built at import from the language registry",
 		reason: "the extension to kind map is filled while the module loads",
+	},
+	"file-time.ts": {
+		ownerKey: "session",
+		sessionSeamException:
+			"reads is keyed by the sessionID string a caller passes to the FileTime constructor, not by a scope cell: the module reads no ambient session, so there is nothing to derive a scope from; locks is keyed by absolute path alone and is shared on purpose, so two writers to one file serialise",
+		reason:
+			"#5036 F1: the read stamps and write locks live in the module object globalState, a store the module-container scan did not read before; clearFileTimeSessions (clearAllSessions) empties both at session_start (runtime-session.ts)",
 	},
 	"file-utils.ts": {
 		ownerKey: "project",
@@ -2091,6 +2104,12 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
 			"process-wide: a call-scoped hand-off keyed by the host's unique tool-call id and a frozen tool-name table",
 		reason:
 			"#2423: the built-in tool-name table is an import-time frozen lookup (SWEEP_HEURISTIC_LIMITS item 5), and the resolved-range carry is CALL-scoped — one entry per toolCallId, written by the tool_call classification and read by that same call's tool_result, drained FIFO at 64 entries. Host tool-call ids are unique per call, so a carried entry cannot be read by a later session; a session_start reset would be redundant, not missing",
+	},
+	"ndjson-logger.ts": {
+		ownerKey:
+			"process-wide: the log sink is shared by every session of this process; the exit flushers and the set of registered log files describe the process, not a session",
+		reason:
+			"#5036 F2: exitFlushers and registeredLogFiles are declared as `a ?? b ?? new Set()` over the canonical globalThis state, a spelling the container scan did not read before; both describe the process, not a session",
 	},
 	"out-of-band-changes.ts": {
 		ownerKey: "project",
@@ -2387,6 +2406,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #4487: the cascade pending-error record (1 -> 2), registered above and
 	// reset by resetDispatchBaselines.
 	"cascade-format.ts": 2,
+	"complexity-client.ts": 24,
 	"config-core/records.ts": 1,
 	"config-resolve.ts": 2,
 	// #2418: the one warn-once latch behind all three config loaders, moved
@@ -2483,6 +2503,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"event-loop-hold.ts": 0,
 	"extension-log.ts": 2,
 	"file-kinds.ts": 2,
+	"file-time.ts": 2,
 	// #2874: the live scan sees settledDataDirs plus the two project-ignore
 	// caches. All three ride the file-level exemption above: the ignore caches
 	// are signature-validated per call (#2929 round 4, F1), so no reset exists
@@ -2563,9 +2584,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// session-root registry's own value (`lsp/session-roots.ts`), so a config
 	// cannot be evicted while its root is still served. `configInFlight` alone
 	// remains here.
-	"lsp/config.ts": 1,
+	"lsp/config.ts": 3,
 	"lsp/created-import-targets.ts": 0,
-	"lsp/document-drift.ts": 2,
+	"lsp/document-drift.ts": 3,
 	// #2372 slice 3: 2 -> 1. The never-mutated `OPTIONAL_LSP_SERVER_IDS` set
 	// moved to lsp/client-registry.ts with the spawn path that reads it; that
 	// module exports no reset, so the scan does not flag it.
@@ -2604,11 +2625,12 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// entry above.
 	"mcp/session.ts": 4,
 	"metrics-client.ts": 1,
-	"module-report-lsp.ts": 0,
+	"module-report-lsp.ts": 1,
 	"module-report.ts": 3,
 	// #2423: the frozen built-in tool-name table plus the call-scoped
 	// resolved-range carry. Both are argued in EXEMPT_SESSION_STATE_FILES.
 	"mutating-tool.ts": 1,
+	"ndjson-logger.ts": 2,
 	// #2000 phase 2: the pending-baseline store (one slot per cwd:generation)
 	// plus the process-global Symbol.for slot; cleared via resetOpaqueMutationState.
 	// #2060: 1 -> 3 for UNMERGED_PORCELAIN_STATUSES and
@@ -2756,7 +2778,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"tree-sitter-symbol-extractor.ts": 2,
 	"turn-context.ts": 0,
 	"turn-summary.ts": 1,
-	"warm-attach.ts": 0,
+	"warm-attach.ts": 1,
 	// #2275 added `renderedDependencyDriftFiles` (the drained per-turn footer
 	// delivery set) alongside the existing two.
 	// #2455: the container scan now recognises any repo-local class owning a

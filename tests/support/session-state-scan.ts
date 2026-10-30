@@ -571,6 +571,23 @@ export function auditContainerClassExclusions(
 	return problems;
 }
 
+/**
+ * What may sit between a declared name and its `=` (#5036 F2): a type
+ * annotation, which may hold `=>` (`Set<() => void>`) and may run over
+ * further lines. A newline continues the annotation only when the next line is
+ * indented or opens with a closing bracket, so a column-zero statement ends it
+ * and `let a: T;` can never borrow the `new` of the declaration below.
+ */
+const DECLARATION_ANNOTATION = "(?:[^=\\n]|=>|\\n(?=[ \\t>})\\]]))*?";
+
+/**
+ * Zero or more `operand ??` links ahead of the `new` (#5036 F2): `a ?? b?.c ??
+ * new Set()` still binds the container when the chain falls through. A plain
+ * operand only (a name, a member path, `!`); a call or a ternary is the factory
+ * case `SWEEP_HEURISTIC_LIMITS` already names.
+ */
+const NULLISH_CHAIN = "(?:[\\w$]+(?:\\??\\.[\\w$]+|!)*\\s*\\?\\?\\s*)*";
+
 const containerDeclarationCache = new Map<string, RegExp>();
 
 /**
@@ -598,7 +615,7 @@ function containerDeclarationRegex(dir: string): RegExp {
 		escapeRegExp,
 	);
 	const regex = new RegExp(
-		`^(?<exported>export\\s+)?(?<kind>const|let)\\s+(?<name>[A-Za-z_$][\\w$]*)[^=\\n]*=\\s*new\\s+(?<ctor>${names.join("|")})\\b`,
+		`^(?<exported>export\\s+)?(?<kind>const|let)\\s+(?<name>[A-Za-z_$][\\w$]*)${DECLARATION_ANNOTATION}=\\s*${NULLISH_CHAIN}new\\s+(?<ctor>${names.join("|")})\\b`,
 		"gm",
 	);
 	containerDeclarationCache.set(dir, regex);
@@ -720,6 +737,11 @@ export const SWEEP_HEURISTIC_LIMITS = [
 	// #5027: the owner scan reads two more shapes, and stays blind to the rest.
 	"a CLASS FIELD is read only when its value is a literal `new <Map|Set|WeakMap|WeakSet|clients/ class>` or `[]` (a field initialiser, or a `this.x =`/`??=`/`||=` assignment): a value built by a factory call, reached through another binding, built by an aliased constructor, or written `x ?? new Map()` is invisible, and so is a class expression or a class whose header holds a `{`",
 	"the admitted UPPER_SNAKE constant is judged on every shipped source (clients/, tools/, mcp/, index.ts) but not on tests or scripts, and a same-named identifier elsewhere only makes the verdict stricter",
+	// #5036: the member scan of a module-level object, and the two mutation
+	// spellings the admitted constant's read-form allowlist cannot see.
+	"a container held in a module-level OBJECT LITERAL is read only as a depth-1 `key: new <container>` member of a column-zero `const|let name = { … }` (an `[]` member is not read): a nested object's member, a shorthand, spread, quoted or computed key, a literal wrapped in `Object.freeze(...)`, `as const` or a factory, a literal declared inside a function, and a member filled by a later assignment are invisible, and so is the owner of a file reached only that way",
+	"the admitted UPPER_SNAKE constant admits `forEach`, and a container emptied through the callback's third argument (`READ_OPS.forEach((v, _k, set) => set.delete(v))`) stays admitted; it also admits `.get(`/`.values(`/`.entries(`/`.keys(`/`.forEach(`, so a stored VALUE mutated in place (`COUNTS.get(k)!.n++`, `LOOKUP.forEach((s) => s.add(x))`) stays admitted too. Live population 0 in clients/, tools/, mcp/ and index.ts (#5036 F3); refusing `forEach` wholesale would flag the common read and inflate the census",
+	"the container-declaration regex reads a type annotation (which may hold `=>` and run over further lines) and a `??` chain of plain operands ahead of the `new`; a call operand, `||`, a ternary or an `await` ahead of it is invisible, like the factory case above",
 ] as const;
 
 let cachedCandidates: SessionStateCandidate[] | undefined;
@@ -925,6 +947,63 @@ function fieldInitialisers(
 }
 
 /**
+ * The `{ … }` bodies of every column-zero `const|let NAME [: T] = { … }` in
+ * blanked `source` (#5036 F1): the module-level object that holds its stores
+ * as members (`clients/file-time.ts`'s `globalState = { reads: new Map() }`).
+ * The entry is the literal brace right after the `=`; a wrapper call, an
+ * `as const` and a factory return are not read.
+ */
+function objectLiteralBodies(
+	source: string,
+): Array<{ name: string; open: number; close: number }> {
+	const bodies: Array<{ name: string; open: number; close: number }> = [];
+	const head = new RegExp(
+		`^(?:export\\s+)?(?:const|let)\\s+([A-Za-z_$][\\w$]*)${DECLARATION_ANNOTATION}=\\s*\\{`,
+		"gm",
+	);
+	for (const match of source.matchAll(head)) {
+		const open = match.index + match[0].length - 1;
+		const close = matchingCloseIndex(source, open, "{", "}");
+		if (close < 0) continue;
+		bodies.push({ name: match[1]!, open, close });
+	}
+	return bodies;
+}
+
+/**
+ * The depth-1 members of one object literal body that are `key: value`: the
+ * key and where the value starts. A member starts after the `{` or a depth-1
+ * `,`; a bracketed run is skipped whole, so a nested object, a call's
+ * arguments and a generic's comma are never member starts. Shorthand, spread,
+ * method, quoted and computed keys carry no `ident:` head and are skipped.
+ */
+function objectMemberValues(
+	source: string,
+	open: number,
+	close: number,
+): Array<{ name: string; valueAt: number }> {
+	const members: Array<{ name: string; valueAt: number }> = [];
+	const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+	const take = (from: number) => {
+		const head = /^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*:(?!:)/.exec(
+			source.slice(from, from + 200),
+		);
+		if (head) members.push({ name: head[1]!, valueAt: from + head[0].length });
+	};
+	take(open + 1);
+	for (let i = open + 1; i < close; i++) {
+		const ch = source[i]!;
+		const closer = pairs[ch];
+		if (closer) {
+			const end = matchingCloseIndex(source, i, ch, closer);
+			if (end < 0) break;
+			i = end;
+		} else if (ch === ",") take(i + 1);
+	}
+	return members;
+}
+
+/**
  * Class fields bound to a container in blanked `source`: a field initialiser
  * (`name = new Map()`, `name: T[] = []`), or a `this.name =`/`??=`/`||=`
  * assignment anywhere in the class body, whose value is `new <ctor>` for a
@@ -963,6 +1042,27 @@ export function instanceContainerFields(
 				body.open + match.index,
 				body.open + match.index + match[0].length,
 			);
+	}
+	// #5036 F1: a module-level object literal holds its stores as members. A
+	// member is read only for a `new <container>`: an array member (`[]`) is
+	// not read here, since a config table is full of them and none is a store.
+	const memberValue = new RegExp(
+		`^\\s*new\\s+(${[...ctors].map(escapeRegExp).join("|")})\\b`,
+	);
+	for (const body of objectLiteralBodies(source)) {
+		const seen = new Set<string>();
+		for (const member of objectMemberValues(source, body.open, body.close)) {
+			const value = memberValue.exec(
+				source.slice(member.valueAt, member.valueAt + 200),
+			);
+			if (!value || seen.has(member.name)) continue;
+			seen.add(member.name);
+			out.push({
+				name: `${body.name}.${member.name}`,
+				line: lineAt(member.valueAt),
+				ctor: value[1]!,
+			});
+		}
 	}
 	return out;
 }
