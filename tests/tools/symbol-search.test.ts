@@ -7,6 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
+import { toPosix } from "../../clients/path-utils.js";
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	loadProjectSnapshot,
@@ -422,7 +423,7 @@ describe("symbol_search tool", () => {
 								JSON.parse(backslashText.slice(backslashStart)) as {
 									results: Array<{ file: string }>;
 								}
-							).results.map((hit) => hit.file.replace(/\\/g, "/"));
+							).results.map((hit) => toPosix(hit.file));
 				expect(backslashFiles).toEqual(["src/auth/login.ts"]);
 			} finally {
 				env.cleanup();
