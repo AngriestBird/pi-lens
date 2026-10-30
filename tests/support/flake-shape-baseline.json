@@ -38,7 +38,7 @@
 		"clients/lsp/typescript-native-vitest.integration.test.ts": 1,
 		"clients/lsp/unheld-module-pyright-4742.integration.test.ts": 1,
 		"clients/mcp/review-rebuild.test.ts": 1,
-		"clients/metrics-history-stderr.test.ts": 16,
+		"clients/metrics-history-stderr.test.ts": 19,
 		"clients/opaque-any-tool-4732.test.ts": 1,
 		"clients/opaque-mutation-scan.test.ts": 50,
 		"clients/persistence-worker-exit.test.ts": 1,

@@ -50,7 +50,6 @@ import {
 	hasResolvableNodeModules,
 } from "../../clients/lsp/environment-gap.js";
 import { NearestRoot } from "../../clients/lsp/server.js";
-import { captureSnapshots } from "../../clients/metrics-history.js";
 import { findLocalOpengrepConfig } from "../../clients/opengrep-config.js";
 import { getPackageRoot } from "../../clients/package-root.js";
 import {
@@ -71,11 +70,6 @@ import { hasNearestPackageJsonDependency } from "../../clients/tool-policy.js";
 import { findLocalTyposConfig } from "../../clients/typos-config.js";
 import { findGoverningTsconfigDir } from "../../clients/workspace-topology.js";
 import { findLocalZizmorConfig } from "../../clients/zizmor-config.js";
-import {
-	gitExecFileSync,
-	gitFixtureEnv,
-	hasGit,
-} from "../support/git-fixture-env.js";
 import {
 	assertNonEmptyScan,
 	listSourceFiles,
@@ -125,9 +119,6 @@ interface Walker {
 	expected?: (t: Layout) => unknown;
 	/** Extra `process.cwd()` the walker should see; defaults to the fixture base. */
 	cwd?: (t: Layout) => string;
-	/** Runs after the markers are written: the walker's answer needs a real git repo. */
-	needsGit?: boolean;
-	prepare?: (t: Layout) => void;
 }
 
 const cleanups: Array<() => void> = [];
@@ -183,9 +174,6 @@ function build(walker: Walker): { layout: Layout; skipReason?: string } {
 		twinFile: path.join(decoy, "dirlink", "src", fileName),
 		linkFile: path.join(decoy, "src", fileName),
 	};
-	if (walker.needsGit && !hasGit())
-		return { layout, skipReason: "git is not available" };
-	walker.prepare?.(layout);
 	try {
 		fs.symlinkSync(
 			path.join("..", "real", "pkg"),
@@ -455,54 +443,6 @@ const WALKERS: readonly Walker[] = [
 		run: (start) => resolveKtfmtGradleStyle(start),
 		expected: () => "--google-style",
 	},
-	{
-		// The commit the metrics history records for a file: the start of the
-		// repository lookup is the FILE's identity, not the file link's directory
-		// (#4966 review F2: a link edit recorded the decoy repository's commit).
-		id: "captureSnapshots",
-		files: ["clients/metrics-history.ts"],
-		input: "file",
-		needsGit: true,
-		markers: { "owner.txt": "owner\n" },
-		decoy: { "owner.txt": "decoy\n" },
-		prepare: (t) => {
-			for (const repo of [t.real, t.decoy]) {
-				const git = (...args: string[]) =>
-					gitExecFileSync("git", args, {
-						cwd: repo,
-						stdio: "ignore",
-						env: gitFixtureEnv(repo),
-					});
-				git("init", "-q");
-				git("config", "user.email", "test@example.com");
-				git("config", "user.name", "pi-lens test");
-				git("add", "owner.txt");
-				git("commit", "-qm", path.basename(repo));
-			}
-		},
-		run: (start) => {
-			const history = captureSnapshots([
-				{
-					filePath: start,
-					metrics: {
-						maintainabilityIndex: 90,
-						cognitiveComplexity: 1,
-						maxNestingDepth: 1,
-						linesOfCode: 10,
-						maxCyclomatic: 1,
-						entropy: 1,
-					},
-				},
-			]);
-			return history.files[path.relative(process.cwd(), start)]?.latest.commit;
-		},
-		expected: (t) =>
-			gitExecFileSync("git", ["rev-parse", "--short", "HEAD"], {
-				cwd: t.real,
-				encoding: "utf-8",
-				env: gitFixtureEnv(t.real),
-			}).trim(),
-	},
 	// --- the language server ---
 	{
 		id: "NearestRoot",
@@ -603,6 +543,11 @@ const EXEMPT: Readonly<Record<string, { reason: string; pinnedBy: string }>> = {
 		reason:
 			"`findUp` (formatter config discovery) and `hasEditorConfig` are private; pinned through the formatter config finders on a link",
 		pinnedBy: "tests/clients/formatters-link-config-4689.test.ts",
+	},
+	"clients/metrics-history.ts": {
+		reason:
+			"`getCurrentCommit` looks up a git repo for a spawn cwd and is private; its file-link start is pinned through `captureSnapshots` with a real repository beside the link",
+		pinnedBy: "tests/clients/metrics-history-stderr.test.ts",
 	},
 	"clients/tree-sitter-client.ts": {
 		reason:
