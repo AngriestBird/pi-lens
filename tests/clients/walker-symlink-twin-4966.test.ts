@@ -25,10 +25,13 @@
  * file walker also from the file twin. All spellings must answer the owner.
  * A walker that climbs the spelling answers the decoy and reds here.
  *
- * Census: every file in `clients/`, `tools/`, `mcp/` and `index.ts` that calls
- * a seam climber (comment-and-string-blanked, AST call sites) is covered by a
- * registered walker or exempt with the reason and the test that pins it. A new
- * walker file reds until it is registered. The hand-rolled loops that bypass
+ * Census: every file in `clients/`, `tools/`, `mcp/` and `index.ts` that names
+ * a seam climber in code (comment-and-string-blanked; an alias or a binding
+ * counts) is covered by a registered walker or exempt with the reason and the
+ * test that pins it. A new walker file reds until it is registered. The
+ * registry is file-granular: a file with many climbs (`clients/lsp/server.ts`
+ * 7, `clients/tool-policy.ts` 44 seam calls) runs one representative, which
+ * is why #4966 stays open (Refs). The hand-rolled loops that bypass
  * the seam are the other half: `tests/config/path-identity-sweep.test.ts`
  * (`hand-rolled-upward-walk`).
  */
@@ -76,10 +79,11 @@ import {
 import {
 	assertNonEmptyScan,
 	listSourceFiles,
-	callSites,
 	readWalkedFile,
 	relativePosix,
+	stripSource,
 } from "../support/sweep-kit.js";
+import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const REPO_ROOT = path.resolve(
@@ -657,10 +661,23 @@ const EXEMPT: Readonly<Record<string, { reason: string; pinnedBy: string }>> = {
 	},
 };
 
-const SEAM_CLIMBERS =
-	/^(walkUpDirs|findNearestContaining|findLocalToolConfig|findNearestMarkerRoot|findNearestMarkerRootDetailed)$/;
+/**
+ * Admit a file that NAMES a seam climber in code (comments and strings
+ * blanked): a call, an import alias (`findNearestContaining as nearest`), a
+ * `const` binding of one, a member call through a namespace import, a passed
+ * reference. The form is "any code mention", so a spelling nobody planned for
+ * is a walker file that needs a registration, not a skipped file (AGENTS.md
+ * shape 69). On the authoring head every file that calls one also names one
+ * and no file names one without calling it, so the wider rule adds no row.
+ */
+const SEAM_CLIMBER_NAME =
+	/\b(?:walkUpDirs|findNearestContaining|findLocalToolConfig|findNearestMarkerRoot|findNearestMarkerRootDetailed)\b/;
 
-/** Files under the runtime trees that call a seam climber. */
+function namesSeamClimber(source: string): boolean {
+	return SEAM_CLIMBER_NAME.test(stripSource(source));
+}
+
+/** Files under the runtime trees that name a seam climber. */
 function walkerFiles(): string[] {
 	const files = [
 		...["clients", "tools", "mcp"].flatMap((tree) =>
@@ -672,8 +689,7 @@ function walkerFiles(): string[] {
 	for (const file of files) {
 		const source = readWalkedFile(file);
 		if (source === undefined) continue;
-		if (callSites(source, SEAM_CLIMBERS).length > 0)
-			found.push(relativePosix(REPO_ROOT, file));
+		if (namesSeamClimber(source)) found.push(relativePosix(REPO_ROOT, file));
 	}
 	return found.sort();
 }
@@ -716,44 +732,92 @@ describe("#4966: every upward walker answers the same from a symlink twin", () =
 });
 
 describe("#4966: the walker registry covers every file that climbs", () => {
-	const live = walkerFiles();
+	// Lazy: the walk runs inside a budgeted case, never at suite declaration.
+	let cached: string[] | undefined;
+	const live = (): string[] => (cached ??= walkerFiles());
 	const registered = new Set(WALKERS.flatMap((walker) => walker.files));
 
-	it("finds the climbing files (a scan that reads nothing is dead, not clean)", () => {
-		// Calibration on the authoring head: 41 files call a seam climber.
-		assertNonEmptyScan("walker twin census", live.length, 25);
-		expect(live).toContain("clients/tool-policy.ts");
-	});
+	it(
+		"finds the climbing files (a scan that reads nothing is dead, not clean)",
+		() => {
+			// Calibration on the authoring head: 41 files name a seam climber.
+			assertNonEmptyScan("walker twin census", live().length, 25);
+			expect(live()).toContain("clients/tool-policy.ts");
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
 
-	it("registers or exempts every file that calls a seam climber", () => {
-		// RECURRENCE GUARDED: a new walker file that nothing runs from a twin is
-		// how #4847, #4858 and #4876 shipped: no scanner sees a walk start.
-		const unaccounted = live.filter(
-			(file) => !registered.has(file) && !(file in EXEMPT),
-		);
+	it(
+		"registers or exempts every file that names a seam climber",
+		() => {
+			// RECURRENCE GUARDED: a new walker file that nothing runs from a twin is
+			// how #4847, #4858 and #4876 shipped: no scanner sees a walk start.
+			const unaccounted = live().filter(
+				(file) => !registered.has(file) && !(file in EXEMPT),
+			);
+			expect(
+				unaccounted,
+				"Register the walker in WALKERS (it runs from a symlink twin), or exempt the file in EXEMPT with the reason and the suite that pins it. Refs #4966.",
+			).toEqual([]);
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps no stale entry and gives every exemption a reason and a real suite",
+		() => {
+			const liveSet = new Set(live());
+			const stale = [...registered, ...Object.keys(EXEMPT)].filter(
+				(file) => !liveSet.has(file),
+			);
+			const doubled = Object.keys(EXEMPT).filter((file) =>
+				registered.has(file),
+			);
+			const weak = Object.entries(EXEMPT)
+				.filter(
+					([, entry]) =>
+						entry.reason.trim().length < 40 ||
+						!fs.existsSync(path.join(REPO_ROOT, entry.pinnedBy)),
+				)
+				.map(([file]) => file);
+			expect({ stale, doubled, weak }).toEqual({
+				stale: [],
+				doubled: [],
+				weak: [],
+			});
+		},
+		TREE_WALK_TIMEOUT_MS,
+	);
+
+	it("admits a climber named by an alias, a binding or a namespace, not by prose", () => {
+		// RECURRENCE GUARDED (PR #5037 review, Greptile): the census matched the
+		// callee's text, so `findNearestContaining as nearest` then `nearest(...)`
+		// was a walker file nothing registered. Each spelling below is planted.
+		const planted: Array<[string, string, boolean]> = [
+			[
+				"import alias then call",
+				"import { findNearestContaining as nearest } from './path-utils.js';\nnearest(dir, ['a']);",
+				true,
+			],
+			[
+				"const binding of the climber",
+				"import { walkUpDirs } from './path-utils.js';\nconst climb = walkUpDirs;\nclimb(dir);",
+				true,
+			],
+			[
+				"namespace member call",
+				"import * as pu from './path-utils.js';\npu.findNearestMarkerRoot(dir, ['a']);",
+				true,
+			],
+			["direct call", "findLocalToolConfig(dir, ['a.toml']);", true],
+			[
+				"a comment and a string only",
+				"// walkUpDirs is the seam\nconst note = 'findNearestContaining';",
+				false,
+			],
+		];
 		expect(
-			unaccounted,
-			"Register the walker in WALKERS (it runs from a symlink twin), or exempt the file in EXEMPT with the reason and the suite that pins it. Refs #4966.",
-		).toEqual([]);
-	});
-
-	it("keeps no stale entry and gives every exemption a reason and a real suite", () => {
-		const liveSet = new Set(live);
-		const stale = [...registered, ...Object.keys(EXEMPT)].filter(
-			(file) => !liveSet.has(file),
-		);
-		const doubled = Object.keys(EXEMPT).filter((file) => registered.has(file));
-		const weak = Object.entries(EXEMPT)
-			.filter(
-				([, entry]) =>
-					entry.reason.trim().length < 40 ||
-					!fs.existsSync(path.join(REPO_ROOT, entry.pinnedBy)),
-			)
-			.map(([file]) => file);
-		expect({ stale, doubled, weak }).toEqual({
-			stale: [],
-			doubled: [],
-			weak: [],
-		});
+			planted.map(([label, source]) => [label, namesSeamClimber(source)]),
+		).toEqual(planted.map(([label, , expected]) => [label, expected]));
 	});
 });
