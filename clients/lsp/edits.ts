@@ -1317,7 +1317,7 @@ async function assertParentIsUsable(
 				throw new Error(`resource parent is not a directory: ${current}`);
 			return;
 		}
-	}
+	} // The walk ran off the filesystem root: no ancestor exists.
 	throw new Error(`resource parent does not exist: ${filePath}`);
 }
 
