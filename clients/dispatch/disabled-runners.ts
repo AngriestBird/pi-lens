@@ -141,13 +141,15 @@ export function disabledRunnerIdsFor(
 	if (resolved.records.length > 0) {
 		// A pasted list can name any number of unknown ids; bound the notices the
 		// way every other config record is (`MAX_MIGRATION_RECORDS`, one slot for
-		// the suppression count), anchored at the document that declared the key.
-		const declared = memberProvenance(resolution, 0);
-		const file = declared?.file ?? resolution.documents.at(-1)?.file ?? "";
+		// the suppression count), anchored at the last record: the
+		// highest-precedence document, whose entries the bound drops first. The
+		// list spans tiers, so member zero can belong to a tier that lost nothing.
+		const anchor = resolved.records.at(-1);
+		const file = anchor?.file ?? resolution.documents.at(-1)?.file ?? "";
 		reportPiLensConfigRecords(
 			finalizeRecords(resolved.records, {
 				file,
-				...(declared?.tier ? { tier: declared.tier } : {}),
+				...(anchor?.tier ? { tier: anchor.tier } : {}),
 			}),
 		);
 	}

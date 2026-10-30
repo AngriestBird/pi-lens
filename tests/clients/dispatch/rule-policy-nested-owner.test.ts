@@ -221,6 +221,37 @@ describe("rules.<id> — a project policy reads each file's own owner", () => {
 		]);
 	});
 
+	// PR #5011 round 6, F21 (CodeRabbit thread PRRT_kwDORt8rec6yKC-N):
+	// minimatch.escape leaves `{ }` and a leading `!`. `{pkg,src}/legacy/**`
+	// brace-expanded (the carve-out matched nothing under the real directory)
+	// and `!docs/legacy/**` is a negation, which hid every finding under
+	// `!docs/` that the carve-out never named. #5029 owns the meaning of a
+	// user-authored `!`; this pins only the literal directory-name prefix.
+	it.each([
+		["!docs", "a leading bang"],
+		["{pkg,src}", "braces"],
+	])(
+		"anchors a nested ignorePaths glob under a config directory named %s (%s)",
+		(name) => {
+			const dir = path.join(repo, name);
+			const neighbour = path.join(repo, "src", "legacy", "n.ts");
+			writeConfig(dir, {
+				rules: { "no-eval": { ignorePaths: ["legacy/**"] } },
+			});
+
+			expect(
+				keptFiles([
+					finding(path.join(dir, "legacy", "a.ts")),
+					finding(path.join(dir, "src", "c.ts")),
+					finding(neighbour),
+				]),
+			).toEqual([
+				path.relative(repo, path.join(dir, "src", "c.ts")),
+				path.relative(repo, neighbour),
+			]);
+		},
+	);
+
 	it("keeps the same glob text from two files as two carve-outs", () => {
 		writeConfig(repo, {
 			rules: { "no-eval": { ignorePaths: ["legacy/**"] } },

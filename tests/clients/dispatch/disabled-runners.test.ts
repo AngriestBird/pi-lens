@@ -732,6 +732,29 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		expect(suppression[0]).toContain(".pi-lens.json");
 	});
 
+	// PR #5011 round 6, F20 (greptile thread PRRT_kwDORt8rec6yJ-Og): the
+	// suppression record took its file and tier from list member zero, so a
+	// global list that overflowed into the project list named the global file
+	// ("global config notices for config.json") for notices the project's
+	// `.pi-lens.json` produced. The anchor is the records' own last entry, the
+	// highest-precedence document, as config-resolve's documentAnchor does.
+	it("anchors the suppression record at the document whose records overflowed, not at member zero", async () => {
+		const unknown = (tag: string) =>
+			Array.from({ length: 15 }, (_, i) => `no-such-${tag}-${i}`);
+		writeGlobal({ dispatch: { disabledRunners: unknown("global") } });
+		writeProject({ dispatch: { disabledRunners: unknown("project") } });
+		const { registry } = registryWith(SKIPPED, BLOCKING_BUILD);
+
+		await dispatchForFile(contextFor(), fallbackGroup, registry);
+
+		const suppression = notified.filter((m) => m.includes("PILENS_CFG_0007"));
+		expect(suppression).toHaveLength(1);
+		expect(suppression[0]).toContain("11 further config notices");
+		expect(suppression[0]).toContain("project config notices");
+		expect(suppression[0]).toContain(".pi-lens.json");
+		expect(suppression[0]).not.toContain("global config notices");
+	});
+
 	it("reports every unknown id when the list is within the bound", async () => {
 		const unknown = Array.from({ length: 19 }, (_, i) => `no-such-runner-${i}`);
 		writeProject({ dispatch: { disabledRunners: unknown } });

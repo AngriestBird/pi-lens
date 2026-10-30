@@ -187,7 +187,13 @@ function anchorPattern(pattern: string, prefix: string): string {
 	if (posix.startsWith("/") || /^[A-Za-z]:\//.test(posix)) return pattern;
 	// The prefix is a directory NAME, not a glob: `pkg[1]` and Next.js `[id]`
 	// would read as character classes and anchor the entry at the wrong path.
-	return `${minimatch.escape(prefix)}/${posix.replace(/^(\.\/)+/, "")}`;
+	// `minimatch.escape` leaves braces (expansion) and a leading `!` (negation),
+	// so those two are escaped here; user-authored `!` stays #5029's decision.
+	const literal = minimatch
+		.escape(prefix)
+		.replace(/[{}]/g, "\\$&")
+		.replace(/^!/, "\\!");
+	return `${literal}/${posix.replace(/^(\.\/)+/, "")}`;
 }
 
 /**
