@@ -174,27 +174,49 @@ describe("#5020 retireForeignRows", () => {
 });
 
 describe("#5020 retireForeignRowsOfMissingFiles", () => {
-	it("retires a row whose cited file is gone and keeps one whose file exists, resolving a relative cite against the project root", () => {
+	it("retires a row whose absolute cite is gone and keeps one whose file exists", () => {
 		const env = setupTestEnvironment("pi-lens-5020-missing-");
 		try {
 			const a = path.join(env.tmpDir, "a.yaml");
+			const kept = path.join(env.tmpDir, "kept.yaml");
+			const gone = path.join(env.tmpDir, "gone.yaml");
 			fs.writeFileSync(a, "a: 1\n");
-			fs.writeFileSync(path.join(env.tmpDir, "kept.yaml"), "k: 1\n");
+			fs.writeFileSync(kept, "k: 1\n");
 			const runtime = new RuntimeCoordinator();
-			runtime.projectRoot = env.tmpDir;
 			record(runtime, a, [
-				row("kept.yaml", 1, "helm-lint"),
-				row("gone.yaml", 2, "helm-lint"),
+				row(kept, 1, "helm-lint"),
+				row(gone, 2, "helm-lint"),
 			]);
 
 			const changed = runtime.retireForeignRowsOfMissingFiles();
 
 			expect(changed.map((c) => c.filePath)).toEqual([a]);
 			const [after] = runtime.getInlineBlockersSnapshot();
-			expect(after?.diagnostics?.map((d) => d.filePath)).toEqual(["kept.yaml"]);
+			expect(after?.diagnostics?.map((d) => d.filePath)).toEqual([kept]);
 			// A deletion is not a clean verdict: no "Resolved" claim.
 			expect(runtime.hasResolvedBlockerFiles()).toBe(false);
 			expect(runtime.retireForeignRowsOfMissingFiles()).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents: a row spelled relatively (`a.ts` for the record
+	// `/tmp/x/a.ts`) reads as another file, and resolving it against a guessed
+	// root found it "missing" and retired a live blocker of the record's own file
+	// (tests/clients/turn-end-resolved-blockers.test.ts went red on exactly that).
+	it("keeps a row with a relative cite it cannot place", () => {
+		const env = setupTestEnvironment("pi-lens-5020-relative-");
+		try {
+			const a = path.join(env.tmpDir, "a.yaml");
+			fs.writeFileSync(a, "a: 1\n");
+			const runtime = new RuntimeCoordinator();
+			record(runtime, a, [row("a.yaml", 1, "helm-lint")]);
+
+			expect(runtime.retireForeignRowsOfMissingFiles()).toEqual([]);
+			expect(runtime.getInlineBlockersSnapshot()[0]?.diagnostics).toHaveLength(
+				1,
+			);
 		} finally {
 			env.cleanup();
 		}

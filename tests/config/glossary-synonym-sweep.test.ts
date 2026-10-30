@@ -1314,9 +1314,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 28 -> 16 (#4689 batch 1 r2): the other eleven inline-store accessors and
 		// the deferMutation key drop their `path.resolve` too; every accessor keys
 		// the raw spelling through normalizeMapKey (review F1).
-		// 16 -> 17 (#5020): `retireForeignRowsOfMissingFiles` resolves a row's
-		// cited path against the project root with `path.resolve`, the call
-		// `reconcileInlineBlockers` makes for the record's own file.
+		// 16 -> 17 (#5020): `retireForeignRowsOfMissingFiles` asks `path.isAbsolute`
+		// before it judges a cited file, so a relative cite is never retired.
 		"clients/runtime-coordinator.ts": 17,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into

@@ -2668,19 +2668,18 @@ export class RuntimeCoordinator {
 
 	/**
 	 * #5020: the rows whose cited file is gone, for the two reads the commit gate
-	 * depends on (the turn end and the gate's own evaluation). Resolved against
-	 * the project root, never the host's working directory; a row that cannot be
-	 * placed stays.
+	 * depends on (the turn end and the gate's own evaluation). Only an ABSOLUTE
+	 * cite is judged: a relative one is relative to whatever the runner ran in,
+	 * which the record does not keep, so a row that cannot be placed stays
+	 * (fail closed) rather than being resolved against a guess.
 	 */
 	retireForeignRowsOfMissingFiles(): Array<{
 		filePath: string;
 		owner: string | undefined;
 	}> {
-		const root = this._projectRoot;
-		if (!root) return [];
 		return this.retireForeignRows(
 			"cited-file-missing",
-			(row) => !fs.existsSync(path.resolve(root, row.filePath)),
+			(row) => path.isAbsolute(row.filePath) && !fs.existsSync(row.filePath),
 		);
 	}
 
