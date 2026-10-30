@@ -70,6 +70,15 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 		}
 		expect(at("java25")).toBeGreaterThan(at("resolution_layer"));
 		expect(at("lsp_cascade")).toBeLessThan(at("evaluated_floor"));
+		// #5021 verify r4 F11: the list above only covers the layers that existed
+		// when this cell was written. A step added after the cascade without an
+		// `if:` would be skipped by a red cascade, the x8Fpo shape again.
+		for (const step of steps.slice(at("lsp_cascade") + 1)) {
+			expect(
+				step.if,
+				`${step.name ?? step.uses} after lsp_cascade carries an if:`,
+			).toBeTruthy();
+		}
 	});
 
 	it("reads the handshake census it follows (same PI_LENS_HOME, later step)", () => {
