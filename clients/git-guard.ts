@@ -2565,8 +2565,14 @@ export function evaluateGitGuard(
 		}
 		// #5020: a row naming a file that was deleted since the record was made
 		// has nothing left to fix, and no dispatch will ever re-take it. The gate
-		// is the read that matters, so it retires them before it judges.
-		for (const retired of runtime.retireForeignRowsOfMissingFiles()) {
+		// is the read that matters, so it retires them before it judges. Only the
+		// committing session's records: the resync below writes this cwd's
+		// cache, which holds that session's records and no other's, so another
+		// session's row is left to its own gate or turn end, which writes the
+		// owner's cache (PR #5033 round 3 item 4).
+		for (const retired of runtime.retireForeignRowsOfMissingFiles({
+			sessionId,
+		})) {
 			resyncGitGuardAfterRetire({
 				runtime,
 				cacheManager,

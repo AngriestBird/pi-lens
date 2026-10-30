@@ -636,6 +636,14 @@ async function openSession(name: string) {
 	return session;
 }
 
+/**
+ * The mypy cells write three or four files through the real dispatch chain,
+ * so they exceed vitest's 5000 ms default under a loaded host (5021 ms and
+ * 5330 ms measured at load 27, round 3). They assert no elapsed time, so the
+ * call site carries the timeout, as the #2512 note in vitest.config.ts says.
+ */
+const MYPY_CELL_TIMEOUT_MS = 20_000;
+
 describe("#5020 witness: a cross-file row retires once its cited file is clean or gone", () => {
 	/**
 	 * Both write 1 and write 2 land on `deploy-a.yaml` while helm-lint cites
@@ -740,25 +748,74 @@ describe("#5020 witness: a cross-file row retires once its cited file is clean o
 	 * row for `b.py` is recorded against the written `a.py` the same way, and
 	 * writing `b.py` clean must retire it by the same rule.
 	 */
-	it("opens the gate when the file another runner cites is written clean", async () => {
-		const root = path.join(tmpDir, "pyproj");
-		fs.mkdirSync(root, { recursive: true });
-		fs.writeFileSync(path.join(tmpDir, "mypy.ini"), "[mypy]\nstrict = True\n");
-		const a = path.join(root, "a.py");
-		const b = path.join(root, "b.py");
-		fs.writeFileSync(a, "import b\n");
-		fs.writeFileSync(b, "x: int = 1\n");
-		const s = await openSession("mypy-cross-file");
-		spawnRouter.state.mypyStdout = `${b}:1:10: error: Incompatible types in assignment [assignment]`;
-		expect(await s.write(a, "import b\n# one\n")).toContain("🔴 STOP");
-		expect(await s.write(a, "import b\n# two\n")).toMatch(/Still unfixed/);
-		expect(await s.commitBlocked()).toBe(true);
-		spawnRouter.state.mypyStdout = "";
-		await s.write(b, "x: int = 2\n");
-		expect(await s.commitBlocked()).toBe(false);
-		expect(await s.endTurn()).not.toContain("Unresolved from this turn");
-		await s.shutdown();
-	});
+	it(
+		"opens the gate when the file another runner cites is written clean",
+		{ timeout: MYPY_CELL_TIMEOUT_MS },
+		async () => {
+			const root = path.join(tmpDir, "pyproj");
+			fs.mkdirSync(root, { recursive: true });
+			fs.writeFileSync(
+				path.join(tmpDir, "mypy.ini"),
+				"[mypy]\nstrict = True\n",
+			);
+			const a = path.join(root, "a.py");
+			const b = path.join(root, "b.py");
+			fs.writeFileSync(a, "import b\n");
+			fs.writeFileSync(b, "x: int = 1\n");
+			const s = await openSession("mypy-cross-file");
+			spawnRouter.state.mypyStdout = `${b}:1:10: error: Incompatible types in assignment [assignment]`;
+			expect(await s.write(a, "import b\n# one\n")).toContain("🔴 STOP");
+			expect(await s.write(a, "import b\n# two\n")).toMatch(/Still unfixed/);
+			expect(await s.commitBlocked()).toBe(true);
+			spawnRouter.state.mypyStdout = "";
+			await s.write(b, "x: int = 2\n");
+			expect(await s.commitBlocked()).toBe(false);
+			expect(await s.endTurn()).not.toContain("Unresolved from this turn");
+			await s.shutdown();
+		},
+	);
+
+	/**
+	 * Recurrence (PR #5033 round 3, CodeRabbit and Greptile on
+	 * `verdictRunnerIds`): a runner that answers the cited file and fails on
+	 * findings in ANOTHER module reports `failed` with `blocking_diagnostics`.
+	 * That is a completed check (`hasUsableResult`), but the retire read only
+	 * `succeeded`, so the row naming `b.py` outlived its cause and the commit
+	 * stayed refused after every file was clean. The run still holds no blocker
+	 * of its own on `b.py` (`stillReported`), which is what lets it speak.
+	 */
+	it(
+		"opens the gate when the cited file's runner answers it while failing on another module",
+		{ timeout: MYPY_CELL_TIMEOUT_MS },
+		async () => {
+			const root = path.join(tmpDir, "pyproj-failing");
+			fs.mkdirSync(root, { recursive: true });
+			fs.writeFileSync(
+				path.join(tmpDir, "mypy.ini"),
+				"[mypy]\nstrict = True\n",
+			);
+			const a = path.join(root, "a.py");
+			const b = path.join(root, "b.py");
+			const c = path.join(root, "c.py");
+			fs.writeFileSync(a, "import b\n");
+			fs.writeFileSync(b, "import c\nx: int = 1\n");
+			fs.writeFileSync(c, "y: int = 1\n");
+			const s = await openSession("mypy-failing-elsewhere");
+			spawnRouter.state.mypyStdout = `${b}:2:10: error: Incompatible types in assignment [assignment]`;
+			expect(await s.write(a, "import b\n# one\n")).toContain("🔴 STOP");
+			expect(await s.write(a, "import b\n# two\n")).toMatch(/Still unfixed/);
+			// mypy answers b.py and reports only c.py: `failed`, `blocking_diagnostics`.
+			spawnRouter.state.mypyStdout = `${c}:1:10: error: Incompatible types in assignment [assignment]`;
+			await s.write(b, "import c\nx: int = 2\n");
+			// c.py's row now sits in b.py's record, so the gate is still shut here.
+			expect(await s.commitBlocked()).toBe(true);
+			spawnRouter.state.mypyStdout = "";
+			await s.write(c, "y: int = 2\n");
+			expect(await s.commitBlocked()).toBe(false);
+			expect(await s.endTurn()).not.toContain("Unresolved from this turn");
+			await s.shutdown();
+		},
+	);
 
 	/**
 	 * Negative (#4137 rule): a run without authorship withholds the blocker

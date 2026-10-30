@@ -622,10 +622,17 @@ export function checkedWholeFile(
 
 /**
  * #5020: the runners that reached a verdict on this run's bytes: a row of the
- * latency report that succeeded and is not in `inconclusiveSources`. A runner
- * that skipped, failed, is still in flight or answered for part of the file
- * speaks for nothing, which is why this is the evidence a retire of another
- * file's row asks for (`RuntimeCoordinator.retireForeignRows`).
+ * latency report with a usable result ({@link hasUsableResult}: it succeeded,
+ * or it completed and failed on findings) that is not in
+ * `inconclusiveSources`. A runner that skipped, broke, is still in flight or
+ * answered for part of the file speaks for nothing, which is why this is the
+ * evidence a retire of another file's row asks for
+ * (`RuntimeCoordinator.retireForeignRows`). A run that failed on findings
+ * speaks only through the caller's own guard: the retire also needs the run to
+ * hold no blocker of its own on the file (`stillReported` in
+ * `publishInlineVerdict`), so mypy answering `b.py` while reporting `c.py`
+ * retires the row about `b.py` and keeps every row about `c.py` (PR #5033
+ * round 3).
  *
  * An edit-scoped runner (`editScopedRunnerIds`) is refused here for the reason
  * `checkedWholeFile` refuses the whole run for it: its verdict covers the
@@ -643,7 +650,7 @@ export function verdictRunnerIds(
 		...(result.editScopedRunnerIds ?? []),
 	]);
 	return (result.latencyReport?.runners ?? []).flatMap((runner) =>
-		runner.status === "succeeded" && !noWholeFileVerdict.has(runner.runnerId)
+		hasUsableResult(runner) && !noWholeFileVerdict.has(runner.runnerId)
 			? [runner.runnerId]
 			: [],
 	);

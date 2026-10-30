@@ -1786,7 +1786,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// to fix and no dispatch will re-take it. The commit gate's latch is a memo
 	// of the map, so a retire re-derives it (the persisted record is rewritten
 	// by the composer below from the survivors, as for every other retire).
-	if (runtime.retireForeignRowsOfMissingFiles().length > 0) {
+	// Only this turn session's records: the composer persists this session's
+	// survivors into this cwd, so another session's row is its own turn end's
+	// to retire, against its own cwd (#4921; PR #5033 round 3 F1).
+	if (runtime.retireForeignRowsOfMissingFiles({ sessionId }).length > 0) {
 		runtime.updateGitGuardStatus(false, "");
 	}
 

@@ -2615,6 +2615,10 @@ export class RuntimeCoordinator {
 	 * (`confirmedAtWriteOrder`, turn first), as `retireInlineBlockerOnConfirmedClean`
 	 * orders its own: a slow old clean must not erase a newer observation.
 	 *
+	 * `of` limits the retire to one session's records, the partition
+	 * `getInlineBlockersSnapshot` reads. Omitted, every session's record is
+	 * judged.
+	 *
 	 * @returns one entry per record that lost rows, with the session that owns
 	 * it, so the caller can bring the commit gate (the latch and the persisted
 	 * record) back in line. Counted once per file in the degradation ledger.
@@ -2623,9 +2627,10 @@ export class RuntimeCoordinator {
 		why: "cited-file-clean" | "cited-file-missing",
 		shouldRetire: (row: Diagnostic) => boolean,
 		confirmedAtWriteOrder?: number,
+		of?: { sessionId: string | undefined },
 	): Array<{ filePath: string; owner: string | undefined }> {
 		const changed: Array<{ filePath: string; owner: string | undefined }> = [];
-		for (const existing of this.getInlineBlockersSnapshot()) {
+		for (const existing of this.getInlineBlockersSnapshot(of)) {
 			const key = existing.filePath;
 			if (
 				confirmedAtWriteOrder !== undefined &&
@@ -2669,14 +2674,26 @@ export class RuntimeCoordinator {
 	 * cite is judged: a relative one is relative to whatever the runner ran in,
 	 * which the record does not keep, so a row that cannot be placed stays
 	 * (fail closed) rather than being resolved against a guess.
+	 *
+	 * Both reads persist what they retire into the caller's own cwd cache, and
+	 * a session's records live in that session's cwd cache (pi fixes a
+	 * session's cwd), so each caller retires only its OWN session's records
+	 * (`of`, required): a sweep by another session at another cwd would write
+	 * the wrong project's cache and leave the owner's record refusing its next
+	 * commit (PR #5033 round 3, F1 and item 4). Another session's dead cite is
+	 * that session's own turn end or commit gate to retire.
 	 */
-	retireForeignRowsOfMissingFiles(): Array<{
+	retireForeignRowsOfMissingFiles(of: {
+		sessionId: string | undefined;
+	}): Array<{
 		filePath: string;
 		owner: string | undefined;
 	}> {
 		return this.retireForeignRows(
 			"cited-file-missing",
 			(row) => path.isAbsolute(row.filePath) && !fs.existsSync(row.filePath),
+			undefined,
+			of,
 		);
 	}
 
