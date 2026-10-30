@@ -213,8 +213,13 @@ const SITE_ROWS: ReadonlyArray<[string, string, PathIdentityNeedle[]]> = [
 		["hand-rolled-upward-walk"],
 	],
 	[
-		"plant: a bracket read and a comma-expression callee",
-		'while (c !== root) {\n\tc = path["dirname"](c);\n\td = (0, dirname)(d);\n}',
+		"plant: a bracket read of dirname",
+		'while (c !== root) {\n\tc = path["dirname"](c);\n}',
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: a comma-expression callee",
+		"while (c !== root) {\n\tc = (0, dirname)(c);\n}",
 		["hand-rolled-upward-walk"],
 	],
 	[
@@ -274,8 +279,12 @@ const CLEAN_ROWS: ReadonlyArray<[string, string]> = [
 		"for (const f of files) {\n\tout.add(path.dirname(f));\n}",
 	],
 	[
+		"the seam's own loop, even holding a parent value and an assignment",
+		"for (const dir of walkUpDirs(start)) {\n\tlast = path.dirname(dir);\n}",
+	],
+	[
 		"a dirname in the iterable of a for-of",
-		"for (const d of walkUpDirs(path.dirname(f))) {\n\tx = d;\n}",
+		"for (const d of list(path.dirname(f))) {\n\tx = d;\n}",
 	],
 	[
 		"a loop in another function than the dirname",
