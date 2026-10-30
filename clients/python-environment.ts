@@ -12,7 +12,7 @@ import { parseJsonc } from "./review-graph/tsconfig-paths.js";
 import {
 	matchesWorkspaceMemberPattern,
 	realpathOrResolve,
-	toPosix,
+	relativeInside,
 	UV_WORKSPACE_EXCLUDE_DIALECT,
 	UV_WORKSPACE_MEMBERS_DIALECT,
 	walkUpDirs,
@@ -155,15 +155,8 @@ function isUvWorkspaceMember(
 	// `.venv`, `exclude` included, because equality was tested before the
 	// walk result was consulted (review round 3, S2). The relative-path guard
 	// below returns false for the root itself, which is the intended answer.
-	const relative = toPosix(path.relative(workspace.root, projectRoot));
-	if (
-		relative.length === 0 ||
-		relative === ".." ||
-		relative.startsWith("../") ||
-		path.isAbsolute(relative)
-	) {
-		return false;
-	}
+	const relative = relativeInside(workspace.root, projectRoot);
+	if (!relative) return false;
 
 	const matches =
 		(dialect: WorkspaceMemberGlobDialect) =>
@@ -273,14 +266,9 @@ export async function detectPythonEnvironment(
 	const isWithinProjectRoot = (candidateRoot: string): boolean => {
 		// Both sides are identities (#4847 review F1): an ambient root spelled
 		// through a link to the project is inside it.
-		const relative = path.relative(root, realpathOrResolve(candidateRoot));
-		return (
-			relative !== ".." &&
-			!relative.startsWith(`..${path.sep}`) &&
-			// #3871 V1: another Windows drive has no relative path, so
-			// `path.relative` returns the absolute target: no `..`, not inside.
-			!path.isAbsolute(relative)
-		);
+		// #3871 V1: another Windows drive has no relative path; the seam reads
+		// the absolute `path.relative` result as outside.
+		return relativeInside(root, realpathOrResolve(candidateRoot)) !== undefined;
 	};
 	const candidates: Array<{
 		root: string | undefined;

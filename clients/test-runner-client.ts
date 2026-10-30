@@ -51,6 +51,7 @@ import {
 	pathsEqual,
 	isAbsoluteFilePath,
 	realpathOrResolve,
+	relativeInside,
 	toPosix,
 	toProjectRelativePath,
 } from "./path-utils.js";
@@ -429,19 +430,14 @@ export function isExcludedTestTarget(
 	cwd: string,
 ): boolean {
 	const absolute = path.resolve(cwd, toPosix(testFilePath));
-	let rel = toPosix(path.relative(cwd, absolute));
+	let rel = relativeInside(cwd, absolute);
 	// #2522 review round 2, F6: a target that resolves OUTSIDE the project root
 	// yields a `..`-leading relative path (or, across Windows drives, a still
 	// absolute one), which matches none of the globs — so the bare `some()`
 	// below reported it as "not excluded" and turn_end would have auto-spawned a
 	// runner against a file outside the project the turn is running in. An
 	// out-of-tree target, and the project root itself, fail CLOSED.
-	if (
-		rel === "" ||
-		rel === ".." ||
-		rel.startsWith("../") ||
-		path.isAbsolute(rel)
-	) {
+	if (!rel) {
 		// Different aliases can spell an in-tree target as lexically outside cwd.
 		const realTarget = canonicalFailedPath(absolute);
 		const realCwd = canonicalFailedPath(cwd);

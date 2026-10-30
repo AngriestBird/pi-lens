@@ -232,6 +232,32 @@ describe("helm-render opt-in gate", () => {
 		expect(isHelmRenderEnabled(workspace)).toBe(false);
 	});
 
+	it("skips a chart that sits outside the workspace root even with the switch on", async () => {
+		// Recurrence (#2556, shape 83): the workspace gate is `isWithinIdentity`'s
+		// answer, and nothing else pinned it for the render runner.
+		const outside = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-helm-render-outside-")),
+		);
+		try {
+			const chart = path.join(outside, "valid-chart");
+			fs.cpSync(path.join(fixtures, "valid-chart"), chart, { recursive: true });
+			optIn({ helm: { renderValidation: { enabled: true } } });
+			stubSpawns({ render: { status: 0 } });
+
+			const result = await helmRenderRunner.run(
+				makeRunnerCtx(path.join(chart, "values.yaml"), workspace, {
+					kind: "yaml",
+					projectRoot: workspace,
+				}),
+			);
+
+			expect(result).toMatchObject({ status: "skipped", diagnostics: [] });
+			expect(safeSpawnAsync).not.toHaveBeenCalled();
+		} finally {
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
 	it("refuses to render an untrusted project even with the switch on", async () => {
 		// `.pi-lens.json` is a TRACKED file: a hostile chart repo can arrive with
 		// consent already granted, authorizing execution of its own templates.

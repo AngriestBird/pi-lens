@@ -15,8 +15,10 @@
   base expansion) or `resolveToolCallFilePath` (base plus pi's variant
   ladder), never a bare `path.resolve(base, raw)`; see shape 74.
 - Windows-shaped paths use `path.win32` functions. Use `toPosix`,
-  `splitPathSegments`, `isUnderDir`, `isSameOrWithin`, and
-  `isAtOrAboveHomeDir` instead of inline separator or containment logic.
+  `splitPathSegments`, `isUnderDir`, `isSameOrWithin`, `relativeInside`
+  (lexical containment with the relative text), `isWithinIdentity`
+  (containment on the identity axis), and `isAtOrAboveHomeDir` instead of
+  inline separator or containment logic.
 - Data and log locations follow **Data directories and logs**; never hardcode
   `.pi-lens` paths in writes or user-facing text.
 - Probes and child processes pin `PI_LENS_HOME`, `PILENS_DATA_DIR`, `HOME`, and

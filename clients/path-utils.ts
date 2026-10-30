@@ -758,6 +758,38 @@ export function normalizeMapKey(filePath: string): string {
 }
 
 /**
+ * The ONE lexical containment test (#2556, shape 83). Returns `file` relative
+ * to `root`, forward-slashed, when `file` is the root itself (`""`) or inside
+ * it, and `undefined` when it is outside. Callers that need only the verdict
+ * test `!== undefined`; callers that need the relative text (a glob target, a
+ * display path, a cache key) take it from the same call, so the verdict and
+ * the text cannot disagree.
+ *
+ * Outside is decided from the `path.relative` result on three arms, every one
+ * of them required: `..` exactly, a `..` SEGMENT (`..` plus a separator, so a
+ * directory named `..foo` is inside, #4835), and an absolute result (across
+ * Windows drives `path.relative` returns the target's absolute path, which
+ * starts with no `..`, #4878 F1). No filesystem access: both operands are read
+ * as spelled, so a caller on the identity axis normalizes first.
+ *
+ * `pathImpl` picks the dialect (a Windows-shaped path on a POSIX host takes
+ * `path.win32`); production callers pass the host default or the dialect they
+ * classified, and `tests/clients/path-utils.test.ts` runs both on every lane.
+ */
+export function relativeInside(
+	root: string,
+	file: string,
+	pathImpl: typeof path = path,
+): string | undefined {
+	const relative = pathImpl.relative(pathImpl.resolve(root), file);
+	return relative !== ".." &&
+		!relative.startsWith(`..${pathImpl.sep}`) &&
+		!pathImpl.isAbsolute(relative)
+		? relative.replace(/\\/g, "/")
+		: undefined;
+}
+
+/**
  * Human-facing path relative to a project root when the file is inside it.
  *
  * Parses by path SHAPE, not host OS (refs #1150/#1152, shape-2 class #1163):
@@ -779,26 +811,18 @@ export function toProjectRelativePath(
 ): string {
 	const p = isWindowsPath(filePath) ? win32 : path;
 	if (!p.isAbsolute(filePath)) return filePath.replace(/\\/g, "/");
-	const inside = (root: string, file: string): string | undefined => {
-		const relative = p.relative(p.resolve(root), file);
-		return relative &&
-			relative !== ".." &&
-			!relative.startsWith(`..${p.sep}`) &&
-			!p.isAbsolute(relative)
-			? relative.replace(/\\/g, "/")
-			: undefined;
-	};
-	const direct = inside(projectRoot, filePath);
-	if (direct !== undefined) return direct;
+	const direct = relativeInside(projectRoot, filePath, p);
+	if (direct) return direct;
 	// #4101: a canonical key (`normalizeMapKey`: realpath on win32, so 8.3 names,
 	// junctions and subst drives are expanded) set against a root the caller
 	// spelled differently. Canonicalize both sides before giving up; a file
 	// that really is outside the root stays outside.
-	const canonical = inside(
+	const canonical = relativeInside(
 		normalizeFilePath(projectRoot),
 		normalizeFilePath(filePath),
+		p,
 	);
-	if (canonical !== undefined) return canonical;
+	if (canonical) return canonical;
 	return filePath.replace(/\\/g, "/");
 }
 
@@ -1178,11 +1202,7 @@ export function isAtOrAboveHomeDir(
 	homeDir: string = os.homedir(),
 	pathImpl: typeof path = path,
 ): boolean {
-	const rel = pathImpl.relative(
-		pathImpl.resolve(dir),
-		pathImpl.resolve(homeDir),
-	);
-	return !rel.startsWith("..") && !pathImpl.isAbsolute(rel);
+	return relativeInside(dir, pathImpl.resolve(homeDir), pathImpl) !== undefined;
 }
 
 /**
@@ -1245,6 +1265,16 @@ export function isUnderDir(child: string, parent: string): boolean {
 	if (isWithinForm(normalizePathSpelling(child), normalizePathSpelling(parent)))
 		return true;
 	if (process.platform === "win32") return false;
+	return isWithinIdentity(child, parent);
+}
+
+/**
+ * `child` at or under `parent` on the IDENTITY axis only: both operands
+ * through `normalizeFilePath` (realpath, so a link spelling meets its target)
+ * and no spelling disjunct. Read where a lexically-inside path that links out
+ * must stay outside (a chart's template tree, #2556).
+ */
+export function isWithinIdentity(child: string, parent: string): boolean {
 	return isWithinForm(normalizeFilePath(child), normalizeFilePath(parent));
 }
 
