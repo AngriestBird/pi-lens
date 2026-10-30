@@ -1045,9 +1045,9 @@ describe("runLspCascade (#1712)", () => {
 			// before the baseline deadline, then never conclude after the move, so
 			// both waits run nearly their whole deadline (fake clock).
 			const deadlineMs = 20_000;
+			const stepMs = 500;
 			vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
 			try {
-				const began = Date.now();
 				const lane = runLane({
 					census: "pass",
 					fixture: { conclusiveDeadlineMs: deadlineMs, warmDeadlineMs: 60_000 },
@@ -1059,14 +1059,19 @@ describe("runLspCascade (#1712)", () => {
 				void lane.finally(() => {
 					settled = true;
 				});
-				while (!settled) await vi.advanceTimersByTimeAsync(500);
+				// The fake clock is advanced in whole steps, so the steps taken are the
+				// virtual time spent (a counter, not a read of the clock).
+				let steps = 0;
+				while (!settled) {
+					await vi.advanceTimersByTimeAsync(stepMs);
+					steps += 1;
+				}
 				const { times } = await lane;
-				const spent = Date.now() - began;
 				expect(times.rows[0].rename.state).toBe("unconcluded");
-				expect(spent).toBeGreaterThan(
+				expect(steps * stepMs).toBeGreaterThan(
 					(CASCADE_RENAME_EXTRA_DEADLINES - 0.5) * deadlineMs,
 				);
-				expect(spent).toBeLessThanOrEqual(
+				expect(steps * stepMs).toBeLessThanOrEqual(
 					CASCADE_RENAME_EXTRA_DEADLINES * deadlineMs + 2_000,
 				);
 			} finally {
