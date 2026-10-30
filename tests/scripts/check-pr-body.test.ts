@@ -2841,6 +2841,7 @@ describe("PR body lint (#1844)", () => {
 					hunk("clients/example.ts", [
 						["-", "\tif (!a) return null;"],
 						["-", "\tif (!b) return null;"],
+						["-", "\tif (!c) return null;"],
 						["+", "\tif (!b) return null;"],
 						["+", "\tif (!a) return null;"],
 					]),
