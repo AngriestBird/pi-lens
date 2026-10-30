@@ -157,14 +157,31 @@ const DEPENDENCY_MANIFESTS = [
  * Exported for tests and gate-before-construct callers.
  */
 export function hasAnyDependencyManifest(cwd: string): boolean {
+	return existingDependencyManifests(cwd).length > 0;
+}
+
+/**
+ * #4617: the manifests a `trivy fs` pass at `cwd` reads, as absolute paths.
+ *
+ * A CVE or license row names a PACKAGE, never a file:line, so the turn-end
+ * tiers that render these rows have no cited path of their own. Their evidence
+ * is the dependency declaration the scan read, so these are the files the
+ * advisory speaks for — a lockfile edit is exactly what makes the cached row
+ * out of date. The one place the manifest list is turned into paths, so the
+ * detection gate and the provenance citation cannot disagree about which files
+ * the scan covers.
+ */
+export function existingDependencyManifests(cwd: string): string[] {
+	const found: string[] = [];
 	for (const manifest of DEPENDENCY_MANIFESTS) {
 		try {
-			if (fs.existsSync(path.join(cwd, manifest))) return true;
+			const candidate = path.join(cwd, manifest);
+			if (fs.existsSync(candidate)) found.push(candidate);
 		} catch {
 			// non-fatal — keep probing the remaining manifests
 		}
 	}
-	return false;
+	return found;
 }
 
 /**

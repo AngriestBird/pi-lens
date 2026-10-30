@@ -1451,7 +1451,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 	},
 	record: {
 		"clients/actionable-warnings.ts": 14,
-		"clients/advisory-provenance.ts": 8,
+		// 8 -> 9 (#4617): the well-formed check reads the new `filelessParts`
+		// flag on the record it validates, so one more `record.` use exists.
+		"clients/advisory-provenance.ts": 9,
 		"clients/cache-observability.ts": 2,
 		"clients/config-core/merge.ts": 3,
 		"clients/config-core/normalize.ts": 12,
@@ -1826,7 +1828,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/pipeline.ts": 6,
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/runtime-agent-end.ts": 6,
-		"clients/runtime-turn.ts": 16,
+		// 16 -> 18 (#4617): the code-quality advisory cites the `filePath` of each
+		// kept `warning` the report was built from, so the loop variable is read
+		// twice more.
+		"clients/runtime-turn.ts": 18,
 		"clients/secret-findings.ts": 3,
 		"clients/widget-state.ts": 1,
 		"tools/ast-grep-search.ts": 6,

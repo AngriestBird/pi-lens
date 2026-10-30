@@ -21,6 +21,14 @@ export interface PendingRunnerFindings {
 	session?: GenerationHandle | undefined;
 	/** Stable activation identity; generation is only a late-write fence. */
 	sessionId?: string;
+	/**
+	 * #4617: the turn whose turn-end cap held this failure and handed it back
+	 * (`requeueRunnerFindings` from a delivery hold). A crash note re-rendered
+	 * here reports evidence an EARLIER turn captured, so the composing turn
+	 * stamps it carried (never current) rather than fileless-this-turn. Absent
+	 * for a failure the current turn's drain settled, which is this turn's news.
+	 */
+	carriedFromTurnIndex?: number;
 }
 
 interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
@@ -47,6 +55,7 @@ function settledSnapshot(entry: PendingRunnerPromise): PendingRunnerFindings {
 		// the scope that owned it, and the gate's peek can fence with it.
 		session: entry.session,
 		sessionId: entry.sessionId,
+		carriedFromTurnIndex: entry.carriedFromTurnIndex,
 		result: entry.result,
 	};
 }

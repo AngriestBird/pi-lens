@@ -64,6 +64,7 @@ import {
 	SWEEP_IDLE_SAFETY_MARGIN_MS,
 } from "./lsp/workspace-sweep-hold.js";
 import { isTestRoleCollateral } from "./collateral-test-role.js";
+import { existingDependencyManifests } from "./trivy-client.js";
 import type { TrivyResult } from "./trivy-client.js";
 import { isSecretWarning, secretLocationKey } from "./secret-findings.js";
 import { govulncheckLane } from "./turn-end/lanes/govulncheck.js";
@@ -74,7 +75,7 @@ import {
 	planDeliveryHolds,
 	stillReportedParked,
 } from "./turn-end/delivery-holds.js";
-import type { TurnEndLaneContext } from "./turn-end/lane.js";
+import type { TurnEndLaneContext, TurnEndLanePart } from "./turn-end/lane.js";
 import { isHardFailureSummary } from "./hard-failure-summary.js";
 import type { KnipClient, KnipIssue, KnipResult } from "./knip-client.js";
 import {
@@ -1449,6 +1450,40 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		provenanceCitations.set(part, [...files]);
 	};
 	/**
+	 * #4617 population B: the parts with no file they could be stale against.
+	 *
+	 * A part is fileless when its text reports no file's bytes — a runner's
+	 * crash note, a suppressed-count notice — so no file stamp can speak for it.
+	 * It is stamped current for the turn that produced it, and only that turn:
+	 * `"this-turn"` is the producer's statement that the evidence was captured
+	 * now, so the stamp needs no file subject at all. `"carried"` is the same
+	 * shape for evidence captured in an EARLIER turn (a cap-held note re-rendered
+	 * on a later turn): the record is stamped `truncated` and never reads
+	 * current. Every other part must cite a file; a part in neither table leaves
+	 * the record incomplete, so the message reads historical (the #4962 r3
+	 * fail-closed rule, now only for a producer that declared nothing at all).
+	 * Same seam as `provenanceCitations` — one registry of what the stamp speaks
+	 * for, beside that map rather than in a second one.
+	 */
+	const filelessParts = new Map<string, "this-turn" | "carried">();
+	const markFilelessPart = (part: string): void => {
+		filelessParts.set(part, "this-turn");
+	};
+	const markCarriedPart = (part: string): void => {
+		filelessParts.set(part, "carried");
+	};
+	/**
+	 * #4617: a lane renders its own sections and knows which findings it printed,
+	 * so it hands back the declaration with the text (`TurnEndLanePart`); this is
+	 * the one place a lane's declaration reaches the same registry. A lane part
+	 * that cites no file and declares nothing lands in neither table, which is
+	 * the fail-closed state above — never a silent current.
+	 */
+	const registerLanePart = (entry: TurnEndLanePart): void => {
+		if ("filelessThisTurn" in entry) markFilelessPart(entry.part);
+		else citePart(entry.part, entry.cites);
+	};
+	/**
 	 * #3813: one-shot state a producer consumes for a part of this message,
 	 * held until the cap has said what the message kept (see
 	 * `clients/turn-end/delivery-holds.ts`). It folds in #1950 fix-round F1's
@@ -1606,15 +1641,26 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const failedNote = `❌ Deferred runner ${pending.runnerId} failed (${result.failureKind ?? "unknown"})${detail}`;
 			// #3813: the drain above removed this settled entry for good. If the
 			// cap cuts the note, hand back the failure alone (the findings, if
-			// any, are judged on their own part below).
+			// any, are judged on their own part below). #4617: the requeue names
+			// the turn that held it, so a later turn stamps the re-rendered note
+			// carried rather than current.
 			deliveryHolds.push({
 				part: failedNote,
 				onHeld: () =>
 					requeueRunnerFindings({
 						...pending,
 						result: { ...result, diagnostics: [] },
+						carriedFromTurnIndex: runtime.turnIndex,
 					}),
 			});
+			// #4617 population B: the note names no file, so no file stamp can
+			// vouch for it. A failure this turn's drain settled is this turn's
+			// evidence; one the cap held last turn is not, and reads historical.
+			const carriedFailure =
+				pending.carriedFromTurnIndex !== undefined &&
+				pending.carriedFromTurnIndex < runtime.turnIndex;
+			if (carriedFailure) markCarriedPart(failedNote);
+			else markFilelessPart(failedNote);
 			// @delivery-surface: runtime-turn:late-runner-findings
 			advisoryParts.push(failedNote);
 		}
@@ -1909,6 +1955,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				(retirementNote ? `\n${retirementNote}` : "");
 			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			advisoryParts.push(advisoryPart);
+			// #4617: the demoted advisory is about this file, which a no-write turn
+			// did not edit; the body's line numbers were already degraded against it.
+			citePart(advisoryPart, [bPath]);
 			if (retires) {
 				deliveryHolds.push({
 					part: advisoryPart,
@@ -2333,6 +2382,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					testSection += `\n  ... and ${testSuggestions.length - 5} more`;
 				}
 				parts.push(testSection);
+				// #4617: the lines name test files, so the joined section speaks for
+				// them too (the "and N more" line stands for the whole list).
+				sectionPrimaries.push(...testSuggestions.map((s) => s.testFile));
 			}
 		}
 		if (unansweredLines.length > 0) parts.unshift(unansweredLines.join("\n"));
@@ -3107,6 +3159,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 				// @delivery-surface: runtime-turn:knip-blocker
 				blockerParts.push(report);
+				// #4617: the rows name these files (their issue paths), which a
+				// no-write turn did not edit. The "and N more" set is reported too.
+				citePart(
+					report,
+					blockerIssues.flatMap((issue) =>
+						issue.file ? [resolveRunnerPath(scanRoot, issue.file)] : [],
+					),
+				);
 				deliveryHolds.push(
 					cutAdvisoryHold(
 						"knip",
@@ -3138,6 +3198,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 				// @delivery-surface: runtime-turn:knip-advisory
 				advisoryParts.push(report);
+				// #4617: same subject rule as the blocker above.
+				citePart(
+					report,
+					unusedExportDelta.flatMap((issue) =>
+						issue.file ? [resolveRunnerPath(scanRoot, issue.file)] : [],
+					),
+				);
 				deliveryHolds.push(
 					cutAdvisoryHold(
 						"knip",
@@ -3438,6 +3505,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			);
 			// @delivery-surface: runtime-turn:dead-code-advisory
 			advisoryParts.push(deadCodePart);
+			// #4617: the rows name the file each unused symbol lives in (its "and N
+			// more" line stands for the rest of the kept set).
+			citePart(
+				deadCodePart,
+				deadCodeDeliverable.kept.flatMap((issue) =>
+					issue.file ? [resolveRunnerPath(cwd, issue.file)] : [],
+				),
+			);
 			const reOfferedKeys = new Set(reOffered.map(deadCodeIssueKey));
 			deliveryHolds.push(
 				cutAdvisoryHold(
@@ -3788,8 +3863,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	)) {
 		recordDispositionSuppressed(store, count);
 	}
-	// @delivery-surface: runtime-turn:govulncheck-advisory
-	advisoryParts.push(...(govDelivery.advisoryParts ?? []));
+	// #4617: the lane hands back each section with the files it reports, so the
+	// stamp's subject is registered here — one seam for every lane part.
+	for (const lanePart of govDelivery.advisoryParts ?? []) {
+		registerLanePart(lanePart);
+		// @delivery-surface: runtime-turn:govulncheck-advisory
+		advisoryParts.push(lanePart.part);
+	}
 
 	// Secrets — UNIFIED surfacing (#131 Mode 3). gitleaks, trivy secret, and the
 	// ast-grep hardcoded-secret rules can each flag the SAME line with different
@@ -3825,10 +3905,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	}
 	const secretBlockedLocations =
 		secretsDelivery.deliveredLocationKeys ?? new Set<string>();
-	// @delivery-surface: runtime-turn:secrets-gitleaks,runtime-turn:secrets-trivy
-	blockerParts.push(...(secretsDelivery.blockerParts ?? []));
-	// @delivery-surface: runtime-turn:stale-secrets-tier
-	staleSecretParts.push(...(secretsDelivery.staleSecretParts ?? []));
+	for (const lanePart of secretsDelivery.blockerParts ?? []) {
+		registerLanePart(lanePart);
+		// @delivery-surface: runtime-turn:secrets-gitleaks,runtime-turn:secrets-trivy
+		blockerParts.push(lanePart.part);
+	}
+	for (const lanePart of secretsDelivery.staleSecretParts ?? []) {
+		registerLanePart(lanePart);
+		// @delivery-surface: runtime-turn:stale-secrets-tier
+		staleSecretParts.push(lanePart.part);
+	}
 
 	// trivy — surface session_start-cached dependency CVEs (#131, Phase 1).
 	// CRITICAL is a blocker (a known-exploitable CVE in a shipped dep is real
@@ -3847,6 +3933,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// a suppressed finding never reaches this render at all, so the two only
 	// ever compose.
 	const trivyAgeLabel = formatCacheAgeLabel(trivyCacheEntry?.data?.scannedAt);
+	// #4617: a CVE or license row names a package, not a file:line, so the file
+	// stamp had nothing to stat for these three tiers. The scan's evidence IS
+	// the dependency declaration it read, so the manifests are the subject: a
+	// lockfile edit is what makes the cached row out of date. Empty when the
+	// declaration is gone, which leaves the tiers unaccounted (fail closed).
+	const trivyCitedFiles = existingDependencyManifests(cwd);
 	const trivyFindingsFiltered = filterFindingsByDisposition(
 		trivyCacheEntry?.data?.findings ?? [],
 		cwd,
@@ -3875,6 +3967,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 			// @delivery-surface: runtime-turn:trivy-critical-blocker
 			blockerParts.push(report);
+			citePart(report, trivyCitedFiles);
 		}
 		if (advisory.length) {
 			const shown = advisory.slice(0, 5);
@@ -3885,6 +3978,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 			// @delivery-surface: runtime-turn:trivy-cve-advisory
 			advisoryParts.push(report);
+			citePart(report, trivyCitedFiles);
 		}
 	}
 
@@ -3905,6 +3999,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		// @delivery-surface: runtime-turn:trivy-license-advisory
 		advisoryParts.push(report);
+		citePart(report, trivyCitedFiles);
 	}
 
 	// #1616 suppressed-bucket rule: surface the running disposition-drop total
@@ -3916,12 +4011,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const byLane = Object.entries(dispositionSuppressedByLane)
 			.map(([lane, count]) => `${lane} ${count}`)
 			.join(", ");
-		// @delivery-surface: runtime-turn:disposition-suppressed-notice
-		advisoryParts.push(
+		const suppressedNotice =
 			`suppressed by disposition: ${dispositionSuppressedTotal} finding(s) ` +
-				`dropped from this turn's gitleaks/govulncheck/trivy sections (${byLane}) ` +
-				"(marked false-positive or won't-fix).",
-		);
+			`dropped from this turn's gitleaks/govulncheck/trivy sections (${byLane}) ` +
+			"(marked false-positive or won't-fix).";
+		// @delivery-surface: runtime-turn:disposition-suppressed-notice
+		advisoryParts.push(suppressedNotice);
+		// #4617 population B: a count over this turn's own gate calls reports no
+		// file's bytes, and the rows it counts were already read this turn, so
+		// there is nothing about it a file stamp could confirm.
+		markFilelessPart(suppressedNotice);
 	}
 
 	const t3 = Date.now();
@@ -5023,11 +5122,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// into an authoritative-looking clean result for the rest of the file.
 			// Keep the limitation visible and require a complete graph for this
 			// user-facing impact surface (#1070).
-			// @delivery-surface: runtime-turn:call-graph-advisory
-			advisoryParts.push(
+			const incompleteGraphNotice =
 				"Call-graph impact was not emitted because call-graph extraction coverage is incomplete; " +
-					"the affected files may have unreported callers.",
-			);
+				"the affected files may have unreported callers.";
+			// @delivery-surface: runtime-turn:call-graph-advisory
+			advisoryParts.push(incompleteGraphNotice);
+			// #4617 population B: the notice reports the graph's own coverage, not
+			// any file's bytes, and it is computed from THIS turn's coverage value.
+			markFilelessPart(incompleteGraphNotice);
 		} else {
 			const callGraphStart = Date.now();
 			try {
@@ -5143,6 +5245,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					const impactPart = `📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`;
 					// @delivery-surface: runtime-turn:call-graph-advisory
 					advisoryParts.push(impactPart);
+					// #4617: the lines name each caller file the impact was found in.
+					citePart(impactPart, shownImpactFiles);
 					deliveryHolds.push(
 						cutAdvisoryHold(
 							"call-graph",
@@ -5381,6 +5485,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// #2521: `cwd` is what resolves the store location the advisory
 			// names -- it is the SAME cwd `publishActionableWarningsReport`
 			// just wrote through, so the two cannot disagree.
+			// #4617: the files the advisory reports, taken from the same per-file
+			// rows the owner prints (its "... and N more file(s)" line stands for
+			// the whole kept set, not only the five it names).
+			let actionableNamedFiles: string[] = [];
 			const advisory = formatActionableWarningsAdvisory(
 				publishResult.report,
 				cwd,
@@ -5429,11 +5537,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						"actionable-warnings",
 						dispositionSuppressed,
 					);
+					actionableNamedFiles = files.map((file) => file.filePath);
 					return { files, suppressed: dispositionSuppressed };
 				},
 			);
 			// @delivery-surface: runtime-turn:actionable-warnings-advisory
 			if (advisory) advisoryParts.push(advisory);
+			if (advisory) citePart(advisory, actionableNamedFiles);
 			logActionableWarningsEvent({
 				event: advisory ? "advisory_injected" : "advisory_skipped",
 				sessionId: runtime.telemetrySessionId,
@@ -5507,6 +5617,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		// @delivery-surface: runtime-turn:code-quality-warnings-advisory
 		if (advisory) advisoryParts.push(advisory);
+		// #4617: the advisory counts warnings per file over this turn's kept set.
+		if (advisory)
+			citePart(
+				advisory,
+				qualityWarnings.map((warning) => warning.filePath),
+			);
 		logLatency({
 			type: "phase",
 			toolName: "turn_end",
@@ -6347,11 +6463,24 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		// #4962 r3: with no affected file, the citations are the stamp's only
 		// subjects, so the stamp speaks for the message only when every part
-		// the message carries cited a file. A part that cited none would read
-		// current whatever happened to the files it reports, so the stamp is
-		// incomplete (`truncated`): never current, and never proof of deletion.
-		const uncitedPartReached = holdPlan.reachedParts.some(
-			(part) => (provenanceCitations.get(part.raw)?.length ?? 0) === 0,
+		// the message carries is accounted for. A part that cited no file and
+		// declared no fileless subject would read current whatever happened to
+		// the files it reports, so the stamp is incomplete (`truncated`): never
+		// current, and never proof of deletion.
+		const unaccountedPartReached = holdPlan.reachedParts.some(
+			(part) =>
+				(provenanceCitations.get(part.raw)?.length ?? 0) === 0 &&
+				!filelessParts.has(part.raw),
+		);
+		// #4617: a fileless part whose evidence an EARLIER turn captured is the
+		// same complaint in a different shape — the message reports something the
+		// stamp cannot vouch for — so it truncates the stamp whatever files the
+		// turn edited.
+		const carriedPartReached = holdPlan.reachedParts.some(
+			(part) => filelessParts.get(part.raw) === "carried",
+		);
+		const filelessPartReached = holdPlan.reachedParts.some(
+			(part) => filelessParts.get(part.raw) !== undefined,
 		);
 		// #4954 F6: a file only the text names is `cited`, so deleting it labels
 		// the message historical and never drops it; the first role a path gets
@@ -6381,10 +6510,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				runtime,
 				generation: 0,
 				files: stamped,
+				...(filelessPartReached ? { filelessParts: true as const } : {}),
 				truncated:
 					affectedTruncated ||
 					byKey.size > stamped.length ||
-					(affectedFiles.length === 0 && uncitedPartReached),
+					carriedPartReached ||
+					(affectedFiles.length === 0 && unaccountedPartReached),
 			});
 		};
 		if (getFlag("lens-guard") || carried.length > 0) {
