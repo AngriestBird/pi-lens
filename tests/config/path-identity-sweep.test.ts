@@ -131,6 +131,9 @@ const URI_KEY_INDEX_WALK =
 const PYTHON_RELATIVE_LEVELS =
 	"a Python relative import climbs a COUNTED number of package levels (the leading dots), not to a marker: `from ..x import y` is `dots - 1` parents of the importing file's directory by package nesting, which the language defines on the spelled module path, so there is no ceiling or root to compare and no identity to take";
 
+const ANCHOR_PREFIX_COUNTED_CLIMB =
+	"clients/dispatch/rule-policy.ts anchorPrefix climbs a COUNTED number of segments: one dirname per segment of the config location's relativePath (its spelling below the directory that owns the file, such as `.pi-lens.json`), so the owning directory is a count fixed by that location, not a walk to a marker or a root; walkUpDirs stops on a marker or a root and cannot express the count, and the result is a spelled prefix for ignorePaths anchoring, with no identity taken";
+
 interface Pin {
 	sites: number;
 	identities: string;
@@ -368,6 +371,11 @@ const PINS: Readonly<Record<string, Pin>> = {
 		identities: "06064201b76ebaf1",
 		reason: PYTHON_RELATIVE_LEVELS,
 	}, // :415
+	"clients/dispatch/rule-policy.ts#hand-rolled-upward-walk": {
+		sites: 1,
+		identities: "70c171ce33765a1f",
+		reason: ANCHOR_PREFIX_COUNTED_CLIMB,
+	}, // :176
 };
 
 interface Occurrence {
