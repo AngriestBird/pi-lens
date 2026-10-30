@@ -171,7 +171,7 @@ describe("source=lsp drops jedi's compile verdict under a declared 3.14 (#4638)"
 		expect(reason).toContain("1 jedi compile finding dropped");
 	});
 
-	it("drops it again on a cache replay, and keeps it revocable there", async () => {
+	it("drops it again on a cache replay, and re-decides once the declaration changes", async () => {
 		declareRequiresPython(">=3.14");
 		const service = makeService([jediCompile(), pyrightFinding()]);
 
@@ -183,12 +183,15 @@ describe("source=lsp drops jedi's compile verdict under a declared 3.14 (#4638)"
 		expect(replay.content[0].text).not.toContain("multiple exception types");
 		expect(compileDrops()).toHaveLength(1);
 
-		// The replay re-decides against the declaration current at the read: the
-		// cached inline set still holds the row, so lowering the declaration (a
-		// file the cache never keys on) brings it back without a re-touch.
+		// The cached inline set still holds the row, so the drop re-decides at
+		// every read. Lowering the declaration is a change to a file the CACHE
+		// never keys on, but it IS a server config file the answer route's
+		// pre-answer look publishes (#4532 gap 12: pyright reads
+		// `pyproject.toml` once at start), so the next call is a fresh touch and
+		// the row comes back through it (#5005 F1).
 		declareRequiresPython(">=3.12");
 		const lowered = await probe(service);
-		expect(service.touchFile).toHaveBeenCalledTimes(1);
+		expect(service.touchFile).toHaveBeenCalledTimes(2);
 		expect(lowered.content[0].text).toContain("multiple exception types");
 	});
 

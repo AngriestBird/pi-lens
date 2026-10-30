@@ -114,6 +114,7 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 	let service: {
 		shutdown: () => Promise<void>;
 		touchFile: (...args: never[]) => Promise<unknown>;
+		livePrimaryClientRoots?: () => Array<{ root: string }>;
 	};
 
 	beforeAll(async () => {
@@ -317,10 +318,13 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 
 	// ---- #4532 gap 12 / #4521: what configures the server, born after start ----
 
-	async function configPhase(look: (root: string) => Promise<unknown>) {
+	async function configPhase(
+		look: (root: string) => Promise<unknown>,
+		fixture: unknown = configBoundFixture,
+	) {
 		const { createLspDiagnosticsTool } =
 			await import("../../tools/lsp-diagnostics.js");
-		return runBornAfterStartConfigWitness(configBoundFixture as never, {
+		return runBornAfterStartConfigWitness(fixture as never, {
 			workspace,
 			execute: (
 				toolCallId: string,
@@ -337,6 +341,13 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 					ctx,
 				),
 			look,
+			// #4532 gap 14: the row names the live primary roots, so a cell can assert
+			// the subdirectory hosts its own client and not only that the finding
+			// cleared.
+			clientRoots: () =>
+				(service.livePrimaryClientRoots?.() ?? []).map(
+					(entry) => path.relative(workspace, entry.root) || ".",
+				),
 			deadlineMs: 10_000,
 			intervalMs: 100,
 		});
@@ -353,23 +364,39 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 		const rows = await configPhase((root) =>
 			lookForOutOfBandChanges(root, "tool_call"),
 		);
+		// The third row is the gap-14 case. It PASSES here for a reason worth
+		// naming: this fixture root carries the shared `.git`, which the built-in
+		// python detector counts as a project root, so a file in a subdirectory
+		// resolves to the workspace and the boundary verdict is never consulted.
+		// The defect needs a marker-less workspace above the subdirectory — the
+		// nightly's own fixture (no `.git`, no manifest) and the pyright transcript
+		// in the PR body. The verdict itself is pinned by
+		// tests/clients/lsp/client-registry-direct.test.ts, both directions.
 		expect(rows.map((row) => [row.runner, row.state])).toEqual([
 			["config-bound fake born after start (config file)", "pass"],
 			["config-bound fake born after start (root marker)", "pass"],
+			[
+				"config-bound fake born after start (root marker, no ancestor marker)",
+				"pass",
+			],
 		]);
+		// The row's evidence, not only its verdict: the subdirectory hosts its own
+		// client by the time the importer reads clean.
+		expect(String(rows[2].detail)).toContain("witness_sub_");
 	}, 60_000);
 
-	// Recurrence: a witness that can only pass is a vacuous nightly row. Without
-	// the look the config is never forwarded, so the config row must red at its
-	// deadline after polling; the marker row needs no look and stays green.
-	it("reds the config row, after polling, when no look forwards the config", async () => {
+	// #4532 gap 5: the ANSWER route forwards the late config for itself. The
+	// injected look above stands in for pi's `tool_call` hook; a tool run whose
+	// hook looked nothing at all still answers clean on the FIRST call, because
+	// `lsp_diagnostics` now runs the same out-of-band look (with a forced walk)
+	// before it answers. That is what the MCP route and any direct caller get
+	// too, and it is why the config row can no longer be redded by removing the
+	// hook's look: the red direction for it is the mutation that removes the
+	// tool's own look (PR body, mutation rows).
+	it("forwards the config on the first call even when the hook's look did nothing", async () => {
 		const rows = await configPhase(async () => undefined);
-		expect(rows.map((row) => row.state)).toEqual(["fail", "pass"]);
-		const calls = Number(
-			/after (\d+) calls over/.exec(String(rows[0].detail))?.[1],
-		);
-		expect(calls).toBeGreaterThan(3);
-		expect(rows[0].detail).toContain("pyrightconfig.json created after start");
+		expect(rows.map((row) => row.state)).toEqual(["pass", "pass", "pass"]);
+		expect(rows[0].detail).toContain("cleared on call 1");
 	}, 60_000);
 
 	async function diagnoseText(file: string): Promise<string> {

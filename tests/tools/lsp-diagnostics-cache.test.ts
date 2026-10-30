@@ -602,20 +602,55 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		// a real missing-module error at warning authority with nothing to re-promote
 		// it. The entry now holds the server's own rows and the replay demotes them
 		// against the install state of the serve.
+		//
+		// #5005 F1: the install is a PACKAGE-local install (`pkg/node_modules`),
+		// because the answer route's pre-answer look stamps the ROOT's own install
+		// and would (correctly) force a fresh touch there — that behaviour is the
+		// sibling cell below. A package's own install is outside the root's stamp,
+		// so this replay still replays, and the re-promotion rule it pins stays
+		// reachable on the real path.
 		it("re-promotes a cached gap once an install resolves and the package is still missing", async () => {
-			const [file] = writeFiles(["a.ts"]);
+			fs.mkdirSync(path.join(tmpDir, "pkg"), { recursive: true });
+			const [file] = writeFiles(["pkg/a.ts"]);
 			await runBatch([file!]);
 			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "warning" });
 
 			// The install lands from outside (no project file changes, so the entry
 			// stays fresh) but does not provide `left-pad`.
-			fs.mkdirSync(path.join(tmpDir, "node_modules", "other"), {
+			fs.mkdirSync(path.join(tmpDir, "pkg", "node_modules", "other"), {
 				recursive: true,
 			});
 			reconcileScanDiagnostics.mockClear();
 			touchFile.mockClear();
 			await runBatch([file!]);
 			expect(touchFile).not.toHaveBeenCalled();
+			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "blocking" });
+			expect(writtenFor(file!)[0]?.message).not.toContain(
+				ENVIRONMENT_GAP_MARKER,
+			);
+		});
+
+		// #5005 F1: the sibling of the cell above. An install at the call's own
+		// root IS what the answer route's pre-answer look publishes (#4532 gap 5),
+		// so the next call must touch again rather than replay the pre-install
+		// entry — the freshness property the replay cell must not encode as
+		// "never a second touch".
+		it("touches again once an install lands at the call's own root (#4532 gap 5)", async () => {
+			const [file] = writeFiles(["a.ts"]);
+			await runBatch([file!]);
+			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "warning" });
+
+			fs.mkdirSync(path.join(tmpDir, "node_modules", "other"), {
+				recursive: true,
+			});
+			reconcileScanDiagnostics.mockClear();
+			touchFile.mockClear();
+			await runBatch([file!]);
+			// A fresh touch, not a replay: the look published the install and the
+			// cache refused the entry it had scanned before it.
+			expect(touchFile).toHaveBeenCalledTimes(1);
+			// The fresh touch re-applies the environment rule at the current install
+			// state, so the row is blocking again with no install advice.
 			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "blocking" });
 			expect(writtenFor(file!)[0]?.message).not.toContain(
 				ENVIRONMENT_GAP_MARKER,
@@ -681,8 +716,10 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			serve: ProbeAnswer,
 			replay: ProbeAnswer,
 			beforeReplay?: () => void,
+			filePath: string = path.join(tmpDir, "spawn.test.ts"),
 		): Promise<{ fresh: string[]; replayed: string[] }> {
-			const file = path.join(tmpDir, "spawn.test.ts");
+			const file = filePath;
+			fs.mkdirSync(path.dirname(file), { recursive: true });
 			fs.writeFileSync(file, "describe('x', () => {});\n");
 			touchFile.mockResolvedValue({
 				diags: rows.map((row) => ({ ...(row as object) })),
@@ -743,15 +780,23 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		// membership; the entry must still carry the file's membership verdict, or
 		// an install that leaves the package missing turns it blocking on a replay
 		// that cannot ask, though a live fresh touch would answer inferred.
+		//
+		// #5005 F1: the install is a PACKAGE-local one, because the answer route's
+		// pre-answer look stamps the root's own install and correctly forces a
+		// fresh touch there (the root case has its own cell in the environment-gap
+		// suite). This cell's replay is the property under test, so its install
+		// must be one the root's look does not claim.
 		it("keeps an inferred file's gap demoted after an install, when the replay cannot ask", async () => {
+			const file = path.join(tmpDir, "pkg", "spawn.test.ts");
 			const { fresh, replayed } = await serveThenReplay(
 				[declaredGap],
 				inferred,
 				noLiveClient,
 				() =>
-					fs.mkdirSync(path.join(tmpDir, "node_modules", "other"), {
+					fs.mkdirSync(path.join(tmpDir, "pkg", "node_modules", "other"), {
 						recursive: true,
 					}),
+				file,
 			);
 			expect(fresh).toEqual(["warning"]);
 			expect(replayed).toEqual(["warning"]);
@@ -935,6 +980,11 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		 * that answer. The budget is the production default (15 s) because the
 		 * file's 50 ms leaves the incumbent no time before its send reserve, and
 		 * then no answer is asked or carried.
+		 *
+		 * #5005 F1: the install lands in the FILE's own package directory, not at
+		 * the root the answer route's pre-answer look stamps. That keeps this
+		 * helper's replay a replay (the root-stamp case is the sibling cell in the
+		 * environment-gap suite) while still exercising the re-promotion rule.
 		 */
 		async function serveInstallReplay(file: string, incumbentAnswer: unknown) {
 			incumbentProbes = 0;
@@ -949,7 +999,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			expect(touchFile).toHaveBeenCalledTimes(1);
 			const probeCallsOnServe = incumbentProbes;
 			const fresh = writtenFor(file)[0];
-			fs.mkdirSync(path.join(tmpDir, "node_modules", "other"), {
+			fs.mkdirSync(path.join(path.dirname(file), "node_modules", "other"), {
 				recursive: true,
 			});
 			reconcileScanDiagnostics.mockClear();
@@ -961,7 +1011,8 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		}
 
 		it("re-promotes an attached gap row once an install resolves (configured project)", async () => {
-			const [file] = writeFiles(["a.ts"]);
+			fs.mkdirSync(path.join(tmpDir, "pkg"), { recursive: true });
+			const [file] = writeFiles(["pkg/a.ts"]);
 
 			const { fresh, replayed, probeCallsOnServe } = await serveInstallReplay(
 				file!,
@@ -1016,7 +1067,8 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		});
 
 		it("keeps the incumbent's membership verdict on the replay after an install (inferred project)", async () => {
-			const [file] = writeFiles(["a.ts"]);
+			fs.mkdirSync(path.join(tmpDir, "pkg"), { recursive: true });
+			const [file] = writeFiles(["pkg/a.ts"]);
 
 			const { fresh, replayed, probeCallsOnServe } = await serveInstallReplay(
 				file!,

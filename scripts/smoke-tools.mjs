@@ -2640,10 +2640,15 @@ export async function runCreatedModuleWitness(
  *    hosted at, so the importer cannot see the module; a marker file created in
  *    the subdirectory makes it a project root of its own, and a second client
  *    hosted there reads the config. This needs no look: the root is resolved at
- *    each call. (A workspace with NO marker of its own stays shared after the
- *    subdirectory gets one: `projectBoundaryCache` keeps the "no boundary"
- *    answer it gave before the marker existed; recorded on #4532, not covered
- *    here.)
+ *    each call;
+ *  - root marker, no ancestor marker (#4532 gap 14): the same subdirectory and
+ *    config, in a workspace with NO marker of its own, so the client is hosted
+ *    at the workspace because a file directly in it was answered first. Before
+ *    the fix the boundary verdict was cached for the registry's life, so the
+ *    subdirectory kept sharing that client after its own marker appeared: no
+ *    second client, and the importer stayed stale (real pyright 1.1.414,
+ *    40 calls over 20.25 s). The row names the live client roots, so a pass
+ *    also shows the second client being hosted.
  *
  * One row per case, reported with the module phase's rows.
  */
@@ -2653,6 +2658,7 @@ export async function runBornAfterStartConfigWitness(
 		workspace,
 		execute,
 		look,
+		clientRoots,
 		deadlineMs = BORN_AFTER_START_DEADLINE_MS,
 		intervalMs = BORN_AFTER_START_POLL_MS,
 	},
@@ -2703,6 +2709,29 @@ export async function runBornAfterStartConfigWitness(
 				}),
 			what: witness.rootMarker,
 		},
+		{
+			label: "root marker, no ancestor marker",
+			root: path.join(workspace, `witness_sub_${tag}`),
+			// A file directly in the workspace, answered before the importer: it is
+			// what hosts a client at the workspace root, which has no marker of its
+			// own. Without it the first call would host the client in the
+			// subdirectory and the row would prove nothing.
+			host: {
+				file: path.join(workspace, `witness_host_${tag}${witness.ext}`),
+				text: "host_marker = 1\n",
+			},
+			seed: (dir, name) => {
+				seedModule(dir, name);
+				fs.writeFileSync(
+					path.join(dir, witness.configFile),
+					witness.configText,
+				);
+			},
+			before: undefined,
+			birth: (dir) => fs.writeFileSync(path.join(dir, witness.rootMarker), ""),
+			cleanup: () => undefined,
+			what: `${witness.rootMarker} in a subdirectory of a workspace with no marker`,
+		},
 	];
 	const rows = [];
 	for (const [index, born] of cases.entries()) {
@@ -2722,6 +2751,10 @@ export async function runBornAfterStartConfigWitness(
 		try {
 			born.seed(born.root, name);
 			fs.writeFileSync(importer, witness.importerText(name));
+			if (born.host) {
+				fs.writeFileSync(born.host.file, born.host.text);
+				await diagnoseFile(execute, workspace, fx.lang, born.host.file)();
+			}
 			const ready = await pollUntil(
 				async () => witness.reportsMissing(await diagnose(), name),
 				{ deadlineMs, intervalMs },
@@ -2747,13 +2780,16 @@ export async function runBornAfterStartConfigWitness(
 				},
 				{ deadlineMs, intervalMs },
 			);
+			const roots = clientRoots
+				? `; client roots: ${clientRoots().join(", ")}`
+				: "";
 			rows.push({
 				lang: fx.lang,
 				runner: runner(born.label),
 				state: cleared.ok ? "pass" : "fail",
 				detail: cleared.ok
-					? `the importer's missing import cleared on call ${cleared.polls} (${cleared.elapsedMs} ms after ${born.what} was created)`
-					: `the importer still reports ${name} missing, or answers inconclusively, after ${cleared.polls} calls over ${cleared.elapsedMs} ms (${born.what} created after start; #4532)`,
+					? `the importer's missing import cleared on call ${cleared.polls} (${cleared.elapsedMs} ms after ${born.what} was created)${roots}`
+					: `the importer still reports ${name} missing, or answers inconclusively, after ${cleared.polls} calls over ${cleared.elapsedMs} ms (${born.what} created after start; #4532)${roots}`,
 				diags: cleared.ok ? 0 : 1,
 			});
 		} catch (err) {
@@ -2950,16 +2986,21 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 			}
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
+			// The witness phases below read the live primary client roots (#4532 gap
+			// 14: a row that passes also shows the subdirectory hosting its own
+			// client), so the service is resolved once here.
+			const getLSPService =
+				fx.createdModuleWitness || fx.bornAfterStartConfig
+					? (deps?.getLSPService ??
+						(
+							await import(
+								pathToFileURL(
+									path.join(repoRoot, "dist", "clients", "lsp", "index.js"),
+								).href
+							)
+						).getLSPService)
+					: undefined;
 			if (fx.createdModuleWitness && verdict.state === "pass") {
-				const getLSPService =
-					deps?.getLSPService ??
-					(
-						await import(
-							pathToFileURL(
-								path.join(repoRoot, "dist", "clients", "lsp", "index.js"),
-							).href
-						)
-					).getLSPService;
 				witnessRows.push(
 					...(await runCreatedModuleWitness(fx, {
 						workspace,
@@ -2990,6 +3031,12 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 						workspace,
 						execute: (...args) => createLspDiagnosticsTool().execute(...args),
 						look: (root) => lookForOutOfBandChanges(root, "tool_call"),
+						// #4532 gap 14: the row names the live primary roots, so a pass
+						// also shows the subdirectory's own client being hosted.
+						clientRoots: () =>
+							(getLSPService?.()?.livePrimaryClientRoots?.() ?? []).map(
+								(entry) => path.relative(workspace, entry.root) || ".",
+							),
 						...deps?.createdModulePoll,
 					})),
 				);

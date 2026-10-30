@@ -170,12 +170,19 @@ export function oweDeclarationWalk(
 	if (demandsWalk(trigger, walk)) owedWalks.set(normalizeMapKey(root), true);
 }
 
-/** #4476's rule: a bash result always walks, unless the look is `"interval"`. */
+/** #4476's rule: a bash result always walks, unless the look is `"interval"`.
+ *
+ * #4532 gap 5: `"always"` is the caller saying it must not answer from a view
+ * the walk has not refreshed — the `lsp_diagnostics` body does, so a
+ * declaration file created inside `PI_LENS_DECLARATION_LOOK_MS` reaches the
+ * server before the answer rather than after the next bash result. */
 function demandsWalk(
 	trigger: "tool_call" | "tool_result",
 	walk: OutOfBandLookOptions["walk"],
 ): boolean {
-	return trigger === "tool_result" && walk !== "interval";
+	return (
+		walk === "always" || (trigger === "tool_result" && walk !== "interval")
+	);
 }
 
 const fingerprint = (stat: {
@@ -522,9 +529,47 @@ export interface OutOfBandLookOptions {
 	 * `PI_LENS_DECLARATION_LOOK_MS`. `"interval"` walks at most that often on
 	 * every trigger, which is what a look at an EXTRA root uses: the walk is
 	 * bounded per root, and the install stamp is what an extra root is looked at
-	 * for, so a big worktree's walk cannot run on every bash result.
+	 * for, so a big worktree's walk cannot run on every bash result. `"always"`
+	 * walks on this look whatever the interval says, for a caller that is about
+	 * to answer from the servers' view (#4532 gap 5).
 	 */
-	walk?: "trigger" | "interval";
+	walk?: "trigger" | "interval" | "always";
+	/**
+	 * The caller's abort signal (#5005 F3). A caller that already abandoned its
+	 * answer looks at nothing: no install stamp, no walk, no publish, and no walk
+	 * demand owed to the next look. A caller that abandons the answer while its
+	 * look runs stops waiting for it, because an answer nobody reads must not be
+	 * held by a walk; the look itself still finishes for any caller joined to it
+	 * (see `untilAborted`).
+	 *
+	 * `| undefined` so a caller can pass its own `AbortSignal | undefined`
+	 * through the existing options object without a new
+	 * `exactOptionalPropertyTypes` diagnostic (`tools/lsp-diagnostics.ts` does).
+	 */
+	signal?: AbortSignal | undefined;
+}
+
+/**
+ * Settle when `work` does or when `signal` aborts, whichever happens first
+ * (#5005 F3).
+ *
+ * The work is NOT cancelled. A look is single-flight, so the pass that a caller
+ * starts may be one another caller joined (`coalesceTrailing`), and that
+ * joiner's walk must not be cut because this caller's answer was abandoned. The
+ * walk stays bounded by the declaration caps either way.
+ */
+function untilAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
+	if (signal.aborted) return Promise.resolve();
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<void>((resolve) => {
+		onAbort = () => resolve();
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	// The race consumes `work`'s rejection too, so an aborted caller leaves no
+	// unhandled rejection behind when the look settles later.
+	return Promise.race([work, aborted]).finally(() => {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	});
 }
 
 /**
@@ -549,6 +594,11 @@ export function lookForOutOfBandChanges(
 	runtime?: DiskChangeRuntime,
 	options: OutOfBandLookOptions = {},
 ): Promise<void> {
+	// #5005 F3: a caller that already abandoned its answer spends nothing at all.
+	// Before this guard the answer route's look ran its whole walk for a call
+	// whose signal was already aborted, and the batch it was for then answered
+	// no file.
+	if (options.signal?.aborted) return Promise.resolve();
 	// #4905: the home folder (or a folder above it) holds more directories than
 	// the declaration walk's cap on any real machine, so each look would spend
 	// its time and end capped. Same ceiling as the opaque prescan, `analysis-root`
@@ -571,9 +621,10 @@ export function lookForOutOfBandChanges(
 		});
 	const key = normalizeMapKey(root);
 	oweDeclarationWalk(root, trigger, options.walk);
-	return looks.run(key, () =>
+	const look = looks.run(key, () =>
 		lookOnce(root, key, trigger, runtime, options, homeRoot),
 	);
+	return options.signal ? untilAborted(look, options.signal) : look;
 }
 
 /** The `DiskChange.sources` entry of a server config file change (#4532). */

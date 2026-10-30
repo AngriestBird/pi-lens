@@ -213,13 +213,16 @@ export function runCreatedModuleWitness(
 ): Promise<SmokeRow[]>;
 /** Create the server's config file, and a root marker, once the server
  *  reports the importer's missing import; one row per case (#4521, #4532).
- *  `look` is the out-of-band look pi runs at every `tool_call`. */
+ *  `look` is the out-of-band look pi runs at every `tool_call`; `clientRoots`
+ *  is read into each row's detail so a pass also names the live client roots
+ *  (#4532 gap 14). */
 export function runBornAfterStartConfigWitness(
 	fixture: LspFixture | undefined,
 	options: {
 		workspace: string;
 		execute: (...args: never[]) => Promise<unknown>;
 		look: (root: string) => Promise<unknown>;
+		clientRoots?: () => string[];
 		deadlineMs?: number;
 		intervalMs?: number;
 	},

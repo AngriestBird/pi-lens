@@ -315,8 +315,6 @@ export class ClientRegistry {
 	private readonly hooks: ClientGenerationHooks;
 	private readonly sessionCwd: string | undefined;
 	private readonly workspaceProbeLogged = new Set<string>();
-	/** Per-service immutable root-boundary verdicts; root detectors cache hits too. */
-	private readonly projectBoundaryCache = new Map<string, Promise<boolean>>();
 	/** Foreign roots are recorded once per normalized root for this service/session. */
 	private readonly warmStartLogged = new Set<string>();
 	private readonly optionalFailureLogged = new Set<string>();
@@ -564,13 +562,18 @@ export class ClientRegistry {
 			}
 		}
 		if (!nearestAncestor) return root;
-		const boundaryKey = `${server.id}:${rootKey}`;
-		let boundary = this.projectBoundaryCache.get(boundaryKey);
-		if (!boundary) {
-			boundary = hasProjectBoundaryMarker(root, server);
-			this.projectBoundaryCache.set(boundaryKey, boundary);
-		}
-		if (await boundary) return root;
+		// #4532 gap 14: the boundary verdict is read from the disk on every
+		// resolution, never stored. It used to be cached per (server, root) for the
+		// service's life, negatives included, so a marker created in a subdirectory
+		// after its ancestor's client answered kept the subdirectory coalesced into
+		// that ancestor — its own `pyrightconfig.json` and manifests reached no
+		// server, and no client was ever hosted there (real pyright 1.1.414: stale
+		// through 40 calls over 20.25 s). `NearestRoot` already answers the same
+		// question this way (#3412): a miss is never cached. The probe is one
+		// directory's marker set — 0.024 ms on an early hit, 0.35 ms marker-less,
+		// measured — and it only runs when a nested candidate has a hosted
+		// same-server ancestor, after the per-call root walk above it.
+		if (await hasProjectBoundaryMarker(root, server)) return root;
 		return (
 			this.clients.get(`${server.id}:${nearestAncestor}`)?.root ??
 			nearestAncestor

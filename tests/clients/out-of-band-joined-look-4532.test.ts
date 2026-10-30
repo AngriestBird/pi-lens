@@ -177,4 +177,41 @@ describe("#4532 gap 6: a joined look gets the walk it demands", () => {
 		expect(publishedCreated(seen, generated)).toBe(true);
 		await starter;
 	});
+
+	// #5005 F3: the answer route abandons its wait when its caller aborts, but
+	// a look is single-flight, so the abandon must not cut a walk another caller
+	// joined. The flight is held open by a subscriber, so the join and the abort
+	// are construction, not timing.
+	it("lets an aborted caller stop waiting without cutting the shared flight", async () => {
+		const seen = recordPublishes();
+		const hold = holdNextPublish();
+		const generated = path.join(root, "gen", "aborted.d.ts");
+		fs.writeFileSync(generated, "export declare const aborted: 1;\n");
+		const controller = new AbortController();
+		const caller = lookForOutOfBandChanges(root, "tool_call", undefined, {
+			walk: "always",
+			signal: controller.signal,
+		});
+		try {
+			await hold.reached;
+			controller.abort();
+			// Settles while the flight is still inside its publish. An
+			// implementation that awaited the walk would hang here.
+			await caller;
+		} finally {
+			hold.release();
+		}
+		// The flight was not cut: it finished its publish and advanced the root's
+		// record, so the next look of this root finds nothing new.
+		await lookForOutOfBandChanges(root, "tool_call", undefined, {
+			walk: "always",
+		});
+		expect(
+			seen.filter((change) =>
+				(change.pathChanges ?? []).some(
+					(entry) => entry.filePath === generated && entry.type === "created",
+				),
+			),
+		).toHaveLength(1);
+	});
 });

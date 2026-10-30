@@ -56,6 +56,7 @@ import {
 	loadProjectRulePolicyMap,
 } from "../clients/dispatch/finding-policy.js";
 import { readFileContent } from "../clients/dispatch/runners/utils.js";
+import { lookForOutOfBandChanges } from "../clients/out-of-band-changes.js";
 import { hasStrictDispositionMarks } from "../clients/diagnostic-dispositions.js";
 import { dispositionSuppressedLine } from "../clients/finding-delivery-gate.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
@@ -595,6 +596,22 @@ export function createLspDiagnosticsTool(
 					details: {},
 				};
 			}
+
+			// #4532 gap 5: the `tool_call` look walks at most once per
+			// `PI_LENS_DECLARATION_LOOK_MS` (2 s), so a declaration file created
+			// inside that window reached no server before this answer: the importer
+			// kept `Cannot find name` on call 1 and cleared only after a later bash
+			// result's walk. This is the extension route's half of the gap-13 rule,
+			// and it rides the same pre-answer seam as the sweep below. `"always"`
+			// walks on this look whatever the interval says; the walk is bounded per
+			// root (`DECLARATION_WALK_MAX_DIRS`/`_FILES`), and it runs before the
+			// sweep so a client a publish restarts receives the re-push that follows.
+			// #5005 F3: the caller's signal rides along, so an abandoned answer is
+			// neither held by this walk nor paying for it.
+			await lookForOutOfBandChanges(cwd, "tool_call", undefined, {
+				walk: "always",
+				signal,
+			});
 
 			// #4532 gap 13: a document the server already holds may have changed
 			// outside pi (a `cp`, a bash write) since pi last synced it. The touch

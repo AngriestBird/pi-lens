@@ -476,10 +476,13 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 		});
 
 		expect(output.join("\n")).toContain("LSP created-module witness");
-		// The two module rows and the two born-after-start config rows (#4532)
-		// all stay red: the scripted server reports every import missing.
+		// Every witness row stays red: the scripted server reports every import
+		// missing. 5 = 2 created-module rows (`runCreatedModuleWitness`: pi
+		// write, outside pi-lens) + 3 born-after-start config rows
+		// (`runBornAfterStartConfigWitness`: config file, root marker, root
+		// marker with no ancestor marker, added by #4532's gap 14).
 		expect(output.join("\n")).toContain("born after start (config file)");
-		expect(failures).toBe(4);
+		expect(failures).toBe(5);
 	});
 
 	// Recurrence: the one-call witness red-flaked locally (2 of 5 pyright runs
