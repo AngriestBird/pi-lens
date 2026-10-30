@@ -1801,6 +1801,11 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
 		ownerKey: "project",
 		reason: "diagnostics publisher registration and dirty-path dedupe",
 	},
+	"disk-changes.ts": {
+		ownerKey:
+			"process-wide: the disk-change subscriber registry, one per process, rebuilt by each module evaluation",
+		reason: "subscribers to out-of-band disk changes, keyed by consumer id",
+	},
 	"dispatch/auxiliary-lsp.ts": {
 		ownerKey:
 			"process-wide: a memo over the frozen AUXILIARY_LSP_PROFILES table, keyed by diagnostic source string",
@@ -1946,6 +1951,16 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
 		reason:
 			"anchor index entries are keyed by file path and bounded to the tool call",
 	},
+	"instance-registry-lock.ts": {
+		ownerKey:
+			"process-wide: the locks this process holds on the instance registry",
+		reason: "own lock holds in a process singleton cell",
+	},
+	"instance-registry-tail.ts": {
+		ownerKey:
+			"process-wide: the instance-registry mutation tail must outlive every session by construction",
+		reason: "the serialised mutation tail of the instance registry",
+	},
 	"instance-registry.ts": {
 		ownerKey:
 			"process-wide: the instance-registry enablement flag is read from this process's environment",
@@ -2001,6 +2016,12 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
 	"lsp/config.ts": {
 		ownerKey: "project",
 		reason: "LSP config in-flight dedupe, per-load not per-session",
+	},
+	"lsp/created-import-targets.ts": {
+		ownerKey: "session",
+		sessionSeamException:
+			"the scan rollup is one process singleton cell with a single cwd field, so concurrent sessions fold into one tally that its snapshot reports as this session's",
+		reason: "the producer tally of the created-import scan",
 	},
 	"lsp/document-drift.ts": {
 		ownerKey:
@@ -2093,6 +2114,12 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<
 			"process-wide: the probe-home redirect decision is fixed by this process's cwd and environment",
 		reason:
 			"#2506: the globalThis-keyed probe-home-redirect RESOLUTION (the memoized decision plus the degradation event it produced), the same shape as process-singletons.ts's container just below — a PROCESS boundary, not a session one. getGlobalPiLensLogDir()'s redirect decision is fixed by cwd/env at process start and is memoized once, so a session_start reset would only hide the fact from every session after the first in the same probe process. The slot key is a module-scope Symbol.for constant, which the container scan does not count. #2516 round 2 moved getGlobalPiLensLogDir() and the whole redirect decision into this module: it is off file-utils.ts's import cycle, so its own bindings can never be observed mid-initialization the way a resolver living in file-utils.ts could.",
+	},
+	"process-bridge.ts": {
+		ownerKey:
+			"process-wide: bridge dependencies of the live activation, rebound by each activation",
+		reason:
+			"versioned process singleton cells holding the mounted bridge's dependencies",
 	},
 	"process-singletons.ts": {
 		ownerKey:
@@ -2390,6 +2417,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"diagnostic-dispositions.ts": 1,
 	"diagnostic-line-freshness.ts": 1,
 	"diagnostics-publish.ts": 1,
+	"disk-changes.ts": 0,
 	"dispatch/auxiliary-lsp.ts": 1,
 	"dispatch/collect-later-tier.ts": 1,
 	// #2346 added `generatedSkipRecorded` beside `coverageNoticeSeen` (1 → 2);
@@ -2501,6 +2529,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #2442 review F2: the container regex now recognises BoundedFifoMap /
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
 	"installer/index.ts": 12,
+	"instance-registry-lock.ts": 0,
+	"instance-registry-tail.ts": 0,
 	"instance-registry.ts": 0,
 	"jscpd-client.ts": 2,
 	"knip-client.ts": 5,
@@ -2534,6 +2564,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// cannot be evicted while its root is still served. `configInFlight` alone
 	// remains here.
 	"lsp/config.ts": 1,
+	"lsp/created-import-targets.ts": 0,
 	"lsp/document-drift.ts": 2,
 	// #2372 slice 3: 2 -> 1. The never-mutated `OPTIONAL_LSP_SERVER_IDS` set
 	// moved to lsp/client-registry.ts with the spawn path that reads it; that
@@ -2616,6 +2647,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// mutable module-scope container here — the same shape as
 	// process-singletons.ts just below.
 	"probe-home-state.ts": 0,
+	"process-bridge.ts": 0,
 	// #2146: the container key is a Symbol.for constant, so the scan sees no
 	// mutable module-scope container here.
 	"process-singletons.ts": 0,

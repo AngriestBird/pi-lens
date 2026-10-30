@@ -710,7 +710,7 @@ export const SWEEP_HEURISTIC_LIMITS = [
 	"instance fields on bootstrap-lived singletons",
 	"session-scoped vs import-time-constant semantics",
 	"substitution: add one container, remove another, and the #1817 symbol-count pin sees no change",
-	"getProcessSingleton cells are a SIGNAL, but the cell VALUE lives off module scope on globalThis — a session-scoped cell is still only caught when its file also exports a reset (the pair-with-reset rule), and the cell itself is registered/exempted by hand judgment",
+	"getProcessSingleton cells are a SIGNAL, but the cell VALUE lives off module scope on globalThis — the file is a candidate with or without a reset (#5027), but the cell itself is registered/exempted by hand judgment and the pin does not count cells",
 	// #2455 fix round 2, F4: the widened predicate is "declared in clients/",
 	// which is still only a NAME match against clients/'s own class index —
 	// two shapes remain structurally invisible even though they hold the exact
@@ -1005,7 +1005,8 @@ function useSourcesFor(dir: string): () => Iterable<string> {
  * - a container bound next to an exported reset-shaped function, a getProcessSingleton
  *   call or a test-only reset (the original pairing rule);
  * - a module-level container that is not an admitted read-only constant
- *   ({@link isAdmittedConstant}), with or without a reset;
+ *   ({@link isAdmittedConstant}), or a getProcessSingleton call, with or
+ *   without a reset;
  * - a class field bound to a container ({@link instanceContainerFields}).
  *
  * `includeUnresetContainers` lists every file with any module container (the
@@ -1068,7 +1069,8 @@ export function scanSessionStateCandidates(
 			? stateSignal
 			: (resets.length > 0 && stateSignal) ||
 				openContainers.length > 0 ||
-				instanceFields.length > 0;
+				instanceFields.length > 0 ||
+				hasProcessSingleton;
 		if (!flagged) continue;
 		found.push({
 			file: relativePosix(dir, absolute),

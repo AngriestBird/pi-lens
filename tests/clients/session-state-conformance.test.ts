@@ -1523,6 +1523,24 @@ describe("session-state scan — containers with no reset, and class fields (#50
 		).toEqual(["read-guard.ts"]);
 	});
 
+	// Class sweep of #5027: five files kept their state in a process singleton
+	// cell (disk-changes.ts, instance-registry-lock.ts, instance-registry-tail.ts,
+	// lsp/created-import-targets.ts, process-bridge.ts) and exported no reset, so
+	// the pairing rule never asked whose it was.
+	it("a process singleton cell with no reset is a candidate", () => {
+		expect(
+			flagged({
+				"cell.ts": [
+					'import { getProcessSingleton } from "./process-singletons.js";',
+					"export function tally(): { calls: number } {",
+					'\treturn getProcessSingleton("tally", 1, () => ({ calls: 0 }));',
+					"}",
+					"",
+				].join("\n"),
+			}),
+		).toEqual(["cell.ts"]);
+	});
+
 	describe("the one admitted constant: an UPPER_SNAKE built-in never mutated", () => {
 		const READ_ONLY = [
 			'const READ_OPS = new Set(["read", "grep"]);',
