@@ -41,6 +41,7 @@
  *   node scripts/smoke-tools.mjs [lang ...] [--step2] [--tier1] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --lsp [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --lsp-gate [lang ...] [--install] [--verbose]
+ *   node scripts/smoke-tools.mjs --lsp-cascade [lang ...] [--install] [--verbose] [--times-out=<file>] [--min-pass=N]
  *   node scripts/smoke-tools.mjs --lens-full [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --format [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --resolution [--verbose]
@@ -68,6 +69,16 @@ import {
 	sweepScratchDirs,
 } from "./lib/scratch-dir.mjs";
 import { safeRm } from "./lib/safe-rm.mjs";
+import {
+	CASCADE_CONCLUSIVE_DEADLINE_MS,
+	CASCADE_FIXTURES,
+	CASCADE_RETRY_INTERVAL_MS,
+	CASCADE_WARM_DEADLINE_MS,
+	cascadeRow,
+	cascadeTimesRecord,
+	classifyCascadeRun,
+	describeLastTouch,
+} from "./lib/lsp-cascade-smoke.mjs";
 import { touchAnsweredDiagnostics } from "./lib/touch-result.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1854,6 +1865,8 @@ function parseArgs(argv) {
 	let install = false;
 	let lsp = false;
 	let lspGate = false;
+	let lspCascade = false;
+	let timesOut = null;
 	let lensFull = false;
 	let format = false;
 	let resolution = false;
@@ -1869,6 +1882,9 @@ function parseArgs(argv) {
 		else if (arg === "--install") install = true;
 		else if (arg === "--lsp") lsp = true;
 		else if (arg === "--lsp-gate") lspGate = true;
+		else if (arg === "--lsp-cascade") lspCascade = true;
+		else if (arg.startsWith("--times-out="))
+			timesOut = arg.slice("--times-out=".length);
 		else if (arg === "--lens-full") lensFull = true;
 		else if (arg === "--format") format = true;
 		else if (arg === "--resolution") resolution = true;
@@ -1888,6 +1904,8 @@ function parseArgs(argv) {
 		install,
 		lsp,
 		lspGate,
+		lspCascade,
+		timesOut,
 		lensFull,
 		format,
 		resolution,
@@ -2043,8 +2061,14 @@ export function passFloorBreach(rows, minPass) {
 	});
 	if (verdict.ok) return null;
 	const unavailable = rows.filter((r) => r.state === "skip").length;
+	// The sentence follows what happened: "installs nothing" is only true when
+	// nothing passed (#5021 verify F10).
+	const conclusion =
+		verdict.evaluated === 0
+			? "A lane that installs nothing proves nothing"
+			: "A lane that proves fewer servers than its floor proves too little";
 	return `
-✗ pass floor: ${verdict.evaluated} runner(s) passed, at least ${verdict.floor} required (${unavailable} unavailable). A lane that installs nothing proves nothing — treat this as red, not as flaky tooling.`;
+✗ pass floor: ${verdict.evaluated} runner(s) passed, at least ${verdict.floor} required (${unavailable} unavailable). ${conclusion} — treat this as red, not as flaky tooling.`;
 }
 
 // A transient/offline registry condition — the runner has no network, or the
@@ -3212,6 +3236,295 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 }
 
 /**
+ * Live cascade layer (`--lsp-cascade`, #1712). Per `CASCADE_FIXTURES` row:
+ * warm the exporter and its importers through `LSPService.touchFile`, break the
+ * exporter's signature on disk, then call the production
+ * `computeCascadeForFile` (repeated until the neighbours conclude or the
+ * deadline passes) and classify the run (`scripts/lib/lsp-cascade-smoke.mjs`).
+ * A server that handshook and never concludes reds the lane. The measured
+ * times are the lane's telemetry (`--times-out`).
+ */
+export async function runLspCascade({
+	langs = [],
+	install,
+	verbose,
+	timesOut = null,
+	minPass = null,
+	deps,
+} = {}) {
+	const lspEntry = path.join(repoRoot, "dist", "clients", "lsp", "index.js");
+	const cascadeEntry = path.join(
+		repoRoot,
+		"dist",
+		"clients",
+		"dispatch",
+		"integration.js",
+	);
+	const configEntry = path.join(
+		repoRoot,
+		"dist",
+		"clients",
+		"lsp",
+		"config.js",
+	);
+	if (!deps && !(fs.existsSync(lspEntry) && fs.existsSync(cascadeEntry))) {
+		console.error(
+			`dist build missing: ${lspEntry}\nRun \`npm run build:dist\` first.`,
+		);
+		process.exit(2);
+	}
+	let getLSPService;
+	let computeCascadeForFile;
+	let initLSPConfig;
+	let ensureTool;
+	let getInstallAttempt;
+	if (deps) {
+		({
+			getLSPService,
+			computeCascadeForFile,
+			initLSPConfig,
+			ensureTool,
+			getInstallAttempt,
+		} = deps);
+	} else {
+		({ getLSPService } = await import(pathToFileURL(lspEntry).href));
+		({ computeCascadeForFile } = await import(
+			pathToFileURL(cascadeEntry).href
+		));
+		({ initLSPConfig } = await import(pathToFileURL(configEntry).href));
+		({ ensureTool, getInstallAttempt } = await import(
+			pathToFileURL(
+				path.join(repoRoot, "dist", "clients", "installer", "index.js"),
+			).href
+		));
+	}
+	// A standalone host, as the other LSP layers: the copied fixture is a
+	// trusted project, through the seam pi uses.
+	await adoptFixtureProjectTrust({
+		repoRoot,
+		adopt: deps?.adoptProjectTrustFromContext,
+	});
+	const selected = (deps?.fixtures ?? CASCADE_FIXTURES).filter(
+		(f) => !langs.length || langs.includes(f.lang),
+	);
+	if (selected.length === 0) {
+		console.error(`No cascade fixtures matched: ${langs.join(", ")}`);
+		return 1;
+	}
+	let handshakeCensus;
+	const censusPath = process.env.PI_LENS_HOME
+		? path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json")
+		: undefined;
+	if (censusPath && fs.existsSync(censusPath)) {
+		try {
+			handshakeCensus = JSON.parse(fs.readFileSync(censusPath, "utf8"));
+		} catch {
+			// A malformed census says nothing about the handshake.
+		}
+	}
+	const lsp = getLSPService();
+	const touchOptions = {
+		diagnostics: "document",
+		collectDiagnostics: true,
+		clientScope: "primary",
+		maxClientWaitMs: LSP_CLIENT_WAIT_MS,
+		maxDiagnosticsWaitMs: LSP_DIAGNOSTICS_WAIT_MS,
+		source: "smoke-lsp-cascade",
+	};
+	const rows = [];
+	const measurements = {};
+	let seq = 0;
+	for (const cascadeFx of selected) {
+		const base = LSP_FIXTURES.find((f) => f.lang === cascadeFx.lang);
+		const fx = { ...base, ...cascadeFx };
+		const push = (state, detail, diags = 0) =>
+			rows.push({ lang: fx.lang, runner: fx.serverHint, state, detail, diags });
+		await ensureFixtureTools(
+			fx.tools ?? [],
+			install
+				? ensureTool
+				: (toolId) => ensureTool(toolId, { allowInstall: false }),
+			getInstallAttempt,
+			(toolId, resolved) =>
+				verbose &&
+				console.error(
+					`[${fx.lang}] ensureTool(${toolId}) → ${resolved ?? "UNAVAILABLE"}`,
+				),
+		);
+		// A server the workflow provisions itself (`provisionedBy`) was not started
+		// by the handshake step, so the census says nothing about it: the variable
+		// is the claim that it is there.
+		const handshook = fx.provisionedBy
+			? Boolean(process.env[fx.provisionedBy]?.trim())
+			: handshakeCensus
+				? handshakeCensus[fx.lang]?.state === "pass"
+				: undefined;
+		let workspace;
+		let cleanup;
+		try {
+			let absPrimary;
+			({
+				workspace,
+				absFile: absPrimary,
+				cleanup,
+			} = await (deps?.bootstrapFixtureWorkspace ?? bootstrapFixtureWorkspace)(
+				fx,
+				{
+					initLSPConfig,
+					repoRoot,
+					tmpPrefix: "pi-lens-smoke-cascade-",
+				},
+			));
+			if (fx.setup) {
+				const setupResult = runFixtureSetup(fx.setup, workspace, verbose);
+				if (!setupResult.ok) {
+					push("setup-failed", setupResult.detail);
+					continue;
+				}
+			}
+			const measured = { handshook, answered: false, warmMs: 0, attempts: 0 };
+			measurements[fx.lang] = measured;
+			// A server the handshake step could not start is unavailable on this
+			// runner (the gate's rule): waiting out the warm-up deadline for it
+			// would spend minutes proving nothing.
+			if (handshook === false) {
+				const row = cascadeRow(fx, measured);
+				push(row.state, row.detail);
+				continue;
+			}
+			// Warm: every file open, with a snapshot from before the edit.
+			const abs = (rel) => path.join(workspace, rel);
+			const warmDeadlineMs = fx.warmDeadlineMs ?? CASCADE_WARM_DEADLINE_MS;
+			const warmStart = Date.now();
+			for (const rel of [fx.file, ...fx.neighbours]) {
+				const content = fs.readFileSync(abs(rel), "utf8");
+				const left = Math.max(0, warmDeadlineMs - (Date.now() - warmStart));
+				const ready = await pollUntil(
+					async () => {
+						const touched = await lsp.touchFile(
+							abs(rel),
+							content,
+							touchOptions,
+						);
+						const diags = touchAnsweredDiagnostics(touched, touchOptions, lsp);
+						if (diags !== undefined) measured.answered = true;
+						return diags !== undefined && !touched?.inconclusive;
+					},
+					{ deadlineMs: left, intervalMs: 1000 },
+				);
+				if (verbose)
+					console.error(
+						`[${fx.lang}] warm ${rel}: ${ready.ok ? "answered" : "no conclusive answer"} after ${ready.polls} touch(es), ${ready.elapsedMs} ms`,
+					);
+				if (!measured.answered) break;
+			}
+			measured.warmMs = Date.now() - warmStart;
+			if (measured.answered && fx.expectLaunchVariant) {
+				const snapshots = await lsp.getCapabilitySnapshots(absPrimary);
+				if (
+					!snapshots.some((s) => s.launchVariant === fx.expectLaunchVariant)
+				) {
+					push(
+						"fail",
+						`expected launchVariant '${fx.expectLaunchVariant}', got [${snapshots.map((s) => s.launchVariant ?? "(unset)").join(",")}] — silent fallback?`,
+					);
+					continue;
+				}
+			}
+			if (!measured.answered) {
+				try {
+					const logDir = process.env.PI_LENS_HOME ?? "";
+					const readLog = (name) => {
+						try {
+							return fs.readFileSync(path.join(logDir, name), "utf8");
+						} catch {
+							return "";
+						}
+					};
+					measured.why = describeLastTouch(
+						readLog("latency.log"),
+						absPrimary,
+						readLog("extension.log"),
+					);
+				} catch {
+					// No latency log to read: the row keeps its plain wording.
+				}
+				const row = cascadeRow(fx, measured);
+				push(row.state, row.detail);
+				continue;
+			}
+			// The edit: the exporter's signature changes, as an agent's write would.
+			const before = fs.readFileSync(absPrimary, "utf8");
+			const after = before.replace(fx.edit.from, fx.edit.to);
+			if (after === before) {
+				push(
+					"fail",
+					`fixture drift: '${fx.edit.from}' not found in ${fx.file}`,
+				);
+				continue;
+			}
+			const deadlineMs =
+				fx.conclusiveDeadlineMs ?? CASCADE_CONCLUSIVE_DEADLINE_MS;
+			const editStart = Date.now();
+			fs.writeFileSync(absPrimary, after);
+			await lsp.touchFile(absPrimary, after, touchOptions);
+			for (;;) {
+				measured.attempts += 1;
+				seq += 1;
+				const cascadeStart = Date.now();
+				const run = await computeCascadeForFile(absPrimary, workspace, {
+					turnSeq: seq,
+					writeSeq: seq,
+					projectRoot: workspace,
+				});
+				if (measured.attempts === 1)
+					measured.firstCascadeMs = Date.now() - cascadeStart;
+				const prior = measured.concluded?.detail;
+				measured.concluded = classifyCascadeRun(run, fx, workspace);
+				measured.neighbours = measured.concluded.neighbours;
+				measured.elapsedMs = Date.now() - editStart;
+				if (verbose && measured.concluded.detail !== prior)
+					console.error(
+						`[${fx.lang}] cascade attempt ${measured.attempts}: ${measured.concluded.state} (${measured.concluded.detail}) skipReason=${run.skipReason ?? "-"} observed=${JSON.stringify(run.observedNeighborPaths ?? [])} unconfirmed=${run.unconfirmed?.count ?? 0}${measured.concluded.state === "wrong-verdict" ? `\n${run.result?.formatted ?? "(no cascade output)"}` : ""}`,
+					);
+				if (measured.concluded.state === "conclusive") {
+					measured.timeToConclusiveMs = measured.elapsedMs;
+					break;
+				}
+				if (measured.elapsedMs + CASCADE_RETRY_INTERVAL_MS > deadlineMs) break;
+				await sleep(CASCADE_RETRY_INTERVAL_MS);
+			}
+			const row = cascadeRow(fx, measured);
+			push(row.state, row.detail, row.diags);
+		} catch (err) {
+			push("fail", `cascade error: ${err?.message ?? err}`);
+		} finally {
+			cleanup?.();
+		}
+	}
+	try {
+		await lsp.shutdown();
+	} catch {
+		// best-effort teardown
+	}
+	const failures = report(
+		rows,
+		"LSP cascade (edit the exporter → importers conclude)",
+		{ failOnSkipOnly: true },
+	);
+	if (timesOut) {
+		fs.writeFileSync(
+			timesOut,
+			`${JSON.stringify(cascadeTimesRecord(rows, measurements), null, 2)}\n`,
+		);
+		if (verbose) console.error(`[lsp-cascade] times written to ${timesOut}`);
+	}
+	const floorBreach = passFloorBreach(rows, minPass);
+	if (floorBreach) console.error(floorBreach);
+	return failures + (floorBreach ? 1 : 0);
+}
+
+/**
  * The drift line criterion 4 of #3217 asks for: `gated N / handshake-only M /
  * unavailable K`, derived from `lspGatePopulation()` and this run's own rows so
  * a new fixture added without a flag is visible in the nightly summary instead
@@ -4307,6 +4620,8 @@ async function main() {
 		install,
 		lsp,
 		lspGate,
+		lspCascade,
+		timesOut,
 		lensFull,
 		format,
 		resolution,
@@ -4336,6 +4651,14 @@ async function main() {
 
 	if (lspGate) {
 		process.exit((await runLspGate({ langs, install, verbose })) > 0 ? 1 : 0);
+	}
+
+	if (lspCascade) {
+		process.exit(
+			(await runLspCascade({ langs, install, verbose, timesOut, minPass })) > 0
+				? 1
+				: 0,
+		);
 	}
 
 	if (lensFull) {

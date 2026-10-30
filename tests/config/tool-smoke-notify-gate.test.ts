@@ -153,7 +153,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		);
 	});
 
-	it("reads all eight gating layers' step outcomes via the smoke job's outputs, by expression (not hardcoded literals)", () => {
+	it("reads all nine gating layers' step outcomes via the smoke job's outputs, by expression (not hardcoded literals)", () => {
 		const env = notifyStep.env ?? {};
 		expect(env.TOOL_LAYER_OUTCOME).toBe(
 			"${{ needs.tool-smoke.outputs.tool_layer }}",
@@ -163,6 +163,14 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		);
 		expect(env.LSP_GATE_OUTCOME).toBe(
 			"${{ needs.tool-smoke.outputs.lsp_gate }}",
+		);
+		// #1712: the live cascade layer. Without this pair a cascade red filed as
+		// "(outside the tracked layers)" with no log (the #2723 shape).
+		expect(env.LSP_CASCADE_OUTCOME).toBe(
+			"${{ needs.tool-smoke.outputs.lsp_cascade }}",
+		);
+		expect(env.LSP_CASCADE_LOG).toBe(
+			"${{ runner.temp }}/tool-smoke-lsp-cascade.log",
 		);
 		expect(env.LENS_FULL_OUTCOME).toBe(
 			"${{ needs.tool-smoke.outputs.lens_full }}",
@@ -198,6 +206,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 			"tool_layer",
 			"lsp_handshake",
 			"lsp_gate",
+			"lsp_cascade",
 			"lens_full",
 			"format_layer",
 			"resolution_layer",
@@ -214,6 +223,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 		expect(findStep(workflow, "LSP diagnostics clean-gate").id).toBe(
 			"lsp_gate",
 		);
+		expect(findStep(workflow, "LSP cascade layer").id).toBe("lsp_cascade");
 		expect(findStep(workflow, "lens_diagnostics mode=full row").id).toBe(
 			"lens_full",
 		);
@@ -253,6 +263,7 @@ describe("tool-smoke.yml's issue writers are scoped to nightly/default runs (#33
 			"Tool layer",
 			"LSP handshake layer",
 			"LSP diagnostics clean-gate",
+			"LSP cascade layer",
 			"lens_diagnostics mode=full row",
 			"Format layer",
 			"Resolution layer",
@@ -408,6 +419,7 @@ describe("each gating layer step's pipe keeps set -o pipefail (#2723 review F4)"
 		"Tool layer",
 		"LSP handshake layer",
 		"LSP diagnostics clean-gate",
+		"LSP cascade layer",
 		"lens_diagnostics mode=full row",
 		"Format layer",
 		"Resolution layer",
@@ -503,6 +515,7 @@ describe("each layer's tee log filename matches the notify step's *_LOG env (#27
 		["Tool layer", "TOOL_LAYER_LOG"],
 		["LSP handshake layer", "LSP_HANDSHAKE_LOG"],
 		["LSP diagnostics clean-gate", "LSP_GATE_LOG"],
+		["LSP cascade layer", "LSP_CASCADE_LOG"],
 		["lens_diagnostics mode=full row", "LENS_FULL_LOG"],
 		["Format layer", "FORMAT_LAYER_LOG"],
 		["Resolution layer", "RESOLUTION_LAYER_LOG"],

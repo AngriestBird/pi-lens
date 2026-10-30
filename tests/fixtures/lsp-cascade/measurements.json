@@ -1,0 +1,68 @@
+{
+	"_comment": "First measured time-to-conclusive per priority server (#1712; the #1549 budget input). Raw artifact `lsp-cascade-times` of the tool-smoke workflow_dispatch run named in runner.runId (head 2913446ae, ubuntu runner, run 2026-10-30), unedited apart from this comment. Milliseconds. warmMs: cold start to the exporter and both importers answering a touch. timeToConclusiveMs: from the exporter's edit to both importers observed with the expected finding (null: never, java is declared inconclusive because CASCADE_GRAPH_KINDS has no java). Refresh it from a later nightly's artifact; tests/config/lsp-cascade-measurements.test.ts keeps it consistent with the fixtures and deadlines.",
+	"schema": 1,
+	"command": "node scripts/smoke-tools.mjs --lsp-cascade --install --times-out=<file>",
+	"date": "2026-10-30",
+	"runner": {
+		"os": "linux",
+		"arch": "x64",
+		"node": "v22.23.4",
+		"ci": true,
+		"runId": "41028917875",
+		"image": "20261026.354.1"
+	},
+	"rows": [
+		{
+			"lang": "typescript7",
+			"server": "typescript native (tsc --lsp --stdio, TS7+)",
+			"state": "pass",
+			"warmMs": 149,
+			"firstCascadeMs": 121,
+			"timeToConclusiveMs": 129,
+			"attempts": 1,
+			"neighbours": {
+				"src/b.ts": "findings",
+				"src/c.ts": "findings"
+			}
+		},
+		{
+			"lang": "rust",
+			"server": "rust-analyzer",
+			"state": "pass",
+			"warmMs": 983,
+			"firstCascadeMs": 62,
+			"timeToConclusiveMs": 2887,
+			"attempts": 1,
+			"neighbours": {
+				"src/b.rs": "findings",
+				"src/c.rs": "findings"
+			}
+		},
+		{
+			"lang": "go",
+			"server": "gopls",
+			"state": "pass",
+			"warmMs": 1494,
+			"firstCascadeMs": 1009,
+			"timeToConclusiveMs": 1322,
+			"attempts": 1,
+			"neighbours": {
+				"app/app.go": "findings",
+				"tool/tool.go": "findings"
+			}
+		},
+		{
+			"lang": "java",
+			"server": "jdtls",
+			"state": "pass",
+			"warmMs": 7041,
+			"firstCascadeMs": 0,
+			"timeToConclusiveMs": null,
+			"attempts": 5,
+			"neighbours": {
+				"src/app/B.java": "unconfirmed",
+				"src/app/C.java": "unconfirmed"
+			}
+		}
+	]
+}
