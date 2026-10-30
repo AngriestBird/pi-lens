@@ -393,7 +393,7 @@ function fileMatchesPathGlobs(
 	const rel = path.relative(cwd, file).split(path.sep).join("/");
 	const options = { dot: true, nocase: process.platform === "win32" };
 	return globs.some((raw) => {
-		const pattern = raw.split("\\").join("/");
+		const pattern = toPosix(raw);
 		return (
 			minimatch(rel, pattern, options) ||
 			minimatch(rel, `${pattern}/**`, options)

@@ -29,13 +29,21 @@
  *   `getAvailableRunners`, lens-engine.ts `recentLatency`, resolved-config.ts
  *   `isLegacyLspFile`, tools/lsp-navigation.ts latency phase.
  * - file-utils.ts `isTestFile`: no predicate it applies reads a separator, so
- *   its fold is unobservable (routed through `toPosix` all the same).
+ *   its fold is unobservable (routed through `toPosix` all the same; #5013 F5
+ *   proved it dead and deferred the deletion, see the PR's accepted residuals).
  * One more was deleted outright because its fold was a no-op: file-role.ts (a
  * second fold of the already-folded `dir`).
+ *
+ * The other two folds this PR could not witness at first are driven from the
+ * files that already own their harness rather than here, because each needs a
+ * service or graph double this file does not carry: dispatch/integration.ts's
+ * cascade neighbour path (tests/clients/cascade-compute.test.ts) and
+ * lsp/index.ts's rename description (tests/clients/lsp/service-rename-file.test.ts).
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isRuleIgnoredForPath } from "../../clients/dispatch/rule-ignores.js";
 import { isGitHubWorkflowFile } from "../../clients/dispatch/runners/actionlint.js";
@@ -144,15 +152,19 @@ describe('toPosix fold sites: former inline `.replace(/\\\\/g, "/")` callers', (
 	});
 
 	it("a rename whose two spellings differ only by separator is refused (lsp/edits.ts preflight)", async () => {
-		fs.writeFileSync(path.join(fx, `a${BS}r.ts`), "x");
+		// The preflight folds the two resolved disk paths and throws before any read
+		// (`preflightWorkspaceEdit`'s rename arm), so neither spelling needs to
+		// exist, and both URIs are built through `pathToFileURL` so the fixture is
+		// valid on a Windows host too — there a backslash is a separator, not a
+		// file-name character (#5013 F2).
 		await expect(
 			validateWorkspaceEdit(
 				{
 					documentChanges: [
 						{
 							kind: "rename",
-							oldUri: `file://${fx}/a%5Cr.ts`,
-							newUri: `file://${fx}/a/r.ts`,
+							oldUri: pathToFileURL(path.join(fx, `a${BS}r.ts`)).href,
+							newUri: pathToFileURL(path.join(fx, "a", "r.ts")).href,
 						},
 					],
 				},
@@ -181,11 +193,19 @@ describe('toPosix fold sites: former inline `.replace(/\\\\/g, "/")` callers', (
 			JSON.stringify({ name: "a" }),
 		);
 		const weird = path.join(fx, "ws2");
-		fs.mkdirSync(path.join(weird, "packages", `we${BS}ird`), {
+		// The module's `relativePath` fold is load-bearing only where the host's
+		// `path.relative` can spell a separator as a backslash: on win32 for any
+		// nested module, on POSIX only through a literal backslash inside one
+		// directory's name. Each host gets the spelling that makes the fold do work,
+		// and the one `packages/*` glob matches both (#5013 F2).
+		const weirdDir = process.platform === "win32" ? "weird" : `we${BS}ird`;
+		const weirdRel =
+			process.platform === "win32" ? "packages/weird" : "packages/we/ird";
+		fs.mkdirSync(path.join(weird, "packages", weirdDir), {
 			recursive: true,
 		});
 		fs.writeFileSync(
-			path.join(weird, "packages", `we${BS}ird`, "package.json"),
+			path.join(weird, "packages", weirdDir, "package.json"),
 			JSON.stringify({ name: "weird" }),
 		);
 		fs.writeFileSync(
@@ -202,11 +222,15 @@ describe('toPosix fold sites: former inline `.replace(/\\\\/g, "/")` callers', (
 				: [];
 		};
 		expect(describeModules(ws)).toEqual(["a@packages/a"]);
-		expect(describeModules(weird)).toEqual(["weird@packages/we/ird"]);
+		expect(describeModules(weird)).toEqual([`weird@${weirdRel}`]);
 	});
 
 	it("project rules scan folds a backslash directory name (rules-scanner.ts)", () => {
 		const rr = path.join(fx, "rr");
+		// `sub\dir` is one directory whose name contains a backslash on POSIX and
+		// two nested directories on win32, where `path.relative` spells the
+		// separators with backslashes anyway; the fold is load-bearing on both
+		// (#5013 F2).
 		fs.mkdirSync(path.join(rr, ".claude", "rules", `sub${BS}dir`), {
 			recursive: true,
 		});

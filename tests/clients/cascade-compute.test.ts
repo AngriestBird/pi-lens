@@ -1297,6 +1297,46 @@ describe("computeCascadeForFile", () => {
 		return (call![0] as { metadata: Record<string, unknown> }).metadata;
 	}
 
+	// #5013: `cascade_result`'s `neighbors[].file` is the only surface that reads
+	// the posix fold (the widget and formatted paths keep the full neighbour
+	// path), so it is the record that witnesses the fold at that site. On win32
+	// every nested path spells its separators with backslashes; on POSIX the fold
+	// is observable only through a literal backslash in a directory name.
+	it("#5013: cascade_result folds a backslash-spelled neighbour path for display (integration.ts)", async () => {
+		const env = setupTestEnvironment("cascade-neighbor-fold-");
+		try {
+			const primary = path.join(env.tmpDir, "hub.py");
+			fs.writeFileSync(primary, "class Hub: pass\n");
+			const neighbourDir =
+				process.platform === "win32" ? path.join("sub", "dir") : "sub\\dir";
+			const neighborPath = path.join(env.tmpDir, neighbourDir, "dep.py");
+			fs.mkdirSync(path.dirname(neighborPath), { recursive: true });
+			fs.writeFileSync(neighborPath, "from hub import Hub\n");
+			mocks.computeImpactCascade.mockReturnValue(
+				impact(primary, [neighborPath]),
+			);
+			installLspService({
+				...makeLspServiceDouble(),
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn().mockResolvedValue({ diags: [lspError()] }),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(cascadeResultMetadata().neighbors).toContainEqual(
+				expect.objectContaining({ file: "dir/dep.py" }),
+			);
+		} finally {
+			env.cleanup();
+		}
+	}, 30_000);
+
 	it("#1462: a cascade inside the rescue band walks fewer neighbours instead of overrunning the on-time window", async () => {
 		const env = setupTestEnvironment("cascade-budget-pressured-");
 		const fixture = budgetFixture(env.tmpDir, 41);
