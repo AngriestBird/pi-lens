@@ -44,9 +44,12 @@
   The commit gate reads every record, whoever owns it, because the tree is
   shared. A turn end reads only its own session's records: it delivers,
   sweeps, re-judges and consumes those, and files its guard section under its
-  own id. Only a write by the coordinator's session latches
-  `session_mismatch`; a concurrent session's write leaves another
-  session's record and the latch alone.
+  own id. The gate reads every record but retires only its own session's: its
+  missing-file sweep (#5020) persists into the committing cwd's cache, which
+  holds that session's records and no other's, so another session's
+  dead-cite row waits for that session's own gate or turn end. Only a write
+  by the coordinator's session latches `session_mismatch`; a concurrent
+  session's write leaves another session's record and the latch alone.
 - The commit gate is keyed by the repository being committed (#4941), not by
   session. A commit/push is judged by the unresolved blockers whose files lie
   in the git checkout it targets (`resolveGitCheckout`, the seam the review
