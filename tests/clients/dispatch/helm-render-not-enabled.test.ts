@@ -35,23 +35,17 @@ import {
 import { resetWorkspaceTopology } from "../../../clients/workspace-topology.js";
 import { wireUserNotifier } from "../../../clients/user-notify.js";
 import { makeRunnerCtx } from "../../support/runner-ctx.js";
+import { capThenTimedOutSpawnResult } from "../../support/spawn-shapes.js";
 import { useConfigPath } from "../../support/global-config.js";
 import { removeTempDirSync } from "../test-utils.js";
 
-// The one process boundary: an absent helm. Render validation ON with no helm
-// is the failing-render arm; with it OFF the runner never reaches this.
-const { resolveAvailableOrInstall } = vi.hoisted(() => ({
-	resolveAvailableOrInstall: vi.fn(async () => null),
+// The one process boundary: the spawned binary. Render validation OFF never
+// reaches it; the ON arm answers `helm` like a render that timed out.
+const { safeSpawnAsync } = vi.hoisted(() => ({ safeSpawnAsync: vi.fn() }));
+vi.mock("../../../clients/safe-spawn.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../clients/safe-spawn.js")>()),
+	safeSpawnAsync,
 }));
-vi.mock(
-	"../../../clients/dispatch/runners/utils/runner-helpers.js",
-	async (importOriginal) => ({
-		...(await importOriginal<
-			typeof import("../../../clients/dispatch/runners/utils/runner-helpers.js")
-		>()),
-		resolveAvailableOrInstall,
-	}),
-);
 
 const setConfigPath = useConfigPath();
 
@@ -60,6 +54,7 @@ let globalDir: string;
 let chartDir: string;
 let template: string;
 let previousHome: string | undefined;
+let previousPath: string | undefined;
 
 function writeProject(config: unknown): void {
 	fs.writeFileSync(
@@ -120,9 +115,32 @@ beforeEach(() => {
 	resetDegradationLedger();
 	wireUserNotifier(() => () => {});
 	writeChart();
+	// The availability checker looks `helm` up on disk before it spawns anything;
+	// the stand-in is never executed because the spawn is mocked.
+	const bin = path.join(tmpDir, "bin");
+	fs.mkdirSync(bin);
+	const stub = path.join(
+		bin,
+		process.platform === "win32" ? "helm.exe" : "helm",
+	);
+	fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+	fs.chmodSync(stub, 0o755);
+	previousPath = process.env.PATH;
+	process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+	safeSpawnAsync.mockReset();
+	safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+		args[0] === "template"
+			? // A render that timed out: the runner reached no verdict.
+				capThenTimedOutSpawnResult({
+					outputTruncated: false,
+					killedForOutputCap: false,
+				})
+			: { error: null, status: 0, stdout: "v3.14.0\n", stderr: "" },
+	);
 });
 
 afterEach(() => {
+	process.env.PATH = previousPath;
 	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 	else process.env.PI_LENS_HOME = previousHome;
 	resetProjectLensConfigCache();
@@ -161,8 +179,8 @@ describe("helm-render opt-out reads as the opt-in, not a failed tool (#5042)", (
 	});
 
 	it("still reads a render that is on and failing as a failure", async () => {
-		// Render validation ON in a trusted project, helm absent: the pass runs
-		// and breaks, which is a failure the notice must keep naming.
+		// Render validation ON in a trusted project and the render times out: a
+		// tool that failed, which the notice must keep naming.
 		// Recurrence: admitting the opt-out must not hide a render that failed.
 		writeProject({
 			dispatch: { disabledRunners: ["helm-lint"] },
@@ -172,7 +190,9 @@ describe("helm-render opt-out reads as the opt-in, not a failed tool (#5042)", (
 
 		const result = await dispatch();
 
-		expect(resolveAvailableOrInstall).toHaveBeenCalled();
+		expect(
+			safeSpawnAsync.mock.calls.some((call) => call[1][0] === "template"),
+		).toBe(true);
 		expect(result.output).toContain("failed to run");
 		expect(result.output).toContain("dispatch.disabledRunners");
 		expect(result.output).not.toContain("so no runner checks these files");
