@@ -103,19 +103,19 @@ const INSTALL_MARKERS = [
  * in its own order (#4532 gap 3).
  */
 const VENV_DIR_NAMES = [".venv", "venv"];
-/** The version level of a POSIX venv's `site-packages` directory. */
+/** The interpreter level of a POSIX venv's `site-packages` directory. */
 const VENV_LIB_DIR = "lib";
 /** The Windows venv layout's `site-packages`, relative to the venv root. */
 const VENV_WINDOWS_SITE_PACKAGES = join("Lib", "site-packages");
 /**
- * Version directories under `<venv>/lib` statted per look. A venv holds one per
- * interpreter on the platform, so the cap never binds on a real environment; it
- * exists so a pathological `lib` cannot turn every look into a stat storm, and
- * a version directory past the cap is not stamped — an install there publishes
- * nothing, which is the bound's stated cost, chosen over an unbounded stat per
- * look.
+ * Interpreter directories under `<venv>/lib` statted per look. A venv holds one
+ * per interpreter on the platform, so the cap never binds on a real
+ * environment; it exists so a pathological `lib` cannot turn every look into a
+ * stat storm, and an interpreter directory past the cap is not stamped — an
+ * install there publishes nothing, which is the bound's stated cost, chosen
+ * over an unbounded stat per look.
  */
-const VENV_VERSION_DIRS_MAX = 4;
+const VENV_INTERPRETER_DIRS_MAX = 4;
 
 /** Directories one declaration walk reads before it stops (degraded). */
 const DECLARATION_WALK_MAX_DIRS = 4096;
@@ -234,14 +234,15 @@ function diffServerConfigs(
  * published change clears on call 1).
  *
  * One directory stat per `site-packages` and NO listing of its contents: `pip
- * install` adds the package's directory and its `<name>-<version>.dist-info`
- * entry, which moves the directory's own mtime, inode or size. A root with no
- * venv costs no syscall here; a venv costs one `lib` listing and one stat per
- * version directory, plus one stat for the Windows layout (absent on POSIX).
+ * install` adds the package's directory and its `.dist-info` entry, which moves
+ * the directory's own mtime, inode or size. A root with no venv costs no
+ * syscall here; a venv costs one `lib` listing and one stat per interpreter
+ * directory, plus one stat for the Windows layout (absent on POSIX).
  *
  * Residual: an install that rewrites files INSIDE an existing package
- * directory without adding or removing an entry (a same-version reinstall that
- * leaves `<name>` and its `.dist-info` in place) changes no entry of
+ * directory without adding or removing an entry (a reinstall of the same
+ * package release that leaves `<name>` and its `.dist-info` in place)
+ * changes no entry of
  * `site-packages` itself, so it publishes nothing; pip's own uninstall-then-
  * install moves the directory.
  */
@@ -253,14 +254,14 @@ async function readVenvInstallParts(
 	for (const name of VENV_DIR_NAMES) {
 		if (!listed.has(name)) continue;
 		const venvRoot = join(root, name);
-		// The Windows layout has no version level, so it is one stat either way.
+		// The Windows layout has no interpreter level, so it is one stat either way.
 		targets.push({
 			label: `${name}/${VENV_WINDOWS_SITE_PACKAGES}`,
 			dir: join(venvRoot, VENV_WINDOWS_SITE_PACKAGES),
 		});
-		let versions: import("node:fs").Dirent[];
+		let interpreters: import("node:fs").Dirent[];
 		try {
-			versions = await fsp.readdir(join(venvRoot, VENV_LIB_DIR), {
+			interpreters = await fsp.readdir(join(venvRoot, VENV_LIB_DIR), {
 				withFileTypes: true,
 			});
 		} catch {
@@ -270,12 +271,15 @@ async function readVenvInstallParts(
 		// Deterministic order, as the declaration walk's keys are (S2871): the
 		// population that fits `VENV_VERSION_DIRS_MAX` must not depend on the
 		// order the filesystem listed the entries in.
-		versions.sort((a, b) => compareOrdinal(a.name, b.name));
-		for (const version of versions.slice(0, VENV_VERSION_DIRS_MAX)) {
-			if (!version.isDirectory() && !version.isSymbolicLink()) continue;
+		interpreters.sort((a, b) => compareOrdinal(a.name, b.name));
+		for (const interpreter of interpreters.slice(
+			0,
+			VENV_INTERPRETER_DIRS_MAX,
+		)) {
+			if (!interpreter.isDirectory() && !interpreter.isSymbolicLink()) continue;
 			targets.push({
-				label: `${name}/${VENV_LIB_DIR}/${version.name}/site-packages`,
-				dir: join(venvRoot, VENV_LIB_DIR, version.name, "site-packages"),
+				label: `${name}/${VENV_LIB_DIR}/${interpreter.name}/site-packages`,
+				dir: join(venvRoot, VENV_LIB_DIR, interpreter.name, "site-packages"),
 			});
 		}
 	}
@@ -288,6 +292,9 @@ async function readVenvInstallParts(
 					changedAt: stat.mtimeMs,
 				};
 			} catch {
+				// none: the venv has no `site-packages` at this layout, which reads as
+				// "no entry here" exactly as a listed name that could not be statted
+				// does; a layout that appears later changes the stamp.
 				return { part: `${target.label}=-`, changedAt: 0 };
 			}
 		}),
@@ -349,19 +356,24 @@ async function readInstallStamp(root: string): Promise<{
 	const configNames: string[] = [];
 	for (const name of SERVER_CONFIG_FILE_NAMES)
 		if (listed.has(name)) configNames.push(name);
-	const statted = await Promise.all(
-		[...names, ...configNames].map(async (name) => {
-			try {
-				const stat = await fsp.stat(join(root, name));
-				return {
-					part: `${name}=${fingerprint(stat)}`,
-					changedAt: stat.mtimeMs,
-				};
-			} catch {
-				return { part: `${name}=-`, changedAt: 0 };
-			}
-		}),
-	);
+	// #4532 gap 3: the venv's `site-packages` directories ride the same round,
+	// so the look pays no extra await for them.
+	const [statted, venvParts] = await Promise.all([
+		Promise.all(
+			[...names, ...configNames].map(async (name) => {
+				try {
+					const stat = await fsp.stat(join(root, name));
+					return {
+						part: `${name}=${fingerprint(stat)}`,
+						changedAt: stat.mtimeMs,
+					};
+				} catch {
+					return { part: `${name}=-`, changedAt: 0 };
+				}
+			}),
+		),
+		readVenvInstallParts(root, listed),
+	]);
 	const parts = statted.slice(0, names.length);
 	// A listed name that could not be statted reads as absent, as in the stamp.
 	const configs = new Map<string, string>();
@@ -373,10 +385,7 @@ async function readInstallStamp(root: string): Promise<{
 	}
 	if (linkPrint !== undefined)
 		parts.push({ part: linkPrint, changedAt: linkChangedAt });
-	// #4532 gap 3: a Python install into a venv the project keeps no lockfile
-	// for is invisible to every name above, so the venv's site-packages
-	// directories join the stamp on the same round.
-	parts.push(...(await readVenvInstallParts(root, listed)));
+	parts.push(...venvParts);
 	return {
 		configs,
 		stamp: parts.map((entry) => entry.part).join("|"),
