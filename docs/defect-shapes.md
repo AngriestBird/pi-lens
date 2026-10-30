@@ -617,11 +617,13 @@ file-scoped worklist and receives no project-wide scanner output.
     the lane's timeout scale and is refused; a same-named local constant is
     admitted and an import alias of the shared one is refused (no live member
     either way). Screen: does this case call a walker or read a binding one
-    produced, and is its third argument one of those two forms? Census: 151 in
-    `tests/config`, all budgeted; 79 outside it still keep the default (a probe,
-    not a command). Enforcer: `tests/config/tree-census-timeout.test.ts` (it
-    derives the declaration callee from the file's vitest imports, resolves
-    walker aliases, and counts a test-shaped call it cannot trace as a census).
+    produced, and is its third argument one of those two forms? Census: 244
+    under `tests/` (154 in `tests/config`, all budgeted; 90 outside it, of which
+    87 are refused and admitted by name in
+    `tests/config/tree-census-timeout.baseline.json`, and 3 budgeted). Enforcer:
+    `tests/config/tree-census-timeout.test.ts` (it derives the declaration
+    callee from the file's vitest imports, resolves walker aliases, and counts a
+    test-shaped call it cannot trace as a census).
     It does not read a walker reached through a helper in another module, a
     variable-bound arrow-function walker, a local spawn wrapper, or a walk named
     only by an enclosing `describe.each` or loop; `Unit tests Windows` is the
