@@ -608,7 +608,7 @@ export function displayProjectDataPath(
 	...segments: string[]
 ): string {
 	const absolute = path.resolve(getProjectDataDir(cwd), ...segments);
-	const absolutePosix = absolute.replace(/\\/g, "/");
+	const absolutePosix = toPosix(absolute);
 	const relative = toProjectRelativePath(absolute, cwd);
 	if (relative !== absolutePosix) {
 		return relative;
@@ -1729,7 +1729,7 @@ export async function detectFileChangedAfterCommand(
  */
 export function isTestFile(filePath: string): boolean {
 	if (detectFileRole(filePath) === "test") return true;
-	const normalized = filePath.replace(/\\/g, "/");
+	const normalized = toPosix(filePath);
 	return (
 		normalized.includes("test-utils") ||
 		normalized.startsWith("test-") ||

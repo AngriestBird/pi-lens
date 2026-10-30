@@ -3,6 +3,7 @@ import * as path from "node:path";
 import {
 	normalizeHostToolPath,
 	normalizeMapKey,
+	toPosix,
 	walkUpDirs,
 } from "../path-utils.js";
 
@@ -23,8 +24,8 @@ function resolveAgainstAncestors(cwd: string, filePath: string): string {
 		return filePath;
 	}
 
-	const normalizedRelative = filePath.replace(/\\/g, "/");
-	const cwdBaseName = path.basename(path.resolve(cwd)).replace(/\\/g, "/");
+	const normalizedRelative = toPosix(filePath);
+	const cwdBaseName = toPosix(path.basename(path.resolve(cwd)));
 	if (
 		cwdBaseName &&
 		(normalizedRelative === cwdBaseName ||
@@ -67,7 +68,7 @@ export function resolveRunnerPath(cwd: string, filePath: string): string {
 export function toRunnerDisplayPath(cwd: string, filePath: string): string {
 	const cwdKey = normalizeMapKey(path.resolve(cwd));
 	const fileKey = resolveRunnerPath(cwd, filePath);
-	const relative = path.relative(cwdKey, fileKey).replace(/\\/g, "/");
+	const relative = toPosix(path.relative(cwdKey, fileKey));
 	if (relative && relative !== "." && !relative.startsWith("../")) {
 		return relative;
 	}

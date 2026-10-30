@@ -3,13 +3,14 @@ import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { type ExtensionLogLevel, logExtension } from "./extension-log.js";
 import {
-	isRealGitMarker,
 	isAtOrAboveHomeDir,
+	isRealGitMarker,
 	isUnderDir,
 	isWindowsPath,
 	nameMatchesMarkerGlob,
 	normalizeEphemeralMapKey,
 	realpathOrResolve,
+	toPosix,
 } from "./path-utils.js";
 import {
 	getDegradationLedgerGeneration,
@@ -152,7 +153,7 @@ function walkMarkerRoot(
 	for (let depth = 0; depth < 64; depth++) {
 		if (isAtOrAboveHomeDir(current, homeDir)) break;
 		for (const marker of markers) {
-			const slash = marker.replace(/\\/g, "/").lastIndexOf("/");
+			const slash = toPosix(marker).lastIndexOf("/");
 			const parent = slash >= 0 ? marker.slice(0, slash) : "";
 			const basename = slash >= 0 ? marker.slice(slash + 1) : marker;
 			const target = parent
