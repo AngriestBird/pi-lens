@@ -1,6 +1,9 @@
 /**
- * #4828: every tests/config census that walks the repo tree carries a timeout
- * budget. A census declared with vitest's 5 s default reds on the Windows unit
+ * #4828: every census that walks the repo tree carries a timeout
+ * budget. #4967: the census covers all of `tests/`; a member outside
+ * `tests/config` that predates the widening is admitted by identity in
+ * `tests/config/tree-census-timeout.baseline.json`, and no other member is.
+ * A census declared with vitest's 5 s default reds on the Windows unit
  * leg (`Unit tests Windows`): the walk costs several times its Linux time
  * there (the 2026-10-24 #4823 run timed out `pi-mock-importer-sweep` at
  * 5000 ms, whose Linux time is 711 ms).
@@ -39,16 +42,18 @@
  *   included) given `ls-files` as a string, an array element, or a binding
  *   of either.
  *
- * Not read (accepted residual, live population 0, backstop `Unit tests
- * Windows`, which reds on the first census that times out there): a walker
- * reached only through a helper in another module; a recursive walker spelled as
- * a variable-bound arrow function; a walker or spawner reached through a local
- * wrapper function; and a walk named by an enclosing `describe.each` table or
- * `for...of` loop instead of by the case. The budget is admitted by name, not by
- * binding (accepted residual, live population 0 each way): a same-named local
- * `const TREE_WALK_TIMEOUT_MS = 5000` is admitted, and an import alias of the
- * shared constant is refused.
+ * Not read (accepted residual, backstop `Unit tests Windows`, which reds on the
+ * first census that times out there): a walker reached only through a helper in
+ * another module (measured 2026-10-30 with 11 helper names taken as walkers: 83
+ * members in 13 files, 22 of them in tests/config; a follow-up owns them); a
+ * recursive walker spelled as a variable-bound arrow function; a walker or spawner
+ * reached through a local wrapper function; and a walk named by an enclosing
+ * `describe.each` table or `for...of` loop instead of by the case. The budget
+ * is admitted by name, not by binding (accepted residual, live population 0
+ * each way): a same-named local `const TREE_WALK_TIMEOUT_MS = 5000` is
+ * admitted, and an import alias of the shared constant is refused.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SgNode } from "@ast-grep/napi";
@@ -56,14 +61,22 @@ import { describe, expect, it } from "vitest";
 import { parseRoot } from "../support/ast-census.js";
 import {
 	assertNonEmptyScan,
+	assertSortedRegistry,
 	listSourceFiles,
 	readWalkedFiles,
 	relativePosix,
 } from "../support/sweep-kit.js";
-import { TREE_WALK_TIMEOUT_MS } from "../support/test-timeout-scale.js";
+import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const CONFIG_DIR = path.join(ROOT, "tests", "config");
+const TESTS_DIR = path.join(ROOT, "tests");
+/** #4967: the admitted members outside `tests/config`, one row per identity. */
+const BASELINE_PATH = path.join(
+	ROOT,
+	"tests",
+	"config",
+	"tree-census-timeout.baseline.json",
+);
 
 const WALKERS = new Set([
 	"listSourceFiles",
@@ -438,6 +451,39 @@ function censuses(source: string): Census[] {
 	return found;
 }
 
+/** One admitted census member (#4967): its test file and case title as written. */
+interface BaselineRow {
+	file: string;
+	title: string;
+	reason: string;
+}
+
+/**
+ * #4967: the census verdict for one scan. A refused member is admitted only
+ * when a baseline row names its identity, `file: title`. `unadmitted`: a refused
+ * member no row names. `stale`: a row no refused member matches, so a fixed or
+ * deleted member drops its row. `duplicated`: an identity two refused members
+ * share, which one row would admit twice (AGENTS.md shape 36: match identity,
+ * never a count). `unreasoned`: a row with a blank reason (shape 38).
+ */
+function admissionVerdict(
+	refused: readonly string[],
+	rows: readonly BaselineRow[],
+) {
+	const keys = rows.map((row) => `${row.file}: ${row.title}`);
+	assertSortedRegistry("tree census baseline", keys);
+	const admitted = new Set(keys);
+	const found = new Set(refused);
+	return {
+		unadmitted: refused.filter((key) => !admitted.has(key)),
+		stale: keys.filter((key) => !found.has(key)),
+		duplicated: refused.filter((key, index) => refused.indexOf(key) !== index),
+		unreasoned: rows
+			.filter((row) => row.reason.trim() === "")
+			.map((row) => `${row.file}: ${row.title}`),
+	};
+}
+
 /** One file's census count and the censuses whose budget the gate refuses. */
 function flagCensuses(
 	rel: string,
@@ -660,15 +706,54 @@ describe("tree census timeout (#4828)", () => {
 		expect(defaultBudget(`${VITEST}${KIT}${body}`)).toEqual([]);
 	});
 
+	// Recurrence (#4967): the baseline admits pre-existing members by identity, so
+	// each verdict it can reach is planted: a refused member no row names (what the
+	// widened census reports for a new walk), a row whose member is gone, two
+	// members that share one identity, and a blank reason or an unsorted baseline.
+	const KEY = 'tests/clients/a.test.ts: "c"';
+	const ROW: BaselineRow = {
+		file: "tests/clients/a.test.ts",
+		title: '"c"',
+		reason: "pre-existing, census widened in #4967",
+	};
+	it("plants: flags a refused member no baseline row names, admits one a row names", () => {
+		expect(admissionVerdict([KEY], []).unadmitted).toEqual([KEY]);
+		expect(admissionVerdict([KEY], [ROW]).unadmitted).toEqual([]);
+	});
+	it("plants: flags a baseline row whose member is gone", () => {
+		expect(admissionVerdict([], [ROW]).stale).toEqual([KEY]);
+		expect(admissionVerdict([KEY], [ROW]).stale).toEqual([]);
+	});
+	it("plants: flags two refused members that share one identity", () => {
+		expect(admissionVerdict([KEY, KEY], [ROW]).duplicated).toEqual([KEY]);
+		expect(admissionVerdict([KEY], [ROW]).duplicated).toEqual([]);
+	});
+	it("plants: flags a blank reason and an unsorted baseline", () => {
+		expect(
+			admissionVerdict([KEY], [{ ...ROW, reason: "  " }]).unreasoned,
+		).toEqual([KEY]);
+		expect(() => admissionVerdict([], [{ ...ROW, title: '"z"' }, ROW])).toThrow(
+			/sorted/,
+		);
+	});
+
+	// Recurrence (#4967, detection audit 2026-10-29): the census read tests/config
+	// only, so refused tree-walk cases elsewhere (#4931, #4832, #4800, #4852, and
+	// possibly #4797) shipped at vitest's 5 s default and timed out on loaded
+	// runners. The root is every test file under tests/. Pre-existing refused
+	// members outside tests/config are admitted by identity in the baseline; a new
+	// one without a budget reds here. Budget: the walk over 1,711 files took 23.3 s
+	// on Linux (2026-10-30), so this census takes 120 s (about 5x), not the shared
+	// 30 s ceiling; the lane's scale still applies.
 	it(
-		"every tests/config census with a tree walk carries a timeout budget",
+		"every census under tests/ with a tree walk carries a timeout budget or a baseline row",
 		async () => {
-			const files = listSourceFiles(CONFIG_DIR, {
+			const files = listSourceFiles(TESTS_DIR, {
 				extensions: [".ts"],
 				skipTests: false,
 			}).filter((file) => file.endsWith(".test.ts"));
-			// Calibration 2026-10-25: 141 tests/config test files; half rounds to 70.
-			assertNonEmptyScan("tests/config test files", files.length, 70);
+			// Calibration 2026-10-30: 1,711 .test.ts files under tests/; half rounds to 855.
+			assertNonEmptyScan("tests test files", files.length, 855);
 			const flagged: string[] = [];
 			let census = 0;
 			for (const { file, source } of readWalkedFiles(files)) {
@@ -680,14 +765,23 @@ describe("tree census timeout (#4828)", () => {
 				// freed before the next file is parsed.
 				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
-			// Calibration 2026-10-25: 151 census tests declared (121 carried the
-			// default budget before #4828; every one carries a budget after it). The
-			// floor is the measured count, shrink-only: a regression in binding
-			// propagation (measured 52) drops the count and reds here, where a floor of 30 stayed
-			// green.
-			assertNonEmptyScan("tree census tests", census, 151);
-			expect(flagged).toEqual([]);
+			// Calibration 2026-10-30: 244 census tests under tests/ (154 in
+			// tests/config, all budgeted since #4828; 90 outside it, of which 87
+			// are refused and admitted by the baseline since #4967 and 3 are
+			// budgeted). The floor is the measured count, shrink-only: a
+			// regression in binding propagation (measured 52 in tests/config)
+			// drops the count and reds here, where a floor of 30 stayed green. A
+			// root narrowed back to tests/config counts 154 and reds here.
+			assertNonEmptyScan("tree census tests", census, 244);
+			const rows = JSON.parse(
+				fs.readFileSync(BASELINE_PATH, "utf8"),
+			) as BaselineRow[];
+			const verdict = admissionVerdict(flagged, rows);
+			expect(verdict.unadmitted).toEqual([]);
+			expect(verdict.stale).toEqual([]);
+			expect(verdict.duplicated).toEqual([]);
+			expect(verdict.unreasoned).toEqual([]);
 		},
-		TREE_WALK_TIMEOUT_MS,
+		scaledTestTimeout(120_000),
 	);
 });
