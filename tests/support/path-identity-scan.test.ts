@@ -171,6 +171,72 @@ const SITE_ROWS: ReadonlyArray<[string, string, PathIdentityNeedle[]]> = [
 		"function g(f) {\n\tconst k = path.resolve(f);\n\treturn () => m.has(k);\n}",
 		["path-resolve-keyed"],
 	],
+	// hand-rolled-upward-walk (#4966), refused forms
+	[
+		"while loop assigning the parent",
+		"let c = d;\nwhile (c !== root) {\n\tc = path.dirname(c);\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"do loop with a bare dirname import",
+		'import { dirname } from "node:path";\ndo {\n\tc = dirname(c);\n} while (c !== root);',
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"C-style for loop climbing in its update",
+		"for (let c = d; c !== root; c = path.dirname(c)) {\n\tprobe(c);\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"for-of with a counter and a carried parent",
+		"for (const _ of depth) {\n\tc = path.dirname(c);\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"recursive climb",
+		"function up(d) {\n\tif (has(d)) return d;\n\treturn up(path.dirname(d));\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: an import alias of dirname",
+		'import { dirname as up } from "node:path";\nwhile (c !== root) {\n\tc = up(c);\n}',
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: an indirect call through a bound reference",
+		"const up = path.dirname;\nwhile (c !== root) {\n\tc = up(c);\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: a destructured alias",
+		"const { dirname: up } = path;\nwhile (c !== root) {\n\tc = up(c);\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: a bracket read and a comma-expression callee",
+		'while (c !== root) {\n\tc = path["dirname"](c);\n\td = (0, dirname)(d);\n}',
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: dirname.call",
+		"while (c !== root) {\n\tc = path.dirname.call(path, c);\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: the parent held in another binding, then carried",
+		"while (c !== root) {\n\tconst next = path.dirname(c);\n\tc = next;\n}",
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: the parent spelled as a .. segment",
+		'while (c !== root) {\n\tc = path.resolve(c, "..");\n}',
+		["hand-rolled-upward-walk"],
+	],
+	[
+		"plant: the parent read from path.parse",
+		"while (c !== root) {\n\tc = path.parse(c).dir;\n}",
+		["hand-rolled-upward-walk"],
+	],
 ];
 
 const CLEAN_ROWS: ReadonlyArray<[string, string]> = [
@@ -194,6 +260,32 @@ const CLEAN_ROWS: ReadonlyArray<[string, string]> = [
 	["a raw template with a backslash", "x.replaceAll(String.raw`\\.`, '.');"],
 	["a bracket key that is not resolve", 'm.set(path["relative"](root, f), 1);'],
 	["a bracket key that is not a key method", 'm["push"](path.resolve(f));'],
+	[
+		"a per-item dirname with only member writes",
+		"for (const f of files) {\n\trec.dir = path.dirname(f);\n\tmap[f] = rec;\n}",
+	],
+	["a one-shot dirname outside any loop", "const d = path.dirname(f);"],
+	[
+		"the seam's own loop",
+		"for (const dir of walkUpDirs(start)) {\n\tif (has(dir)) return dir;\n}",
+	],
+	[
+		"a per-item dirname with no carried assignment",
+		"for (const f of files) {\n\tout.add(path.dirname(f));\n}",
+	],
+	[
+		"a dirname in the iterable of a for-of",
+		"for (const d of walkUpDirs(path.dirname(f))) {\n\tx = d;\n}",
+	],
+	[
+		"a loop in another function than the dirname",
+		"while (c) {\n\tconst g = () => path.dirname(f);\n\tc = g;\n}",
+	],
+	["a comment naming the climb", "// while (c) { c = path.dirname(c); }\nx();"],
+	[
+		"path.join without a .. segment",
+		"while (c) {\n\tc = path.join(c, 'a');\n}",
+	],
 ];
 
 describe("path identity detector state table (#4689)", () => {

@@ -57,13 +57,12 @@ function hasProjectMarker(dir: string): boolean {
 }
 
 function nearestProjectRoot(filePath: string): string | undefined {
-	let dir = nodePath.dirname(nodePath.resolve(filePath));
-	const filesystemRoot = nodePath.parse(dir).root;
-	while (dir !== filesystemRoot) {
+	// `walkUpDirs` yields the filesystem root last, so it is tried after every
+	// nearer directory, as before.
+	for (const dir of walkUpDirs(nodePath.dirname(filePath))) {
 		if (hasProjectMarker(dir)) return dir;
-		dir = nodePath.dirname(dir);
 	}
-	return hasProjectMarker(filesystemRoot) ? filesystemRoot : undefined;
+	return undefined;
 }
 
 /** The selected filesystem root, or undefined for a refused path. */

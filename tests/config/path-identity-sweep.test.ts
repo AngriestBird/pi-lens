@@ -105,6 +105,15 @@ const FOREIGN_CHECKOUT_FAIL_CLOSED =
 const INSTALL_SELF_CONTAINED =
 	"clients/install-diagnostics.ts is the paste-able report for an install whose runtime dependencies did not resolve (#285/#335) and imports nothing from clients/: clients/path-utils.ts imports minimatch, so routing its one realpath (the symlinked-install probe, which compares the kernel-real package dir with the spelled one on purpose) through realpathOrResolve would stop the report loading exactly when it is needed; the import census in tests/clients/install-diagnostics.test.ts refuses any relative or bare specifier there, so that swap reds it";
 
+const TEMP_FOLD =
+	"temporary row, removed by a later commit of the same change once the LSP climbs are folded onto walkUpDirs";
+
+const INSTALL_ANCHOR_WALK =
+	"clients/install-diagnostics.ts walks up from its own module to the package.json that holds its version, six levels at most, to describe an install whose dependencies did not resolve (#285/#335); it imports nothing from clients/ (INSTALL_SELF_CONTAINED), so walkUpDirs is out of reach, and the walk is compared with the spelled package dir on purpose to report a symlinked install";
+
+const PYTHON_RELATIVE_LEVELS =
+	"a Python relative import climbs a COUNTED number of package levels (the leading dots), not to a marker: `from ..x import y` is `dots - 1` parents of the importing file's directory by package nesting, which the language defines on the spelled module path, so there is no ceiling or root to compare and no identity to take";
+
 interface Pin {
 	sites: number;
 	identities: string;
@@ -327,6 +336,36 @@ const PINS: Readonly<Record<string, Pin>> = {
 		identities: "66db1fe5f84f9efe",
 		reason: SPELLING_MEMO,
 	}, // :696
+	"clients/install-diagnostics.ts#hand-rolled-upward-walk": {
+		sites: 1,
+		identities: "04674fe2776e3519",
+		reason: INSTALL_ANCHOR_WALK,
+	}, // :135
+	"clients/lsp/edits.ts#hand-rolled-upward-walk": {
+		sites: 2,
+		identities: "024409a8d1aa178b",
+		reason: TEMP_FOLD,
+	},
+	"clients/lsp/environment-gap.ts#hand-rolled-upward-walk": {
+		sites: 2,
+		identities: "784bd7428b675dbf",
+		reason: TEMP_FOLD,
+	},
+	"clients/lsp/server.ts#hand-rolled-upward-walk": {
+		sites: 8,
+		identities: "78412e733ec4e132",
+		reason: TEMP_FOLD,
+	},
+	"clients/lsp/workspace-diagnostics-cache.ts#hand-rolled-upward-walk": {
+		sites: 1,
+		identities: "2b80a64ac3f8164d",
+		reason: TEMP_FOLD,
+	},
+	"clients/review-graph/import-resolvers.ts#hand-rolled-upward-walk": {
+		sites: 1,
+		identities: "06064201b76ebaf1",
+		reason: PYTHON_RELATIVE_LEVELS,
+	}, // :415
 };
 
 interface Occurrence {
@@ -431,19 +470,24 @@ describe("path identity sweep (#4689)", () => {
 		// Calibration on the authoring head: 530 runtime files under clients/,
 		// tools/ and mcp/ plus index.ts (seam excluded); half is 265. The live
 		// populations are 31 raw-realpath and 158 path-resolve-keyed sites,
-		// floored at 5.
+		// floored at 5; the hand-rolled upward walks (#4966) are floored at 1.
 		assertNonEmptyScan(
 			"path identity sweep: runtime files scanned",
 			scanned,
 			265,
 		);
-		for (const needle of ["raw-realpath", "path-resolve-keyed"] as const)
+		for (const [needle, floor] of [
+			["raw-realpath", 5],
+			["path-resolve-keyed", 5],
+			// The folds of #4966 left the few climbs that stay, each with a reason.
+			["hand-rolled-upward-walk", 1],
+		] as const)
 			assertNonEmptyScan(
 				`path identity sweep: ${needle} sites`,
 				occurrences.filter((occurrence) =>
 					occurrence.row.endsWith(`#${needle}`),
 				).length,
-				5,
+				floor,
 			);
 		expect(
 			auditPins(occurrences, PINS),

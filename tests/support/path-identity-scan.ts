@@ -26,12 +26,26 @@
  *   and arrow bodies inside `new Map/Set/WeakMap/WeakSet(…)`. A type cast,
  *   a non-null assertion or parentheses do not change the value; any other
  *   call around the resolve does, and decides the key itself.
+ * - `hand-rolled-upward-walk` (#4966): an upward climb that `walkUpDirs`
+ *   (`clients/path-utils.ts`) owns, written by hand. A parent value is a
+ *   `dirname` call (a member read, a bracket read, a name bound to it, a
+ *   `.call`/`.apply` of it, a comma-expression callee), a `resolve`/`join`
+ *   call with a `".."` argument, or `parse(x).dir`. A site is a `while`, `do`
+ *   or C-style `for` loop holding a parent value, a `for…of`/`for…in` (other
+ *   than one over `walkUpDirs`) holding a parent value and a carried assignment
+ *   (any target but a member write), or a
+ *   function that calls itself with a parent value in an argument. A climb
+ *   that starts from the caller's spelling is the defect the needle exists
+ *   for (shapes 1 and 32): the loop never says which axis it climbs.
  */
 import { Lang, parse } from "@ast-grep/napi";
 import type { SgNode } from "../../clients/deps/ast-grep-napi.js";
 import { cookedIdentifier, cookedString } from "./cooked-literal.js";
 
-export type PathIdentityNeedle = "raw-realpath" | "path-resolve-keyed";
+export type PathIdentityNeedle =
+	| "raw-realpath"
+	| "path-resolve-keyed"
+	| "hand-rolled-upward-walk";
 
 export interface PathIdentitySite {
 	needle: PathIdentityNeedle;
@@ -497,10 +511,252 @@ function resolveKeyedSites(root: SgNode): PathIdentitySite[] {
 	return sites;
 }
 
+const LOOP_KINDS: ReadonlySet<string> = new Set([
+	"while_statement",
+	"do_statement",
+	"for_statement",
+	"for_in_statement",
+]);
+
+const FUNCTION_KINDS: ReadonlySet<string> = new Set([
+	"function_declaration",
+	"function_expression",
+	"generator_function_declaration",
+	"generator_function",
+	"arrow_function",
+	"method_definition",
+]);
+
+/** A comma expression's last operand: `(0, dirname)` calls `dirname`. */
+function lastOperand(node: SgNode): SgNode {
+	let value = unwrap(node);
+	while (value.kind() === "sequence_expression") {
+		const parts = named(value);
+		const last = parts[parts.length - 1];
+		if (last === undefined) break;
+		value = unwrap(last);
+	}
+	return value;
+}
+
+/** Local names bound to `dirname`: an import or destructure alias, `const up = path.dirname`. */
+function dirnameBindings(root: SgNode): Set<string> {
+	const names = new Set<string>();
+	for (const specifier of root.findAll({
+		rule: { kind: "import_specifier" },
+	})) {
+		const parts = named(specifier);
+		const imported = parts[0];
+		const local = parts[1] ?? parts[0];
+		if (imported && local && cookedIdentifier(imported.text()) === "dirname")
+			names.add(cookedIdentifier(local.text()));
+	}
+	for (const pair of root.findAll({ rule: { kind: "pair_pattern" } })) {
+		const key = pair.field("key");
+		const value = pair.field("value");
+		if (
+			key &&
+			value &&
+			cookedIdentifier(key.text()) === "dirname" &&
+			value.kind() === "identifier"
+		)
+			names.add(cookedIdentifier(value.text()));
+	}
+	for (const declarator of root.findAll({
+		rule: { kind: "variable_declarator" },
+	})) {
+		const name = declarator.field("name");
+		const value = declarator.field("value");
+		if (!name || !value || name.kind() !== "identifier") continue;
+		const held = lastOperand(value);
+		if (isMember(held) && memberName(held) === "dirname")
+			names.add(cookedIdentifier(name.text()));
+	}
+	return names;
+}
+
+function isDirnameCallee(callee: SgNode, bound: ReadonlySet<string>): boolean {
+	const value = lastOperand(callee);
+	if (isMember(value)) {
+		const name = memberName(value);
+		if (name === "dirname") return true;
+		// `dirname.call(path, x)` and `dirname.apply(path, [x])`.
+		if (name === "call" || name === "apply") {
+			const target = value.field("object");
+			return target !== null && isDirnameCallee(target, bound);
+		}
+		return false;
+	}
+	if (value.kind() !== "identifier") return false;
+	const name = cookedIdentifier(value.text());
+	return name === "dirname" || bound.has(name);
+}
+
+function isParentCall(call: SgNode, bound: ReadonlySet<string>): boolean {
+	const callee = call.field("function");
+	if (callee === null) return false;
+	if (isDirnameCallee(callee, bound)) return true;
+	// `resolve(x, "..")` / `join(x, "..")`.
+	const target = lastOperand(callee);
+	const name = isMember(target)
+		? memberName(target)
+		: target.kind() === "identifier"
+			? cookedIdentifier(target.text())
+			: undefined;
+	if (name === "resolve" || name === "join")
+		return argumentsOf(call).some((arg) => {
+			const value = unwrap(arg);
+			return value.kind() === "string" && literalValue(value) === "..";
+		});
+	return false;
+}
+
+/** `path.parse(x).dir`. */
+function isParseDir(node: SgNode): boolean {
+	if (!isMember(node) || memberName(node) !== "dir") return false;
+	const object = node.field("object");
+	if (object === null) return false;
+	const inner = unwrap(object);
+	if (inner.kind() !== "call_expression") return false;
+	const callee = inner.field("function");
+	if (callee === null) return false;
+	const target = lastOperand(callee);
+	const name = isMember(target)
+		? memberName(target)
+		: target.kind() === "identifier"
+			? cookedIdentifier(target.text())
+			: undefined;
+	return name === "parse";
+}
+
+function isParentValue(node: SgNode, bound: ReadonlySet<string>): boolean {
+	if (node.kind() === "call_expression") return isParentCall(node, bound);
+	return isParseDir(node);
+}
+
+function containsRange(outer: SgNode, inner: SgNode): boolean {
+	const a = outer.range();
+	const b = inner.range();
+	return a.start.index <= b.start.index && b.end.index <= a.end.index;
+}
+
+/** The loop a parent value iterates in, stopping at a function boundary. */
+function enclosingLoop(node: SgNode): SgNode | undefined {
+	for (let scope = node.parent(); scope; scope = scope.parent()) {
+		const kind = String(scope.kind());
+		if (FUNCTION_KINDS.has(kind)) return undefined;
+		if (!LOOP_KINDS.has(kind)) continue;
+		// A for-of/for-in iterable is evaluated once, outside the iteration.
+		if (kind === "for_in_statement") {
+			const body = scope.field("body");
+			if (body === null || !containsRange(body, node)) continue;
+		}
+		return scope;
+	}
+	return undefined;
+}
+
+function iteratesWalkUpDirs(loop: SgNode): boolean {
+	const right = loop.field("right");
+	if (right === null) return false;
+	const value = unwrap(right);
+	if (value.kind() !== "call_expression") return false;
+	const callee = value.field("function");
+	return (
+		callee !== null &&
+		callee.kind() === "identifier" &&
+		cookedIdentifier(callee.text()) === "walkUpDirs"
+	);
+}
+
+/** A carried value: any assignment whose target is not a member write (`rec.x = …`, `rec[k] = …`). */
+function hasCarriedAssignment(loop: SgNode): boolean {
+	for (const kind of [
+		"assignment_expression",
+		"augmented_assignment_expression",
+	]) {
+		for (const assignment of loop.findAll({ rule: { kind } })) {
+			const target = assignment.field("left");
+			if (target === null || !isMember(unwrap(target))) return true;
+		}
+	}
+	return false;
+}
+
+/** The name a function binds: a declaration, or `const f = () => …`. */
+function functionName(fn: SgNode): string | undefined {
+	const own = fn.field("name");
+	if (own !== null) return cookedIdentifier(own.text());
+	const parent = fn.parent();
+	if (parent?.kind() === "variable_declarator") {
+		const name = parent.field("name");
+		if (name !== null && name.kind() === "identifier")
+			return cookedIdentifier(name.text());
+	}
+	return undefined;
+}
+
+function upwardWalkSites(root: SgNode): PathIdentitySite[] {
+	const bound = dirnameBindings(root);
+	const sites: PathIdentitySite[] = [];
+	const loops = new Map<number, { loop: SgNode }>();
+	const parentValues = [
+		...root.findAll({ rule: { kind: "call_expression" } }),
+		...root.findAll({ rule: { kind: "member_expression" } }),
+		...root.findAll({ rule: { kind: "subscript_expression" } }),
+	].filter((node) => isParentValue(node, bound));
+	for (const value of parentValues) {
+		const loop = enclosingLoop(value);
+		if (loop) loops.set(loop.range().start.index, { loop });
+	}
+	for (const { loop } of loops.values()) {
+		const kind = String(loop.kind());
+		if (kind === "for_in_statement") {
+			if (iteratesWalkUpDirs(loop) || !hasCarriedAssignment(loop)) continue;
+			sites.push({
+				needle: "hand-rolled-upward-walk",
+				line: loop.range().start.line,
+				form: "for-of loop with a parent value and a carried assignment",
+			});
+		} else
+			sites.push({
+				needle: "hand-rolled-upward-walk",
+				line: loop.range().start.line,
+				form: kind.replace("_statement", " loop"),
+			});
+	}
+	// A recursive climb: a function calling itself with a parent value inside an argument.
+	for (const call of root.findAll({ rule: { kind: "call_expression" } })) {
+		const callee = call.field("function");
+		if (callee === null || callee.kind() !== "identifier") continue;
+		const name = cookedIdentifier(callee.text());
+		let fn: SgNode | null = call.parent();
+		while (fn && !FUNCTION_KINDS.has(String(fn.kind()))) fn = fn.parent();
+		if (fn === null || functionName(fn) !== name) continue;
+		const hasParentArg = argumentsOf(call).some(
+			(arg) =>
+				isParentValue(arg, bound) ||
+				[
+					...arg.findAll({ rule: { kind: "call_expression" } }),
+					...arg.findAll({ rule: { kind: "member_expression" } }),
+				].some((inner) => isParentValue(inner, bound)),
+		);
+		if (hasParentArg)
+			sites.push({
+				needle: "hand-rolled-upward-walk",
+				line: call.range().start.line,
+				form: "recursive call with a parent value",
+			});
+	}
+	return sites;
+}
+
 /** Every path identity site in one TypeScript source, in source order. */
 export function scanPathIdentitySites(source: string): PathIdentitySite[] {
 	const root = parse(Lang.TypeScript, source).root();
-	return [...realpathSites(root), ...resolveKeyedSites(root)].sort(
-		(a, b) => a.line - b.line || a.needle.localeCompare(b.needle),
-	);
+	return [
+		...realpathSites(root),
+		...resolveKeyedSites(root),
+		...upwardWalkSites(root),
+	].sort((a, b) => a.line - b.line || a.needle.localeCompare(b.needle));
 }

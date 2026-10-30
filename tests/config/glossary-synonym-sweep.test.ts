@@ -1066,7 +1066,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 65 -> 68 (#4876 r2): `projectPathKey` keys a dot-segment spelling by its
 		// DIRECTORY's identity (`path.dirname` + `path.basename` of the caller's
 		// own spelling), so the kernel — not `path.resolve` — folds the `..`.
-		"clients/file-utils.ts": 68,
+		"clients/file-utils.ts": 67,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realpathOrResolve`,
@@ -1081,10 +1081,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
 		"clients/git-tracked-ignore.ts": 3,
-		"clients/gitleaks-client.ts": 20,
+		"clients/gitleaks-client.ts": 19,
 		"clients/go-client.ts": 2,
 		"clients/govulncheck-client.ts": 7,
-		"clients/gradle-ktfmt-style.ts": 5,
+		"clients/gradle-ktfmt-style.ts": 4,
 		"clients/grammar-source.ts": 4,
 		"clients/gzip-stage-write.ts": 2,
 		"clients/inline-blocker-dispositions.ts": 2,
@@ -1288,7 +1288,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 10 -> 11 (#4508): the walk joins the `.git` entry and its HEAD.
 		"clients/review-graph/git-identity.ts": 11,
 		// 61 -> 64 (#4346 final lane): `fileAnswerNames`, moved from builder.ts.
-		"clients/review-graph/import-resolvers.ts": 64,
+		"clients/review-graph/import-resolvers.ts": 61,
 		"clients/review-graph/tsconfig-paths.ts": 35,
 		"clients/review-graph/workspace-modules.ts": 27,
 		"clients/ruff-client.ts": 4,
@@ -1391,8 +1391,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (a path operation).
 		"clients/tool-agreement.ts": 10,
 		// 13 -> 12 (#4689 item 6): the file is resolved by `realpathOrResolve`.
-		"clients/tool-cwd.ts": 12,
-		"clients/tool-policy.ts": 64,
+		"clients/tool-cwd.ts": 10,
+		"clients/tool-policy.ts": 62,
 		// 19 -> 18 (#4689 batch 7): the grammar write probe climbs `walkUpDirs`, so
 		// its own `path.dirname` step is the seam's.
 		"clients/tree-sitter-client.ts": 18,
@@ -1454,7 +1454,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/symbol-search.ts": 5,
 		"mcp/analyze-cli.ts": 4,
 		"mcp/cli.ts": 2,
-		"mcp/server.ts": 31,
+		"mcp/server.ts": 30,
 		"index.ts": 20,
 	},
 	record: {

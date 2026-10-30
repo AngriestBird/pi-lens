@@ -1937,15 +1937,9 @@ function* walkUpDirsUntilPackageJson(cwd: string): Generator<string> {
 }
 
 function findNearestPackageJsonPath(cwd: string): string | undefined {
-	let dir = cwd;
-	const root = path.parse(dir).root;
-	while (true) {
+	for (const dir of walkUpDirs(cwd)) {
 		const pkgPath = path.join(dir, "package.json");
 		if (fs.existsSync(pkgPath)) return pkgPath;
-		if (dir === root) break;
-		const parent = path.dirname(dir);
-		if (parent === dir) break;
-		dir = parent;
 	}
 	return undefined;
 }
