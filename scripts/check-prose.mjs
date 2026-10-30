@@ -164,19 +164,14 @@ export function checkProse(text = "", options = {}) {
 }
 
 /**
- * The prose sections of a PR body (Bottom line, Notes for the reviewer, and the
- * older Why and Summary) with their headings, each up to the next heading of any
- * level. The boundaries are the lexer's (#4717 N2): a setext or indented ATX
- * `Tests` ends `## Summary`, so its prose is not judged as Summary prose.
+ * The prose sections of a PR body (Why, Notes for the reviewer, Summary) with
+ * their headings, each up to the next heading of any level. The boundaries are
+ * the lexer's (#4717 N2): a setext or indented ATX `Tests` ends `## Summary`,
+ * so its prose is not judged as Summary prose.
  */
 export function proseSections(body = "") {
 	const lines = String(body ?? "").split(/\r?\n/);
-	const wanted = new Set([
-		"bottom line",
-		"why",
-		"notes for the reviewer",
-		"summary",
-	]);
+	const wanted = new Set(["why", "notes for the reviewer", "summary"]);
 	const headings = markdownHeadings(body);
 	return headings
 		.flatMap((heading, index) =>

@@ -109,7 +109,7 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
 
 - Issues lead with the outcome, then evidence, root cause (or a labeled
   hypothesis), acceptance criteria, non-goals, failure semantics, test matrix,
-  observability, and class-sweep coverage. A PR body leads with its bottom line
+  observability, and class-sweep coverage. A PR body leads with a short summary
   and stays short: proof is transcripts and mutation rows, not narrative. The
   issue reference goes in the PR title; the closing keyword goes in the body,
   because GitHub ignores it in a title.
@@ -878,7 +878,7 @@ consistent. Use sentence-case headings, Oxford commas, and no em-dash chains.
 Issue bodies lead with evidence, then root cause, acceptance criteria,
 observability, and cross-links. Every issue has one type label and at least one
 `area:` label, plus exactly one `priority:` label. A PR body follows
-`.github/PULL_REQUEST_TEMPLATE.md`: `Bottom line`, `Notes for the reviewer`,
+`.github/PULL_REQUEST_TEMPLATE.md`: `Summary`, `Notes for the reviewer`,
 `Change outline`, and `Proof and checks`, within the caps
 `scripts/check-pr-body.mjs` enforces.
 

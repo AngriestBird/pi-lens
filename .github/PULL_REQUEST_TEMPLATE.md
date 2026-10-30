@@ -1,4 +1,4 @@
-## Bottom line
+## Summary
 
 At most three sentences: what changed, who notices, and the risk.
 

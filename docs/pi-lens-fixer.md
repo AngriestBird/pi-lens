@@ -250,7 +250,7 @@ rigor (#2599).
 ## Handoff
 
 - The PR body follows `.github/PULL_REQUEST_TEMPLATE.md`, which a reader must
-  be able to scan (#5003): `## Bottom line` (at most three sentences, with the
+  be able to scan (#5003): `## Summary` (at most three sentences, with the
   closing keyword, which GitHub ignores in a title), `## Notes for the reviewer`
   (at most five bullets, no tables or fences), `## Change outline`, and
   `## Proof and checks` with `### Tests`, `### Class sweep`,

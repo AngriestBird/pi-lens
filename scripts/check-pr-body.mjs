@@ -50,7 +50,7 @@ const TEMPLATE_FILE = resolve(
 // tests build carry no `formal/` tree, and a diff path is repo-relative.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REQUIRED_SECTIONS = [
-	"Bottom line",
+	"Summary",
 	"Notes for the reviewer",
 	"Change outline",
 	"Tests",
@@ -60,7 +60,7 @@ const REQUIRED_SECTIONS = [
 ];
 // #5003: what a reader scrolls past. Code fences hold the required transcripts,
 // so they are capped per fence and stay out of the character count.
-const BOTTOM_LINE_MAX_SENTENCES = 3;
+const SUMMARY_MAX_SENTENCES = 3;
 const REVIEWER_NOTES_MAX_BULLETS = 5;
 const VISIBLE_BODY_MAX_CHARS = 5000;
 const FENCE_MAX_LINES = 20;
@@ -75,7 +75,6 @@ const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 // remainder as a count (#4585 row classification is an agent-facing surface).
 const UNCLASSIFIED_REPORT_LIMIT = 5;
 const REPAIR_HEADINGS = [
-	"Bottom line",
 	"Why",
 	"Notes for the reviewer",
 	"Change outline",
@@ -94,7 +93,6 @@ const REPAIR_HEADINGS = [
 ];
 const REPAIR_HEADING_PATTERN = REPAIR_HEADINGS.join("|");
 const CORRUPTED_HEADING_TAILS = [
-	"ottom line",
 	"hy",
 	"otes for the reviewer",
 	"hange outline",
@@ -112,21 +110,19 @@ const CORRUPTED_IDENTIFIER_TAILS = ["etchOpenPullRequests", "px"];
 
 // Fleet census from the review of 11 bodies: ## OBSERVABILITY x5,
 // ## what changed x6, ## verification x7, and ## Summary x1. “What changed”
-// (with or without “and why”) satisfies the lead; “Verification” satisfies
-// Tests. Heading matching is deliberately case-insensitive. #5003: `Bottom line`
-// replaced `Why` and `Summary`; both still read as the lead, so an open body
-// keeps its structure.
+// (with or without “and why”) satisfies Summary; “Verification” satisfies
+// Tests. Heading matching is deliberately case-insensitive. #5003: `Why` folded
+// into `Summary` and still reads as it, so an open body keeps its structure.
 const SECTION_SYNONYMS = new Map([
-	["bottom line", "bottom line"],
-	["why", "bottom line"],
+	["why", "summary"],
 	["notes for the reviewer", "notes for the reviewer"],
 	["change outline", "change outline"],
-	["summary", "bottom line"],
-	["problem", "bottom line"],
-	["what changed", "bottom line"],
-	["what changed and why", "bottom line"],
-	["what changed / why", "bottom line"],
-	["what changed / why / verification", ["bottom line", "tests"]],
+	["summary", "summary"],
+	["problem", "summary"],
+	["what changed", "summary"],
+	["what changed and why", "summary"],
+	["what changed / why", "summary"],
+	["what changed / why / verification", ["summary", "tests"]],
 	["tests", "tests"],
 	["verification", "tests"],
 	["blast radius", "blast radius"],
@@ -4425,7 +4421,7 @@ export function lintPrBody(body = "", options = {}) {
 	const placeholders = templatePlaceholderLines();
 	const structure = headingLines(body, headings).name;
 	const errors = options.diff ? lintDiffCompliance(body, options) : [];
-	const lead = headings.find((heading) => hasSection(heading, "bottom line"));
+	const lead = headings.find((heading) => hasSection(heading, "summary"));
 	const firstHeading = headings[0]?.index ?? lines.length;
 	const nextSectionHeading = (heading) =>
 		headings.find(
@@ -4438,21 +4434,19 @@ export function lintPrBody(body = "", options = {}) {
 		(!lead ||
 			!hasRealContent(
 				lines.slice(lead.contentIndex, leadEnd),
-				"bottom line",
+				"summary",
 				placeholders,
 				structure,
 				lead.contentIndex,
 			)) &&
 		!hasRealContent(
 			lines.slice(0, firstHeading),
-			"bottom line",
+			"summary",
 			placeholders,
 			structure,
 		)
 	) {
-		errors.push(
-			`PR body is missing a Bottom line section. See ${TEMPLATE_PATH}.`,
-		);
+		errors.push(`PR body is missing a Summary section. See ${TEMPLATE_PATH}.`);
 	}
 
 	// The exported structural linter is also used by focused tests and historical
@@ -4499,9 +4493,9 @@ export function lintPrBody(body = "", options = {}) {
 			const sentences = countSentenceTerminators(
 				rawLines.slice(lead.contentIndex, leadEnd),
 			);
-			if (sentences < 1 || sentences > BOTTOM_LINE_MAX_SENTENCES)
+			if (sentences < 1 || sentences > SUMMARY_MAX_SENTENCES)
 				errors.push(
-					`PR body "## Bottom line" must contain one to ${BOTTOM_LINE_MAX_SENTENCES} sentences. See ${TEMPLATE_PATH}.`,
+					`PR body "## Summary" must contain one to ${SUMMARY_MAX_SENTENCES} sentences. See ${TEMPLATE_PATH}.`,
 				);
 		}
 	}

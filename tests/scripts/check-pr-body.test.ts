@@ -1298,7 +1298,7 @@ describe("flattened body CI entrypoint", () => {
 		});
 		expect(result).toMatchObject({ valid: false, repaired: false });
 		expect(errors).toHaveBeenCalledWith(
-			expect.stringContaining('PR body is missing "## Bottom line"'),
+			expect.stringContaining('PR body is missing "## Summary"'),
 		);
 		expect(fetchImpl).not.toHaveBeenCalledWith(
 			expect.anything(),
@@ -3438,7 +3438,7 @@ describe("PR body lint (#1844)", () => {
 	});
 
 	const LEAD = "The body gate makes review intent explicit.";
-	const LEAD_CAP = '"## Bottom line" must contain one to 3 sentences';
+	const LEAD_CAP = '"## Summary" must contain one to 3 sentences';
 	const gateErrors = (text: string) =>
 		lintPrBody(text, { workingTree: true }).errors.join(" ");
 
@@ -3509,7 +3509,7 @@ describe("PR body lint (#1844)", () => {
 			body.replace("## Why\n", "").replace("## Summary\n", ""),
 		);
 		expect(result.valid).toBe(false);
-		expect(result.errors.join(" ")).toContain('"## Bottom line"');
+		expect(result.errors.join(" ")).toContain('"## Summary"');
 	});
 
 	it("accepts not applicable with a reason", () => {
@@ -3591,7 +3591,7 @@ describe("PR body lint (#1844)", () => {
 		const result = lintPrBody(null as unknown as string);
 		expect(result.valid).toBe(false);
 		expect(result.errors).toContain(
-			"PR body is missing a Bottom line section. See .github/PULL_REQUEST_TEMPLATE.md.",
+			"PR body is missing a Summary section. See .github/PULL_REQUEST_TEMPLATE.md.",
 		);
 	});
 
@@ -3885,7 +3885,7 @@ describe("live PR body resolution (#2085)", () => {
 
 describe("body caps (#5003)", () => {
 	const NEW_BODY = [
-		"## Bottom line",
+		"## Summary",
 		"The lint caps what a reader scrolls past.",
 		"",
 		"Refs #5003",
@@ -3940,11 +3940,11 @@ describe("body caps (#5003)", () => {
 
 	it("reports a missing lead once at the repository gates", () => {
 		const leadless = NEW_BODY.replace(
-			"## Bottom line\nThe lint caps what a reader scrolls past.\n\nRefs #5003\n\n",
+			"## Summary\nThe lint caps what a reader scrolls past.\n\nRefs #5003\n\n",
 			"",
 		);
-		expect(capError(leadless, "Bottom line")).toEqual([
-			'PR body is missing "## Bottom line". See .github/PULL_REQUEST_TEMPLATE.md.',
+		expect(capError(leadless, "Summary")).toEqual([
+			'PR body is missing "## Summary". See .github/PULL_REQUEST_TEMPLATE.md.',
 		]);
 	});
 
