@@ -41,6 +41,15 @@
  * - a comparison between axes: a key (path identity) tested against a root
  *   held as a spelling, or the reverse. No needle sees which axis a value is
  *   on; `isUnderDir` answers containment on either axis instead (#4689 r2).
+ * - an upward climb written without a parent call the third needle
+ *   (`hand-rolled-upward-walk`, #4966) reads: a `reduce`, a regex or
+ *   `slice`/`lastIndexOf` strip of the last segment, a split on the separator,
+ *   or a climb through `new URL("..", base)`. The twin suite
+ *   (`tests/clients/walker-symlink-twin-4966.test.ts`) runs the registered
+ *   walkers from a symlink twin instead of reading their spelling.
+ * - a `walkUpDirs(…, { spelling: true })` call. The option is the seam's own
+ *   named escape; the census of files that climb is the twin suite's, whose
+ *   exemptions name each spelled-by-design file and the suite pinning it.
  *
  * Scope: the shipped runtime, `clients/`, `tools/`, `mcp/` and `index.ts`,
  * without tests; `clients/path-utils.ts` is the seam and is not scanned.
