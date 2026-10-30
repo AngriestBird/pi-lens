@@ -19,16 +19,23 @@ import {
 	RunnerRegistry,
 } from "../../../clients/dispatch/dispatcher.js";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
-import { loadProjectRulePolicy } from "../../../clients/dispatch/finding-policy.js";
+import {
+	applyPushedFindingPolicy,
+	loadProjectRulePolicy,
+} from "../../../clients/dispatch/finding-policy.js";
 import { applyRulePolicy } from "../../../clients/dispatch/rule-policy.js";
 import type {
 	Diagnostic,
 	RunnerDefinition,
 	RunnerGroup,
 } from "../../../clients/dispatch/types.js";
+import { applyCascadeDisplayPolicy } from "../../../clients/cascade-format.js";
+import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
+import { applyInlineBlockerPolicy } from "../../../clients/inline-blocker-dispositions.js";
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
 import { clearWidgetState } from "../../../clients/widget-state.js";
 import { createLensDiagnosticsTool } from "../../../tools/lens-diagnostics.js";
+import { createLspDiagnosticsTool } from "../../../tools/lsp-diagnostics.js";
 import { useConfigPath } from "../../support/global-config.js";
 import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
 import { removeTempDirSync } from "../test-utils.js";
@@ -250,5 +257,148 @@ describe("rules.<id> — lens_diagnostics source=lsp reads each file's owner", (
 
 		expect(await probe([path.join(pkg, "app.ts")])).not.toContain(MESSAGE);
 		expect(await probe([path.join(repo, "app.ts")])).toContain(MESSAGE);
+	});
+});
+
+/**
+ * #5011 verify round 3 (F11): four moved non-dispatch surfaces each read
+ * `loadProjectRulePolicy(root)` and, reverted to the root's map, kept a finding
+ * that a nested `.pi-lens.json` disables, with no red anywhere in the repo.
+ * Each case drives the surface's real exported entry point against real config
+ * files and asserts both a file under the nested owner (hidden) and one at the
+ * repo root (kept). A surface handed the root's map fails the first assertion.
+ */
+describe("rules.<id> — the moved finding surfaces read each file's owner", () => {
+	const PROBE_MESSAGE = "Type 'string' is not assignable to type 'number'.";
+	const underPkg = () => path.join(pkg, "a.ts");
+	const atRoot = () => path.join(repo, "a.ts");
+
+	beforeEach(() => clearWidgetState());
+	afterEach(() => clearWidgetState());
+
+	/** A language-server ERROR as `convertLspDiagnostics` renders it (`typescript:2345`). */
+	function lspError(): LSPDiagnostic {
+		return {
+			severity: 1,
+			message:
+				"Argument of type 'string' is not assignable to parameter of type 'number'.",
+			source: "typescript",
+			code: 2345,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 5 },
+			},
+		};
+	}
+
+	/** Write the file, then run the lsp_diagnostics tool over it (a fresh probe). */
+	async function lspProbe(file: string): Promise<string> {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "const value: number = 'bad';\n");
+		const service = makeLspServiceDouble({
+			touchFile: vi.fn(async () => ({
+				diags: [
+					{
+						severity: 2,
+						message: PROBE_MESSAGE,
+						source: "typescript",
+						code: 2322,
+						serverId: "typescript",
+						range: {
+							start: { line: 0, character: 6 },
+							end: { line: 0, character: 11 },
+						},
+					},
+				],
+			})),
+		});
+		const tool = createLspDiagnosticsTool(
+			undefined,
+			undefined,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"lsp-nested-owner",
+			{ path: file },
+			new AbortController().signal,
+			null,
+			{ cwd: repo },
+		)) as { content: Array<{ text: string }> };
+		return result.content.map((part) => part.text).join("\n");
+	}
+
+	// Recurrence: F11 N13 (pushed findings, `applyPushedFindingPolicy` handed the root map).
+	it("pushed findings: applyPushedFindingPolicy hides a nested disable under its own package only", () => {
+		writeConfig(pkg, { rules: { "no-eval": { disable: ["no-eval"] } } });
+
+		const nested = applyPushedFindingPolicy([finding(underPkg())], {
+			cwd: repo,
+			filePath: underPkg(),
+			content: "eval('1');\n",
+		});
+		expect(nested.kept).toEqual([]);
+		expect(nested.suppressed).toBe(1);
+
+		const root = applyPushedFindingPolicy([finding(atRoot())], {
+			cwd: repo,
+			filePath: atRoot(),
+			content: "eval('1');\n",
+		});
+		expect(root.kept.map((d) => d.rule)).toEqual(["no-eval"]);
+	});
+
+	// Recurrence: F11 N14 (cascade format, `applyCascadeDisplayPolicy` handed the root map).
+	it("cascade format: applyCascadeDisplayPolicy hides a nested disable under its own package only", () => {
+		writeConfig(pkg, { rules: { ts: { disable: ["typescript:2345"] } } });
+
+		const nested = applyCascadeDisplayPolicy([lspError()], {
+			cwd: repo,
+			policyRoot: repo,
+			filePath: underPkg(),
+			content: "const marked = 1;\n",
+		});
+		expect(nested.diagnostics).toEqual([]);
+		expect(nested.suppressed).toBe(1);
+
+		const root = applyCascadeDisplayPolicy([lspError()], {
+			cwd: repo,
+			policyRoot: repo,
+			filePath: atRoot(),
+			content: "const marked = 1;\n",
+		});
+		expect(root.diagnostics).toHaveLength(1);
+	});
+
+	// Recurrence: F11 N15 (inline blockers, `applyInlineBlockerPolicy` handed the root map).
+	it("inline blockers: applyInlineBlockerPolicy hides a nested disable under its own package only", () => {
+		writeConfig(pkg, { rules: { "no-eval": { disable: ["no-eval"] } } });
+		fs.mkdirSync(pkg, { recursive: true });
+		fs.writeFileSync(underPkg(), "eval('1');\n");
+		fs.writeFileSync(atRoot(), "eval('1');\n");
+
+		const nested = applyInlineBlockerPolicy(
+			{
+				filePath: underPkg(),
+				summary: "eval",
+				diagnostics: [finding(underPkg())],
+			},
+			repo,
+		);
+		expect(nested.kept).toBe(0);
+		expect(nested.body).toBeUndefined();
+
+		const root = applyInlineBlockerPolicy(
+			{ filePath: atRoot(), summary: "eval", diagnostics: [finding(atRoot())] },
+			repo,
+		);
+		expect(root.kept).toBe(1);
+	});
+
+	// Recurrence: F11 N16 (lsp_diagnostics probe, `applyProbeFindingPolicy` handed the root map).
+	it("lsp_diagnostics probe: hides a nested disable under its own package only", async () => {
+		writeConfig(pkg, { rules: { ts: { disable: ["typescript:2322"] } } });
+
+		expect(await lspProbe(underPkg())).not.toContain(PROBE_MESSAGE);
+		expect(await lspProbe(atRoot())).toContain(PROBE_MESSAGE);
 	});
 });
