@@ -30,10 +30,11 @@ import {
 	registerRunnerId,
 	resetRunnerIdentityForTests,
 } from "../../../clients/dispatch/known-runner-ids.js";
-import type {
-	RunnerDefinition,
-	RunnerGroup,
-	RunnerResult,
+import {
+	RUNNER_SKIP_REASONS,
+	type RunnerDefinition,
+	type RunnerGroup,
+	type RunnerResult,
 } from "../../../clients/dispatch/types.js";
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
 import { resetIgnoredConfigWarnCache } from "../../../clients/config-warn.js";
@@ -509,7 +510,11 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		return dispatchForFile(ctx, fallbackGroup, registry);
 	}
 
-	it.each(["no-files-matched", "dialect-unsupported"] as const)(
+	it.each([
+		"no-files-matched",
+		"configured-non-biome-linter",
+		"dialect-unsupported",
+	] as const)(
 		"words a sibling's stated not-applicable skip (%s) as config only, not a failed tool",
 		async (skipReason) => {
 			const result = await deniedLspNextTo({ ...SKIPPED, skipReason });
@@ -532,17 +537,34 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		expect(result.unconfirmedStatus).toContain("failed to run");
 	});
 
-	it("still reads a covered-by-primary sibling skip as a failed tool", async () => {
-		// Listed in RUNNER_SKIP_REASONS but not a not-applicable reason: it defers
-		// to a lane whose answer is exactly what the denial removed.
-		const result = await deniedLspNextTo({
-			...SKIPPED,
-			skipReason: "covered-by-primary",
-		});
+	// Recurrence: round 4 admitted three reasons and pinned two, and nothing
+	// pinned the closed direction, so a change that admitted the whole taxonomy
+	// (or dropped one entry) shipped green. Every taxonomy reason outside the
+	// admitted three, the denial's own `disabled-by-config` aside, must still
+	// read as a failed tool, so a reason added to RUNNER_SKIP_REASONS fails here
+	// until someone decides which side of the list it belongs on.
+	const ADMITTED = [
+		"no-files-matched",
+		"configured-non-biome-linter",
+		"dialect-unsupported",
+	];
+	it.each(
+		RUNNER_SKIP_REASONS.filter(
+			(reason) =>
+				reason !== DISABLED_BY_CONFIG_SKIP_REASON && !ADMITTED.includes(reason),
+		),
+	)(
+		"still reads a taxonomy skip outside the admitted reasons (%s) as a failed tool",
+		async (skipReason) => {
+			// covered-by-primary defers to a lane whose answer is exactly what the
+			// denial removed.
+			const result = await deniedLspNextTo({ ...SKIPPED, skipReason });
 
-		expect(result.output).toContain("failed to run");
-		expect(result.unconfirmedStatus).toContain("failed to run");
-	});
+			expect(result.output).toContain("failed to run");
+			expect(result.output).not.toContain("so no runner checks these files");
+			expect(result.unconfirmedStatus).toContain("failed to run");
+		},
+	);
 
 	it("still names a sibling runner's failure when lsp.disabledServers turned the primary off", async () => {
 		const csharp = path.join(projectDir, "Program.cs");
@@ -686,5 +708,42 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		);
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain("PILENS_CFG_0005");
+	});
+
+	// PR #5011 round 5, F16 (greptile thread PRRT_kwDORt8rec6yJQYq): the unknown
+	// entries were reported raw, so a pasted list of 100 typo'd ids sent 100
+	// notifications while every other config producer is bounded by
+	// MAX_MIGRATION_RECORDS (20, one slot held for the suppression count).
+	it("bounds the notices for a long list of unknown ids to 19 plus one suppression record", async () => {
+		const unknown = Array.from({ length: 25 }, (_, i) => `no-such-runner-${i}`);
+		writeProject({
+			dispatch: { disabledRunners: ["dotnet-build", ...unknown] },
+		});
+		const { registry } = registryWith(SKIPPED, BLOCKING_BUILD);
+
+		await dispatchForFile(contextFor(), fallbackGroup, registry);
+
+		expect(notified.filter((m) => m.includes("PILENS_CFG_0005"))).toHaveLength(
+			19,
+		);
+		const suppression = notified.filter((m) => m.includes("PILENS_CFG_0007"));
+		expect(suppression).toHaveLength(1);
+		expect(suppression[0]).toContain("6 further config notices");
+		expect(suppression[0]).toContain(".pi-lens.json");
+	});
+
+	it("reports every unknown id when the list is within the bound", async () => {
+		const unknown = Array.from({ length: 19 }, (_, i) => `no-such-runner-${i}`);
+		writeProject({ dispatch: { disabledRunners: unknown } });
+		const { registry } = registryWith(SKIPPED, BLOCKING_BUILD);
+
+		await dispatchForFile(contextFor(), fallbackGroup, registry);
+
+		expect(notified.filter((m) => m.includes("PILENS_CFG_0005"))).toHaveLength(
+			19,
+		);
+		expect(notified.filter((m) => m.includes("PILENS_CFG_0007"))).toHaveLength(
+			0,
+		);
 	});
 });

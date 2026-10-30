@@ -486,7 +486,13 @@ export async function effectiveConfig(
 		documents: summary.documents,
 		provenance: provenanceView(resolved, homeDir).entries,
 		provenanceCounts: summary.countsByTier,
-		recordCounts: countBy(resolution.records, (record) => record.code),
+		// The unknown `dispatch.disabledRunners` ids are records too: the pure
+		// `disabledRunnersOf` derives them without reporting (this query is not a
+		// dispatch), so a typo'd id shows here even where notifications are off.
+		recordCounts: countBy(
+			[...resolution.records, ...disabledRunnersOf(resolution).records],
+			(record) => record.code,
+		),
 		tools: LENS_TOOL_NAMES.map((name) => ({
 			name,
 			enabled: resolveLensToolEnabled(

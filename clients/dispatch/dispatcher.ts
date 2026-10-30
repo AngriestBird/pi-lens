@@ -90,6 +90,7 @@ import { classifyPreExisting, preEditSeedFactKey } from "./pre-edit-seed.js";
 import {
 	hasUsableResult,
 	isRunnerClaimSource,
+	isNotApplicableSkipReason,
 	isRunnerSkipReason,
 	reachedNoVerdict,
 } from "./types.js";
@@ -888,16 +889,6 @@ function buildCoverageNotice(
 		.filter((r) => r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON)
 		.map((r) => r.runnerId);
 	const deniedNote = `${deniedRunnerIds.join(", ")} disabled in config by dispatch.disabledRunners`;
-	// The skip reasons that say a runner had nothing to check, so beside a
-	// `dispatch.disabledRunners` denial they are not a tool that failed. A closed
-	// admission list: a reason added to `RUNNER_SKIP_REASONS` reads as a failure
-	// until it is listed here. `covered-by-primary` is left out on purpose: it
-	// defers to a lane whose answer is what the denial may have removed.
-	const notApplicableSkipReasons: ReadonlySet<RunnerSkipReason> = new Set([
-		"no-files-matched",
-		"configured-non-biome-linter",
-		"dialect-unsupported",
-	]);
 	// A row that is not a tool failure: one the operator switched off (a runner
 	// denial, or a primary LSP `lsp.disabledServers` turned off, with or without
 	// its fallback), or one that skipped with a stated not-applicable reason
@@ -908,8 +899,7 @@ function buildCoverageNotice(
 	const onlySwitchedOff = relevant.every(
 		(r) =>
 			r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON ||
-			(r.skipReason !== undefined &&
-				notApplicableSkipReasons.has(r.skipReason)) ||
+			isNotApplicableSkipReason(r.skipReason) ||
 			r.primaryUnavailableCause === "disabled" ||
 			r.primaryUnavailableCause === "disabledFallback",
 	);

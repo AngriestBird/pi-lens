@@ -306,6 +306,29 @@ export const RUNNER_SKIP_REASONS = [
 export type RunnerSkipReason = (typeof RUNNER_SKIP_REASONS)[number];
 
 /**
+ * The skip reasons that say a runner had nothing to check, so beside a
+ * `dispatch.disabledRunners` denial the coverage notice does not read them as
+ * a tool that failed. A closed admission list over {@link RUNNER_SKIP_REASONS}:
+ * a reason added to the taxonomy reads as a failure until it is listed here.
+ * `covered-by-primary` is left out on purpose: it defers to a lane whose answer
+ * is what the denial may have removed. `disabled-by-config` is the denial
+ * itself and the caller handles it. {@link reachedNoVerdict} admits the whole
+ * taxonomy as a verdict; this is the narrower "not a tool failure" subset.
+ */
+export const NOT_APPLICABLE_SKIP_REASONS: readonly RunnerSkipReason[] = [
+	"no-files-matched",
+	"configured-non-biome-linter",
+	"dialect-unsupported",
+];
+
+/** Whether a skip reason states the runner had nothing to check. */
+export function isNotApplicableSkipReason(
+	value: RunnerSkipReason | undefined,
+): boolean {
+	return NOT_APPLICABLE_SKIP_REASONS.some((reason) => reason === value);
+}
+
+/**
  * #4130: why an invoked tool produced no result. The non-`ran` kinds of
  * `classifyRunOutcome` (`runners/utils/spawn-outcome.ts`), so a new outcome
  * kind fails to compile at `skipUnlessToolRan` until it is named here.

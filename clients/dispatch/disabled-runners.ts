@@ -31,6 +31,7 @@ import {
 } from "../config-resolve.js";
 import {
 	boundedKeyLabel,
+	finalizeRecords,
 	type MigrationRecord,
 	migrationSubject,
 } from "../config-core/records.js";
@@ -91,7 +92,7 @@ function dispatchSection(
  * The denied runners of one resolution, validated against the registry.
  *
  * Pure: reads the resolution and the identity registry and writes nothing.
- * {@link disabledRunnerIdsFor} reports the records.
+ * {@link disabledRunnerIdsFor} bounds and reports the records.
  */
 export function disabledRunnersOf(
 	resolution: PiLensConfigResolution,
@@ -137,7 +138,19 @@ export function disabledRunnerIdsFor(
 	resolution: PiLensConfigResolution,
 ): ReadonlySet<string> | undefined {
 	const resolved = disabledRunnersOf(resolution);
-	reportPiLensConfigRecords(resolved.records);
+	if (resolved.records.length > 0) {
+		// A pasted list can name any number of unknown ids; bound the notices the
+		// way every other config record is (`MAX_MIGRATION_RECORDS`, one slot for
+		// the suppression count), anchored at the document that declared the key.
+		const declared = memberProvenance(resolution, 0);
+		const file = declared?.file ?? resolution.documents.at(-1)?.file ?? "";
+		reportPiLensConfigRecords(
+			finalizeRecords(resolved.records, {
+				file,
+				...(declared?.tier ? { tier: declared.tier } : {}),
+			}),
+		);
+	}
 	return resolved.runners.length === 0
 		? undefined
 		: new Set(resolved.runners.map((runner) => runner.id));

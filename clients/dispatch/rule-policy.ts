@@ -29,6 +29,7 @@ import {
 	resolvePiLensConfig,
 } from "../config-resolve.js";
 import { getPiLensGlobalConfigPath } from "../lens-config.js";
+import { minimatch } from "../deps/minimatch.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import {
 	isUnderDir,
@@ -184,7 +185,9 @@ function anchorPattern(pattern: string, prefix: string): string {
 		return `!${anchorPattern(pattern.slice(1), prefix)}`;
 	const posix = pattern.replaceAll("\\", "/");
 	if (posix.startsWith("/") || /^[A-Za-z]:\//.test(posix)) return pattern;
-	return `${prefix}/${posix.replace(/^(\.\/)+/, "")}`;
+	// The prefix is a directory NAME, not a glob: `pkg[1]` and Next.js `[id]`
+	// would read as character classes and anchor the entry at the wrong path.
+	return `${minimatch.escape(prefix)}/${posix.replace(/^(\.\/)+/, "")}`;
 }
 
 /**

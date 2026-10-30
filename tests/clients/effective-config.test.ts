@@ -26,6 +26,10 @@ import {
 	isEffectiveFileViewError,
 } from "../../clients/effective-config.js";
 import {
+	registerRunnerId,
+	resetRunnerIdentityForTests,
+} from "../../clients/dispatch/known-runner-ids.js";
+import {
 	explainServersForFile,
 	initLSPConfig,
 	isServerDisabled,
@@ -541,6 +545,35 @@ describe("effectiveConfig — why is X running (#2415 AC)", () => {
 			} finally {
 				if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 				else process.env.PI_LENS_HOME = previousHome;
+			}
+		});
+
+		// PR #5011 round 5, F18 (greptile thread PRRT_kwDORt8rec6yJQYm): the view
+		// dropped the unknown-id record, so a typo'd id appeared nowhere and the
+		// tool row read as if nothing was denied. The pure `disabledRunnersOf`
+		// derives the record; `effective_config` counts it without reporting.
+		it("counts an unknown disabledRunners id as a PILENS_CFG_0005 record and sends no notice", async () => {
+			registerRunnerId("dotnet-build");
+			try {
+				const { view } = await viewFor(
+					{
+						files: {
+							"proj/.pi-lens.json": {
+								dispatch: { disabledRunners: ["dotnet-bild", "dotnet-build"] },
+							},
+						},
+						startDir: "proj",
+					},
+					{ file: "Program.cs" },
+				);
+
+				expect(view.recordCounts.PILENS_CFG_0005).toBe(1);
+				expect(deniedBuild(view)?.reason).toBe("disabled-by-config");
+				expect(
+					logSink.messages.filter((message) => message.includes("dotnet-bild")),
+				).toEqual([]);
+			} finally {
+				resetRunnerIdentityForTests();
 			}
 		});
 

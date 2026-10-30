@@ -149,6 +149,23 @@ describe("rules.<id> — dispatch reads the file's config owner", () => {
 		const kept = await dispatchUnderRepo(path.join(pkg, "src", "a.ts"));
 		expect(kept.map((d) => d.rule)).toEqual(["no-eval"]);
 	});
+
+	// PR #5011 round 5, F19 (greptile thread PRRT_kwDORt8rec6yJQYe): a config
+	// directory named with glob magic (`pkg[1]`, Next.js `[id]`) anchored its
+	// entries as `pkg[1]/legacy/**`, which minimatch reads as `pkg1/...`, so the
+	// carve-out silently matched nothing under the real directory.
+	it("anchors a nested ignorePaths glob under a config directory named with glob magic", async () => {
+		const magic = path.join(repo, "pkg[1]");
+		writeConfig(magic, {
+			rules: { "no-eval": { ignorePaths: ["legacy/**"] } },
+		});
+
+		expect(await dispatchUnderRepo(path.join(magic, "legacy", "a.ts"))).toEqual(
+			[],
+		);
+		const kept = await dispatchUnderRepo(path.join(magic, "src", "a.ts"));
+		expect(kept.map((d) => d.rule)).toEqual(["no-eval"]);
+	});
 });
 
 describe("rules.<id> — a project policy reads each file's own owner", () => {
@@ -183,6 +200,25 @@ describe("rules.<id> — a project policy reads each file's own owner", () => {
 				finding(inPkgSrc()),
 			]),
 		).toEqual([path.relative(repo, inRoot()), path.relative(repo, inPkgSrc())]);
+	});
+
+	it("anchors a nested ignorePaths glob under a config directory named with glob magic", () => {
+		const magic = path.join(repo, "pkg[1]");
+		const neighbour = path.join(repo, "pkg1", "legacy", "n.ts");
+		writeConfig(magic, {
+			rules: { "no-eval": { ignorePaths: ["legacy/**"] } },
+		});
+
+		expect(
+			keptFiles([
+				finding(path.join(magic, "legacy", "a.ts")),
+				finding(path.join(magic, "src", "c.ts")),
+				finding(neighbour),
+			]),
+		).toEqual([
+			path.relative(repo, path.join(magic, "src", "c.ts")),
+			path.relative(repo, neighbour),
+		]);
 	});
 
 	it("keeps the same glob text from two files as two carve-outs", () => {
