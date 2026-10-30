@@ -25,7 +25,7 @@ import {
 } from "./path-utils.js";
 import {
 	inlineBlockerLines,
-	inlineBlockerPlaces,
+	inlineBlockerPlacement,
 	inlineBlockerSources,
 } from "./inline-blocker-fields.js";
 import {
@@ -1706,28 +1706,30 @@ function buildAllClearOutput(
  * #5008: the bounded place list both delta lines end with. `total` is the whole
  * blocker population (what the record and the commit gate count), and every one
  * of them is accounted for exactly once: a shown place, the `+N more`
- * remainder, or the trailing count of blockers with no place in these bytes
- * (a `positionStale` carry, another file's row, or no line). At most five
- * places are shown.
+ * remainder, or one of the two counted causes `inlineBlockerPlacement` names.
+ * At most five places are shown.
  */
 function formatBlockerPlaces(
 	blockers: readonly Diagnostic[],
 	filePath: string,
 ): string {
-	const places = inlineBlockerPlaces(blockers, filePath);
+	const { places, unplaced } = inlineBlockerPlacement(blockers, filePath);
 	const shown = places
 		.slice(0, 5)
 		.map((place) => `L${place.line} ${shortBlockerRule(place.rule)}`);
 	const more = places.length - shown.length;
 	if (more > 0) shown.push(`+${more} more`);
-	const unplaced = blockers.length - places.length;
 	const parts: string[] = [];
 	if (shown.length > 0) parts.push(` (${shown.join(", ")})`);
 	// Review r2 (CodeRabbit PRRT_kwDORt8rec6x4fNi): the count names its SCOPE.
-	// It includes another file's row (helm-lint reports `values.yaml` while
-	// `templates/deploy.yaml` is processed), which HAS a current line, just not
-	// in these bytes, so "no current line" misdescribed it.
-	if (unplaced > 0) parts.push(`; ${unplaced} with no line in this file`);
+	// Review r3 (F6): and each cause gets its own clause, because they disagree
+	// about whether this file has a line at all. A same-file stale carry has one
+	// (from older bytes), so counting it as "no line in this file" denied what
+	// the row holds; another file's row and a line-less blocker have none here.
+	if (unplaced.movedLine > 0)
+		parts.push(`; ${unplaced.movedLine} at a line that moved since capture`);
+	if (unplaced.noLineInThisFile > 0)
+		parts.push(`; ${unplaced.noLineInThisFile} with no line in this file`);
 	return parts.join("");
 }
 

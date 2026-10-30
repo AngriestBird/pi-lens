@@ -637,6 +637,28 @@ describe("the language-server verdict the clean advisory reads (#4734 r3)", () =
 			expectedUnconfirmed: "opengrep silent (diagnostics are incomplete)",
 		},
 		{
+			// Review r3 (F7): the status sentence's DEFERRED half, the sibling of
+			// row 11. Recurrence: emptying `statusParts.push` for the deferred set
+			// survived every suite, so a #2810 late-delivery scanner's latched
+			// notice rendered `unconfirmed —  (diagnostics are incomplete)` — the
+			// same unnamed-scanner defect row 11 covers, one scanner class over.
+			label: "row 11b: a deferred server's partial notice, latched",
+			file: "test.ts",
+			runners: {
+				lsp: async () => ({
+					status: "deferred",
+					diagnostics: [],
+					semantic: "none",
+					unconfirmedServerIds: ["typos"],
+					deferredServerIds: ["typos"],
+				}),
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp"] }],
+			pushes: 2,
+			expected: undefined,
+			expectedUnconfirmed: "typos deferred (diagnostics are incomplete)",
+		},
+		{
 			label: "row 12: the lsp runner is deferred",
 			file: "test.ts",
 			runners: {

@@ -2079,10 +2079,10 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 		expect(await s.commitBlocked()).toBe(true);
 		expect(await s.endTurn()).not.toContain("Resolved this turn");
 		// Kept without a place, the blocker cites no line from older bytes — and
-		// the line says so instead of dropping it from a count that still holds it
-		// (#5008).
+		// the line says so (its line MOVED, review r3 F6) instead of dropping it
+		// from a count that still holds it (#5008).
 		expect(w2).toMatch(
-			/Still unfixed: 1 blocker reported earlier; 1 with no line in this file\./,
+			/Still unfixed: 1 blocker reported earlier; 1 at a line that moved since capture\./,
 		);
 		await fixAndDrain(s);
 	}, 180_000);
@@ -2120,7 +2120,7 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 			await s.edit(`${AG_PRE}export const tail = 2;\n${OVER_CAP}\n`, [7]),
 		).toMatch(/Still unfixed: 1 blocker reported earlier/);
 		expect(w2).toMatch(
-			/Still unfixed: 1 blocker reported earlier; 1 with no line in this file\./,
+			/Still unfixed: 1 blocker reported earlier; 1 at a line that moved since capture\./,
 		);
 		await fixAndDrain(s);
 	}, 180_000);
@@ -2442,14 +2442,15 @@ describe("#5008 witness: a partial run answers for the servers that answered", (
 			/Still unfixed: 2 blockers reported earlier \(L2 ts:2304, L3 ts:2304\)\./,
 		);
 		// One blocker's own line is rewritten, so its line number is from older
-		// bytes: it stays counted, and the line says it has no place.
+		// bytes: it stays counted, and the line says its line moved (review r3
+		// F6: this is not the "no line in this file" cause).
 		expect(
 			await s.edit(
 				"const a = 1;\nBAD_CALL(1);\nBAD_CALL();\nconst b = 2;\n",
 				[2],
 			),
 		).toMatch(
-			/Still unfixed: 2 blockers reported earlier \(L3 ts:2304\); 1 with no line in this file\./,
+			/Still unfixed: 2 blockers reported earlier \(L3 ts:2304\); 1 at a line that moved since capture\./,
 		);
 		boundary.lsp.mode = "answer";
 		await fixAndDrain(s);
