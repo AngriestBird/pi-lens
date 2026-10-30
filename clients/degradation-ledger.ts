@@ -168,6 +168,14 @@ export type DegradationKind =
 	 */
 	| "blocker-clear-refused"
 	/**
+	 * #5020: a row of an inline-blocker record that names ANOTHER file (a
+	 * chart-wide or import-following runner reports one against the written
+	 * file) left the record because the cited file was dispatched clean by the
+	 * runner that raised it, or no longer exists. The reason names which. One
+	 * subject per record file key, counted across the session.
+	 */
+	| "cross-file-row-retired"
+	/**
 	 * #4484 round 3: a write could not align its bytes to the bytes the file's
 	 * recorded blockers were read from (no stored line hashes, a file over the
 	 * alignment caps, or a rewrite past `MAX_ALIGNMENT_EDITS`). Each recorded

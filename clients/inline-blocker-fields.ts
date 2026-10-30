@@ -64,6 +64,19 @@ export function inlineBlockerLines(
 	return inlineBlockerPlaces(blockers, filePath).map((place) => place.line);
 }
 
+/**
+ * #5020: whether a blocker row cites a file other than `filePath`: the one
+ * own-file test, shared by the record's line list (`inlineBlockerPlacement`)
+ * and the retire seams that treat such a row as another file's claim. The two
+ * read it the same way, so a row the line list calls "no line in this file" is
+ * the row a retire may judge by its cited file.
+ */
+export function isCrossFileBlocker(d: Diagnostic, filePath: string): boolean {
+	return (
+		normalizeEphemeralMapKey(d.filePath) !== normalizeEphemeralMapKey(filePath)
+	);
+}
+
 /** One place a blocker is cited in `filePath`: the line, and the rule that
  *  reported it. */
 export interface InlineBlockerPlace {
@@ -98,13 +111,12 @@ export function inlineBlockerPlacement(
 	blockers: readonly Diagnostic[],
 	filePath: string,
 ): { places: InlineBlockerPlace[]; unplaced: UnplacedBlockerCounts } {
-	const own = normalizeEphemeralMapKey(filePath);
 	const places: InlineBlockerPlace[] = [];
 	let movedLine = 0;
 	for (const d of blockers) {
 		// Another file's row (#1641) and a blocker with no line are both "no line
 		// in this file"; only a stale carry of THIS file has a line to report.
-		if (normalizeEphemeralMapKey(d.filePath) !== own) continue;
+		if (isCrossFileBlocker(d, filePath)) continue;
 		if (typeof d.line !== "number") continue;
 		if (d.positionStale) {
 			// #4509 (N3): a stale entry's line is from older bytes, so it cites

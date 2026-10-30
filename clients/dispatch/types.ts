@@ -620,6 +620,24 @@ export function checkedWholeFile(
 	);
 }
 
+/**
+ * #5020: the runners that reached a verdict on this run's bytes: a row of the
+ * latency report that succeeded and is not in `inconclusiveSources`. A runner
+ * that skipped, failed, is still in flight or answered for part of the file
+ * speaks for nothing, which is why this is the evidence a retire of another
+ * file's row asks for (`RuntimeCoordinator.retireForeignRows`).
+ */
+export function answeredRunnerIds(
+	result: Pick<DispatchResult, "inconclusiveSources" | "latencyReport">,
+): string[] {
+	const noVerdict = new Set(result.inconclusiveSources?.runnerIds);
+	return (result.latencyReport?.runners ?? []).flatMap((runner) =>
+		runner.status === "succeeded" && !noVerdict.has(runner.runnerId)
+			? [runner.runnerId]
+			: [],
+	);
+}
+
 // --- Dispatch Context ---
 
 /**

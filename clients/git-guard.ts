@@ -2036,6 +2036,26 @@ export function retireInlineBlockerAndResyncGuard(args: {
 		args.coveredSources,
 	);
 	if (!retired) return false;
+	resyncGitGuardAfterRetire({ ...args, owner });
+	return true;
+}
+
+/**
+ * The gate half of a retirement: the latch re-derived from the map, then the
+ * persisted record rewritten without `filePath`'s section, speaking as the
+ * record's `owner`. Shared by every retire that leaves the map (the confirmed
+ * clean above, and #5020's rows of other files, whose cited file was fixed or
+ * deleted), so none of them can retire a record and leave the gate quoting it.
+ */
+export function resyncGitGuardAfterRetire(args: {
+	runtime: RuntimeCoordinator;
+	cacheManager: CacheManager;
+	cwd: string;
+	filePath: string;
+	owner: string | undefined;
+	lensGuardEnabled: boolean;
+	analysisRootMode?: AnalysisRootMode;
+}): void {
 	args.runtime.updateGitGuardStatus(false, "");
 	if (args.lensGuardEnabled) {
 		syncGitGuardRecord(
@@ -2043,12 +2063,11 @@ export function retireInlineBlockerAndResyncGuard(args: {
 			args.cacheManager,
 			args.cwd,
 			args.filePath,
+			args.analysisRootMode,
 			undefined,
-			undefined,
-			owner,
+			args.owner,
 		);
 	}
-	return true;
 }
 
 /**
@@ -2543,6 +2562,19 @@ export function evaluateGitGuard(
 		// persisted record drops that file's section.
 		for (const filePath of absorbed.retiredFiles) {
 			syncGitGuardRecord(runtime, cacheManager, cwd, filePath);
+		}
+		// #5020: a row naming a file that was deleted since the record was made
+		// has nothing left to fix, and no dispatch will ever re-take it. The gate
+		// is the read that matters, so it retires them before it judges.
+		for (const retired of runtime.retireForeignRowsOfMissingFiles()) {
+			resyncGitGuardAfterRetire({
+				runtime,
+				cacheManager,
+				cwd,
+				filePath: retired.filePath,
+				owner: retired.owner,
+				lensGuardEnabled: true,
+			});
 		}
 	} catch (failure) {
 		incrementDegradationCount({

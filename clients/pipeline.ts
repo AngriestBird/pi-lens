@@ -76,6 +76,7 @@ import {
 } from "./dispatch/runners/utils/runner-helpers.js";
 import { findDetektConfig } from "./dispatch/runners/detekt.js";
 import {
+	answeredRunnerIds,
 	checkedWholeFile,
 	type Diagnostic,
 	type InconclusiveSources,
@@ -494,6 +495,13 @@ export interface PipelineResult {
 	 * drop another session's section for it only on such a run.
 	 */
 	fileVerdictComplete?: true;
+	/**
+	 * #5020: the runners that reached a verdict on this run's bytes
+	 * (`answeredRunnerIds`). A row of another file's record that names THIS file
+	 * is retired only by a runner in this list, so a skipped, failed or
+	 * inconclusive one cannot speak for it.
+	 */
+	answeredRunnerIds?: string[];
 	/**
 	 * #4484 round 3: the anchor the inline verdict this run hands on is about
 	 * (the analysed bytes' line hashes and the lines still owed). The caller
@@ -3006,5 +3014,6 @@ async function analysePipeline(
 		...(checkedWholeFile(dispatchResult) && {
 			fileVerdictComplete: true as const,
 		}),
+		answeredRunnerIds: answeredRunnerIds(dispatchResult),
 	};
 }
