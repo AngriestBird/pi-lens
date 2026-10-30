@@ -480,7 +480,7 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"provenance stamp does have a subject — the dependency declarations the " +
 			"scan reported for the rows this report shows (`trivyEvidenceFiles`, " +
 			"each result's target resolved against the scan root, falling back to " +
-			"`existingDependencyManifests` only when no shown row names one), so a " +
+			"`existingDependencyManifests` only when no shown row cites one), so a " +
 			"lockfile edit supersedes the message — nested ones included, not only the " +
 			"manifests at the scan root — even though a package row cannot be stat'd. " +
 			"Also routes through " +

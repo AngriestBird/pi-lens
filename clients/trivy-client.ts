@@ -168,7 +168,7 @@ export function hasAnyDependencyManifest(cwd: string): boolean {
  * These are the manifests at `cwd` only, which is narrower than the scan: the
  * walk reads nested manifests too, so a rendered row cites its own `Target`
  * through `trivyEvidenceFiles` (below) and this list answers only when no
- * shown row names one. The one place the manifest list is turned into paths, so
+ * shown row cites one. The one place the manifest list is turned into paths, so
  * the detection gate and the fallback cannot disagree about which files sit at
  * the root.
  */

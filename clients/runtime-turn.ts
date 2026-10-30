@@ -1661,15 +1661,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					requeueRunnerFindings({
 						...pending,
 						result: { ...result, diagnostics: [] },
-						carriedFromTurnIndex: deliveryTurnKey,
+						carriedFromTurnKey: deliveryTurnKey,
 					}),
 			});
 			// #4617 population B: the note names no file, so no file stamp can
 			// vouch for it. A failure this turn's drain settled is this turn's
 			// evidence; one the cap held last turn is not, and reads historical.
 			const carriedFailure =
-				pending.carriedFromTurnIndex !== undefined &&
-				pending.carriedFromTurnIndex < deliveryTurnKey;
+				pending.carriedFromTurnKey !== undefined &&
+				pending.carriedFromTurnKey < deliveryTurnKey;
 			if (carriedFailure) markCarriedPart(failedNote);
 			else markFilelessPart(failedNote);
 			// @delivery-surface: runtime-turn:late-runner-findings

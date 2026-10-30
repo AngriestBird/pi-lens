@@ -32,7 +32,7 @@ export interface PendingRunnerFindings {
 	 * session's: a concurrent secondary's turns do not move the coordinator's
 	 * `turnIndex` (review V1).
 	 */
-	carriedFromTurnIndex?: number;
+	carriedFromTurnKey?: number;
 }
 
 interface PendingRunnerPromise extends Omit<PendingRunnerFindings, "result"> {
@@ -59,7 +59,7 @@ function settledSnapshot(entry: PendingRunnerPromise): PendingRunnerFindings {
 		// the scope that owned it, and the gate's peek can fence with it.
 		session: entry.session,
 		sessionId: entry.sessionId,
-		carriedFromTurnIndex: entry.carriedFromTurnIndex,
+		carriedFromTurnKey: entry.carriedFromTurnKey,
 		result: entry.result,
 	};
 }
@@ -231,8 +231,8 @@ export async function drainPendingRunnerFindings(
 			// producer's own `promise` handler settles `settled`/`result` on THIS
 			// object, so a copy would stay `settled: false` forever. The first
 			// boundary wins, so the stamp stays the earliest turn it reports about.
-			if (turnKey !== undefined && entry.carriedFromTurnIndex === undefined)
-				entry.carriedFromTurnIndex = turnKey;
+			if (turnKey !== undefined && entry.carriedFromTurnKey === undefined)
+				entry.carriedFromTurnKey = turnKey;
 			pending.push(entry);
 		}
 	}
