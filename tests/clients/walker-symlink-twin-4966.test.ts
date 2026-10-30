@@ -720,15 +720,19 @@ async function answers(walker: Walker, layout: Layout) {
 
 describe("#4966: every upward walker answers the same from a symlink twin", () => {
 	for (const walker of WALKERS)
-		it(`${walker.id}: the real path and its symlink twin answer the owner`, async (ctx) => {
-			// RECURRENCE GUARDED: seven bug-fix PRs (#4844 #4847 #4858 #4870 #4876
-			// #4919 #4957) each found one walker that started from the spelling and
-			// answered the decoy owner for a symlinked checkout.
-			const { layout, skipReason } = build(walker);
-			if (skipReason) return ctx.skip(skipReason);
-			const { out, expected } = await answers(walker, layout);
-			expect(out).toEqual(expected);
-		});
+		it(
+			`${walker.id}: the real path and its symlink twin answer the owner`,
+			async (ctx) => {
+				// RECURRENCE GUARDED: seven bug-fix PRs (#4844 #4847 #4858 #4870 #4876
+				// #4919 #4957) each found one walker that started from the spelling and
+				// answered the decoy owner for a symlinked checkout.
+				const { layout, skipReason } = build(walker);
+				if (skipReason) return ctx.skip(skipReason);
+				const { out, expected } = await answers(walker, layout);
+				expect(out).toEqual(expected);
+			},
+			TREE_WALK_TIMEOUT_MS,
+		);
 });
 
 describe("#4966: the walker registry covers every file that climbs", () => {

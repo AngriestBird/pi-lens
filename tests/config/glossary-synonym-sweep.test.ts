@@ -947,6 +947,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// duplicated path operations with one owner.
 		"clients/cache/rule-cache.ts": 5,
 		"clients/call-graph.ts": 4,
+		// 6 -> 5 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/cargo-manifest.ts": 5,
 		"clients/cascade-logger.ts": 2,
 		"clients/code-quality-warnings.ts": 5,
@@ -1066,6 +1067,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 65 -> 68 (#4876 r2): `projectPathKey` keys a dot-segment spelling by its
 		// DIRECTORY's identity (`path.dirname` + `path.basename` of the caller's
 		// own spelling), so the kernel — not `path.resolve` — folds the `..`.
+		// 68 -> 67 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/file-utils.ts": 67,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
@@ -1081,9 +1083,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
 		"clients/git-tracked-ignore.ts": 3,
+		// 20 -> 19 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/gitleaks-client.ts": 19,
 		"clients/go-client.ts": 2,
 		"clients/govulncheck-client.ts": 7,
+		// 5 -> 4 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/gradle-ktfmt-style.ts": 4,
 		"clients/grammar-source.ts": 4,
 		"clients/gzip-stage-write.ts": 2,
@@ -1127,11 +1131,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (`path.resolve` / `path.dirname` / `path.basename` / `path.join`) is
 		// deleted; the confinement asks `realpathOrResolveAsync` for the root and
 		// each URI's identity, so four `path` uses leave the module.
+		// 19 -> 18 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/lsp/edits.ts": 18,
 		// #4532: the environment-gap gate resolves its walk-up from the file's
 		// own directory, so these are real filesystem `path` calls. 5 -> 8
 		// (#4532 round 5): the manifest walk-up reads `package.json` at each
 		// level on the same bounded ancestry.
+		// 8 -> 5 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/lsp/environment-gap.ts": 5,
 		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
@@ -1171,10 +1177,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 121 -> 124 (#4914): `findEffectTsgoLsp` joins the `@effect/tsgo` manifest
 		// path, the `.bin/effect-tsgo` path, and `findNativeTypeScriptLsp` hands
 		// back its `node_modules` directory: three `path.join` filesystem calls.
+		// 122 -> 111 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/lsp/server.ts": 111,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
+		// 12 -> 11 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/lsp/workspace-diagnostics-cache.ts": 11,
 		// #4346: a creation record carries the created file's path.
 		"clients/lsp/workspace-diagnostics-session.ts": 2,
@@ -1189,7 +1197,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/ipc.ts": 7,
 		"clients/mcp/session.ts": 3,
 		"clients/metrics-client.ts": 6,
-		"clients/metrics-history.ts": 7,
+		// 7 -> 6 (#4966): the two `path.dirname(filePath)` starts of the commit lookup become one inside `getCurrentCommit`.
+		"clients/metrics-history.ts": 6,
 		"clients/module-report.ts": 30,
 		// 6 -> 9 (#3650): MutationLineResult.path field, the adapter-declared
 		// preference, and the readToolResultPathField return.
@@ -1244,6 +1253,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 39 -> 41 (#2556): `relativeInside` takes a `pathImpl: typeof path = path`
 		// argument so callers can pass the win32 dialect; the default and its
 		// annotation are the two senses.
+		// 41 -> 40 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/path-utils.ts": 40,
 		"clients/php-cs-fixer-config.ts": 4,
 		// 26 -> 24 (#4689 batch 3): the changed-file set is a PathKeyedMap, so two
@@ -1288,6 +1298,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 10 -> 11 (#4508): the walk joins the `.git` entry and its HEAD.
 		"clients/review-graph/git-identity.ts": 11,
 		// 61 -> 64 (#4346 final lane): `fileAnswerNames`, moved from builder.ts.
+		// 64 -> 61 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/review-graph/import-resolvers.ts": 61,
 		"clients/review-graph/tsconfig-paths.ts": 35,
 		"clients/review-graph/workspace-modules.ts": 27,
@@ -1391,7 +1402,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (a path operation).
 		"clients/tool-agreement.ts": 10,
 		// 13 -> 12 (#4689 item 6): the file is resolved by `realpathOrResolve`.
+		// 12 -> 10 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/tool-cwd.ts": 10,
+		// 64 -> 62 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"clients/tool-policy.ts": 62,
 		// 19 -> 18 (#4689 batch 7): the grammar write probe climbs `walkUpDirs`, so
 		// its own `path.dirname` step is the seam's.
@@ -1454,6 +1467,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/symbol-search.ts": 5,
 		"mcp/analyze-cli.ts": 4,
 		"mcp/cli.ts": 2,
+		// 31 -> 30 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
 		"mcp/server.ts": 30,
 		"index.ts": 20,
 	},
