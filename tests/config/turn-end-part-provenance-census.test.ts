@@ -34,6 +34,14 @@
  * line, because the scanner cannot read it: fail closed, as the
  * `@delivery-surface:` seam scan beside it does (#4429).
  *
+ * Scope (review F5): the population is the THREE TIER ARRAYS' pushes, not every
+ * composed part. One composed part is deliberately outside it — `resolvedParts`
+ * (`clients/runtime-turn.ts`, cited where the resolution lines are built, then
+ * spread into the message's parts). It is a literal array, never a `.push(` into
+ * a tier, so this scan cannot see it, and a change that stopped citing it would
+ * not red here. It is cited today, and the body states the narrower population
+ * rather than claiming "every producer".
+ *
  * Known limit (named, not papered over): the pairing is by identifier inside
  * one block. Two producers in the SAME block that reuse one identifier would
  * share a declaration. Every block today builds one part per identifier, and a

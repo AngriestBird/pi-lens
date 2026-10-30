@@ -477,9 +477,12 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		"Package-pinned finding with no cited file:line to stat — this gate has " +
 			"nothing to check drift against. The session_start cache can be " +
 			"arbitrarily old, so its age is stated instead. #4617: the advisory " +
-			"provenance stamp does have a subject — the dependency manifests the " +
-			"scan read (`existingDependencyManifests`), so a lockfile edit " +
-			"supersedes the message even though a package row cannot be stat'd. " +
+			"provenance stamp does have a subject — the dependency declarations the " +
+			"scan reported for the rows this report shows (`trivyEvidenceFiles`, " +
+			"each result's target resolved against the scan root, falling back to " +
+			"`existingDependencyManifests` for a row that names none), so a lockfile " +
+			"edit supersedes the message — nested ones included, not only the " +
+			"manifests at the scan root — even though a package row cannot be stat'd. " +
 			"Also routes through " +
 			"`filterFindingsByDisposition` (#1625) first — a suppressed/false-" +
 			"positive finding never reaches this render, so the age label and the " +

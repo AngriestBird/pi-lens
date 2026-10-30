@@ -161,15 +161,16 @@ export function hasAnyDependencyManifest(cwd: string): boolean {
 }
 
 /**
- * #4617: the manifests a `trivy fs` pass at `cwd` reads, as absolute paths.
+ * #4617: the manifests a `trivy fs` pass at `cwd` reads, as absolute paths —
+ * the DEPENDENCY SURFACE probe (`hasAnyDependencyManifest`) and, at turn end,
+ * the citation fallback for a report whose rows name no target.
  *
- * A CVE or license row names a PACKAGE, never a file:line, so the turn-end
- * tiers that render these rows have no cited path of their own. Their evidence
- * is the dependency declaration the scan read, so these are the files the
- * advisory speaks for — a lockfile edit is exactly what makes the cached row
- * out of date. The one place the manifest list is turned into paths, so the
- * detection gate and the provenance citation cannot disagree about which files
- * the scan covers.
+ * These are the manifests at `cwd` only, which is narrower than the scan: the
+ * walk reads nested manifests too, so a rendered row cites its own `Target`
+ * through `trivyEvidenceFiles` (below) and this list is only what answers for a
+ * row that names none. The one place the manifest list is turned into paths, so
+ * the detection gate and the fallback cannot disagree about which files sit at
+ * the root.
  */
 export function existingDependencyManifests(cwd: string): string[] {
 	const found: string[] = [];
@@ -182,6 +183,35 @@ export function existingDependencyManifests(cwd: string): string[] {
 		}
 	}
 	return found;
+}
+
+/**
+ * #4617 review F1: the declarations one rendered trivy report was read from, as
+ * absolute paths — each row's target (a result's `Target`, or a license row's
+ * `FilePath`, which falls back to its result's `Target`) resolved against the
+ * scan root, deduped.
+ *
+ * `trivy fs` walks the whole tree, so the root manifests alone under-covered
+ * the scan: a monorepo package's own lockfile could move on and the CVE row
+ * still read current. A row that names no target contributes nothing, and a
+ * report whose rows all name none falls back to `existingDependencyManifests`
+ * (the same list the opt-in gate probes) so the tier keeps a subject — an
+ * uncited part fails the provenance stamp closed, which would label a live
+ * report historical.
+ *
+ * Bounded by the caller: it is handed the rows the report SHOWS, so a scan with
+ * hundreds of CVE rows never pushes the stamp past its file cap.
+ */
+export function trivyEvidenceFiles(
+	scanRoot: string,
+	targets: readonly (string | undefined)[],
+): string[] {
+	const files = new Set<string>();
+	for (const target of targets) {
+		if (target === undefined || target.trim() === "") continue;
+		files.add(path.resolve(scanRoot, target));
+	}
+	return files.size > 0 ? [...files] : existingDependencyManifests(scanRoot);
 }
 
 /**

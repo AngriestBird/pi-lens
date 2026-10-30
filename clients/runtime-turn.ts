@@ -64,7 +64,7 @@ import {
 	SWEEP_IDLE_SAFETY_MARGIN_MS,
 } from "./lsp/workspace-sweep-hold.js";
 import { isTestRoleCollateral } from "./collateral-test-role.js";
-import { existingDependencyManifests } from "./trivy-client.js";
+import { trivyEvidenceFiles } from "./trivy-client.js";
 import type { TrivyResult } from "./trivy-client.js";
 import { isSecretWarning, secretLocationKey } from "./secret-findings.js";
 import { govulncheckLane } from "./turn-end/lanes/govulncheck.js";
@@ -1467,6 +1467,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	 */
 	const filelessParts = new Map<string, "this-turn" | "carried">();
 	const markFilelessPart = (part: string): void => {
+		// #4617 review F3: the registry is keyed by the part's TEXT, so a fresh note
+		// identical to a cap-held one would overwrite `carried` with `this-turn` and
+		// drop the earlier-turn evidence. Carried wins over a later same-text write.
+		if (filelessParts.get(part) === "carried") return;
 		filelessParts.set(part, "this-turn");
 	};
 	const markCarriedPart = (part: string): void => {
@@ -1600,6 +1604,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				0,
 				runtime.sessionScope.capture(),
 				deliverySessionId,
+				// #4617 review F2: the index of the boundary that leaves a run waiting,
+				// so the note a later turn renders reads carried, not this-turn.
+				runtime.turnIndex,
 			),
 			{
 				ms: HOOK_WALL_BUDGET_MS.turn_end,
@@ -3934,11 +3941,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// ever compose.
 	const trivyAgeLabel = formatCacheAgeLabel(trivyCacheEntry?.data?.scannedAt);
 	// #4617: a CVE or license row names a package, not a file:line, so the file
-	// stamp had nothing to stat for these three tiers. The scan's evidence IS
-	// the dependency declaration it read, so the manifests are the subject: a
-	// lockfile edit is what makes the cached row out of date. Empty when the
+	// stamp had nothing to stat for these three tiers. The scan's evidence IS the
+	// dependency declaration it read, so each report cites the targets its own
+	// rows name — `trivyEvidenceFiles` resolves them against the scan root, which
+	// covers a nested lockfile a root-only list misses (review F1). Empty when the
 	// declaration is gone, which leaves the tiers unaccounted (fail closed).
-	const trivyCitedFiles = existingDependencyManifests(cwd);
 	const trivyFindingsFiltered = filterFindingsByDisposition(
 		trivyCacheEntry?.data?.findings ?? [],
 		cwd,
@@ -3967,7 +3974,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 			// @delivery-surface: runtime-turn:trivy-critical-blocker
 			blockerParts.push(report);
-			citePart(report, trivyCitedFiles);
+			citePart(
+				report,
+				trivyEvidenceFiles(
+					cwd,
+					shown.map((f) => f.target),
+				),
+			);
 		}
 		if (advisory.length) {
 			const shown = advisory.slice(0, 5);
@@ -3978,7 +3991,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 			// @delivery-surface: runtime-turn:trivy-cve-advisory
 			advisoryParts.push(report);
-			citePart(report, trivyCitedFiles);
+			citePart(
+				report,
+				trivyEvidenceFiles(
+					cwd,
+					shown.map((f) => f.target),
+				),
+			);
 		}
 	}
 
@@ -3999,7 +4018,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		// @delivery-surface: runtime-turn:trivy-license-advisory
 		advisoryParts.push(report);
-		citePart(report, trivyCitedFiles);
+		citePart(
+			report,
+			trivyEvidenceFiles(
+				cwd,
+				shown.map((l) => l.filePath),
+			),
+		);
 	}
 
 	// #1616 suppressed-bucket rule: surface the running disposition-drop total

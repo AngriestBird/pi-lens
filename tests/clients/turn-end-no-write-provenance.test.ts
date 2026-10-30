@@ -1547,6 +1547,49 @@ describe.each([false, true])(
 			});
 		});
 
+		// #4617 review F1 (probe C): `trivy fs` walks the whole tree, so a nested
+		// lockfile is a declaration the scan read. Citing only the manifests at
+		// `cwd` left a monorepo's CVE list reading current after its own package's
+		// lockfile moved on.
+		it("labels a trivy CVE advisory historical when a nested lockfile the scan named changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-nested-${guard}`,
+				incident:
+					"A nested lockfile edit left a monorepo's CVE advisory labelled current",
+				issue: "#4617",
+				async run(h) {
+					h.write("package.json", '{\n  "name": "root"\n}\n');
+					h.write("package-lock.json", "{\n}\n");
+					const nested = h.write("packages/a/package-lock.json", "{\n}\n");
+					h.scan("trivy", {
+						findings: [
+							{
+								vulnerabilityId: "CVE-2024-0001",
+								pkgName: "left-pad",
+								installedVersion: "1.0.0",
+								fixedVersion: "1.0.1",
+								severity: "HIGH",
+								target: "packages/a/package-lock.json",
+							},
+						],
+						licenses: [],
+						secrets: [],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(nested, '{\n  "x": 1\n}\n');
+						},
+					});
+					expect(view.text).toContain("Dependency CVEs (trivy");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// #4617 population A through the govulncheck LANE: the section reports the
 		// call site each CVE is reachable from, so the lane hands back those files
 		// as the section's subject. A change to one of them supersedes the text.
@@ -1634,6 +1677,81 @@ describe.each([false, true])(
 					expect(view.text).toContain("Deferred runner shellcheck failed");
 					expect(view.text).not.toContain(HISTORICAL);
 					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 review F2 (probe A): the dominant carry path is not the cap. A run
+		// the drain leaves unanswered at this turn's end settles later, and the
+		// note it renders reports the earlier turn's bytes — so it reads carried
+		// whatever mechanism delayed it.
+		it("labels a runner failure note historical when its run settled after its own turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-late-settle-${guard}`,
+				incident:
+					"A crash note for a run deferred before this turn read as this turn's news",
+				issue: "#4617",
+				async run(h) {
+					let settle = (): void => {};
+					const inFlight = new Promise<RunnerResult>((resolve) => {
+						settle = () =>
+							resolve({
+								status: "failed",
+								failureKind: "spawn_failed",
+								semantic: "warning",
+								diagnostics: [],
+							} as RunnerResult);
+					});
+					deferRunnerFindings({
+						filePath: h.write("src/broken.sh", "echo broken\n"),
+						cwd: h.cwd,
+						projectRoot: h.cwd,
+						runnerId: "shellcheck",
+						markedAtMs: Date.now() - 2000,
+						promise: inFlight,
+					});
+					h.runtime.beginTurn();
+					const first = await h.turnEnd({ flags });
+					expect(first.text).not.toContain("Deferred runner shellcheck failed");
+					// The in-flight run settles only after the turn that dispatched it
+					// has ended: production's own drain budget is zero.
+					settle();
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const second = await h.turnEnd({ flags });
+					expect(second.text).toContain("Deferred runner shellcheck failed");
+					expect(second.text).toContain(HISTORICAL);
+					expect(second.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// #4617 review F3 (probe H, CodeRabbit PRRT_kwDORt8rec6x4WEe): the
+		// registry is keyed by part TEXT, so a fresh note identical to the
+		// cap-held one overwrites `carried` with `this-turn` and the earlier-turn
+		// evidence is lost. The carried arm wins over a later same-text write.
+		it("labels a message historical when a carried crash note collides with an identical note from this turn", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-failed-runner-collision-${guard}`,
+				incident:
+					"A repeated runner failure overwrote the carried note's provenance",
+				issue: "#4617",
+				async run(h) {
+					deferNoisyRunner(h, 25);
+					deferBrokenRunner(h, "shellcheck");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const first = await h.turnEnd({ flags });
+					expect(first.text).not.toContain("Deferred runner shellcheck failed");
+					// A second failure of the same runner with the same text: the cap-held
+					// note drains first, this turn's identical one second.
+					deferBrokenRunner(h, "shellcheck");
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					h.runtime.beginTurn();
+					const second = await h.turnEnd({ flags });
+					expect(second.text).toContain("Deferred runner shellcheck failed");
+					expect(second.text).toContain(HISTORICAL);
+					expect(second.text).not.toContain(UNKNOWN_STAMP);
 				},
 			});
 		});
