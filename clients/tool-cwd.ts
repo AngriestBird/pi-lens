@@ -139,10 +139,10 @@ function syncGeneration(): void {
 }
 
 /**
- * `startDir` is a path identity: `resolveToolCwd` resolves the file once and
- * hands its directory here, so the climb names the parents the kernel opens
- * and `homeDir` is on the same axis (the caller resolves it too). A caller
- * that passes a spelling climbs the link's parents instead (#4689 item 6).
+ * `walkUpDirs` resolves `startDir` and `homeDir` to path identities itself, so
+ * the climb names the parents the kernel opens and a caller may pass a
+ * spelling (#4689 item 6, #4966). `resolveToolCwd` hands over the directory
+ * of the file's resolved target.
  */
 function walkMarkerRoot(
 	startDir: string,
