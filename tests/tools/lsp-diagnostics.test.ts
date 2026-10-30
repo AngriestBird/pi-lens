@@ -16,7 +16,8 @@ const mocked = vi.hoisted(() => ({
 	cascadeTier: "waits" as "waits" | "tier3-silent",
 }));
 
-vi.mock("../../clients/warm-attach.js", () => ({
+vi.mock("../../clients/warm-attach.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/warm-attach.js")>()),
 	isWarmAttached: () => mocked.warmAttached,
 	tryWarmAttachedDiagnostics: (...args: unknown[]) =>
 		mocked.attachedDiagnostics(...args),
@@ -1819,9 +1820,8 @@ describe("lsp_diagnostics tool", () => {
 				incumbentTouch: Record<string, unknown>,
 				edit: (response: Record<string, unknown>) => void = () => undefined,
 			) => {
-				const { _serveWarmRequestForTests } = await vi.importActual<
-					typeof import("../../clients/warm-attach.js")
-				>("../../clients/warm-attach.js");
+				const { _serveWarmRequestForTests } =
+					await import("../../clients/warm-attach.js");
 				const { contentHash, WARM_DIAGNOSTICS_SCHEMA_VERSION } =
 					await import("../../clients/mcp/ipc.js");
 				const content = fs.readFileSync(file, "utf-8");

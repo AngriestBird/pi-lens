@@ -574,14 +574,14 @@ export function warmAnswerBinding(answer: {
 	readonly binding?: unknown;
 }): DiagnosticBinding {
 	const wire = answer.binding;
-	const record =
+	const fields =
 		typeof wire === "object" && wire !== null
 			? (wire as Record<string, unknown>)
 			: {};
-	const verdict = record.boundToCurrentDisk;
+	const verdict = fields.boundToCurrentDisk;
 	return {
-		...(typeof record.contentHash === "string" && {
-			contentHash: record.contentHash,
+		...(typeof fields.contentHash === "string" && {
+			contentHash: fields.contentHash,
 		}),
 		boundToCurrentDisk:
 			verdict === true || verdict === false || verdict === "unknown"

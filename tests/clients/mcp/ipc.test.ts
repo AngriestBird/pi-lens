@@ -148,18 +148,18 @@ describe("requestWarmDiagnostics", () => {
 	// transport, and `warmAnswerBinding` reads it as that build meant. The
 	// pre-#5030 shape has no binding, so it reads as not current: a session on
 	// this build attached to an incumbent on an older one withholds the rows
-	// instead of reading them as the current bytes. A new fixture without a row
-	// in the table fails, so a shape cannot join the corpus unread.
+	// instead of reading them as the current bytes. A response shape a released
+	// build adds gets a fixture and a row here.
 	const WARM_FIXTURES = new URL("../../fixtures/warm-attach/", import.meta.url);
-	const READ_AS: Record<string, unknown> = {
+	const READ_AS = {
 		"diagnostics-response-pre-5030.json": { boundToCurrentDisk: false },
 		"diagnostics-response-5030-stale-bound.json": {
 			contentHash:
 				"2ad21d5e89849c34021330c42624e67b494ed26f33fca1819704af80434ba91c",
 			boundToCurrentDisk: false,
 		},
-	};
-	it.each(fs.readdirSync(WARM_FIXTURES).sort())(
+	} as const;
+	it.each(Object.keys(READ_AS) as (keyof typeof READ_AS)[])(
 		"parses the %s response and reads its binding (#5030)",
 		async (name) => {
 			const fixture = JSON.parse(

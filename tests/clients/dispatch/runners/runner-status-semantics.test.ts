@@ -51,7 +51,10 @@ vi.mock("../../../../clients/dispatch/runners/utils.js", () => ({
 	readFileContent,
 }));
 
-vi.mock("../../../../clients/warm-attach.js", () => ({
+vi.mock("../../../../clients/warm-attach.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../../clients/warm-attach.js")
+	>()),
 	tryWarmAttachedDiagnostics: warmAttach.diagnostics,
 	tryWarmAttachedCodeActions: warmAttach.codeActions,
 }));
@@ -1049,9 +1052,8 @@ describe("runner status/semantic edge cases", () => {
 			dir: string,
 			incumbentTouch: Record<string, unknown>,
 		) => {
-			const { _serveWarmRequestForTests } = await vi.importActual<
-				typeof import("../../../../clients/warm-attach.js")
-			>("../../../../clients/warm-attach.js");
+			const { _serveWarmRequestForTests } =
+				await import("../../../../clients/warm-attach.js");
 			const { contentHash, WARM_DIAGNOSTICS_SCHEMA_VERSION } =
 				await import("../../../../clients/mcp/ipc.js");
 			const content = "const x = 1;\n";

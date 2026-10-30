@@ -10,7 +10,8 @@ let warmAttached = false;
 const tryWarmAttachedDiagnostics = vi.fn();
 
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
-vi.mock("../../../clients/warm-attach.js", () => ({
+vi.mock("../../../clients/warm-attach.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../clients/warm-attach.js")>()),
 	isWarmAttached: () => warmAttached,
 	tryWarmAttachedDiagnostics,
 }));
@@ -219,9 +220,8 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 			await installLspServiceDouble({
 				touchFile: vi.fn(async () => incumbentTouch),
 			});
-			const { _serveWarmRequestForTests } = await vi.importActual<
-				typeof import("../../../clients/warm-attach.js")
-			>("../../../clients/warm-attach.js");
+			const { _serveWarmRequestForTests } =
+				await import("../../../clients/warm-attach.js");
 			const { contentHash, WARM_DIAGNOSTICS_SCHEMA_VERSION } =
 				await import("../../../clients/mcp/ipc.js");
 			const content = fs.readFileSync(file, "utf-8");
