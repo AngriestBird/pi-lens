@@ -2539,7 +2539,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// is now an awaited seam call, bounded by its own timeout
 	// (USER_BASE_PROBE_TIMEOUT_MS=5000, ARCHIVE_COMMAND_TIMEOUT_MS=120000) and
 	// no longer hanging on a child that never exits.
-	"clients/installer/index.ts": 221,
+	// 221 → 222 (#4937 review F1): `settleProbeCacheForTests` awaits one
+	// `flushProbeCache` so the tier-2 teardown can reject on a flush that did not
+	// land. Only the test helper registry calls it; no hook handler reaches it.
+	"clients/installer/index.ts": 222,
 	// 29 -> 56 (#4765): refreshOpengrepRulePack (the background registry-pack
 	// refresh) awaits the pack download, its temp-file write, the
 	// `opengrep --validate` spawn, a stat/read/rename of the cached file and a
@@ -2697,7 +2700,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// (a save, #3828 r3), never a spawn; its answer is the late row's outcome.
 	"clients/pipeline.ts": 64,
 	"clients/project-changes.ts": 2,
-	"clients/project-snapshot.ts": 2,
+	// 2 → 3 (#4937 review F1): `settleProjectSnapshotPersistsForTests` awaits the
+	// bounded persist wait, then rejects if work remains. Only the test helper
+	// registry calls it; no hook handler reaches it.
+	"clients/project-snapshot.ts": 3,
 	// #3871 r3: runtime-turn imports only the synchronous
 	// `hasAmbientPythonEnvironment`, which this one-hop walk cannot tell apart.
 	// The four awaits are `detectPythonEnvironment`'s filesystem probes, which

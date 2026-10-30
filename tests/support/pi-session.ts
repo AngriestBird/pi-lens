@@ -53,9 +53,10 @@
  *    process's FIRST `session_start` takes (the cold-start heuristic), and it
  *    is paired with `PI_LENS_COLD_START_QUICK=0`: a quick start otherwise arms
  *    an unref'd 2 s warmup timer (`clients/runtime-session.ts`), and the warmup's
- *    project-snapshot persist is a module-scope queue in the loaded copy that
- *    nothing here can drain — measured, it lands after this fixture root is
- *    gone and re-creates it (the accepted `p3` residual in the PR body). The
+ *    project-snapshot persist lands after this fixture root is gone and
+ *    re-creates it unless the timer is off (the persist is joined at teardown
+ *    when it is already queued, point 6, but a timer that has not fired is not
+ *    a queue). The
  *    opt-out drops the TIMER, not the quick start: the skipped-work branch and
  *    the `mode: "quick"` row are what a quick-mode case observes.
  * 4. The load builds jiti's transform cache at `path.join(os.tmpdir(), "jiti")`,
@@ -108,11 +109,18 @@
  *        directory inside the fixture root this file removes, never in the
  *        shared tmp root (#4632 slice 7 round 2, probed: `pi-lens-temp-find-functions-*`
  *        under the fixture after the pin, under `os.tmpdir()` before it).
- *    The copy's module-scope persist queues (`clients/project-snapshot.ts`,
- *    `clients/review-graph/builder.ts`, the warmup timer) have no such seam:
- *    they are reachable only through the copy's own module objects, which
- *    nothing here holds. That is the `p3` residual documented in the PR body,
- *    NOT a silence.
+ *      - the copy's module-scope deferred writers that REGISTER a drain
+ *        (`clients/background-write-drains.ts`: the project-snapshot worker
+ *        persist, the installer's debounced probe-cache flush) are joined
+ *        by `drainPiSessionWrites` before the root is removed, and the NDJSON
+ *        writers are flushed a second time there. Without the join, the copy's
+ *        write landed after the removal and re-created the root (#4937: master
+ *        run 40967488612; a sweep of the 45 tier-2 files found four more).
+ *    The copy's module-scope persist queue in `clients/review-graph/builder.ts`
+ *    and the warmup timer register no drain: they are reachable only through
+ *    the copy's own module objects, which nothing here holds. None was seen to
+ *    land after a removal in the 45-file sweep; that is the `p3` residual
+ *    documented in the PR body, NOT a silence.
  *
  * INLINE-FACTORY MODE (opt-in, #4937 L6). `PiSessionOptions.inlineFactory`
  * hands pi the factory this test already imported, through pi's
@@ -162,6 +170,7 @@ import type {
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll } from "vitest";
+import { drainRegisteredBackgroundWritesForTests } from "./background-write-drains.js";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
@@ -1306,16 +1315,35 @@ afterEach(async () => {
 });
 
 /**
- * Settle, put the environment back, then remove every fixture root this file
- * owns. `afterEach` above already disposed each case's handles; this pass is
- * the backstop for a case that threw before its first `await`, plus the
- * settle/removal order. The copy's module-scope persist queues stay
- * unreachable (header, point 6).
+ * Dispose every live handle and join every deferred writer the loaded copy can
+ * still land in a fixture root. The loaded copy's module-scope deferred
+ * writers that register a drain (`clients/background-write-drains.ts`: the
+ * project-snapshot worker persist, the installer's debounced probe-cache flush)
+ * are joined here, and the NDJSON writers are flushed a second time: a row the
+ * copy appends after `dispose()` otherwise re-creates the root once it is
+ * removed (#4937; master run 40967488612). The persist queue in
+ * `clients/review-graph/builder.ts` and the warmup timer register no drain and
+ * stay unreachable (header, point 6).
+ *
+ * Exported so the helper's contract test can run it ahead of a root's removal;
+ * the `afterAll` below is its only other caller.
  */
-afterAll(async () => {
+export async function drainPiSessionWrites(): Promise<void> {
 	for (const handle of liveHandles.splice(0)) await handle.dispose();
 	await drainBackgroundWritesForTests();
+	await drainRegisteredBackgroundWritesForTests();
+	await flushAllNdjsonWriters();
 	await _settleRegistryMutationsForTests();
+}
+
+/**
+ * Settle, put the environment back, then remove every fixture root this file
+ * owns. `afterEach` above already disposed each case's handles; the drain is
+ * the backstop for a case that threw before its first `await`, plus the
+ * settle/removal order.
+ */
+afterAll(async () => {
+	await drainPiSessionWrites();
 	for (const [key, value] of Object.entries(savedEnv)) {
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;
