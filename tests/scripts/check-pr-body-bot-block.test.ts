@@ -129,11 +129,19 @@ describe("a bot block appended to the body never counts (#4774)", () => {
 	setup();
 
 	// What a real-body case may still print: the test-reference error that the
-	// empty corpus earns the body's `tests/...` citations, and nothing else.
+	// empty corpus earns the body's `tests/...` citations, the caps a body written
+	// before #5003 exceeds, and nothing else.
 	const unexpected = (printed: string) =>
 		printed
 			.split("\n")
-			.filter((line) => line.trim() && !line.startsWith(TEST_REFERENCE));
+			.filter(
+				(line) =>
+					line.trim() &&
+					!line.startsWith(TEST_REFERENCE) &&
+					!/^PR body (?:is \d+ visible|has a \d+-line|"## Notes for the reviewer" allows)/.test(
+						line,
+					),
+			);
 
 	// Acceptance 1 and 2. Recurrence: PR 4767 at 7f7ee1127, whose body ends with
 	// Greptile's block quoting `(refs #43...`.

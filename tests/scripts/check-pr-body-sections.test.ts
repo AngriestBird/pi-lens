@@ -30,7 +30,6 @@ import {
 const SECTIONS = [
 	"Summary",
 	"Tests",
-	"Blast radius",
 	"Class sweep",
 	"Observability",
 	"Fold check",
@@ -63,12 +62,7 @@ const TAIL = [
 const body = (middle: string) => `${HEAD}\n${middle}\n\n${TAIL}`;
 const crlf = (text: string) => text.replace(/\r?\n/g, "\r\n");
 const TESTS = "## Tests\nTargeted tests pass.";
-const AFTER_SUMMARY = [
-	"Blast radius",
-	"Class sweep",
-	"Observability",
-	"Fold check",
-];
+const AFTER_SUMMARY = ["Class sweep", "Observability", "Fold check"];
 const stub = (): string => "";
 
 const missing = (errors: string[]) =>

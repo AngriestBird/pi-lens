@@ -34,7 +34,6 @@ import {
 	repairEscapedNewlineBody,
 	repairFlattenedBody,
 	resolveLivePrBody,
-	resolveTouchesTests,
 	DETECTION_LAYERS,
 	DETECTION_UNKNOWN_MESSAGE,
 	lintDetectionSection,
@@ -314,7 +313,7 @@ describe("flattened PR body repair", () => {
 		expect(lintPrBody(flattenedBody)).toMatchObject({ valid: false });
 		expect(detectFlattenedBody(flattenedBody)).toBe(true);
 		const repaired = repairFlattenedBody(flattenedBody);
-		expect(lintPrBody(repaired, { requireTestAssessment: true })).toEqual({
+		expect(lintPrBody(repaired)).toEqual({
 			valid: true,
 			errors: [],
 		});
@@ -324,7 +323,7 @@ describe("flattened PR body repair", () => {
 		expect(detectFlattenedBody(multiRoundFlattenedBody)).toBe(true);
 		const repaired = repairFlattenedBody(multiRoundFlattenedBody);
 		expect(repaired).not.toBe(multiRoundFlattenedBody);
-		expect(lintPrBody(repaired, { requireTestAssessment: true })).toEqual({
+		expect(lintPrBody(repaired)).toEqual({
 			valid: true,
 			errors: [],
 		});
@@ -390,11 +389,9 @@ describe("flattened PR body repair", () => {
 		"repairs a flattened motivating body shape",
 		(candidate) => {
 			expect(detectFlattenedBody(candidate)).toBe(true);
-			expect(
-				lintPrBody(repairFlattenedBody(candidate), {
-					requireTestAssessment: true,
-				}),
-			).toMatchObject({ valid: true });
+			expect(lintPrBody(repairFlattenedBody(candidate))).toMatchObject({
+				valid: true,
+			});
 		},
 	);
 
@@ -1301,7 +1298,7 @@ describe("flattened body CI entrypoint", () => {
 		});
 		expect(result).toMatchObject({ valid: false, repaired: false });
 		expect(errors).toHaveBeenCalledWith(
-			expect.stringContaining("PR body is missing a Summary section"),
+			expect.stringContaining('PR body is missing "## Bottom line"'),
 		);
 		expect(fetchImpl).not.toHaveBeenCalledWith(
 			expect.anything(),
@@ -3440,18 +3437,21 @@ describe("PR body lint (#1844)", () => {
 		});
 	});
 
-	it("rejects two sentences in Why but accepts one", () => {
-		const rejected = lintPrBody(
-			body.replace(
-				"The body gate makes review intent explicit.",
-				"The body gate makes review intent explicit. It keeps the contract strict.",
-			),
+	const LEAD = "The body gate makes review intent explicit.";
+	const LEAD_CAP = '"## Bottom line" must contain one to 3 sentences';
+	const gateErrors = (text: string) =>
+		lintPrBody(text, { workingTree: true }).errors.join(" ");
+
+	it("caps the lead at three sentences (#5003)", () => {
+		const three = `${LEAD} It keeps the contract strict. It reds early.`;
+		expect(gateErrors(body.replace(LEAD, three))).not.toContain(LEAD_CAP);
+		expect(gateErrors(body.replace(LEAD, `${three} A fourth.`))).toContain(
+			LEAD_CAP,
 		);
-		expect(rejected.valid).toBe(false);
-		expect(rejected.errors.join(" ")).toContain(
-			'"## Why" must contain exactly one sentence',
-		);
-		expect(lintPrBody(body)).toEqual({ valid: true, errors: [] });
+	});
+
+	it("rejects a lead with no sentence (#5003)", () => {
+		expect(gateErrors(body.replace(LEAD, "Refs #5003"))).toContain(LEAD_CAP);
 	});
 
 	it.each([
@@ -3468,34 +3468,23 @@ describe("PR body lint (#1844)", () => {
 		["question ending", "The change answers the question?"],
 		["exclamation ending", "The change works!"],
 		["quoted period", 'The change preserves the quoted "foo.bar" string.'],
-	])(
-		"accepts one Why sentence without counting %s (#3262 F-3262-V1)",
-		(_name, whyText) => {
-			expect(
-				lintPrBody(
-					body.replace("The body gate makes review intent explicit.", whyText),
-				),
-			).toEqual({
-				valid: true,
-				errors: [],
-			});
-		},
-	);
-
-	it("rejects two real Why sentences (#3262 F-3262-V1)", () => {
-		const result = lintPrBody(
-			body.replace(
-				"The body gate makes review intent explicit.",
-				"The body gate makes review intent explicit. It keeps the contract strict.",
-			),
-		);
-		expect(result.valid).toBe(false);
-		expect(result.errors.join(" ")).toContain(
-			'"## Why" must contain exactly one sentence',
-		);
+	])("counts one lead sentence for %s (#3262 F-3262-V1)", (_name, whyText) => {
+		expect(
+			gateErrors(body.replace(LEAD, `First point. Second point. ${whyText}`)),
+		).not.toContain(LEAD_CAP);
 	});
 
-	it.each(["Tests", "Blast radius", "Class sweep", "Observability"])(
+	it("does not require Blast radius (#5003)", () => {
+		const without = body.replace(
+			"## Blast radius\nNo runtime module touched.\n\n",
+			"",
+		);
+		expect(without).not.toContain("Blast radius");
+		expect(lintPrBody(without)).toEqual({ valid: true, errors: [] });
+		expect(gateErrors(without)).not.toContain("Blast radius");
+	});
+
+	it.each(["Tests", "Class sweep", "Observability"])(
 		"rejects a missing %s section",
 		(section) => {
 			const result = lintPrBody(body.replace(`## ${section}\n`, ""));
@@ -3504,7 +3493,7 @@ describe("PR body lint (#1844)", () => {
 		},
 	);
 
-	it.each(["Tests", "Blast radius", "Class sweep", "Observability"])(
+	it.each(["Tests", "Class sweep", "Observability"])(
 		"rejects an empty %s section",
 		(section) => {
 			const result = lintPrBody(
@@ -3515,10 +3504,12 @@ describe("PR body lint (#1844)", () => {
 		},
 	);
 
-	it("rejects a local body missing Why", () => {
-		const result = lintLocalPrBody(body.replace("## Why\n", ""));
+	it("rejects a local body with no lead heading", () => {
+		const result = lintLocalPrBody(
+			body.replace("## Why\n", "").replace("## Summary\n", ""),
+		);
 		expect(result.valid).toBe(false);
-		expect(result.errors.join(" ")).toContain('"## Why"');
+		expect(result.errors.join(" ")).toContain('"## Bottom line"');
 	});
 
 	it("accepts not applicable with a reason", () => {
@@ -3600,7 +3591,7 @@ describe("PR body lint (#1844)", () => {
 		const result = lintPrBody(null as unknown as string);
 		expect(result.valid).toBe(false);
 		expect(result.errors).toContain(
-			"PR body is missing a Summary section. See .github/PULL_REQUEST_TEMPLATE.md.",
+			"PR body is missing a Bottom line section. See .github/PULL_REQUEST_TEMPLATE.md.",
 		);
 	});
 
@@ -3892,55 +3883,134 @@ describe("live PR body resolution (#2085)", () => {
 	});
 });
 
-describe("conditional Test assessment section (value discipline)", () => {
-	const assessed = `${body}
-
-### Test assessment
-foo.test.ts uniquely pins the retry ladder; nothing made redundant.`;
-
-	it("does not require the section by default", () => {
-		expect(lintPrBody(body)).toMatchObject({ valid: true });
-	});
-
-	it("requires the section when the PR touches tests/", () => {
-		const result = lintPrBody(body, { requireTestAssessment: true });
-		expect(result.valid).toBe(false);
-		expect(result.errors.join(" ")).toContain("Test assessment");
-	});
-
-	it("accepts an answered section when required", () => {
-		expect(lintPrBody(assessed, { requireTestAssessment: true })).toMatchObject(
-			{ valid: true },
+describe("body caps (#5003)", () => {
+	const NEW_BODY = [
+		"## Bottom line",
+		"The lint caps what a reader scrolls past.",
+		"",
+		"Refs #5003",
+		"",
+		"## Notes for the reviewer",
+		"- The caps apply only at the repository gates.",
+		"",
+		"## Change outline",
+		"```text",
+		"- lintPrBody",
+		"  + lintBodyBudgets",
+		"```",
+		"",
+		"## Proof and checks",
+		"",
+		"### Tests",
+		"Targeted tests pass.",
+		"",
+		"### Class sweep",
+		"none: this fixture has no runtime change.",
+		"",
+		"### Observability",
+		"No new failure path; no record added.",
+		"",
+		"### Fold check",
+		"none: this fixture searched for nothing.",
+	].join("\n");
+	const errorsOf = (text: string) =>
+		lintPrBody(text, { workingTree: true }).errors;
+	const capError = (text: string, needle: string) =>
+		errorsOf(text).filter((error) => error.includes(needle));
+	// Pads Tests with one long plain line until the body's visible text is `size`.
+	const sized = (size: number) => {
+		const visible = NEW_BODY.replace(/```text[\s\S]*?```/, "")
+			.replace(/\s+/g, " ")
+			.trim();
+		return NEW_BODY.replace(
+			"Targeted tests pass.",
+			`Targeted tests pass.${"x".repeat(size - visible.length)}`,
 		);
+	};
+	const tests = (text: string) =>
+		NEW_BODY.replace("Targeted tests pass.", text);
+	const notes = (text: string) =>
+		NEW_BODY.replace("- The caps apply only at the repository gates.", text);
+	const bullets = (count: number) =>
+		Array.from({ length: count }, (_, at) => `- Note ${at}.`).join("\n");
+	const fence = (count: number) =>
+		["```text", ...Array.from({ length: count }, () => "FAIL x"), "```"].join(
+			"\n",
+		);
+
+	it("reports a missing lead once at the repository gates", () => {
+		const leadless = NEW_BODY.replace(
+			"## Bottom line\nThe lint caps what a reader scrolls past.\n\nRefs #5003\n\n",
+			"",
+		);
+		expect(capError(leadless, "Bottom line")).toEqual([
+			'PR body is missing "## Bottom line". See .github/PULL_REQUEST_TEMPLATE.md.',
+		]);
 	});
 
-	it("rejects an empty section when required", () => {
-		const result = lintPrBody(
-			`${body}
-
-### Test assessment
-`,
-			{
-				requireTestAssessment: true,
-			},
-		);
-		expect(result.valid).toBe(false);
-		expect(result.errors.join(" ")).toContain("Test assessment");
+	it("accepts the new four-section body at both gates", () => {
+		expect(errorsOf(NEW_BODY)).toEqual([]);
+		expect(lintPrBody(NEW_BODY)).toEqual({ valid: true, errors: [] });
 	});
 
-	it("rejects the template placeholder as content", () => {
-		const template = readFileSync(".github/PULL_REQUEST_TEMPLATE.md", "utf8");
-		const placeholder =
-			/### Test assessment\r?\n\r?\n([^#]*)/.exec(template)?.[1] ?? "";
-		expect(placeholder.trim().length).toBeGreaterThan(0);
-		const result = lintPrBody(
-			`${body}
+	it("caps visible characters at 5000", () => {
+		expect(capError(sized(5000), "visible characters")).toEqual([]);
+		expect(capError(sized(5001), "visible characters")).toHaveLength(1);
+	});
 
-### Test assessment
-${placeholder}`,
-			{ requireTestAssessment: true },
+	it("counts text inside a details block", () => {
+		const hidden = sized(5001).replace(
+			"Targeted tests pass.",
+			"<details>\n<summary>Proof</summary>\n\nTargeted tests pass.",
 		);
-		expect(result.valid).toBe(false);
+		expect(
+			capError(`${hidden}\n\n</details>`, "visible characters"),
+		).toHaveLength(1);
+	});
+
+	it("leaves a code fence out of the character count", () => {
+		const padded = `${sized(5000)}\n\n${fence(20)}`;
+		expect(capError(padded, "visible characters")).toEqual([]);
+	});
+
+	it("caps each code fence at 20 lines", () => {
+		expect(capError(tests(fence(20)), "code fence")).toEqual([]);
+		expect(capError(tests(fence(21)), "code fence")).toHaveLength(1);
+		expect(
+			capError(tests(fence(21).replaceAll("```", "~~~")), "code fence"),
+		).toHaveLength(1);
+	});
+
+	it("caps reviewer notes at five top-level bullets", () => {
+		expect(capError(notes(bullets(5)), "allows at most")).toEqual([]);
+		expect(capError(notes(bullets(6)), "allows at most")).toHaveLength(1);
+		expect(
+			capError(notes(`${bullets(5)}\n  - A nested note.`), "allows at most"),
+		).toEqual([]);
+	});
+
+	it.each([
+		["a table", "| a | b |\n| --- | --- |\n| 1 | 2 |"],
+		["a code fence", "```text\nFAIL x\n```"],
+	])("moves %s out of reviewer notes", (_name, block) => {
+		expect(
+			capError(notes(`- Note.\n\n${block}`), "allows at most"),
+		).toHaveLength(1);
+	});
+
+	it("leaves an older body alone below the repository gates", () => {
+		const long = sized(5001).replace("Refs #5003", "One. Two. Three. Four.");
+		expect(lintPrBody(long).errors).toEqual([]);
+	});
+
+	it("keeps the unfilled template under the character cap", () => {
+		const template = readFileSync(
+			resolve(repositoryRoot, ".github/PULL_REQUEST_TEMPLATE.md"),
+			"utf8",
+		);
+		expect(capError(template, "visible characters")).toEqual([]);
+		expect(capError(template, "code fence")).toEqual([]);
+		expect(capError(template, "allows at most")).toEqual([]);
 	});
 });
 
@@ -4688,16 +4758,6 @@ describe("local lint parity", () => {
 		expect(result.errors.join(" ")).toContain("record literal");
 	});
 
-	it("requires Test assessment when the local diff touches tests/", () => {
-		const result = lintLocalPrBody(
-			body,
-			process.cwd(),
-			() => "tests/scripts/example.test.ts\n",
-		);
-		expect(result.valid).toBe(false);
-		expect(result.errors.join(" ")).toContain("Test assessment");
-	});
-
 	it("matches CI close-keyword placement and rejects comma lists (#3681)", () => {
 		const withTitle = `${body}\n\nCloses #3680, #3681.`;
 		const result = lintLocalPrBody(withTitle, process.cwd(), () => "", {
@@ -4743,7 +4803,7 @@ describe("local lint parity", () => {
 			"revision missing-ref does not exist or is not a commit",
 		);
 	});
-	it("falls back to HEAD~1 when the upstream range is unavailable", () => {
+	it("reports a failed diff when the upstream range is unavailable", () => {
 		const ranges: string[][] = [];
 		const result = lintLocalPrBody(body, process.cwd(), (args) => {
 			ranges.push(args);
@@ -4753,85 +4813,11 @@ describe("local lint parity", () => {
 		});
 		expect(result.valid).toBe(false);
 		// #4585: the diff-keyed rows need the range itself, so the failed diff is
-		// reported rather than replaced by an empty one; the test-detection
-		// fallback still resolves whether tests changed.
+		// reported rather than replaced by an empty one.
 		expect(ranges).toEqual([
 			["diff", "--unified=0", "--no-color", "origin/master...HEAD"],
 			["rev-parse", "--verify", "origin/master"],
-			["diff", "--name-only", "origin/master...HEAD"],
-			["diff", "--name-only", "HEAD~1"],
 		]);
-	});
-});
-
-describe("resolveTouchesTests", () => {
-	const payloadPr = { number: 7, body: "fallback" };
-
-	afterEach(() => {
-		vi.unstubAllEnvs();
-	});
-
-	it("returns true when a tests/ file is in the list", async () => {
-		vi.stubEnv("GITHUB_TOKEN", "t");
-		vi.stubEnv("GITHUB_API_URL", "https://api.example");
-		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
-		const fetchImpl = vi
-			.fn()
-			.mockResolvedValue(
-				new Response(
-					JSON.stringify([
-						{ filename: "clients/foo.ts" },
-						{ filename: "tests/clients/foo.test.ts" },
-					]),
-					{ status: 200 },
-				),
-			);
-		expect(await resolveTouchesTests(payloadPr, fetchImpl)).toBe(true);
-	});
-
-	it("returns false for a production-only PR", async () => {
-		vi.stubEnv("GITHUB_TOKEN", "t");
-		vi.stubEnv("GITHUB_API_URL", "https://api.example");
-		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
-		const fetchImpl = vi.fn().mockResolvedValue(
-			new Response(JSON.stringify([{ filename: "clients/foo.ts" }]), {
-				status: 200,
-			}),
-		);
-		expect(await resolveTouchesTests(payloadPr, fetchImpl)).toBe(false);
-	});
-
-	it("returns null and warns when the list is paginated", async () => {
-		vi.stubEnv("GITHUB_TOKEN", "t");
-		vi.stubEnv("GITHUB_API_URL", "https://api.example");
-		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
-		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const fetchImpl = vi.fn().mockResolvedValue(
-			new Response("[]", {
-				status: 200,
-				headers: { link: '<next>; rel="next"' },
-			}),
-		);
-		expect(await resolveTouchesTests(payloadPr, fetchImpl)).toBe(null);
-		expect(warning).toHaveBeenCalledWith(
-			expect.stringContaining("::warning::"),
-		);
-		warning.mockRestore();
-	});
-
-	it("returns null and warns on a fetch failure", async () => {
-		vi.stubEnv("GITHUB_TOKEN", "t");
-		vi.stubEnv("GITHUB_API_URL", "https://api.example");
-		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
-		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const fetchImpl = vi
-			.fn()
-			.mockResolvedValue(new Response("boom", { status: 500 }));
-		expect(await resolveTouchesTests(payloadPr, fetchImpl)).toBe(null);
-		expect(warning).toHaveBeenCalledWith(
-			expect.stringContaining("::warning::"),
-		);
-		warning.mockRestore();
 	});
 });
 
@@ -4845,120 +4831,6 @@ describe("nested headings are structure, not content (#2124 F1)", () => {
 		);
 		expect(result.valid).toBe(false);
 		expect(result.errors.join(" ")).toContain("## Tests");
-	});
-
-	it("rejects a required Test assessment satisfied only by a deeper heading", () => {
-		const result = lintPrBody(
-			`${body}
-
-### Test assessment
-#### sub`,
-			{
-				requireTestAssessment: true,
-			},
-		);
-		expect(result.valid).toBe(false);
-		expect(result.errors.join(" ")).toContain("Test assessment");
-	});
-});
-
-describe("renames out of tests/ still require the assessment (#2124 F3)", () => {
-	// #2223: the unstub used to run only after the assertion below, so a
-	// failing assertion left GITHUB_TOKEN/GITHUB_API_URL/GITHUB_REPOSITORY
-	// stubbed for every later test in this file.
-	afterEach(() => vi.unstubAllEnvs());
-
-	it("counts previous_filename", async () => {
-		vi.stubEnv("GITHUB_TOKEN", "t");
-		vi.stubEnv("GITHUB_API_URL", "https://api.example");
-		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
-		const fetchImpl = vi.fn().mockResolvedValue(
-			new Response(
-				JSON.stringify([
-					{
-						filename: "attic/foo.test.ts",
-						previous_filename: "tests/clients/foo.test.ts",
-					},
-				]),
-				{ status: 200 },
-			),
-		);
-		expect(await resolveTouchesTests({ number: 7 }, fetchImpl)).toBe(true);
-	});
-});
-
-describe("the event entrypoint consumes the tri-state (#2124 F2)", () => {
-	const assessedBody = `${body}
-
-### Test assessment
-foo.test.ts uniquely pins the retry ladder.`;
-
-	let previousCwd: string;
-	let fixtureCwd: string;
-	beforeEach(() => {
-		previousCwd = process.cwd();
-		fixtureCwd = createOriginMasterFixture();
-		process.chdir(fixtureCwd);
-	});
-
-	afterEach(() => vi.unstubAllEnvs());
-	afterEach(() => {
-		process.chdir(previousCwd);
-		rmSync(fixtureCwd, { recursive: true, force: true });
-	});
-
-	function stubApi() {
-		vi.stubEnv("GITHUB_TOKEN", "t");
-		vi.stubEnv("GITHUB_API_URL", "https://api.example");
-		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
-	}
-
-	function fetchFor(bodyText: string, files: unknown) {
-		return vi.fn().mockImplementation(async (url: string | URL | Request) => {
-			if (String(url).includes("/files")) {
-				if (files instanceof Error) throw files;
-				return new Response(JSON.stringify(files), { status: 200 });
-			}
-			return new Response(JSON.stringify({ body: bodyText }), { status: 200 });
-		});
-	}
-
-	it("requires the section when the live file list touches tests/", async () => {
-		stubApi();
-		const result = await lintPullRequestEvent(
-			fetchFor(body, [{ filename: "tests/clients/foo.test.ts" }]),
-			{ pull_request: { number: 7, body } },
-		);
-		expect(result.valid).toBe(false);
-	});
-
-	it("accepts the assessed body when required", async () => {
-		stubApi();
-		const result = await lintPullRequestEvent(
-			fetchFor(assessedBody, [{ filename: "tests/clients/foo.test.ts" }]),
-			{ pull_request: { number: 7, body: assessedBody } },
-		);
-		expect(result).toMatchObject({ valid: true });
-	});
-
-	it("skips the section for production-only PRs", async () => {
-		stubApi();
-		const result = await lintPullRequestEvent(
-			fetchFor(body, [{ filename: "clients/foo.ts" }]),
-			{ pull_request: { number: 7, body } },
-		);
-		expect(result).toMatchObject({ valid: true });
-	});
-
-	it("skips the section on file-list fetch trouble", async () => {
-		stubApi();
-		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const result = await lintPullRequestEvent(
-			fetchFor(body, new Error("boom")),
-			{ pull_request: { number: 7, body } },
-		);
-		expect(result).toMatchObject({ valid: true });
-		warning.mockRestore();
 	});
 });
 

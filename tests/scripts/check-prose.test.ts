@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkProse } from "../../scripts/check-prose.mjs";
+import { checkProse, proseSections } from "../../scripts/check-prose.mjs";
 import { lintPrBody } from "../../scripts/check-pr-body.mjs";
 
 describe("heading rules read the lexer's headings (#4717 N2)", () => {
@@ -183,5 +183,13 @@ describe("checkProse", () => {
 		expect(
 			lintPrBody(body, { proseMode: "warn" }).errors.join(" "),
 		).not.toContain("sentence-length");
+	});
+
+	it("judges Bottom line prose (#5003)", () => {
+		const long =
+			"This sentence has enough ordinary words to exceed the prose limit and should fail when it appears in a Bottom line section because the PR body gate checks that section during every local and CI validation run.";
+		expect(
+			proseSections(`## Bottom line\n${long}\n\n## Tests\nRan.`),
+		).toContain(long);
 	});
 });

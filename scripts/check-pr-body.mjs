@@ -50,15 +50,20 @@ const TEMPLATE_FILE = resolve(
 // tests build carry no `formal/` tree, and a diff path is repo-relative.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REQUIRED_SECTIONS = [
-	"Why",
+	"Bottom line",
 	"Notes for the reviewer",
 	"Change outline",
 	"Tests",
-	"Blast radius",
 	"Class sweep",
 	"Observability",
 	"Fold check",
 ];
+// #5003: what a reader scrolls past. Code fences hold the required transcripts,
+// so they are capped per fence and stay out of the character count.
+const BOTTOM_LINE_MAX_SENTENCES = 3;
+const REVIEWER_NOTES_MAX_BULLETS = 5;
+const VISIBLE_BODY_MAX_CHARS = 5000;
+const FENCE_MAX_LINES = 20;
 // The PR footer the template requires (.github/PULL_REQUEST_TEMPLATE.md).
 const GENERATED_FOOTER =
 	/^🤖 Generated with \[Claude Code\]\(https:\/\/claude\.com\/claude-code\)$/;
@@ -70,9 +75,11 @@ const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 // remainder as a count (#4585 row classification is an agent-facing surface).
 const UNCLASSIFIED_REPORT_LIMIT = 5;
 const REPAIR_HEADINGS = [
+	"Bottom line",
 	"Why",
 	"Notes for the reviewer",
 	"Change outline",
+	"Proof and checks",
 	"Summary",
 	"Tests",
 	"Test assessment",
@@ -87,9 +94,11 @@ const REPAIR_HEADINGS = [
 ];
 const REPAIR_HEADING_PATTERN = REPAIR_HEADINGS.join("|");
 const CORRUPTED_HEADING_TAILS = [
+	"ottom line",
 	"hy",
 	"otes for the reviewer",
 	"hange outline",
+	"roof and checks",
 	"ummary",
 	"ests",
 	"est assessment",
@@ -103,18 +112,21 @@ const CORRUPTED_IDENTIFIER_TAILS = ["etchOpenPullRequests", "px"];
 
 // Fleet census from the review of 11 bodies: ## OBSERVABILITY x5,
 // ## what changed x6, ## verification x7, and ## Summary x1. “What changed”
-// (with or without “and why”) satisfies Summary; “Verification” satisfies
-// Tests. Heading matching is deliberately case-insensitive.
+// (with or without “and why”) satisfies the lead; “Verification” satisfies
+// Tests. Heading matching is deliberately case-insensitive. #5003: `Bottom line`
+// replaced `Why` and `Summary`; both still read as the lead, so an open body
+// keeps its structure.
 const SECTION_SYNONYMS = new Map([
-	["why", "why"],
+	["bottom line", "bottom line"],
+	["why", "bottom line"],
 	["notes for the reviewer", "notes for the reviewer"],
 	["change outline", "change outline"],
-	["summary", "summary"],
-	["problem", "summary"],
-	["what changed", "summary"],
-	["what changed and why", "summary"],
-	["what changed / why", "summary"],
-	["what changed / why / verification", ["summary", "tests"]],
+	["summary", "bottom line"],
+	["problem", "bottom line"],
+	["what changed", "bottom line"],
+	["what changed and why", "bottom line"],
+	["what changed / why", "bottom line"],
+	["what changed / why / verification", ["bottom line", "tests"]],
 	["tests", "tests"],
 	["verification", "tests"],
 	["blast radius", "blast radius"],
@@ -4365,6 +4377,44 @@ function lintDiffCompliance(body, options) {
 	return errors;
 }
 
+// #5003: a <details> block does not earn room: its text still counts.
+function lintBodyBudgets(body) {
+	const errors = [];
+	const visibleChars = blankMarkdown(body, { htmlBlocks: true })
+		.replace(/\s+/g, " ")
+		.trim().length;
+	if (visibleChars > VISIBLE_BODY_MAX_CHARS)
+		errors.push(
+			`PR body is ${visibleChars} visible characters, over the ${VISIBLE_BODY_MAX_CHARS} cap. Cut narrative and tables; see ${TEMPLATE_PATH}.`,
+		);
+	const longestFence = Math.max(
+		0,
+		...markdownBlocks(body, { tilde: true })
+			.filter((block) => block.fence)
+			.map((block) => block.lines.length - 2),
+	);
+	if (longestFence > FENCE_MAX_LINES)
+		errors.push(
+			`PR body has a ${longestFence}-line code fence, over the ${FENCE_MAX_LINES} cap. Quote only the failing lines; see ${TEMPLATE_PATH}.`,
+		);
+	const notes = sectionContent(body, "notes for the reviewer")?.raw;
+	if (notes !== undefined) {
+		const bullets = notes
+			.split(/\r?\n/)
+			.filter((line) => /^(?:[-*+]|\d+\.)\s/.test(line)).length;
+		if (
+			bullets > REVIEWER_NOTES_MAX_BULLETS ||
+			markdownBlocks(notes, { tilde: true }).some(
+				(block) => block.fence || block.table,
+			)
+		)
+			errors.push(
+				`PR body "## Notes for the reviewer" allows at most ${REVIEWER_NOTES_MAX_BULLETS} bullets and no table or code fence. Move proof under "## Proof and checks"; see ${TEMPLATE_PATH}.`,
+			);
+	}
+	return errors;
+}
+
 export function lintPrBody(body = "", options = {}) {
 	// The same lexer headings and section text `sectionContent` reads (#4717):
 	// a section GitHub hides in a comment or a raw-HTML block is a missing
@@ -4375,47 +4425,43 @@ export function lintPrBody(body = "", options = {}) {
 	const placeholders = templatePlaceholderLines();
 	const structure = headingLines(body, headings).name;
 	const errors = options.diff ? lintDiffCompliance(body, options) : [];
-	const summary = headings.find((heading) => hasSection(heading, "summary"));
+	const lead = headings.find((heading) => hasSection(heading, "bottom line"));
 	const firstHeading = headings[0]?.index ?? lines.length;
 	const nextSectionHeading = (heading) =>
 		headings.find(
 			(candidate) =>
 				candidate.index > heading.index && candidate.level <= heading.level,
 		);
-	const summaryEnd = summary
-		? (nextSectionHeading(summary)?.index ?? lines.length)
-		: 0;
+	const leadEnd = lead ? (nextSectionHeading(lead)?.index ?? lines.length) : 0;
 	if (
-		(!summary ||
+		!options.workingTree &&
+		(!lead ||
 			!hasRealContent(
-				lines.slice(summary.contentIndex, summaryEnd),
-				"summary",
+				lines.slice(lead.contentIndex, leadEnd),
+				"bottom line",
 				placeholders,
 				structure,
-				summary.contentIndex,
+				lead.contentIndex,
 			)) &&
 		!hasRealContent(
 			lines.slice(0, firstHeading),
-			"summary",
+			"bottom line",
 			placeholders,
 			structure,
 		)
 	) {
-		errors.push(`PR body is missing a Summary section. See ${TEMPLATE_PATH}.`);
+		errors.push(
+			`PR body is missing a Bottom line section. See ${TEMPLATE_PATH}.`,
+		);
 	}
 
-	// Value discipline (HISTORY.md "Test assessment and removal (value discipline)"): a PR that
-	// touches tests/ must say, per touched file, what it uniquely pins and
-	// what became redundant. Conditional because docs/production-only PRs owe
-	// nothing here.
 	// The exported structural linter is also used by focused tests and historical
 	// repair fixtures. The repository-facing local gate is the contract that
-	// requires the new header trio; keeping that switch explicit avoids changing
-	// the meaning of lower-level parser tests.
+	// requires the header sections and the caps; keeping that switch explicit
+	// avoids changing the meaning of lower-level parser tests.
 	const requiredSections = options.workingTree
 		? [...REQUIRED_SECTIONS]
-		: ["Tests", "Blast radius", "Class sweep", "Observability"];
-	if (options.requireTestAssessment) requiredSections.push("Test assessment");
+		: ["Tests", "Class sweep", "Observability"];
 	// #4288: only a bug-closing PR owes the detection retrospective. The
 	// tri-state resolution lives at the callers; `true` is the only value that
 	// requires the section, so an unreadable label never blocks.
@@ -4447,19 +4493,17 @@ export function lintPrBody(body = "", options = {}) {
 				sectionMessage(name, "has no content before the next heading"),
 			);
 	}
-	const why = headings.find((heading) => hasSection(heading, "why"));
-	if (why) {
-		const nextHeading = nextSectionHeading(why);
-		const whyLines = rawLines.slice(
-			why.contentIndex,
-			nextHeading?.index ?? lines.length,
-		);
-		if (countSentenceTerminators(whyLines) !== 1)
-			errors.push(
-				'PR body "## Why" must contain exactly one sentence. See ' +
-					TEMPLATE_PATH +
-					".",
+	if (options.workingTree) {
+		errors.push(...lintBodyBudgets(body));
+		if (lead) {
+			const sentences = countSentenceTerminators(
+				rawLines.slice(lead.contentIndex, leadEnd),
 			);
+			if (sentences < 1 || sentences > BOTTOM_LINE_MAX_SENTENCES)
+				errors.push(
+					`PR body "## Bottom line" must contain one to ${BOTTOM_LINE_MAX_SENTENCES} sentences. See ${TEMPLATE_PATH}.`,
+				);
+		}
 	}
 	if (options.bugClosing)
 		errors.push(
@@ -4541,38 +4585,6 @@ export async function resolveLivePrBody(
  * caller SKIPS the conditional check rather than guessing — a lint that can
  * misfire on fetch trouble teaches people to ignore it.
  */
-export async function resolveTouchesTests(
-	payloadPr,
-	fetchImpl = globalThis.fetch,
-) {
-	try {
-		const response = await githubGet(
-			`/pulls/${payloadPr.number}/files?per_page=100`,
-			fetchImpl,
-		);
-		if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
-		if (/rel="next"/.test(response.headers.get("link") ?? ""))
-			throw new Error(
-				"PR exceeds one file page; skipping the conditional check",
-			);
-		const files = await response.json();
-		if (!Array.isArray(files))
-			throw new Error("GitHub API returned no file list");
-		return files.some(
-			(file) =>
-				(file.filename ?? "").startsWith("tests/") ||
-				// A rename OUT of tests/ reports only the new path in filename; a
-				// removal PR is exactly what the assessment exists to catch.
-				(file.previous_filename ?? "").startsWith("tests/"),
-		);
-	} catch (error) {
-		console.warn(
-			`::warning::Could not resolve the PR file list; skipping the Test assessment check (${error instanceof Error ? error.message : error}).`,
-		);
-		return null;
-	}
-}
-
 // #4968: the labels that make an issue owe the detection lesson, for a PR that
 // closes it and for one that references it. One list: 17 of 20 nightly-drift
 // issues carry no `bug` label, and the issue names both for Closes and Refs.
@@ -4755,13 +4767,7 @@ function eventPayload() {
 	}
 }
 
-/**
- * The full live lint: resolve body and file list, then lint. The tri-state
- * from resolveTouchesTests is consumed HERE: only an affirmative true
- * requires the Test assessment section — null (fetch trouble) and false
- * (no tests/ files) both skip it, so a flaky fetch can never misfire the
- * check (#2124 review F2 pinned this consumption).
- */
+/** The full live lint: resolve the body and the diff, then lint. */
 export async function lintPullRequestEvent(
 	fetchImpl = globalThis.fetch,
 	event = eventPayload(),
@@ -4780,8 +4786,6 @@ export async function lintPullRequestEvent(
 	// title stands in only when the live fetch fell back (#4976).
 	const title = live.title ?? pullRequest.title;
 	const body = authorText(fullBody);
-	const requireTestAssessment =
-		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
 	// #4288: a bug-closing PR owes a detection retrospective. The label read is
 	// best-effort; an unreadable label warns and skips the requirement.
 	let bugClosing = null;
@@ -4811,7 +4815,6 @@ export async function lintPullRequestEvent(
 		throw new Error(`diff unavailable: ${reason}`);
 	}
 	const result = lintPrBody(body, {
-		requireTestAssessment,
 		bugClosing: bugClosing === true || bugReferenced === true,
 		existsOnBase: baseFileReader(),
 		shapeCatalog: shapeCatalogReader(),
@@ -5017,29 +5020,6 @@ export function lintWorkflowRunEvidence(
 	return [...errors, ...unreadable];
 }
 
-export function localTouchesTests(cwd = process.cwd(), git = gitExecFileSync) {
-	let names;
-	try {
-		names = git(["diff", "--name-only", "origin/master...HEAD"], {
-			cwd,
-			encoding: "utf8",
-		});
-	} catch {
-		try {
-			names = git(["diff", "--name-only", "HEAD~1"], {
-				cwd,
-				encoding: "utf8",
-			});
-		} catch {
-			// #2904 round 2 recurrence: shallow or single-commit repositories may
-			// have neither range; require assessment because assuming no test changes
-			// would weaken the lint.
-			return true;
-		}
-	}
-	return names.split(/\r?\n/).some((name) => name.startsWith("tests/"));
-}
-
 /**
  * True when the checkout has no `origin/master` at all (a shallow or uncloned
  * base). The diff cannot be read there for a reason the #4404 hint names, and
@@ -5106,7 +5086,6 @@ export function lintLocalPrBody(
 	const existsOnBase = baseFileReader(cwd, git);
 	const shapeCatalog = shapeCatalogReader(cwd, git);
 	const result = lintPrBody(body, {
-		requireTestAssessment: localTouchesTests(cwd, git),
 		bugClosing: bugClosing === true || bugReferenced === true,
 		existsOnBase,
 		shapeCatalog,
