@@ -1967,7 +1967,7 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
 		}
 	}
 
-	const normalized = pattern.replace(/\\/g, "/");
+	const normalized = toPosix(pattern);
 	const slash = normalized.lastIndexOf("/");
 	const basenamePattern = slash >= 0 ? normalized.slice(slash + 1) : normalized;
 	if (!basenamePattern) return false;

@@ -96,6 +96,7 @@ import {
 	clearAllWorkspaceDiagnosticsCaches,
 	clearWorkspaceDiagnosticsCacheAtAndAbove,
 } from "./workspace-diagnostics-cache.js";
+import { toPosix } from "../path-utils.js";
 
 // Opt-in publishDiagnostics trace (PILENS_PUB_DEBUG=1) — read once, negligible
 // hot-path cost. Surfaces each server's publish behavior (version + count) to
@@ -8140,7 +8141,7 @@ function fileOperationUriCandidates(uri: string): string[] {
 	if (parsed.protocol.toLowerCase() !== "file:") return [];
 	let uriPath: string;
 	try {
-		uriPath = decodeURIComponent(parsed.pathname).replace(/\\/g, "/");
+		uriPath = toPosix(decodeURIComponent(parsed.pathname));
 	} catch {
 		return [];
 	}

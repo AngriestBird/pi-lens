@@ -32,6 +32,16 @@ export interface AdvisoryProvenance {
 		capturedAt: number;
 	};
 	files: AdvisoryFileProvenance[];
+	/**
+	 * #4617: the message carries at least one part with no file it could be
+	 * stale against (a runner crash note, a disposition count), so the stamp has
+	 * no file subject at all. The shape is well formed on this flag alone — a
+	 * no-write turn whose every part is fileless has nothing to stat — and the
+	 * currency rule is `truncated`: a message that carries such a part AND one
+	 * the stamp does not speak for is stamped `truncated` by the composer and
+	 * never reads current (`validateAdvisoryProvenance`).
+	 */
+	filelessParts?: true;
 	truncated?: boolean;
 }
 
@@ -94,6 +104,7 @@ export function snapshotAdvisoryProvenance(args: {
 	generation: number;
 	files: Array<{ path: string; role: AdvisoryFileRole }>;
 	capturedAt?: number;
+	filelessParts?: true;
 	truncated?: boolean;
 }): AdvisoryProvenance {
 	const seen = new Set<string>();
@@ -113,6 +124,7 @@ export function snapshotAdvisoryProvenance(args: {
 			capturedAt: args.capturedAt ?? Date.now(),
 		},
 		files,
+		...(args.filelessParts ? { filelessParts: true as const } : {}),
 		...(args.truncated ? { truncated: true } : {}),
 	};
 }
@@ -142,7 +154,10 @@ function isWellFormed(value: unknown): value is AdvisoryProvenance {
 		isFiniteNumber(revision.generation) &&
 		isFiniteNumber(revision.capturedAt) &&
 		Array.isArray(record.files) &&
-		record.files.length > 0 &&
+		// #4617: a fileless-only message has no file to capture, so the flag is
+		// its subject. Anything else with no file stays malformed (the released
+		// writers always captured at least one).
+		(record.files.length > 0 || record.filelessParts === true) &&
 		record.files.every(
 			(file) =>
 				!!file &&

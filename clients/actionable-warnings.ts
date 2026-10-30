@@ -20,6 +20,7 @@ import {
 	isUnderDir,
 	normalizeMapKey,
 	realpathOrResolve,
+	toPosix,
 } from "./path-utils.js";
 import {
 	bounded,
@@ -299,7 +300,7 @@ function legacyActionableWarningId(args: {
 	message: string;
 	line?: number;
 }): string {
-	const rel = path.relative(args.cwd, args.filePath).replace(/\\/g, "/");
+	const rel = toPosix(path.relative(args.cwd, args.filePath));
 	const legacyRelativeFile =
 		rel && !rel.startsWith("..") ? rel : normalizeMapKey(args.filePath);
 	const parts = [

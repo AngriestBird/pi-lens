@@ -19,7 +19,7 @@ import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { readJsonCache, readJsonCacheAsync } from "./json-cache-read.js";
-import { isUnderDir, normalizeMapKey } from "./path-utils.js";
+import { isUnderDir, normalizeMapKey, toPosix } from "./path-utils.js";
 import type { AnalysisRootMode } from "./analysis-root.js";
 
 // --- Types ---
@@ -137,7 +137,7 @@ export class CacheManager {
 	toTurnStateKey(filePath: string, cwd: string): string {
 		const cwdNorm = normalizeMapKey(path.resolve(cwd));
 		const fileNorm = normalizeMapKey(path.resolve(cwd, filePath));
-		const rel = path.relative(cwdNorm, fileNorm).replace(/\\/g, "/");
+		const rel = toPosix(path.relative(cwdNorm, fileNorm));
 		if (!rel || rel === ".") return fileNorm;
 		if (rel === ".." || rel.startsWith("../")) return fileNorm;
 		return rel;

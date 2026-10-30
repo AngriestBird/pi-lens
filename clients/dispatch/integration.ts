@@ -105,7 +105,11 @@ import {
 	isGoSourceFile,
 } from "../lsp/implicit-scope.js";
 import { getLSPService } from "../lsp/capabilities.js";
-import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
+import {
+	isExternalOrVendorFile,
+	normalizeMapKey,
+	toPosix,
+} from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
 import {
 	resetAstGrepNapiLoadState,
@@ -2839,7 +2843,7 @@ export async function computeCascadeForFile(
 						? "no-rescue-window"
 						: undefined,
 				neighbors: visibleNeighbors.slice(0, 10).map((n) => ({
-					file: n.filePath.replace(/\\/g, "/").split("/").slice(-2).join("/"),
+					file: toPosix(n.filePath).split("/").slice(-2).join("/"),
 					diagnostics: n.diagnostics.length,
 					rawErrors: rawErrorsByPath.get(n.filePath) ?? 0,
 				})),
@@ -3511,7 +3515,7 @@ export async function getAvailableRunners(filePath: string): Promise<string[]> {
 	const kind = detectFileKind(filePath);
 	if (!kind) return [];
 
-	const normalizedPath = filePath.replace(/\\/g, "/");
+	const normalizedPath = toPosix(filePath);
 	const pathForFilter = normalizedPath.startsWith("/")
 		? normalizedPath
 		: `/${normalizedPath}`;

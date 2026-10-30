@@ -30,7 +30,7 @@ import { extensionsForLanguageToken } from "./language-registry.js";
 import { initLSPConfig } from "./lsp/config.js";
 import { getLSPService } from "./lsp/capabilities.js";
 import { acquireWarmWordIndex } from "./mcp/analyze.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeMapKey, toPosix } from "./path-utils.js";
 import { scanProjectDiagnostics } from "./project-diagnostics/scanner.js";
 import type { ProjectDiagnosticsSnapshot } from "./project-diagnostics/types.js";
 import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
@@ -109,9 +109,9 @@ export function recentLatency(
 ): DispatchLatencyReport[] {
 	let reports = getLatencyReports();
 	if (fileFilter) {
-		const needle = fileFilter.replace(/\\/g, "/");
+		const needle = toPosix(fileFilter);
 		reports = reports.filter((report) =>
-			report.filePath.replace(/\\/g, "/").endsWith(needle),
+			toPosix(report.filePath).endsWith(needle),
 		);
 	}
 	return reports.slice(-limit).reverse();
@@ -393,7 +393,7 @@ function fileMatchesPathGlobs(
 	const rel = path.relative(cwd, file).split(path.sep).join("/");
 	const options = { dot: true, nocase: process.platform === "win32" };
 	return globs.some((raw) => {
-		const pattern = raw.split("\\").join("/");
+		const pattern = toPosix(raw);
 		return (
 			minimatch(rel, pattern, options) ||
 			minimatch(rel, `${pattern}/**`, options)

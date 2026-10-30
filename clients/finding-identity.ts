@@ -27,7 +27,7 @@
 
 import { createHash } from "node:crypto";
 import * as path from "node:path";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeMapKey, toPosix } from "./path-utils.js";
 
 /** Every finding id in this codebase truncates its sha256 hex digest to this
  * many characters. Single source so the three call sites this module
@@ -189,7 +189,7 @@ export function hashText(
 export function relativeFile(filePath: string, cwd: string): string {
 	const canonicalCwd = normalizeMapKey(cwd);
 	const canonicalFile = normalizeMapKey(filePath);
-	const rel = path.relative(canonicalCwd, canonicalFile).replace(/\\/g, "/");
+	const rel = toPosix(path.relative(canonicalCwd, canonicalFile));
 	return rel && !rel.startsWith("..") ? rel : canonicalFile;
 }
 

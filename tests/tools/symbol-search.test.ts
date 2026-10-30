@@ -7,6 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
+import { toPosix } from "../../clients/path-utils.js";
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	loadProjectSnapshot,
@@ -402,6 +403,28 @@ describe("symbol_search tool", () => {
 				expect(payload.results[0].file.replace(/\\/g, "/")).toBe(
 					"src/auth/login.ts",
 				);
+				// #5013 F3: the same glob spelled with a backslash scopes to the same
+				// files, because the pattern is folded through `toPosix` before
+				// minimatch sees it. An unfolded `src\auth` matches nothing, and the
+				// tool then reports no results at all (no payload to parse).
+				const backslash = await tool.execute(
+					"1",
+					{ query: "authenticate user", paths: ["src\\auth"] },
+					undefined,
+					null,
+					{ cwd: env.tmpDir },
+				);
+				const backslashText = String(backslash.content[0]?.text);
+				const backslashStart = backslashText.indexOf("{");
+				const backslashFiles =
+					backslashStart === -1
+						? []
+						: (
+								JSON.parse(backslashText.slice(backslashStart)) as {
+									results: Array<{ file: string }>;
+								}
+							).results.map((hit) => toPosix(hit.file));
+				expect(backslashFiles).toEqual(["src/auth/login.ts"]);
 			} finally {
 				env.cleanup();
 			}

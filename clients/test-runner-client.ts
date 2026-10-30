@@ -1426,9 +1426,9 @@ export class TestRunnerClient {
 		if (runner === "vitest") {
 			const globs = this.parseVitestTestGlobs(cwd);
 			if (globs) {
-				const rel = path
-					.relative(cwd, path.resolve(cwd, sourceFilePath))
-					.replace(/\\/g, "/");
+				const rel = toPosix(
+					path.relative(cwd, path.resolve(cwd, sourceFilePath)),
+				);
 				const matches = (
 					globs_: string[] | undefined,
 					filter?: (g: string) => boolean,

@@ -35,6 +35,7 @@ import {
 	normalizeToLF,
 	restoreLineEndings,
 } from "../host-edit-normalize.js";
+import { toPosix } from "../path-utils.js";
 
 interface LSPPosition {
 	line: number;
@@ -1171,7 +1172,7 @@ export function __planWorkspaceEditForTest(edit: {
 
 function relativeToCwd(filePath: string, cwd: string): string {
 	const rel = path.relative(cwd, filePath) || path.basename(filePath);
-	return rel.replace(/\\/g, "/");
+	return toPosix(rel);
 }
 
 // Matches an import declaration or a re-export-from declaration — the two
@@ -1565,10 +1566,7 @@ async function preflightWorkspaceEdit(
 			// treat a same-key-different-case pair as a real rename below.
 			const oldDisk = uriToDiskPath(op.oldUri);
 			const newDisk = uriToDiskPath(op.newUri);
-			if (
-				path.resolve(oldDisk).replace(/\\/g, "/") ===
-				path.resolve(newDisk).replace(/\\/g, "/")
-			) {
+			if (toPosix(path.resolve(oldDisk)) === toPosix(path.resolve(newDisk))) {
 				throw new Error("rename source and destination must differ");
 			}
 			const source = await stateFor(oldPath);

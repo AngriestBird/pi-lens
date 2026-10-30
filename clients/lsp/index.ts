@@ -76,6 +76,7 @@ import {
 	isAtOrAboveHomeDir,
 	normalizeMapKey,
 	realpathOrResolve,
+	toPosix,
 	uriToPath,
 } from "../path-utils.js";
 import type {
@@ -8438,11 +8439,9 @@ export class LSPService {
 			throw err;
 		}
 		const relOld =
-			path.relative(cwd, oldFilePath).replace(/\\/g, "/") ||
-			path.basename(oldFilePath);
+			toPosix(path.relative(cwd, oldFilePath)) || path.basename(oldFilePath);
 		const relNew =
-			path.relative(cwd, newFilePath).replace(/\\/g, "/") ||
-			path.basename(newFilePath);
+			toPosix(path.relative(cwd, newFilePath)) || path.basename(newFilePath);
 		const renameDescription = `Renamed ${relOld} → ${relNew}`;
 
 		await Promise.all(
