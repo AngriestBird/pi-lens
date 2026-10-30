@@ -90,7 +90,7 @@ import {
 } from "../tools/ast-grep-search.js";
 import { createLensDiagnosticsTool } from "../tools/lens-diagnostics.js";
 import { peekMcpSessionRuntime } from "../clients/mcp/session.js";
-import { isUnderDir } from "../clients/path-utils.js";
+import { isUnderDir, walkUpDirs } from "../clients/path-utils.js";
 import { loadPiLensGlobalConfig } from "../clients/lens-config.js";
 import { loadPiLensProjectConfig } from "../clients/project-lens-config.js";
 import {
@@ -199,8 +199,7 @@ function isWarmBuildStale(): boolean {
 }
 
 function findRepoRoot(start: string): string {
-	let dir = start;
-	for (let depth = 0; depth < 6; depth++) {
+	for (const dir of walkUpDirs(start, { maxDepth: 6 })) {
 		const pkgPath = path.join(dir, "package.json");
 		if (fs.existsSync(pkgPath)) {
 			try {
@@ -212,9 +211,6 @@ function findRepoRoot(start: string): string {
 				// keep walking up
 			}
 		}
-		const parent = path.dirname(dir);
-		if (parent === dir) break;
-		dir = parent;
 	}
 	return path.resolve(start, "..", "..");
 }

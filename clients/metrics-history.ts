@@ -11,7 +11,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
 import { writeFileAtomic } from "./atomic-write.js";
-import { findNearestContaining, walkUpDirs } from "./path-utils.js";
+import {
+	findNearestContaining,
+	realpathOrResolve,
+	walkUpDirs,
+} from "./path-utils.js";
 import { safeSpawn } from "./safe-spawn.js";
 
 // --- Types ---
@@ -56,9 +60,12 @@ function isInsideGitRepo(startDir: string): boolean {
 }
 
 /**
- * Get current git commit hash (short)
+ * Get current git commit hash (short) of the repository that owns `filePath`.
+ * The lookup starts at the directory of the file's identity, so a file link
+ * answers its target's repository, not the one beside the link (#4966).
  */
-function getCurrentCommit(startDir: string): string {
+function getCurrentCommit(filePath: string): string {
+	const startDir = path.dirname(realpathOrResolve(filePath));
 	if (!isInsideGitRepo(startDir)) {
 		return "unknown";
 	}
@@ -153,7 +160,7 @@ export function captureSnapshot(
 	}
 
 	const relativePath = path.relative(process.cwd(), filePath);
-	const commit = getCurrentCommit(path.dirname(filePath));
+	const commit = getCurrentCommit(filePath);
 
 	const snapshot: MetricSnapshot = {
 		commit,
@@ -251,7 +258,7 @@ export function captureSnapshots(
 
 	for (const file of files) {
 		const relativePath = path.relative(process.cwd(), file.filePath);
-		const commit = getCurrentCommit(path.dirname(file.filePath));
+		const commit = getCurrentCommit(file.filePath);
 
 		const snapshot: MetricSnapshot = {
 			commit,

@@ -49,6 +49,7 @@ import {
 	realpathOrResolve,
 	toPosix,
 	toProjectRelativePath,
+	walkUpDirs,
 } from "../path-utils.js";
 import {
 	ensureTool,
@@ -528,11 +529,11 @@ async function findGitBoundary(
 	dir: string,
 	memo?: Map<string, string | undefined>,
 ): Promise<string | undefined> {
-	let current = path.resolve(dir);
-	const fsRoot = path.parse(current).root;
 	const visited: string[] = [];
 	let found: string | undefined;
-	while (true) {
+	// Spelled climb: the boundary is compared with the caller's spelling of the
+	// candidate (`gitRoot === candidate`), so the two stay on one axis.
+	for (const current of walkUpDirs(dir, { spelling: true })) {
 		const key = normalizeMapKey(current);
 		if (memo?.has(key)) {
 			found = memo.get(key);
@@ -543,8 +544,6 @@ async function findGitBoundary(
 			found = current;
 			break;
 		}
-		if (current === fsRoot) break;
-		current = path.dirname(current);
 	}
 	for (const seen of visited) memo?.set(seen, found);
 	return found;
@@ -569,21 +568,19 @@ async function nearestNonExcludedFallbackRoot(
 	candidate: string,
 	stopDir?: string,
 ): Promise<string> {
-	let current = path.resolve(candidate);
-	const startDir = current;
-	const fsRoot = path.parse(current).root;
+	const startDir = path.resolve(candidate);
+	const fsRoot = path.parse(startDir).root;
 	let nearestAllowed: string | undefined;
 	const gitBoundaries = new Map<string, string | undefined>();
-	while (true) {
+	// Spelled climb, as in `findGitBoundary`: `stopDir` is the caller's key.
+	for (const current of walkUpDirs(startDir, { spelling: true })) {
 		if (!(await isExcludedLspRoot(current, gitBoundaries))) {
 			nearestAllowed ??= current;
 			for (const marker of FALLBACK_PROJECT_MARKERS) {
 				if (await markerExists(current, marker)) return current;
 			}
 		}
-		if (current === fsRoot || normalizeEphemeralMapKey(current) === stopDir)
-			break;
-		current = path.dirname(current);
+		if (normalizeEphemeralMapKey(current) === stopDir) break;
 	}
 	// A walk bounded by `stopDir` that met no allowed directory keeps the file's
 	// own directory: the filesystem root is above the boundary it was told to
@@ -2119,14 +2116,13 @@ export function NearestRoot(
 		// — the conservative direction, by the walk's runtime (~0.2 ms measured).
 		const walkedAt = Date.now();
 		const promise = (async (): Promise<string | undefined> => {
-			let currentDir = startDir;
-			const fsRoot = path.parse(currentDir).root;
+			const fsRoot = path.parse(startDir).root;
 			// #4689: the stop is the walk's other end, so it is an identity too; a
 			// stop spelled through a link (a junction or subst cwd) never contains
 			// an identity and the walk would break on its first step.
 			const stop = stopDir ? realpathOrResolve(stopDir) : fsRoot;
 
-			while (true) {
+			for (const currentDir of walkUpDirs(startDir)) {
 				if (
 					stop !== fsRoot &&
 					currentDir.startsWith(stop + path.sep) === false &&
@@ -2163,10 +2159,7 @@ export function NearestRoot(
 							break;
 						}
 					}
-					if (excluded) {
-						currentDir = path.dirname(currentDir);
-						continue;
-					}
+					if (excluded) continue;
 				}
 
 				// Check include patterns. Exact marker names stay cheap (`stat`), while
@@ -2188,8 +2181,6 @@ export function NearestRoot(
 				if (currentDir === stop || currentDir === fsRoot) {
 					break;
 				}
-
-				currentDir = path.dirname(currentDir);
 			}
 
 			return undefined;
@@ -2303,12 +2294,12 @@ async function findAncestorFileAmong(
 	candidateSegmentLists: string[][],
 ): Promise<string | undefined> {
 	const fs = await import("node:fs/promises");
-	let currentDir = path.resolve(startDir);
 	// The walk keeps the caller's spelling (a returned binary is classified by
 	// where it is spelled); the home ceiling compares real paths (#4911), so a
 	// HOME or an ancestor spelled through a link still stops it.
 	const home = realpathOrResolve(os.homedir());
-	while (!isAtOrAboveHomeDir(realpathOrResolve(currentDir), home)) {
+	for (const currentDir of walkUpDirs(startDir, { spelling: true })) {
+		if (isAtOrAboveHomeDir(realpathOrResolve(currentDir), home)) break;
 		for (const segments of candidateSegmentLists) {
 			const candidate = path.join(currentDir, ...segments);
 			try {
@@ -2318,9 +2309,6 @@ async function findAncestorFileAmong(
 				/* not found at this level */
 			}
 		}
-		const parent = path.dirname(currentDir);
-		if (parent === currentDir) break;
-		currentDir = parent;
 	}
 	return undefined;
 }
@@ -2600,11 +2588,11 @@ interface NativeTypeScriptLsp {
 async function findNativeTypeScriptLsp(
 	root: string,
 ): Promise<NativeTypeScriptLsp | undefined> {
-	let currentDir = path.resolve(root);
 	// Spelled walk, real-path ceiling, as in `findAncestorFileAmong` (#4911).
 	const home = realpathOrResolve(os.homedir());
 
-	while (!isAtOrAboveHomeDir(realpathOrResolve(currentDir), home)) {
+	for (const currentDir of walkUpDirs(root, { spelling: true })) {
+		if (isAtOrAboveHomeDir(realpathOrResolve(currentDir), home)) break;
 		const typescriptDir = path.join(currentDir, "node_modules", "typescript");
 		const packageJsonPath = path.join(typescriptDir, "package.json");
 
@@ -2626,9 +2614,6 @@ async function findNativeTypeScriptLsp(
 			} catch {
 				/* typescript dir itself doesn't exist here — keep walking up */
 			}
-			const parent = path.dirname(currentDir);
-			if (parent === currentDir) return undefined;
-			currentDir = parent;
 			continue;
 		}
 
@@ -2931,9 +2916,11 @@ async function findExtensionBoundedRoot(
 	const boundaryKey = insideBoundary
 		? normalizeEphemeralMapKey(realpathOrResolve(extensionRootKey))
 		: extensionRootKey;
-	let currentDir = path.dirname(insideBoundary ? identity : path.resolve(file));
+	const start = path.dirname(insideBoundary ? identity : path.resolve(file));
 	const configMarkers = tsConfigMarkersForFile(file);
-	while (true) {
+	// `start` is already the identity (inside the root) or the spelling the
+	// boundary is written in (a linked extension), so the climb takes it as is.
+	for (const currentDir of walkUpDirs(start, { spelling: true })) {
 		for (const pattern of configMarkers) {
 			try {
 				await stat(path.join(currentDir, pattern));
@@ -2954,10 +2941,8 @@ async function findExtensionBoundedRoot(
 		// pi-agent-wide scope.
 		const currentKey = normalizeEphemeralMapKey(path.resolve(currentDir));
 		if (currentKey === boundaryKey) return undefined;
-		const parent = path.dirname(currentDir);
-		if (parent === currentDir) return undefined;
-		currentDir = parent;
 	}
+	return undefined;
 }
 
 /**
@@ -3564,9 +3549,10 @@ function RustWorkspaceRoot(): RootFunction {
 		// it (#1671).
 		const stop = sessionHoistCeiling(sessionCwd, file);
 
-		let current = root;
-		const fsRoot = path.parse(current).root;
-		while (true) {
+		const fsRoot = path.parse(root).root;
+		// `root` is the identity the crate-root walk returned, so the climb takes
+		// it as is.
+		for (const current of walkUpDirs(root, { spelling: true })) {
 			if (stop !== undefined && current === stop) break;
 			const parent = path.dirname(current);
 			if (parent === current || parent === fsRoot) break;
@@ -3589,7 +3575,6 @@ function RustWorkspaceRoot(): RootFunction {
 				// rooted rather than being swept into a workspace it opted out of.
 				break;
 			}
-			current = parent;
 		}
 		return root;
 	}, crateRoot.rootMarkers ?? []);
@@ -3670,23 +3655,18 @@ function JavaWorkspaceRoot(): RootFunction {
 		// <modules> must declare, and it is what actually gets returned — never
 		// the cursor, which can land on a bare gap directory that is not itself
 		// a valid module root (#1671 F2).
-		let current = root;
 		let lastHop = root;
-		const fsRoot = path.parse(current).root;
-		while (true) {
+		const fsRoot = path.parse(root).root;
+		for (const current of walkUpDirs(root, { spelling: true })) {
 			if (stop !== undefined && current === stop) break;
 			const parent = path.dirname(current);
 			if (parent === current || parent === fsRoot) break;
-			if (await markerExists(parent, "pom.xml")) {
-				const parentPom = path.join(parent, "pom.xml");
-				if (!(await declaresMavenModule(parent, parentPom, lastHop))) break;
-				current = parent;
-				lastHop = parent;
-				continue;
-			}
-			// No pom.xml here — a gap directory, not a module boundary. Keep
-			// climbing without advancing `lastHop`.
-			current = parent;
+			// No pom.xml at `parent` is a gap directory, not a module boundary:
+			// keep climbing without advancing `lastHop`.
+			if (!(await markerExists(parent, "pom.xml"))) continue;
+			const parentPom = path.join(parent, "pom.xml");
+			if (!(await declaresMavenModule(parent, parentPom, lastHop))) break;
+			lastHop = parent;
 		}
 		return enforceLspRootCeiling(lastHop, sessionCwd, file);
 	}, moduleRoot.rootMarkers ?? []);
