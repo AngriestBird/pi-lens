@@ -166,9 +166,10 @@ function anchoredIgnorePaths(
 			const ignorePaths = (rawEntry as { ignorePaths?: unknown } | undefined)
 				?.ignorePaths;
 			if (!Array.isArray(ignorePaths)) continue;
-			const patterns = ignorePaths.filter(
-				(pattern): pattern is string => typeof pattern === "string",
-			);
+			const patterns: string[] = [];
+			for (const pattern of ignorePaths) {
+				if (typeof pattern === "string") patterns.push(pattern);
+			}
 			const scopes = byKey.get(key) ?? [];
 			scopes.push({ baseDir, patterns });
 			byKey.set(key, scopes);

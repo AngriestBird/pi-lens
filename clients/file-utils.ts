@@ -31,6 +31,7 @@ import {
 	normalizeFilePath,
 	normalizePathSpelling,
 	realpathOrResolve,
+	relativeInside,
 	toPosix,
 	toProjectRelativePath,
 	walkUpDirs,
@@ -985,12 +986,11 @@ export function isIgnoredByGitignoreLines(
 	filePath: string,
 	isDirectory = false,
 ): boolean {
-	const absolute = path.resolve(filePath);
-	const base = path.resolve(baseDir);
-	if (!isWithinPathForm(absolute, base)) return false;
+	const relative = relativeInside(baseDir, filePath);
+	if (relative === undefined) return false;
 	const winner = lastMatchingPattern(
 		parseGitignoreContent(lines.join("\n"), "pilens"),
-		normalizeIgnorePath(path.relative(base, absolute)),
+		normalizeIgnorePath(relative),
 		isDirectory,
 		createExpandedGlobMatcher(),
 	);
