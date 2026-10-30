@@ -481,6 +481,69 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		expect(result.unconfirmedStatus).toContain("dispatch.disabledRunners");
 	});
 
+	// PR #5011 thread PRRT_kwDORt8rec6yH4jk: a denied runner next to a sibling
+	// that skipped with a stated not-applicable reason (nothing for it to check)
+	// was worded "a language tool is missing, timed out, or failed to run", a
+	// failure no tool had. The file stays unconfirmed; only the cause changes.
+	async function deniedLspNextTo(sibling: RunnerResult) {
+		writeProject({ dispatch: { disabledRunners: ["lsp"] } });
+		const csharp = path.join(projectDir, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		const registry = new RunnerRegistry();
+		registry.register({
+			...countingRunner("lsp", SUCCEEDED).runner,
+			appliesTo: ["csharp"],
+		});
+		registry.register({
+			...countingRunner("dotnet-build", sibling).runner,
+			appliesTo: ["csharp"],
+		});
+		const ctx = createDispatchContext(
+			csharp,
+			projectDir,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+		clearCoverageNoticeState();
+		return dispatchForFile(ctx, fallbackGroup, registry);
+	}
+
+	it.each(["no-files-matched", "dialect-unsupported"] as const)(
+		"words a sibling's stated not-applicable skip (%s) as config only, not a failed tool",
+		async (skipReason) => {
+			const result = await deniedLspNextTo({ ...SKIPPED, skipReason });
+
+			expect(result.output).toContain("so no runner checks these files");
+			expect(result.output).toContain("not a clean result");
+			expect(result.output).not.toContain("failed to run");
+			expect(result.unconfirmedStatus).toBe(
+				"not checked (lsp disabled in config by dispatch.disabledRunners)",
+			);
+		},
+	);
+
+	it("still reads a sibling skip that states no reason as a failed tool", async () => {
+		// The helm-render shape: a bare skipped result is not a listed reason.
+		const result = await deniedLspNextTo(SKIPPED);
+
+		expect(result.output).toContain("failed to run");
+		expect(result.output).toContain("dispatch.disabledRunners");
+		expect(result.unconfirmedStatus).toContain("failed to run");
+	});
+
+	it("still reads a covered-by-primary sibling skip as a failed tool", async () => {
+		// Listed in RUNNER_SKIP_REASONS but not a not-applicable reason: it defers
+		// to a lane whose answer is exactly what the denial removed.
+		const result = await deniedLspNextTo({
+			...SKIPPED,
+			skipReason: "covered-by-primary",
+		});
+
+		expect(result.output).toContain("failed to run");
+		expect(result.unconfirmedStatus).toContain("failed to run");
+	});
+
 	it("still names a sibling runner's failure when lsp.disabledServers turned the primary off", async () => {
 		const csharp = path.join(projectDir, "Program.cs");
 		fs.writeFileSync(csharp, "class P {}\n");

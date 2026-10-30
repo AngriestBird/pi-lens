@@ -709,6 +709,19 @@ export interface DispatchLatencyReport {
 }
 
 /**
+ * The skip reasons that say a runner had nothing to check, so beside a
+ * `dispatch.disabledRunners` denial they are not a tool that failed. A closed
+ * admission list: a reason added to `RUNNER_SKIP_REASONS` reads as a failure
+ * until it is listed here. `covered-by-primary` is left out on purpose: it
+ * defers to a lane whose answer is what the denial may have removed.
+ */
+const NOT_APPLICABLE_SKIP_REASONS: ReadonlySet<RunnerSkipReason> = new Set([
+	"no-files-matched",
+	"configured-non-biome-linter",
+	"dialect-unsupported",
+]);
+
+/**
  * Build the synthetic coverage notice for this dispatch, or `undefined` when
  * the runners covered the file. #4403: with it, `unconfirmedStatus`, set
  * whenever the primary group gave no usable result for the file even when the
@@ -888,14 +901,18 @@ function buildCoverageNotice(
 		.filter((r) => r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON)
 		.map((r) => r.runnerId);
 	const deniedNote = `${deniedRunnerIds.join(", ")} disabled in config by dispatch.disabledRunners`;
-	// A row the operator switched off: a runner denial, or a primary LSP
-	// `lsp.disabledServers` turned off (with or without its fallback). The
-	// config-only wording holds only when every row is one; any other row is a
-	// tool that is missing, timed out, or failed, and the notice must still say
-	// so rather than let the denial hide it.
+	// A row that is not a tool failure: one the operator switched off (a runner
+	// denial, or a primary LSP `lsp.disabledServers` turned off, with or without
+	// its fallback), or one that skipped with a stated not-applicable reason
+	// (nothing for it to check). The config-only wording holds only when every
+	// row is one; any other row is a tool that is missing, timed out, or failed
+	// (a skip that states no listed reason included), and the notice must still
+	// say so rather than let the denial hide it.
 	const onlySwitchedOff = relevant.every(
 		(r) =>
 			r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON ||
+			(r.skipReason !== undefined &&
+				NOT_APPLICABLE_SKIP_REASONS.has(r.skipReason)) ||
 			r.primaryUnavailableCause === "disabled" ||
 			r.primaryUnavailableCause === "disabledFallback",
 	);
