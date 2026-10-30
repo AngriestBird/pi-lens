@@ -565,9 +565,10 @@ export function composeBoundToCurrentDisk(
  * builds, so the field is read as untrusted input and the gate admits only the
  * three known verdicts: an absent field (an incumbent built before the field
  * existed), a malformed one, or any other value reads as `false`, never as
- * current. `version` and `contentHash` ride along only when well formed; the
- * sweep records the fingerprint so a later cache replay is disk-gated like a
- * local touch's.
+ * current. `contentHash` rides along only when it is a string; the sweep
+ * records that fingerprint so a later cache replay is disk-gated like a local
+ * touch's. `version` is informational and no reader asks for it, so it stays
+ * off the reader's side.
  */
 export function warmAnswerBinding(answer: {
 	readonly binding?: unknown;
@@ -579,7 +580,6 @@ export function warmAnswerBinding(answer: {
 			: {};
 	const verdict = record.boundToCurrentDisk;
 	return {
-		...(typeof record.version === "number" && { version: record.version }),
 		...(typeof record.contentHash === "string" && {
 			contentHash: record.contentHash,
 		}),

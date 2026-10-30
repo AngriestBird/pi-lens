@@ -217,12 +217,12 @@ describe("requestWarmDiagnostics", () => {
 		[{ boundToCurrentDisk: true }, { boundToCurrentDisk: true }],
 		[{ boundToCurrentDisk: "unknown" }, { boundToCurrentDisk: "unknown" }],
 		[
-			{ boundToCurrentDisk: false, version: "2", contentHash: 7 },
+			{ boundToCurrentDisk: false, version: 2, contentHash: 7 },
 			{ boundToCurrentDisk: false },
 		],
 		[
 			{ boundToCurrentDisk: true, version: 2, contentHash: "ab" },
-			{ boundToCurrentDisk: true, version: 2, contentHash: "ab" },
+			{ boundToCurrentDisk: true, contentHash: "ab" },
 		],
 	])("reads the wire binding %j as %j (#5030)", (binding, expected) => {
 		expect(warmAnswerBinding({ binding })).toEqual(expected);
