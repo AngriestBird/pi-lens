@@ -1239,6 +1239,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `typeof path.posix` parser), and `kernelAttemptAsync` carries the same
 		// argument its sync twin does; the fold and fallback calls are the same
 		// senses counted above.
+		// 39 -> 41 (#2556): `relativeInside` takes a `pathImpl: typeof path = path`
+		// argument so callers can pass the win32 dialect; the default and its
+		// annotation are the two senses.
 		"clients/path-utils.ts": 41,
 		"clients/php-cs-fixer-config.ts": 4,
 		// 26 -> 24 (#4689 batch 3): the changed-file set is a PathKeyedMap, so two
