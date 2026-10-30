@@ -708,6 +708,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `Array.prototype.filter` call.
 		"clients/opaque-mutation-scan.ts": 2,
 		"clients/opengrep-client.ts": 2,
+		// 1 (#5009): the venv interpreter candidates are filtered to directories
+		// and symlinks BEFORE the cap, an `Array.prototype.filter` call, not a
+		// delivery filter.
+		"clients/out-of-band-changes.ts": 1,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
 		// 4 -> 6 (#4484): `liveBlockers.filter` and `recordBlockers.filter` split the
@@ -1264,7 +1268,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 18 -> 22 (#3871 r2, r3): ambient-environment containment uses four
 		// path operations at the shared Python resolver seam; r3 restored the
 		// `path.isAbsolute` leg that rejects another Windows drive (V1).
-		"clients/python-environment.ts": 19,
+		// 19 -> 18 (#5009): the two root-level venv candidates became one
+		// `path.join` inside the list the resolver and the install stamp share.
+		"clients/python-environment.ts": 18,
 		"clients/read-guard-logger.ts": 3,
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
