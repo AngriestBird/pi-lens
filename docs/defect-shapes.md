@@ -725,8 +725,22 @@ file-scoped worklist and receives no project-wide scanner output.
     <reason>`, and a `session` owner states `sessionSeamException`, why a scope
     cell cannot hold it yet. A moved store has no process container and no
     entry; `scanScopeCellKeys` pins every cell by file and key
-    (`SESSION_CELL_KEYS`). Partial: it reads the registered stores only, so an
-    unregistered module-level field is still not scanned.
+    (`SESSION_CELL_KEYS`). The same `auditOwnerKeys` reads all three lists:
+    `SESSION_STATE_REGISTRY`, the file-level `EXEMPT_SESSION_STATE_FILES` rows
+    and the declared `SESSION_STORE_REGISTRY` rows (#5027); a file with several
+    owners states the narrowest. The scan behind them
+    (`scanSessionStateCandidates`) flags a file for a module-level container
+    with or without a reset, except one admitted constant: an UPPER_SNAKE
+    built-in `Map`/`Set`/`WeakMap`/`WeakSet` declared `const` whose every use
+    in `clients/`, `tools/`, `mcp/` and `index.ts` is a read; and for a class
+    field or `this.x` assignment bound to `new <container or clients/ class>`
+    or `[]`. One symbol-count pin counts both. Partial: it walks `clients/`;
+    `tools/` holds no candidate today, `index.ts` is censused by
+    `tests/config/session-scope-sweep.test.ts` (#3611), and `mcp/server.ts`
+    (`lspReadyCwds`) is outside the scan root. A field built by a factory call,
+    through another binding or an aliased constructor is not read
+    (`SWEEP_HEURISTIC_LIMITS`), and the owner value itself is a judgment the
+    audit only forces to be stated.
 
 87. **Factory-time read of a host value set later:** pi applies an extension flag's command-line value after every factory has run, so a flag read while the factory runs answers the registered default. Screen: does any flag read run while the factory runs, and does the host test apply the value after the factory, as pi does? Read it in a handler, a command or a tool, or once in `session_start`. Enforcer: `tests/config/factory-flag-read-sweep.test.ts` (partial: a reader handed to a callee that invokes it synchronously is not seen). Instances and dates: `HISTORY.md`.
 

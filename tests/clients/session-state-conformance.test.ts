@@ -26,6 +26,7 @@ import {
 	EXEMPT_SESSION_STATE_FILES,
 	SESSION_CELL_KEYS,
 	SESSION_STATE_REGISTRY,
+	SESSION_STORE_REGISTRY,
 	SESSION_STATE_SYMBOL_COUNTS,
 	_resetRegistryProbeState,
 } from "../support/session-state-registry.js";
@@ -42,6 +43,7 @@ import {
 	sessionStartClosureResetNames,
 	sessionStartResetNames,
 	stripCommentsAndStrings,
+	symbolCount,
 } from "../support/session-state-scan.js";
 import {
 	assertSortedRegistry,
@@ -428,7 +430,12 @@ describe("session-state sweep — coverage", () => {
 			minFlagged: 40,
 			flagged: scanSessionStateCandidates().map((c) => c.file),
 			registered: SESSION_STATE_REGISTRY.map((e) => e.module),
-			exemptions: EXEMPT_SESSION_STATE_FILES,
+			exemptions: Object.fromEntries(
+				Object.entries(EXEMPT_SESSION_STATE_FILES).map(([file, row]) => [
+					file,
+					row.reason,
+				]),
+			),
 			minReasonLength: 16,
 			remediation:
 				"Decide which it is. If the state must re-arm at session_start, " +
@@ -485,7 +492,7 @@ describe("session-state sweep — coverage", () => {
 	it("every flagged file's stateful-symbol count matches its pin (#1817)", () => {
 		const counts: Record<string, number> = {};
 		for (const candidate of scanSessionStateCandidates()) {
-			counts[candidate.file] = candidate.containers.length;
+			counts[candidate.file] = symbolCount(candidate);
 		}
 		const { problems } = auditSymbolCounts({
 			sweepName: "session-state symbol-count pin",
@@ -1381,6 +1388,389 @@ describe("session-state registry — owner key (#4965)", () => {
 						'// scopeCell(scope, "x")\nconst note = "sessionCell(id, \\"y\\")";',
 				}),
 			).toEqual({});
+		});
+	});
+});
+
+// #5027 (defect shape 72, the gap after #4972): the owner-key column read only
+// SESSION_STATE_REGISTRY. Session-owned state in a file-level exemption, in the
+// store registry, or in a container with no reset (a class field, a Map nobody
+// wrote a reset for) had no owner axis, so the seven bugs #4965 cites (#4955,
+// #4749, #4940, #4762, #4952, #4961, #4753) could not have been flagged.
+describe("session-state registry — owner key on every list (#5027)", () => {
+	const exemptRows = () =>
+		Object.entries(EXEMPT_SESSION_STATE_FILES).map(([file, row]) => ({
+			id: file,
+			module: file,
+			ownerKey: row.ownerKey,
+			sessionSeamException: row.sessionSeamException,
+		}));
+	const storeRows = () =>
+		Object.entries(SESSION_STORE_REGISTRY).map(([name, row]) => ({
+			id: name,
+			module: row.module,
+			ownerKey: row.ownerKey,
+		}));
+
+	it("every exempt file row declares an admitted owner key", () => {
+		expect(exemptRows().length).toBeGreaterThanOrEqual(100);
+		expect(auditOwnerKeys(exemptRows())).toEqual([]);
+	});
+
+	it("every declared session store row declares an admitted owner key", () => {
+		expect(storeRows()).toHaveLength(5);
+		expect(auditOwnerKeys(storeRows(), { declaredStores: true })).toEqual([]);
+	});
+
+	it("an exempt row or a store row with no, an unknown or a short owner is refused", () => {
+		for (const ownerKey of [
+			undefined,
+			"global",
+			"process-wide: x",
+			"Session",
+		]) {
+			expect(
+				auditOwnerKeys([
+					{ id: "git-guard.ts", module: "git-guard.ts", ownerKey },
+				]),
+				String(ownerKey),
+			).toEqual([expect.stringContaining("git-guard.ts: ownerKey")]);
+			expect(
+				auditOwnerKeys(
+					[{ id: "widget", module: "widget-state.ts", ownerKey }],
+					{
+						declaredStores: true,
+					},
+				),
+				String(ownerKey),
+			).toEqual([expect.stringContaining("widget: ownerKey")]);
+		}
+	});
+
+	// #4749 / #4952 recurrence: git-guard.ts sat under a file-level exemption
+	// ("git-guard turn state, cleared on the turn path") with no owner, so the
+	// per-session blocker sections never had to state whose they were.
+	it("a session-owned exempt row states why a scope cell does not hold it", () => {
+		const row = {
+			id: "git-guard.ts",
+			module: "git-guard.ts",
+			ownerKey: "session",
+		};
+		expect(auditOwnerKeys([row])).toEqual([
+			expect.stringContaining("is session-owned"),
+		]);
+		expect(
+			auditOwnerKeys([{ ...row, sessionSeamException: "turn state" }]),
+		).toEqual([expect.stringContaining("is session-owned")]);
+	});
+
+	it("a declared store states no seam exception, and a session exemption keeps its own", () => {
+		expect(
+			auditOwnerKeys(
+				[
+					{
+						id: "widget",
+						module: "widget-state.ts",
+						ownerKey: "session",
+						sessionSeamException: "a store is the seam",
+					},
+				],
+				{ declaredStores: true },
+			),
+		).toEqual([expect.stringContaining("states no sessionSeamException")]);
+		for (const file of ["git-guard.ts", "runtime-coordinator.ts"])
+			expect(
+				EXEMPT_SESSION_STATE_FILES[file]?.sessionSeamException?.length,
+				file,
+			).toBeGreaterThan(30);
+	});
+});
+
+describe("session-state scan — containers with no reset, and class fields (#5027)", () => {
+	function withScanTree(
+		files: Record<string, string>,
+		run: (dir: string) => void,
+	): void {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-session-state-owner-scan-"),
+		);
+		try {
+			for (const [name, contents] of Object.entries(files)) {
+				fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+				fs.writeFileSync(path.join(dir, name), contents);
+			}
+			run(dir);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	}
+	const flagged = (files: Record<string, string>): string[] => {
+		let out: string[] = [];
+		withScanTree(files, (dir) => {
+			out = scanSessionStateCandidates(dir).map((c) => c.file);
+		});
+		return out;
+	};
+
+	// The planted Map of #5027: a camelCase container in clients/read-guard.ts
+	// with no exported reset survived the pairing rule (150 passed on 62ef6a14a).
+	it("a reset-less camelCase Map is a candidate", () => {
+		expect(
+			flagged({
+				"read-guard.ts":
+					"const plantedBySession = new Map<string, string>();\nexport function note(): void {}\n",
+			}),
+		).toEqual(["read-guard.ts"]);
+	});
+
+	describe("the one admitted constant: an UPPER_SNAKE built-in never mutated", () => {
+		const READ_ONLY = [
+			'const READ_OPS = new Set(["read", "grep"]);',
+			"export function isRead(name: string): boolean {",
+			"\treturn READ_OPS.has(name);",
+			"}",
+			"export function all(): string[] {",
+			"\treturn [...READ_OPS];",
+			"}",
+			"",
+		].join("\n");
+		const withUse = (use: string) =>
+			READ_ONLY + `export function extra(): unknown {\n\t${use}\n}\n`;
+
+		it("is not a candidate when every use is a read", () => {
+			expect(flagged({ "lookup.ts": READ_ONLY })).toEqual([]);
+			expect(
+				flagged({
+					"lookup.ts": withUse(
+						"for (const op of READ_OPS) void op; return Array.from(READ_OPS).length + READ_OPS.size;",
+					),
+				}),
+			).toEqual([]);
+		});
+
+		it.each([
+			["add", 'READ_OPS.add("write");'],
+			["delete", 'READ_OPS.delete("read");'],
+			["clear", "READ_OPS.clear();"],
+			["index assignment", 'READ_OPS["x"] = true;'],
+			["an alias", 'const view = READ_OPS; view.add("x");'],
+			["an argument to another call", "mutate(READ_OPS);"],
+			["a value reached through another binding", "return { set: READ_OPS };"],
+			["a reassignment", "READ_OPS = new Set();"],
+			["a typeof use", "return typeof READ_OPS;"],
+		])("is a candidate when a use is %s", (_name, use) => {
+			expect(flagged({ "lookup.ts": withUse(use) })).toEqual(["lookup.ts"]);
+		});
+
+		it("ignores a mutation named only in a comment or a string", () => {
+			expect(
+				flagged({
+					"lookup.ts": withUse(
+						'// READ_OPS.add("write") would be a mutation\n\treturn "READ_OPS.clear()";',
+					),
+				}),
+			).toEqual([]);
+		});
+
+		it("is a candidate when declared let, in lower case, or built by a clients/ class", () => {
+			expect(
+				flagged({
+					"a.ts": READ_ONLY.replace("const READ_OPS", "let READ_OPS"),
+				}),
+			).toEqual(["a.ts"]);
+			expect(
+				flagged({ "b.ts": READ_ONLY.replaceAll("READ_OPS", "readOps") }),
+			).toEqual(["b.ts"]);
+			expect(
+				flagged({
+					"c.ts": READ_ONLY.replace(
+						'new Set(["read", "grep"])',
+						"new Registry()",
+					),
+					"registry.ts": "export class Registry { add(): void {} }\n",
+				}),
+			).toEqual(["c.ts"]);
+		});
+
+		describe("when exported, every shipped source is read", () => {
+			const EXPORTED = READ_ONLY.replace(
+				"const READ_OPS",
+				"export const READ_OPS",
+			);
+			it("stays admitted when an importer only reads", () => {
+				expect(
+					flagged({
+						"lookup.ts": EXPORTED,
+						"user.ts":
+							'import { READ_OPS } from "./lookup.js";\nexport const hit = READ_OPS.has("x");\n',
+					}),
+				).toEqual([]);
+			});
+			it.each([
+				["mutates it", 'READ_OPS.add("x");'],
+				["passes it on", "consume(READ_OPS);"],
+			])("is a candidate when an importer %s", (_name, use) => {
+				expect(
+					flagged({
+						"lookup.ts": EXPORTED,
+						"user.ts": `import { READ_OPS } from "./lookup.js";\nexport function f(): void {\n\t${use}\n}\n`,
+					}),
+				).toEqual(["lookup.ts"]);
+			});
+			it("is a candidate when an importer renames it or re-exports it under another name", () => {
+				expect(
+					flagged({
+						"lookup.ts": EXPORTED,
+						"user.ts":
+							'import { READ_OPS as ops } from "./lookup.js";\nexport const n = ops.size;\n',
+					}),
+				).toEqual(["lookup.ts"]);
+				expect(
+					flagged({
+						"lookup.ts": READ_ONLY + "export { READ_OPS as OPS };\n",
+					}),
+				).toEqual(["lookup.ts"]);
+			});
+			it("treats an unrenamed export list as exported", () => {
+				expect(
+					flagged({
+						"lookup.ts": READ_ONLY + "export { READ_OPS };\n",
+						"user.ts":
+							'import { READ_OPS } from "./lookup.js";\nexport function f(): void {\n\tREAD_OPS.delete("x");\n}\n',
+					}),
+				).toEqual(["lookup.ts"]);
+			});
+		});
+	});
+
+	describe("class fields bound to a container", () => {
+		const fieldsOf = (source: string): string[] => {
+			let out: string[] = [];
+			withScanTree({ "holder.ts": source }, (dir) => {
+				out =
+					scanSessionStateCandidates(dir)
+						.find((c) => c.file === "holder.ts")
+						?.instanceFields.map((f) => f.name) ?? [];
+			});
+			return out;
+		};
+
+		// #4955 recurrence, the declaration and assignment exactly as
+		// RuntimeCoordinator carried them at d472a99c9: a nullable field filled
+		// by a `??= new <clients/ class>`, which no module-scope scan can see.
+		it("reads a null-initialised field the coordinator fills with a new store (#4955)", () => {
+			withScanTree(
+				{
+					"read-guard.ts": "export class ReadGuard { reads = new Map(); }\n",
+					"runtime-coordinator.ts": [
+						'import { ReadGuard } from "./read-guard.js";',
+						"export class RuntimeCoordinator {",
+						"\tprivate _readGuard: ReadGuard | null = null;",
+						"\tgetReadGuard(): ReadGuard {",
+						"\t\tthis._readGuard ??= new ReadGuard();",
+						"\t\treturn this._readGuard;",
+						"\t}",
+						"}",
+						"",
+					].join("\n"),
+				},
+				(dir) => {
+					const coordinator = scanSessionStateCandidates(dir).find(
+						(c) => c.file === "runtime-coordinator.ts",
+					);
+					expect(coordinator?.instanceFields.map((f) => f.name)).toEqual([
+						"RuntimeCoordinator._readGuard",
+					]);
+				},
+			);
+		});
+
+		it.each([
+			[
+				"an initialised Map",
+				"private cache = new Map<string, number>();",
+				["Holder.cache"],
+			],
+			["a Set", "readonly seen: Set<string> = new Set();", ["Holder.seen"]],
+			[
+				"a WeakMap",
+				"private owners = new WeakMap<object, string>();",
+				["Holder.owners"],
+			],
+			["an Array", "private queue: string[] = [];", ["Holder.queue"]],
+			[
+				"a static field",
+				"static readonly shared = new Map<string, string>();",
+				["Holder.shared"],
+			],
+			["a private name", "#hidden = new Set<string>();", ["Holder.#hidden"]],
+			[
+				"a generic type with an arrow function",
+				"private hooks: Map<string, () => void> = new Map();",
+				["Holder.hooks"],
+			],
+			[
+				"a constructor assignment",
+				"constructor() { this.late = new Set(); }",
+				["Holder.late"],
+			],
+			["a ||= assignment", "start() { this.lazy ||= []; }", ["Holder.lazy"]],
+		])("flags %s", (_name, member, expected) => {
+			expect(fieldsOf(`export class Holder {\n\t${member}\n}\n`)).toEqual(
+				expected,
+			);
+		});
+
+		it.each([
+			["a scalar", "private count = 0;"],
+			["a function value", "private handler = () => new Map();"],
+			[
+				"a local inside a method",
+				"run() { const local = new Map(); return local; }",
+			],
+			["a default parameter", "run(cache = new Map()) { return cache; }"],
+			["a comparison", "check() { return this.x == new Map(); }"],
+			["a name in a comment", "// private cache = new Map();"],
+			["a name in a string", 'private note = "this.cache = new Map()";'],
+		])("does not flag %s", (_name, member) => {
+			expect(fieldsOf(`export class Holder {\n\t${member}\n}\n`)).toEqual([]);
+		});
+
+		it("counts fields with the module containers in the one symbol pin", () => {
+			withScanTree(
+				{
+					"holder.ts":
+						"const knownBySession = new Map<string, string>();\nexport class Holder {\n\tprivate a = new Set<string>();\n}\n",
+				},
+				(dir) => {
+					const [candidate] = scanSessionStateCandidates(dir);
+					expect(candidate?.containers).toEqual(["knownBySession"]);
+					expect(candidate?.instanceFields.map((f) => f.name)).toEqual([
+						"Holder.a",
+					]);
+					expect(symbolCount(candidate!)).toBe(2);
+				},
+			);
+		});
+
+		it("states the spellings it does not read, rather than claiming them", () => {
+			// Residual, named in SWEEP_HEURISTIC_LIMITS: a value built by a factory
+			// call, reached through another binding, or by an aliased constructor.
+			expect(
+				fieldsOf(
+					[
+						"const make = () => new Map();",
+						"const Store = Map;",
+						"export class Holder {",
+						"\tprivate viaFactory = make();",
+						"\tprivate viaAlias = new Store();",
+						"\tconstructor(seed: Map<string, string>) { const m = new Map(); this.viaBinding = m; this.fromParam = seed; }",
+						"}",
+						"",
+					].join("\n"),
+				),
+			).toEqual([]);
+			expect(SWEEP_HEURISTIC_LIMITS.join(" ")).toContain("CLASS FIELD");
 		});
 	});
 });

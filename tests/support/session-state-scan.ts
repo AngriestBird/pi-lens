@@ -389,8 +389,19 @@ export interface SessionStateCandidate {
 	file: string;
 	/** Module-level `Map`/`Set` declarations found (name only). */
 	containers: string[];
+	/**
+	 * Containers that are not an admitted read-only constant (#5027): the ones
+	 * that need an owner row on their own account.
+	 */
+	openContainers: string[];
 	/** Container names with their declaration line, for semantic sweeps. */
 	containerDetails?: Array<{ name: string; line: number }>;
+	/**
+	 * Class fields bound to a mutable container (#5027): `Class.field`, with the
+	 * constructor spelled (`Map`, `[]`, a `clients/` class). Counted with
+	 * `containers` in the one symbol-count pin ({@link symbolCount}).
+	 */
+	instanceFields: Array<{ name: string; line: number; ctor: string }>;
 	/** Exported reset-shaped function names found. */
 	resets: string[];
 	/** True when at least one reset is an explicitly test-only seam. */
@@ -587,7 +598,7 @@ function containerDeclarationRegex(dir: string): RegExp {
 		escapeRegExp,
 	);
 	const regex = new RegExp(
-		`^(?:export\\s+)?(?:const|let)\\s+([A-Za-z_$][\\w$]*)[^=\\n]*=\\s*new\\s+(?:${names.join("|")})\\b`,
+		`^(?<exported>export\\s+)?(?<kind>const|let)\\s+(?<name>[A-Za-z_$][\\w$]*)[^=\\n]*=\\s*new\\s+(?<ctor>${names.join("|")})\\b`,
 		"gm",
 	);
 	containerDeclarationCache.set(dir, regex);
@@ -620,7 +631,7 @@ export function containerDeclarationNames(
 		moduleScope.source.replace(/^\^/, `^${indent}`),
 		"gm",
 	);
-	return [...strippedSource.matchAll(regex)].map((match) => match[1]);
+	return [...strippedSource.matchAll(regex)].map((match) => match.groups!.name);
 }
 
 /** An exported reset-shaped function. */
@@ -706,17 +717,300 @@ export const SWEEP_HEURISTIC_LIMITS = [
 	// same kind of state a repo-local container does.
 	"a `new` bound to a constructor IMPORTED FROM OUTSIDE clients/ (a node_modules class, e.g. a third-party cache/client) is invisible — the class index only walks clients/, by design (a walk of node_modules is a different, much larger problem)",
 	"a `new` bound to a constructor built through a FACTORY FUNCTION rather than a bare `new Ctor(...)` expression (createAvailabilityLatch(), createToolchainAvailability()) is invisible to the container-declaration regex, which matches only `new <Name>(...)` — this is the same shape as MISS 2 (closure-held state) one level up: the factory's return value can itself hold session state with no module-level container syntax marking it",
+	// #5027: the owner scan reads two more shapes, and stays blind to the rest.
+	"a CLASS FIELD is read only when its value is a literal `new <Map|Set|WeakMap|WeakSet|clients/ class>` or `[]` (a field initialiser, or a `this.x =`/`??=`/`||=` assignment): a value built by a factory call, reached through another binding, built by an aliased constructor, or written `x ?? new Map()` is invisible, and so is a class expression or a class whose header holds a `{`",
+	"the admitted UPPER_SNAKE constant is judged on every shipped source (clients/, tools/, mcp/, index.ts) but not on tests or scripts, and a same-named identifier elsewhere only makes the verdict stricter",
 ] as const;
 
 let cachedCandidates: SessionStateCandidate[] | undefined;
 
+// ── 2b. Which containers need no row: the admitted read-only constant (#5027) ─
+
+/** A module container as the declaration regex reads it. */
+interface ContainerMatch {
+	name: string;
+	line: number;
+	index: number;
+	exported: boolean;
+	kind: "const" | "let";
+	ctor: string;
+}
+
+const UPPER_SNAKE = /^[A-Z][A-Z0-9_]*$/;
+const BUILTIN_MUTABLE_CTORS = new Set<string>(BUILTIN_CONTAINER_CTORS);
+
+/** What may follow a name for the use to be a read of the container. */
+const READ_USE_AFTER =
+	/^\s*(?:\??\.\s*(?:has|get|keys|values|entries|forEach)\s*\(|\??\.\s*size\b(?!\s*=[^=]))/;
+const SPREAD_OR_OF_BEFORE = /(?:\.\.\.|\bof\s+|\bArray\.from\(\s*)$/;
+const SPREAD_OR_OF_AFTER = /^\s*[)\],};]/;
+
+/**
+ * Whether every occurrence of `name` in `blanked` is a closed READ form: a
+ * `.has(`/`.get(`/`.size`/`.keys(`/`.values(`/`.entries(`/`.forEach(` call, a
+ * spread, a `for … of`, `Array.from(`, or the name in an `import { … }` /
+ * `export { … }` list without a rename. `declaredAt` is the declaration's own
+ * occurrence in the declaring file, which is skipped. Everything else (a
+ * mutator, an assignment, a bare value use, an alias, a rename) refuses, so a
+ * spelling nobody planned for is a use that needs a row, never a pass.
+ * `exportedByList` reports a name listed in an `export { … }`.
+ */
+function constantUses(
+	blanked: string,
+	name: string,
+	declaredAt: number | undefined,
+): { readOnly: boolean; exportedByList: boolean } {
+	const lists = [
+		...blanked.matchAll(/\b(import|export)\s+(?:type\s+)?\{([^}]*)\}/g),
+	].map((match) => {
+		const start = match.index + match[0].indexOf("{");
+		return { start, end: start + match[2]!.length + 2, kind: match[1] };
+	});
+	const occurrence = new RegExp(
+		`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`,
+		"g",
+	);
+	let exportedByList = false;
+	for (const match of blanked.matchAll(occurrence)) {
+		const at = match.index;
+		if (at === declaredAt) continue;
+		const after = blanked.slice(at + name.length);
+		const list = lists.find((range) => at > range.start && at < range.end);
+		if (list) {
+			if (/^\s*as\b/.test(after)) return { readOnly: false, exportedByList };
+			if (list.kind === "export") exportedByList = true;
+			continue;
+		}
+		const before = blanked.slice(Math.max(0, at - 16), at);
+		if (READ_USE_AFTER.test(after)) continue;
+		if (SPREAD_OR_OF_BEFORE.test(before) && SPREAD_OR_OF_AFTER.test(after))
+			continue;
+		return { readOnly: false, exportedByList };
+	}
+	return { readOnly: true, exportedByList };
+}
+
+/**
+ * The admitted constant of #5027: a `const` UPPER_SNAKE built-in
+ * Map/Set/WeakMap/WeakSet that the declaring file (and, when exported, every
+ * shipped source) only reads. It holds a lookup table built at import, not
+ * state a session writes, so it needs no owner row. Every other container is a
+ * candidate. `otherSources` yields every shipped blanked source, read only for
+ * an exported name.
+ */
+function isAdmittedConstant(
+	container: ContainerMatch,
+	declaringSource: string,
+	otherSources: () => Iterable<string>,
+): boolean {
+	if (container.kind !== "const" || !UPPER_SNAKE.test(container.name))
+		return false;
+	if (!BUILTIN_MUTABLE_CTORS.has(container.ctor)) return false;
+	const nameAt = declaringSource
+		.slice(container.index)
+		.search(new RegExp(`(?<![\\w$])${escapeRegExp(container.name)}(?![\\w$])`));
+	const own = constantUses(
+		declaringSource,
+		container.name,
+		container.index + nameAt,
+	);
+	if (!own.readOnly) return false;
+	if (!container.exported && !own.exportedByList) return true;
+	for (const source of otherSources())
+		if (
+			source !== declaringSource &&
+			source.includes(container.name) &&
+			!constantUses(source, container.name, undefined).readOnly
+		)
+			return false;
+	return true;
+}
+
+// ── 2c. Class fields bound to a container (#5027) ────────────────────────────
+
+const FIELD_MODIFIERS =
+	"(?:(?:public|private|protected|readonly|static|declare|override|accessor)\\s+)*";
+const FIELD_HEAD = new RegExp(
+	`^${FIELD_MODIFIERS}(#?[A-Za-z_$][\\w$]*)\\s*[?!]?\\s*(?::|$)`,
+);
+
+/** The `{ … }` bodies of every `class Name` in blanked `source`. */
+function classBodies(
+	source: string,
+): Array<{ name: string; open: number; close: number }> {
+	const bodies: Array<{ name: string; open: number; close: number }> = [];
+	for (const match of source.matchAll(
+		/(?<![.\w$])class\s+([A-Za-z_$][\w$]*)/g,
+	)) {
+		let i = match.index + match[0].length;
+		while (/\s/.test(source[i] ?? "")) i++;
+		if (source[i] === "<") {
+			let depth = 0;
+			for (; i < source.length; i++) {
+				if (source[i] === "<") depth++;
+				else if (source[i] === ">" && source[i - 1] !== "=") depth--;
+				if (depth === 0) break;
+			}
+			i++;
+		}
+		const open = source.indexOf("{", i);
+		if (open < 0) continue;
+		const close = matchingCloseIndex(source, open, "{", "}");
+		if (close < 0) continue;
+		bodies.push({ name: match[1]!, open, close });
+	}
+	return bodies;
+}
+
+/**
+ * The depth-1 members of one class body that are fields with an initialiser:
+ * the field's name and the initialiser's text. Methods, accessors and nested
+ * blocks are skipped whole; a field ends at its `;` outside any bracket.
+ */
+function fieldInitialisers(
+	source: string,
+	open: number,
+	close: number,
+): Array<{ name: string; initAt: number }> {
+	const fields: Array<{ name: string; initAt: number }> = [];
+	let i = open + 1;
+	while (i < close) {
+		while (i < close && /[\s;]/.test(source[i]!)) i++;
+		if (i >= close) break;
+		if (source[i] === "{") {
+			const end = matchingCloseIndex(source, i, "{", "}");
+			i = end < 0 ? close : end + 1;
+			continue;
+		}
+		const start = i;
+		let nest = 0;
+		let angle = 0;
+		let eqAt = -1;
+		let sawParen = false;
+		for (; i < close; i++) {
+			const ch = source[i]!;
+			if (ch === "(" || ch === "[") {
+				if (ch === "(" && nest === 0 && angle === 0 && eqAt < 0)
+					sawParen = true;
+				nest++;
+			} else if (ch === ")" || ch === "]") nest--;
+			else if (ch === "{") {
+				const end = matchingCloseIndex(source, i, "{", "}");
+				i = end < 0 ? close : end;
+				if (nest === 0 && sawParen && eqAt < 0) {
+					i++;
+					break;
+				}
+			} else if (eqAt < 0 && nest === 0) {
+				if (ch === "<" && /[\w$]/.test(source[i - 1] ?? "")) angle++;
+				else if (ch === ">" && angle > 0 && source[i - 1] !== "=") angle--;
+				else if (
+					ch === "=" &&
+					angle === 0 &&
+					source[i + 1] !== ">" &&
+					source[i + 1] !== "=" &&
+					!/[=!<>]/.test(source[i - 1] ?? "")
+				)
+					eqAt = i;
+			}
+			if (ch === ";" && nest === 0) break;
+		}
+		if (eqAt >= 0) {
+			const head = FIELD_HEAD.exec(source.slice(start, eqAt).trim());
+			if (head && !sawParen) fields.push({ name: head[1]!, initAt: eqAt + 1 });
+		}
+		i++;
+	}
+	return fields;
+}
+
+/**
+ * Class fields bound to a container in blanked `source`: a field initialiser
+ * (`name = new Map()`, `name: T[] = []`), or a `this.name =`/`??=`/`||=`
+ * assignment anywhere in the class body, whose value is `new <ctor>` for a
+ * built-in container or a `clients/` class (`ctors`), or `[]`. One entry per
+ * class and field.
+ */
+export function instanceContainerFields(
+	source: string,
+	ctors: ReadonlySet<string>,
+): Array<{ name: string; line: number; ctor: string }> {
+	const valuePattern = new RegExp(
+		`^\\s*(?:new\\s+(${[...ctors].map(escapeRegExp).join("|")})\\b|(\\[\\s*\\]))`,
+	);
+	const out: Array<{ name: string; line: number; ctor: string }> = [];
+	const lineAt = (index: number) => source.slice(0, index).split("\n").length;
+	for (const body of classBodies(source)) {
+		const seen = new Set<string>();
+		const record = (field: string, at: number, valueAt: number) => {
+			const value = valuePattern.exec(source.slice(valueAt, valueAt + 200));
+			if (!value || seen.has(field)) return;
+			seen.add(field);
+			out.push({
+				name: `${body.name}.${field}`,
+				line: lineAt(at),
+				ctor: value[1] ?? "[]",
+			});
+		};
+		for (const field of fieldInitialisers(source, body.open, body.close))
+			record(field.name, field.initAt, field.initAt);
+		const text = source.slice(body.open, body.close);
+		for (const match of text.matchAll(
+			/\bthis\.(#?[A-Za-z_$][\w$]*)\s*(?:\?\?|\|\|)?=(?!=)/g,
+		))
+			record(
+				match[1]!,
+				body.open + match.index,
+				body.open + match.index + match[0].length,
+			);
+	}
+	return out;
+}
+
+/** The one number the symbol-count pin tracks per flagged file. */
+export function symbolCount(candidate: SessionStateCandidate): number {
+	return candidate.containers.length + candidate.instanceFields.length;
+}
+
+/** Blanked sources of every shipped root, read once per scan that needs them. */
+function useSourcesFor(dir: string): () => Iterable<string> {
+	let cache: string[] | undefined;
+	return () => {
+		if (!cache) {
+			const roots =
+				dir === CLIENTS_ROOT ? shippedContainerSourceRoots() : [dir];
+			cache = [];
+			for (const root of roots) {
+				const files = fs.statSync(root).isDirectory()
+					? listSourceFiles(root, { extensions: [".ts"], skipTests: true })
+					: [root];
+				for (const file of files)
+					cache.push(stripCommentsAndStrings(fs.readFileSync(file, "utf8")));
+			}
+		}
+		return cache;
+	};
+}
+
 /**
  * Every source file under `dir` matching the session-scoped-state code
- * pattern. Defaults to (and caches) the real `clients/` tree; a caller may
- * pass an override root to run the same detection against a synthetic
- * fixture tree — `tests/clients/session-state-conformance.test.ts` uses this
- * to regression-test the #1817 symbol-count pin against a fixture that
- * cannot drift out from under the test the way the real tree can.
+ * pattern. A file is a candidate when it holds, in comment-and-string-blanked
+ * source, any of (#5027):
+ *
+ * - a container bound next to an exported reset-shaped function, a getProcessSingleton
+ *   call or a test-only reset (the original pairing rule);
+ * - a module-level container that is not an admitted read-only constant
+ *   ({@link isAdmittedConstant}), with or without a reset;
+ * - a class field bound to a container ({@link instanceContainerFields}).
+ *
+ * `includeUnresetContainers` lists every file with any module container (the
+ * bounded-container guard's view), admitted constants included.
+ *
+ * Defaults to (and caches) the real `clients/` tree; a caller may pass an
+ * override root to run the same detection against a synthetic fixture tree —
+ * `tests/clients/session-state-conformance.test.ts` uses this to
+ * regression-test the #1817 symbol-count pin against a fixture that cannot
+ * drift out from under the test the way the real tree can.
  */
 export function scanSessionStateCandidates(
 	dir = CLIENTS_ROOT,
@@ -726,31 +1020,57 @@ export function scanSessionStateCandidates(
 	const useCache = dir === CLIENTS_ROOT && !includeUnreset;
 	if (useCache && cachedCandidates) return cachedCandidates;
 	const containerDeclaration = containerDeclarationRegex(dir);
+	const fieldCtors = new Set<string>([
+		...BUILTIN_CONTAINER_CTORS,
+		...containerClassNames(dir),
+	]);
+	const otherSources = useSourcesFor(dir);
 	const found: SessionStateCandidate[] = [];
 	for (const absolute of clientSourceFiles(dir)) {
 		// Stripped for the same reason the reachability walk is (R1): a
 		// commented-out declaration or reset export is not one.
 		const source = stripCommentsAndStrings(fs.readFileSync(absolute, "utf8"));
-		const containerDetails = [...source.matchAll(containerDeclaration)].map(
-			(m) => ({
-				name: m[1],
-				line: source.slice(0, m.index).split("\n").length,
-			}),
-		);
+		const matches: ContainerMatch[] = [
+			...source.matchAll(containerDeclaration),
+		].map((m) => ({
+			name: m.groups!.name!,
+			line: source.slice(0, m.index).split("\n").length,
+			index: m.index,
+			exported: m.groups!.exported !== undefined,
+			kind: m.groups!.kind as "const" | "let",
+			ctor: m.groups!.ctor!,
+		}));
+		const containerDetails = matches.map(({ name, line }) => ({ name, line }));
 		const containers = containerDetails.map((container) => container.name);
+		const instanceFields = instanceContainerFields(source, fieldCtors);
 		const resets = [...source.matchAll(EXPORTED_RESET)].map((m) => m[1]);
-		if (!includeUnreset && resets.length === 0) continue;
 		const hasTestOnlyReset = resets.some((r) => TEST_ONLY_RESET.test(r));
 		const hasProcessSingleton = PROCESS_SINGLETON_CALL.test(source);
 		// Signal A (container + reset), signal B (an explicit test-only reset
 		// seam, which by itself says "this module holds state tests must undo"),
-		// or signal C (a getProcessSingleton cell + reset — #2319).
-		if (containers.length === 0 && !hasTestOnlyReset && !hasProcessSingleton)
-			continue;
+		// or signal C (a getProcessSingleton cell + reset — #2319). Signal D
+		// (#5027): a container no reset pairs with is still state with an owner,
+		// and so is a class field bound to a container; only the admitted
+		// read-only constant is exempt from the question.
+		const stateSignal =
+			containers.length > 0 || hasTestOnlyReset || hasProcessSingleton;
+		const openContainers = includeUnreset
+			? containers
+			: matches
+					.filter((match) => !isAdmittedConstant(match, source, otherSources))
+					.map((match) => match.name);
+		const flagged = includeUnreset
+			? stateSignal
+			: (resets.length > 0 && stateSignal) ||
+				openContainers.length > 0 ||
+				instanceFields.length > 0;
+		if (!flagged) continue;
 		found.push({
 			file: relativePosix(dir, absolute),
 			containers,
+			openContainers,
 			containerDetails,
+			instanceFields,
 			resets,
 			hasTestOnlyReset,
 			hasProcessSingleton,
@@ -964,10 +1284,12 @@ function cellKeyToken(
  * (the cell census, `scanScopeCellKeys`, pins it instead), so the retired
  * `sessionSeam` claim is refused wherever it appears: no field can claim a
  * cell for a store that does not hold it. Neither field rides a non-session
- * owner.
+ * owner. `declaredStores` audits the `defineSessionStore` rows, which need
+ * the vocabulary and nothing else.
  */
 export function auditOwnerKeys(
 	entries: readonly OwnerKeyAuditEntry[],
+	options: { declaredStores?: boolean } = {},
 ): string[] {
 	const problems: string[] = [];
 	for (const entry of entries) {
@@ -992,6 +1314,16 @@ export function auditOwnerKeys(
 			continue;
 		}
 		const exception = entry.sessionSeamException;
+		if (options.declaredStores === true) {
+			// A declared session store (`defineSessionStore`) is the seam's transition
+			// contract: a `session` owner needs no exception here, and a process
+			// container behind it carries its own row (#5027).
+			if (exception !== undefined)
+				problems.push(
+					`${where} a declared session store states no sessionSeamException; a container behind it has its own row`,
+				);
+			continue;
+		}
 		if (ownerKey !== "session") {
 			if (exception !== undefined)
 				problems.push(
