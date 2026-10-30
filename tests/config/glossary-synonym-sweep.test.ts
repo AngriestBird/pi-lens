@@ -1127,12 +1127,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (`path.resolve` / `path.dirname` / `path.basename` / `path.join`) is
 		// deleted; the confinement asks `realpathOrResolveAsync` for the root and
 		// each URI's identity, so four `path` uses leave the module.
-		"clients/lsp/edits.ts": 19,
+		"clients/lsp/edits.ts": 18,
 		// #4532: the environment-gap gate resolves its walk-up from the file's
 		// own directory, so these are real filesystem `path` calls. 5 -> 8
 		// (#4532 round 5): the manifest walk-up reads `package.json` at each
 		// level on the same bounded ancestry.
-		"clients/lsp/environment-gap.ts": 8,
+		"clients/lsp/environment-gap.ts": 5,
 		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
 		// #4346: Go package directories and TS/JS extensions of the implicit
@@ -1171,11 +1171,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 121 -> 124 (#4914): `findEffectTsgoLsp` joins the `@effect/tsgo` manifest
 		// path, the `.bin/effect-tsgo` path, and `findNativeTypeScriptLsp` hands
 		// back its `node_modules` directory: three `path.join` filesystem calls.
-		"clients/lsp/server.ts": 122,
+		"clients/lsp/server.ts": 111,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
-		"clients/lsp/workspace-diagnostics-cache.ts": 12,
+		"clients/lsp/workspace-diagnostics-cache.ts": 11,
 		// #4346: a creation record carries the created file's path.
 		"clients/lsp/workspace-diagnostics-session.ts": 2,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
@@ -1244,7 +1244,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 39 -> 41 (#2556): `relativeInside` takes a `pathImpl: typeof path = path`
 		// argument so callers can pass the win32 dialect; the default and its
 		// annotation are the two senses.
-		"clients/path-utils.ts": 41,
+		"clients/path-utils.ts": 40,
 		"clients/php-cs-fixer-config.ts": 4,
 		// 26 -> 24 (#4689 batch 3): the changed-file set is a PathKeyedMap, so two
 		// `path.resolve` calls are gone. 24 -> 22: the postMutation gate compares

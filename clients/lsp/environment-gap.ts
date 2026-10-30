@@ -47,6 +47,7 @@ import * as path from "node:path";
 import type { LSPDiagnostic } from "./client.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
 import { logLatency } from "../latency-logger.js";
+import { realpathOrResolve, walkUpDirs } from "../path-utils.js";
 
 /**
  * The stable, greppable half of the label. A finding that survives at reduced
@@ -181,8 +182,9 @@ function admitPackageName(names: Set<string>, name: string): void {
  */
 function declaredPackageNames(startDir: string): Set<string> {
 	const names = new Set<string>();
-	let dir = path.resolve(startDir);
-	for (let level = 0; level < ENV_NODE_MODULES_WALK_MAX_LEVELS; level++) {
+	for (const dir of walkUpDirs(startDir, {
+		maxDepth: ENV_NODE_MODULES_WALK_MAX_LEVELS,
+	})) {
 		try {
 			const manifest = JSON.parse(
 				fs.readFileSync(path.join(dir, "package.json"), "utf8"),
@@ -208,9 +210,6 @@ function declaredPackageNames(startDir: string): Set<string> {
 			// so a specifier only it could have admitted stays blocking (fail
 			// closed). The demotion's own record is `lsp-environment-gap-demoted`.
 		}
-		const parent = path.dirname(dir);
-		if (parent === dir) break;
-		dir = parent;
 	}
 	return names;
 }
@@ -275,8 +274,11 @@ export function hasResolvableNodeModules(
 	startDir: string,
 	stat: (candidate: string) => fs.Stats = (candidate) => fs.statSync(candidate),
 ): boolean {
-	let dir = path.resolve(startDir);
-	for (let level = 0; level < ENV_NODE_MODULES_WALK_MAX_LEVELS; level++) {
+	let last: string | undefined;
+	for (const dir of walkUpDirs(startDir, {
+		maxDepth: ENV_NODE_MODULES_WALK_MAX_LEVELS,
+	})) {
+		last = dir;
 		try {
 			stat(path.join(dir, "node_modules"));
 			return true;
@@ -292,14 +294,12 @@ export function hasResolvableNodeModules(
 				return true;
 			}
 		}
-		const parent = path.dirname(dir);
-		if (parent === dir) return false;
-		dir = parent;
 	}
-	// The cap is a depth bound, not a verdict: an unbounded ancestry could still
-	// hold an install, so past it the question is unanswered and the finding
-	// stays blocking.
-	return true;
+	// The filesystem root ends the walk with the answer "absent". The cap is a
+	// depth bound, not a verdict: an unbounded ancestry could still hold an
+	// install, so past it the question is unanswered and the finding stays
+	// blocking.
+	return last === undefined || path.dirname(last) !== last;
 }
 
 export interface EnvironmentGapOptions {
@@ -333,7 +333,10 @@ export function demoteEnvironmentGapDiagnostics(
 	}
 	if (candidates.size === 0) return diagnostics;
 	// One filesystem question per file, asked only when a demotion could act.
-	const startDir = options.startDir ?? path.dirname(options.filePath);
+	// Node resolves modules from the file's real directory, so a file reached
+	// through a link looks for `node_modules` where its target lives.
+	const startDir =
+		options.startDir ?? path.dirname(realpathOrResolve(options.filePath));
 	if (hasResolvableNodeModules(startDir, options.stat)) return diagnostics;
 	// A missing module is an install gap only in the two known-good forms; the
 	// manifests are read once, and only when a non-built-in candidate asks.

@@ -1100,14 +1100,14 @@ export function findNearestMarkerRoot(
 	options: FindNearestMarkerRootOptions = {},
 ): string | null {
 	const boundaries = options.boundaries ?? [];
-	// #4689 item 6: both ends of the climb are path identities, so a directory
-	// reached through a link walks up its target's parents and a home that is
-	// itself a link still stops the walk.
-	const homeDir = realpathOrResolve(options.homeDir ?? os.homedir());
 	const markerPredicate = options.markerPredicate ?? (() => true);
-	let current = realpathOrResolve(startDir);
-	for (let depth = 0; depth < 64; depth++) {
-		if (isAtOrAboveHomeDir(current, homeDir)) return null;
+	// #4689 item 6: both ends of the climb are path identities (`walkUpDirs`),
+	// so a directory reached through a link walks up its target's parents and
+	// a home that is itself a link still stops the walk.
+	for (const current of walkUpDirs(startDir, {
+		homeDir: options.homeDir ?? os.homedir(),
+		maxDepth: 64,
+	})) {
 		if (
 			markers.some(
 				(m) =>
@@ -1117,9 +1117,6 @@ export function findNearestMarkerRoot(
 		)
 			return current;
 		if (boundaries.some((m) => existsSync(path.join(current, m)))) return null;
-		const parent = path.dirname(current);
-		if (parent === current) return null;
-		current = parent;
 	}
 	return null;
 }
@@ -1140,11 +1137,14 @@ export function findNearestMarkerRootDetailed(
 	options: FindNearestMarkerRootDetailedOptions,
 ): MarkerRootResult {
 	// #4689 item 6: identities at both ends, as in `findNearestMarkerRoot`.
-	const homeDir = realpathOrResolve(options.homeDir ?? os.homedir());
-	let current = realpathOrResolve(startDir);
-	for (let depth = 0; depth < 64; depth++) {
-		if (isAtOrAboveHomeDir(current, homeDir))
-			return { kind: "not-found", reason: "home-ceiling" };
+	let climbed = 0;
+	let last: string | undefined;
+	for (const current of walkUpDirs(startDir, {
+		homeDir: options.homeDir ?? os.homedir(),
+		maxDepth: 64,
+	})) {
+		climbed += 1;
+		last = current;
 		for (const marker of markers) {
 			const markerPath = path.join(current, marker);
 			const checked = options.markerPredicate(markerPath);
@@ -1152,11 +1152,14 @@ export function findNearestMarkerRootDetailed(
 				return { kind: "unavailable", markerPath, cause: checked.cause };
 			if (checked.kind === "valid") return { kind: "found", root: current };
 		}
-		const parent = path.dirname(current);
-		if (parent === current) return { kind: "not-found", reason: "root" };
-		current = parent;
 	}
-	return { kind: "not-found", reason: "depth-limit" };
+	// The climb ended without a marker; the last directory it yielded says why.
+	if (last === undefined) return { kind: "not-found", reason: "home-ceiling" };
+	if (path.dirname(last) === last) return { kind: "not-found", reason: "root" };
+	return {
+		kind: "not-found",
+		reason: climbed >= 64 ? "depth-limit" : "home-ceiling",
+	};
 }
 
 /**

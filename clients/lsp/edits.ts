@@ -35,7 +35,7 @@ import {
 	normalizeToLF,
 	restoreLineEndings,
 } from "../host-edit-normalize.js";
-import { toPosix } from "../path-utils.js";
+import { toPosix, walkUpDirs } from "../path-utils.js";
 
 interface LSPPosition {
 	line: number;
@@ -1305,19 +1305,20 @@ async function assertParentIsUsable(
 	filePath: string,
 	stateFor: (filePath: string) => Promise<VirtualFile>,
 ): Promise<void> {
-	let current = path.dirname(filePath);
-	while (true) {
+	// `filePath` is the confined identity and `stateFor` keys its overlay by it,
+	// so the climb takes the names as given: a second resolution would look up
+	// a directory the overlay never recorded.
+	for (const current of walkUpDirs(path.dirname(filePath), {
+		spelling: true,
+	})) {
 		const known = await stateFor(current);
 		if (known.exists) {
 			if (!known.directory)
 				throw new Error(`resource parent is not a directory: ${current}`);
 			return;
 		}
-		const parent = path.dirname(current);
-		if (parent === current)
-			throw new Error(`resource parent does not exist: ${filePath}`);
-		current = parent;
 	}
+	throw new Error(`resource parent does not exist: ${filePath}`);
 }
 
 /**
