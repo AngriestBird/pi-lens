@@ -450,6 +450,77 @@ describe("effectiveConfig — why is X running (#2415 AC)", () => {
 		}
 	});
 
+	// `dispatch.disabledRunners`: the runner-level sibling of
+	// `lsp.disabledServers`. The view reads the same resolution the dispatch
+	// context does, so a denied runner is named with the tier that denied it
+	// rather than vanishing from the plan.
+	describe("dispatch.disabledRunners", () => {
+		const deniedBuild = (view: EffectiveConfigView) =>
+			resolvedFile(view)?.tools.find((tool) => tool.id === "dotnet-build");
+
+		it("reports a globally denied runner as disabled-by-config with its provenance while lsp stays selected", async () => {
+			const { view } = await viewFor(
+				{
+					files: {
+						".pi-lens/config.json": {
+							dispatch: { disabledRunners: ["dotnet-build"] },
+						},
+						"proj/.pi-lens.json": { dispatch: { disabledRunners: [] } },
+					},
+					startDir: "proj",
+				},
+				{ file: "Program.cs" },
+			);
+
+			const build = deniedBuild(view);
+			expect(build?.selected).toBe(false);
+			expect(build?.reason).toBe("disabled-by-config");
+			expect(build?.decidedBy?.tier).toBe("global");
+			expect(build?.decidedBy?.key).toBe("/dispatch/disabledRunners/0");
+			expect(build?.decidedBy?.file).toContain("config.json");
+			const lsp = resolvedFile(view)?.tools.find((tool) => tool.id === "lsp");
+			expect(lsp?.selected).toBe(true);
+			expect(lsp?.reason).toBe("selected");
+			expect(lsp?.decidedBy).toBeUndefined();
+			// The resolution agrees: the leaf is in the provenance listing.
+			expect(
+				view.provenance.some(
+					(entry) => entry.key === "/dispatch/disabledRunners/0",
+				),
+			).toBe(true);
+		});
+
+		it("attributes a project-added denial to the project tier", async () => {
+			const { view } = await viewFor(
+				{
+					files: {
+						".pi-lens/config.json": {
+							dispatch: { disabledRunners: ["javac"] },
+						},
+						"proj/.pi-lens.json": {
+							dispatch: { disabledRunners: ["dotnet-build"] },
+						},
+					},
+					startDir: "proj",
+				},
+				{ file: "Program.cs" },
+			);
+
+			expect(deniedBuild(view)?.reason).toBe("disabled-by-config");
+			expect(deniedBuild(view)?.decidedBy?.tier).toBe("project");
+		});
+
+		it("selects the runner when nothing denies it", async () => {
+			const { view } = await viewFor(
+				{ files: {}, startDir: "proj" },
+				{ file: "Program.cs" },
+			);
+
+			expect(deniedBuild(view)?.reason).toBe("selected");
+			expect(deniedBuild(view)?.decidedBy).toBeUndefined();
+		});
+	});
+
 	// #4636, the reporter's live evidence: `effective_config` printed
 	// `"language": "json"` for a `tsconfig.json`, which is the registry's answer
 	// read back through the query an agent actually asks. The FILE KIND stays

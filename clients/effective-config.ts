@@ -49,6 +49,7 @@ import {
 	summarizeConfigResolution,
 } from "./config-resolve.js";
 import { getToolPlan } from "./dispatch/plan.js";
+import { disabledRunnersOf } from "./dispatch/disabled-runners.js";
 import { getAvailableRunners } from "./dispatch/integration.js";
 import { detectFileKind } from "./file-kinds.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
@@ -144,6 +145,7 @@ export interface EffectiveServerDecision {
 /** Why a runner did or did not make a file's dispatch plan. */
 type ToolSelectionReason =
 	| "selected"
+	| "disabled-by-config"
 	| "not-registered-for-kind"
 	| "no-dispatch-plan";
 
@@ -151,6 +153,11 @@ interface EffectiveToolDecision {
 	readonly id: string;
 	readonly selected: boolean;
 	readonly reason: ToolSelectionReason;
+	/**
+	 * The tier and file that denied the runner (`dispatch.disabledRunners`).
+	 * Present only for a `disabled-by-config` decision.
+	 */
+	readonly decidedBy?: ProvenanceViewEntry;
 	readonly resolvedCwd: string;
 }
 
@@ -502,6 +509,7 @@ export async function effectiveConfig(
 				: {
 						file: await fileView(
 							absolute,
+							resolution,
 							resolved,
 							homeDir,
 							cwd,
@@ -531,14 +539,17 @@ export async function effectiveConfig(
  */
 function toolReason(
 	selected: boolean,
+	disabled: boolean,
 	kind: ReturnType<typeof detectFileKind>,
 ): ToolSelectionReason {
+	if (disabled) return "disabled-by-config";
 	if (selected) return "selected";
 	return kind === undefined ? "no-dispatch-plan" : "not-registered-for-kind";
 }
 
 async function fileView(
 	absolute: string,
+	resolution: PiLensConfigResolution,
 	resolved: Resolved<Record<string, unknown>>,
 	homeDir: string,
 	workspaceCwd: string,
@@ -622,6 +633,13 @@ async function fileView(
 	const planned = kind
 		? (getToolPlan(kind)?.groups.flatMap((group) => group.runnerIds) ?? [])
 		: [];
+	// A denied runner stays in the list, named, so the answer to "why did this
+	// not run" is the denial and its provenance, not an absence. The same
+	// `disabledRunnersOf` the dispatcher's context reads, over this query's own
+	// resolution: one definition of which runners are denied.
+	const disabledRunners = new Map(
+		disabledRunnersOf(resolution).runners.map((runner) => [runner.id, runner]),
+	);
 	// Ordinal, not the default locale sort: this list is the ORDER of a payload
 	// callers compare across machines, and a locale-sensitive comparator can
 	// order the same ids differently under a different ICU build (#2427 review
@@ -629,8 +647,9 @@ async function fileView(
 	const ids = [...new Set([...planned, ...available])].sort(compareOrdinal);
 	const tools: EffectiveToolDecision[] = ids.map((id) => ({
 		id,
-		selected: available.has(id),
-		reason: toolReason(available.has(id), kind),
+		selected: available.has(id) && !disabledRunners.has(id),
+		reason: toolReason(available.has(id), disabledRunners.has(id), kind),
+		...decidedByOrNothing(viewOf(disabledRunners.get(id)?.decidedBy, homeDir)),
 		resolvedCwd: homeRelativePath(
 			resolveToolCwd("runner", id, absolute, {
 				cwd: workspaceCwd,

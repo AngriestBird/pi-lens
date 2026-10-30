@@ -20,7 +20,10 @@
  * the three surfaces from drifting.
  */
 import { normalizeRuleId } from "./rule-id-normalize.js";
-import { resolvePiLensConfig } from "../config-resolve.js";
+import {
+	type PiLensConfigResolution,
+	resolvePiLensConfig,
+} from "../config-resolve.js";
 import { getPiLensGlobalConfigPath } from "../lens-config.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { isRuleIgnoredForPath } from "./rule-ignores.js";
@@ -42,12 +45,25 @@ interface RulePolicyEntry {
  */
 export type RulePolicyMap = Record<string, RulePolicyEntry | undefined>;
 
-export function resolvedRulePolicyMap(root: string): RulePolicyMap | undefined {
-	const resolved = resolvePiLensConfig({
+/**
+ * The one global+project resolution a dispatch policy reads (`rules`, and
+ * `dispatch.disabledRunners`). `createDispatchContext` resolves once and hands
+ * the result to each reader, so a second policy key costs no second walk.
+ */
+export function resolveDispatchPolicyConfig(
+	root: string,
+): PiLensConfigResolution {
+	return resolvePiLensConfig({
 		cwd: root,
 		globalDir: getGlobalPiLensDir(),
 		globalConfigPath: getPiLensGlobalConfigPath(),
 	});
+}
+
+export function resolvedRulePolicyMap(
+	root: string,
+	resolved: PiLensConfigResolution = resolveDispatchPolicyConfig(root),
+): RulePolicyMap | undefined {
 	return rulePolicyMapFromConfig(
 		resolved.value.rules as Record<string, unknown> | undefined,
 	);

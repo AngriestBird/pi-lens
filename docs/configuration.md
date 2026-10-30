@@ -252,6 +252,51 @@ Two rules make the rest of the table unambiguous:
   same thing as the canonical one, the canonical one is used — otherwise the
   migration below could never be completed.
 
+### `dispatch.disabledRunners` — turning a dispatch runner off
+
+`lsp.disabledServers` switches off a language server. A dispatch **runner**
+(a linter, type-checker, or build such as `dotnet-build`, `javac`, or
+`rust-clippy`) has its own denial list, with the same semantics:
+
+```jsonc
+// ~/.pi-lens/config.json (or a project .pi-lens.json)
+{ "dispatch": { "disabledRunners": ["dotnet-build"] } }
+```
+
+- **Union across tiers.** Like `lsp.disabledServers`, the list is the union of
+  `~/.pi-lens/config.json`, the project `.pi-lens.json`, and any nested
+  `.pi-lens.json`. A project can add a runner and can never re-enable one a
+  farther tier denied.
+- **The tool never spawns.** The dispatcher skips a disabled runner before its
+  precondition and before it runs, so no availability probe, no `dotnet build`,
+  nothing. The skip is recorded with the reason `disabled-by-config`
+  (`latency.log`, `skipReason`). It is an operator decision, not a failure: it
+  raises no blocker and no "tool failed" notice, and a `fallback` group (such as
+  C#'s `lsp`, then `dotnet-build`) simply moves on to its next member. The other
+  runners of the group, the language server included, run as before.
+- **Unknown ids are dropped, not ignored silently.** An entry that names no
+  registered runner is dropped with a `PILENS_CFG_0005` warning that quotes the
+  entry, so a typo does not read as a runner that was turned off.
+- **Edits apply on the next dispatch.** The list is resolved for each dispatch,
+  so a change to the file needs no restart.
+- **Disabling the only checker leaves the file unconfirmed.** Turning off a
+  runner that was the sole check for a file kind produces the usual
+  "analysis unavailable" notice rather than a clean result.
+
+`pilens_effective_config file=Program.cs` reports the runner as denied, with the
+tier and file that denied it, while the language server stays selected:
+
+```console
+$ pilens_effective_config file=src/Program.cs
+  tools:
+    lsp          selected
+    dotnet-build ✗ disabled-by-config (global ~/.pi-lens/config.json → /dispatch/disabledRunners/0)
+```
+
+`dispatch.runnerTimeoutFloorMs`, the other `dispatch` key, stays global-only.
+Putting it in a project `.pi-lens.json` logs the usual one-time "global-only"
+notice.
+
 ## Legacy locations (still read; being removed)
 
 These are read for their deprecation window and then **removed**. Each one you

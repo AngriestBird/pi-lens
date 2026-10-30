@@ -502,6 +502,16 @@
       "x-stability": "stable"
     },
     "dispatch": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "disabledRunners": {
+          "type": "array",
+          "items": { "type": "string", "x-stability": "experimental" },
+          "x-deny": "array-union",
+          "x-stability": "experimental"
+        }
+      },
       "x-stability": "stable"
     },
     "widget": {

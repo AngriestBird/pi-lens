@@ -78,8 +78,13 @@ import { normalizeRuleId } from "./rule-id-normalize.js";
 import {
 	applyRulePolicy,
 	resolvedRulePolicyMap,
+	resolveDispatchPolicyConfig,
 	rulePolicyMapFromConfig,
 } from "./rule-policy.js";
+import {
+	DISABLED_BY_CONFIG_SKIP_REASON,
+	disabledRunnerIdsFor,
+} from "./disabled-runners.js";
 import { getToolProfile } from "./tool-profile.js";
 import { classifyPreExisting, preEditSeedFactKey } from "./pre-edit-seed.js";
 import {
@@ -395,7 +400,9 @@ export function createDispatchContext(
 				})
 			: undefined;
 	const projectConfig = loadPiLensProjectConfig(normalizedCwd);
-	const rulePolicy = resolvedRulePolicyMap(normalizedProjectRoot);
+	const policyConfig = resolveDispatchPolicyConfig(normalizedProjectRoot);
+	const rulePolicy = resolvedRulePolicyMap(normalizedProjectRoot, policyConfig);
+	const disabledRunnerIds = disabledRunnerIdsFor(policyConfig);
 
 	return {
 		filePath: normalizedFilePath,
@@ -412,6 +419,7 @@ export function createDispatchContext(
 		facts,
 		projectConfig,
 		rulePolicy,
+		...(disabledRunnerIds !== undefined && { disabledRunnerIds }),
 		blockingOnly,
 		modifiedRanges,
 		writeIndex,
@@ -1152,6 +1160,36 @@ async function runGroup(
 				diagnosticCount: 0,
 				semantic: "unknown",
 				metadata: { reason: "applies_to", kind: ctx.kind },
+			});
+			continue;
+		}
+
+		// `dispatch.disabledRunners`: the operator turned this runner off. It is
+		// skipped before `when`/`run`, so its tool never spawns (not even an
+		// availability probe), and the skip carries a stated reason, so it is
+		// neither a failure nor a runner that reached no verdict: a fallback
+		// group moves on to its next member as for any other skip.
+		if (ctx.disabledRunnerIds?.has(runnerId)) {
+			const runnerEnd = Date.now();
+			latencies.push({
+				runnerId,
+				startTime: runnerStart,
+				endTime: runnerEnd,
+				durationMs: 0,
+				status: "skipped",
+				diagnosticCount: 0,
+				semantic: "none",
+				skipReason: DISABLED_BY_CONFIG_SKIP_REASON,
+			});
+			logLatency({
+				type: "runner",
+				filePath: ctx.filePath,
+				runnerId,
+				durationMs: 0,
+				status: "skipped",
+				diagnosticCount: 0,
+				semantic: "none",
+				metadata: { skipReason: DISABLED_BY_CONFIG_SKIP_REASON },
 			});
 			continue;
 		}

@@ -293,12 +293,15 @@ export interface RunnerDefinition {
  * ownership reasons: a runner may skip because its capability is policy-
  * deferred to a lane that owns it, or because its tool categorically cannot
  * serve the file's dialect — both are policy decisions named at the delivery
- * surface, never an empty output read as clean). */
+ * surface, never an empty output read as clean). `disabled-by-config` is the
+ * operator's own decision (`dispatch.disabledRunners`): the runner never ran,
+ * which is neither a failure nor a verdict on the file. */
 export const RUNNER_SKIP_REASONS = [
 	"no-files-matched",
 	"configured-non-biome-linter",
 	"dialect-unsupported",
 	"covered-by-primary",
+	"disabled-by-config",
 ] as const;
 export type RunnerSkipReason = (typeof RUNNER_SKIP_REASONS)[number];
 
@@ -673,6 +676,12 @@ export interface DispatchContext {
 	readonly projectConfig?: PiLensProjectConfig;
 	/** Shared global+project rule policy, including path-scoped denials. */
 	readonly rulePolicy?: RulePolicyMap;
+	/**
+	 * Runner ids the operator denied through `dispatch.disabledRunners`
+	 * (union of every config tier). Absent when nothing is denied. The
+	 * dispatcher skips these before their `when`/`run`, so the tool never spawns.
+	 */
+	readonly disabledRunnerIds?: ReadonlySet<string>;
 	/** Only run blocking rules (severity: error) - used for fast feedback on file write */
 	readonly blockingOnly?: boolean;
 	readonly modifiedRanges?: ModifiedRange[];

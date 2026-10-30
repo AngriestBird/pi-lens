@@ -1,0 +1,397 @@
+/**
+ * `dispatch.disabledRunners` — the operator's runner denial list.
+ *
+ * Everything drives the PRODUCTION path: real config files on disk (global via
+ * `PI_LENS_HOME`, project via `.pi-lens.json`), the real `resolvePiLensConfig`,
+ * the real `createDispatchContext` and the real `dispatchForFile`. Only the
+ * runners are stand-ins, because the property under test is whether a tool
+ * would have been spawned: each stand-in counts its own `when` and `run` calls,
+ * and a control arm with no config proves the counter sees a run.
+ */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resolvePiLensConfig } from "../../../clients/config-resolve.js";
+import { resetDegradationLedger } from "../../../clients/degradation-ledger.js";
+import {
+	disabledRunnersOf,
+	DISABLED_BY_CONFIG_SKIP_REASON,
+} from "../../../clients/dispatch/disabled-runners.js";
+import {
+	createDispatchContext,
+	dispatchForFile,
+	RunnerRegistry,
+} from "../../../clients/dispatch/dispatcher.js";
+import { FactStore } from "../../../clients/dispatch/fact-store.js";
+import {
+	registerRunnerId,
+	resetRunnerIdentityForTests,
+} from "../../../clients/dispatch/known-runner-ids.js";
+import type {
+	RunnerDefinition,
+	RunnerGroup,
+	RunnerResult,
+} from "../../../clients/dispatch/types.js";
+import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
+import { resetIgnoredConfigWarnCache } from "../../../clients/config-warn.js";
+import { wireUserNotifier } from "../../../clients/user-notify.js";
+import { removeTempDirSync } from "../test-utils.js";
+import { useConfigPath } from "../../support/global-config.js";
+const setConfigPath = useConfigPath();
+
+interface Counters {
+	whenCalls: number;
+	runCalls: number;
+}
+
+/** A runner that records every call and answers with `result`. */
+function countingRunner(
+	id: string,
+	result: RunnerResult,
+): { runner: RunnerDefinition; counters: Counters } {
+	const counters: Counters = { whenCalls: 0, runCalls: 0 };
+	return {
+		counters,
+		runner: {
+			id,
+			appliesTo: ["jsts"],
+			priority: 10,
+			when() {
+				counters.whenCalls += 1;
+				return true;
+			},
+			async run() {
+				counters.runCalls += 1;
+				return result;
+			},
+		},
+	};
+}
+
+const SKIPPED: RunnerResult = {
+	status: "skipped",
+	diagnostics: [],
+	semantic: "none",
+};
+const SUCCEEDED: RunnerResult = {
+	status: "succeeded",
+	diagnostics: [],
+	semantic: "none",
+};
+
+/** The dotnet-build failure a real build would report: a blocking finding. */
+const BLOCKING_BUILD: RunnerResult = {
+	status: "failed",
+	failureKind: "blocking_diagnostics",
+	semantic: "blocking",
+	diagnostics: [
+		{
+			id: "CS1002",
+			message: "; expected",
+			filePath: "a.ts",
+			severity: "error",
+			semantic: "blocking",
+			tool: "dotnet-build",
+			rule: "CS1002",
+			line: 1,
+		},
+	],
+};
+
+let tmpDir: string;
+let globalDir: string;
+let projectDir: string;
+let previousHome: string | undefined;
+const notified: string[] = [];
+
+function writeGlobal(config: unknown): void {
+	fs.mkdirSync(globalDir, { recursive: true });
+	fs.writeFileSync(path.join(globalDir, "config.json"), JSON.stringify(config));
+}
+
+function writeProject(config: unknown, dir = projectDir): void {
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(path.join(dir, ".pi-lens.json"), JSON.stringify(config));
+}
+
+function resolutionAt(dir: string) {
+	return resolvePiLensConfig({
+		cwd: dir,
+		globalDir,
+		globalConfigPath: path.join(globalDir, "config.json"),
+		homeDir: tmpDir,
+	});
+}
+
+function contextFor(facts = new FactStore()) {
+	return createDispatchContext(
+		path.join(projectDir, "a.ts"),
+		projectDir,
+		{ getFlag: () => false },
+		facts,
+		false,
+	);
+}
+
+beforeEach(() => {
+	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-disabled-runners-"));
+	globalDir = path.join(tmpDir, ".pi-lens");
+	projectDir = path.join(tmpDir, "proj");
+	fs.mkdirSync(projectDir, { recursive: true });
+	previousHome = process.env.PI_LENS_HOME;
+	process.env.PI_LENS_HOME = globalDir;
+	setConfigPath(path.join(globalDir, "config.json"));
+	resetProjectLensConfigCache();
+	resetIgnoredConfigWarnCache();
+	resetDegradationLedger();
+	resetRunnerIdentityForTests();
+	for (const id of ["lsp", "dotnet-build", "javac"]) registerRunnerId(id);
+	notified.length = 0;
+	wireUserNotifier(() => (message) => {
+		notified.push(message);
+	});
+});
+
+afterEach(() => {
+	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousHome;
+	resetProjectLensConfigCache();
+	resetRunnerIdentityForTests();
+	removeTempDirSync(tmpDir);
+});
+
+describe("dispatch.disabledRunners — resolution", () => {
+	it("is the union of every tier, so a project adds to the global denial", () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		writeProject({ dispatch: { disabledRunners: ["javac"] } });
+
+		const { runners } = disabledRunnersOf(resolutionAt(projectDir));
+
+		expect(runners.map((runner) => runner.id)).toEqual([
+			"dotnet-build",
+			"javac",
+		]);
+	});
+
+	it("cannot be lifted by a nearer tier that omits or empties the list", () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		writeProject({ dispatch: { disabledRunners: [] } });
+
+		const { runners } = disabledRunnersOf(resolutionAt(projectDir));
+
+		expect(runners.map((runner) => runner.id)).toEqual(["dotnet-build"]);
+	});
+
+	it("attributes each member to the tier that contributed it", () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		writeProject({ dispatch: { disabledRunners: ["javac"] } });
+
+		const { runners } = disabledRunnersOf(resolutionAt(projectDir));
+		const tiers = new Map(
+			runners.map((runner) => [runner.id, runner.decidedBy?.tier]),
+		);
+
+		expect(tiers.get("dotnet-build")).toBe("global");
+		expect(tiers.get("javac")).toBe("project");
+		expect(
+			runners.find((runner) => runner.id === "javac")?.decidedBy?.file,
+		).toBe(path.join(fs.realpathSync(projectDir), ".pi-lens.json"));
+	});
+
+	it("collapses a runner denied at two tiers to one entry", () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		writeProject({ dispatch: { disabledRunners: ["dotnet-build"] } });
+
+		const { runners } = disabledRunnersOf(resolutionAt(projectDir));
+
+		expect(runners.map((runner) => runner.id)).toEqual(["dotnet-build"]);
+	});
+
+	it("drops an unknown id with a PILENS_CFG_0005 record naming the entry", () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-bild", "javac"] } });
+
+		const resolved = disabledRunnersOf(resolutionAt(projectDir));
+
+		expect(resolved.runners.map((runner) => runner.id)).toEqual(["javac"]);
+		expect(resolved.records).toHaveLength(1);
+		expect(resolved.records[0]).toMatchObject({
+			code: "PILENS_CFG_0005",
+			file: path.join(globalDir, "config.json"),
+			key: "/dispatch/disabledRunners/0",
+			tier: "global",
+		});
+		expect(resolved.records[0]?.reason).toContain('"dotnet-bild"');
+	});
+
+	it("keeps entries unvalidated while no runner registry exists yet", () => {
+		resetRunnerIdentityForTests();
+		writeGlobal({ dispatch: { disabledRunners: ["not-registered-yet"] } });
+
+		const resolved = disabledRunnersOf(resolutionAt(projectDir));
+
+		expect(resolved.runners.map((runner) => runner.id)).toEqual([
+			"not-registered-yet",
+		]);
+		expect(resolved.records).toEqual([]);
+	});
+
+	it("drops a non-string member at the schema with a record, keeping the rest", () => {
+		writeGlobal({ dispatch: { disabledRunners: [7, "javac"] } });
+
+		const resolution = resolutionAt(projectDir);
+
+		expect(disabledRunnersOf(resolution).runners.map((r) => r.id)).toEqual([
+			"javac",
+		]);
+		expect(
+			resolution.records.some((record) =>
+				record.key.startsWith("/dispatch/disabledRunners"),
+			),
+		).toBe(true);
+	});
+});
+
+describe("dispatch.disabledRunners — dispatch", () => {
+	const fallbackGroup: RunnerGroup[] = [
+		{ mode: "fallback", runnerIds: ["lsp", "dotnet-build"] },
+	];
+
+	function registryWith(lsp: RunnerResult, build: RunnerResult) {
+		const registry = new RunnerRegistry();
+		const lspRunner = countingRunner("lsp", lsp);
+		const buildRunner = countingRunner("dotnet-build", build);
+		registry.register(lspRunner.runner);
+		registry.register(buildRunner.runner);
+		return { registry, lsp: lspRunner.counters, build: buildRunner.counters };
+	}
+
+	it("control: with nothing disabled the fallback runner runs after a skipped lsp", async () => {
+		const { registry, lsp, build } = registryWith(SKIPPED, BLOCKING_BUILD);
+
+		const result = await dispatchForFile(contextFor(), fallbackGroup, registry);
+
+		expect(lsp.runCalls).toBe(1);
+		expect(build.runCalls).toBe(1);
+		expect(result.hasBlockers).toBe(true);
+	});
+
+	it("never spawns a disabled runner, and records a stated skip rather than a failure", async () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		const { registry, lsp, build } = registryWith(SKIPPED, BLOCKING_BUILD);
+
+		const result = await dispatchForFile(contextFor(), fallbackGroup, registry);
+
+		expect(build.runCalls).toBe(0);
+		// Not even the precondition ran: `when` is where a runner probes its tool.
+		expect(build.whenCalls).toBe(0);
+		expect(lsp.runCalls).toBe(1);
+		expect(result.hasBlockers).toBe(false);
+		const latency = result.latencyReport?.runners.find(
+			(runner) => runner.runnerId === "dotnet-build",
+		);
+		expect(latency).toMatchObject({
+			status: "skipped",
+			skipReason: DISABLED_BY_CONFIG_SKIP_REASON,
+		});
+		expect(latency?.failureKind).toBeUndefined();
+	});
+
+	it("is not a runner that reached no verdict", async () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		const { registry } = registryWith(SUCCEEDED, BLOCKING_BUILD);
+
+		const result = await dispatchForFile(contextFor(), fallbackGroup, registry);
+
+		expect(result.inconclusiveSources?.runnerIds ?? []).not.toContain(
+			"dotnet-build",
+		);
+	});
+
+	it("lets the next runner of a fallback group run when the first is disabled", async () => {
+		writeProject({ dispatch: { disabledRunners: ["lsp"] } });
+		const { registry, lsp, build } = registryWith(SUCCEEDED, SUCCEEDED);
+
+		const result = await dispatchForFile(
+			contextFor(),
+			[{ mode: "fallback", runnerIds: ["lsp", "dotnet-build"] }],
+			registry,
+		);
+
+		expect(lsp.runCalls).toBe(0);
+		expect(build.runCalls).toBe(1);
+		expect(
+			result.latencyReport?.runners.map(
+				(runner) => `${runner.runnerId}:${runner.status}`,
+			),
+		).toEqual(["lsp:skipped", "dotnet-build:succeeded"]);
+	});
+
+	it("leaves the other runners of the group running when one is disabled", async () => {
+		writeProject({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		const { registry, lsp } = registryWith(SUCCEEDED, BLOCKING_BUILD);
+
+		await dispatchForFile(
+			contextFor(),
+			[{ mode: "all", runnerIds: ["lsp", "dotnet-build"] }],
+			registry,
+		);
+
+		expect(lsp.runCalls).toBe(1);
+	});
+
+	it("honors a denial that only the global tier states, from a project with its own empty list", async () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		writeProject({ dispatch: { disabledRunners: [] } });
+		const { registry, build } = registryWith(SKIPPED, BLOCKING_BUILD);
+
+		await dispatchForFile(contextFor(), fallbackGroup, registry);
+
+		expect(build.runCalls).toBe(0);
+	});
+
+	it("leaves a file nothing checked unconfirmed rather than clean when the only fallback is disabled", async () => {
+		writeGlobal({ dispatch: { disabledRunners: ["dotnet-build"] } });
+		const csharp = path.join(projectDir, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		const registry = new RunnerRegistry();
+		for (const id of ["lsp", "dotnet-build"]) {
+			registry.register({
+				...countingRunner(id, id === "lsp" ? SKIPPED : BLOCKING_BUILD).runner,
+				appliesTo: ["csharp"],
+			});
+		}
+		const ctx = createDispatchContext(
+			csharp,
+			projectDir,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+
+		const result = await dispatchForFile(ctx, fallbackGroup, registry);
+
+		expect(result.hasBlockers).toBe(false);
+		expect(result.coverage).not.toBe("fallback");
+		expect(result.coverage).not.toBe("primary");
+		expect(result.unconfirmedStatus).toBeDefined();
+	});
+
+	it("warns once about an unknown id and still skips the valid one", async () => {
+		writeGlobal({
+			dispatch: { disabledRunners: ["dotnet-bild", "dotnet-build"] },
+		});
+		const { registry, build } = registryWith(SKIPPED, BLOCKING_BUILD);
+
+		await dispatchForFile(contextFor(), fallbackGroup, registry);
+		await dispatchForFile(contextFor(), fallbackGroup, registry);
+
+		expect(build.runCalls).toBe(0);
+		const warnings = notified.filter((message) =>
+			message.includes("dotnet-bild"),
+		);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("PILENS_CFG_0005");
+	});
+});

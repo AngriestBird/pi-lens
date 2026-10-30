@@ -150,6 +150,7 @@ field docs.
 | `ignore` | global + project | `[]` | Gitignore-style globs excluded from every scan |
 | `widget.visible` | global | `true` | Whether the diagnostics widget shows at session start |
 | `dispatch.runnerTimeoutFloorMs` | global | none (no floor) | Minimum wall-clock budget per dispatch runner |
+| `dispatch.disabledRunners` | global + project | `[]` | Dispatch runner ids that never run (for example `["dotnet-build"]`). A denial: the union of every tier, so a project can add but never re-enable. Unknown ids are dropped with a warning. See [configuration](configuration.md#dispatchdisabledrunners--turning-a-dispatch-runner-off) |
 | `format.mode` | global | `"deferred"` | `"deferred"` (at `agent_end`) or `"immediate"` |
 | `actionableWarnings.autoFix.maxFixes` | global | `5` | Cap on quickfixes applied per turn (`0` = report only) |
 | `rules.high-complexity.threshold` | project | `15` | Cyclomatic-complexity threshold |
@@ -169,7 +170,7 @@ field docs.
 User-level. The file is selected by the [global-location table](configuration.md#global-config-location)
 and applies to **every** project. It honors **all** flag keys from the
 table above plus the non-flag global knobs (`ignore`, `widget.visible`,
-`dispatch.runnerTimeoutFloorMs`, `format.mode`,
+`dispatch.runnerTimeoutFloorMs`, `dispatch.disabledRunners`, `format.mode`,
 `actionableWarnings.autoFix.maxFixes`). On Windows the path is
 `%USERPROFILE%\.pi-lens\config.json`.
 
@@ -219,9 +220,12 @@ Most toggles are **global-only**. Putting a global-only key such as
 `"lsp": { "enabled": false }` in a `.pi-lens.json` is **not** honored at project
 scope — pi-lens logs a one-time warning saying so (rather than silently doing
 nothing) and you should set it in `~/.pi-lens/config.json` or pass the CLI flag
-instead. Foreign LSP-loader namespaces that a shared file legitimately carries
-(`servers`, `serverOverrides`, `disabledServers`, `warmFiles`) and `$schema` are
-tolerated without warning; anything else is logged once as a likely typo.
+instead. `dispatch` is mixed-scope: `dispatch.disabledRunners` is honored in a
+project file, while `dispatch.runnerTimeoutFloorMs` stays global-only and is
+reported as such. Foreign LSP-loader namespaces that a shared file legitimately
+carries (`servers`, `serverOverrides`, `disabledServers`, `warmFiles`) and
+`$schema` are tolerated without warning; anything else is logged once as a
+likely typo.
 
 ```json
 {
