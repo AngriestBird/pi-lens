@@ -236,7 +236,7 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		const result = await diagnose("all", { paths: [probe, secondProbe] });
 
 		expect(result.text).toContain(
-			"0 files confirmed clean, 2 unconfirmed: 2 with no language server " +
+			"0 files confirmed clean, 2 unconfirmed: 2 with no primary language server " +
 				"answer (it could not be started, or was still starting).",
 		);
 		// typos did answer, so the files are inconclusive, not "unavailable":
@@ -309,7 +309,7 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		const result = await diagnose("primary", { paths: [mixed, slow] });
 
 		expect(result.text).toContain(
-			"1 with no language server answer (it could not be started, or was " +
+			"1 with no primary language server answer (it could not be started, or was " +
 				"still starting); the other 1: 1 timed out",
 		);
 	}, 60_000);
@@ -362,7 +362,7 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 
 		expect(result.text).toContain(TYPOS_FINDING);
 		expect(result.text).toContain(
-			"1 file with auxiliary findings only: no language server answered",
+			"1 file with auxiliary or fallback findings only: no primary language server answered",
 		);
 		const outcomes = result.details.outcomes as Array<{ reason?: string }>;
 		expect(outcomes.map((outcome) => outcome.reason)).toEqual([
@@ -381,7 +381,7 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 
 		expect(result.text).toContain(TYPOS_FINDING);
 		expect(result.text).toContain(
-			"1 file with auxiliary findings only: no language server answered",
+			"1 file with auxiliary or fallback findings only: no primary language server answered",
 		);
 		const outcomes = result.details.outcomes as Array<{ reason?: string }>;
 		expect(outcomes.map((outcome) => outcome.reason)).toEqual([

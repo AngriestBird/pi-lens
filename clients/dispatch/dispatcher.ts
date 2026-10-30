@@ -885,7 +885,7 @@ function buildCoverageNotice(
 		relevant.flatMap((r) => r.primaryUnavailableCause ?? []),
 	);
 	const unconfirmedStatus = cause
-		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})`
+		? `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})`
 		: "not fully checked (a language tool is missing, timed out, or failed to run)";
 
 	if (cause === "disabled" || cause === "disabledFallback") {

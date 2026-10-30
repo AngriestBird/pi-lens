@@ -562,7 +562,7 @@ export function splitCascadeUnansweredPrimaries(
 		unanswered.push(...group.neighbors);
 		notes.push({
 			serverIds: group.serverIds,
-			line: `⚠️ Cascade: no language server answered for neighbor files of ${group.serverIds.join(", ")} (${PRIMARY_UNAVAILABLE_CAUSE[group.cause]}), so their cross-file errors were not checked (not a clean result).`,
+			line: `⚠️ Cascade: no primary language server answered for neighbor files of ${group.serverIds.join(", ")} (${PRIMARY_UNAVAILABLE_CAUSE[group.cause]}), so their cross-file errors were not confirmed (not a clean result).`,
 		});
 	}
 	return { answered, unanswered, dropped, notes };

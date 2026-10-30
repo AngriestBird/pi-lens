@@ -1754,7 +1754,8 @@ describe("Pipeline", () => {
 					await verdictOf(
 						filePath,
 						cleanDispatch({
-							unconfirmedStatus: "no language server answered (disabled)",
+							unconfirmedStatus:
+								"no primary language server answered (disabled)",
 						}),
 					)
 				).map((v) => (typeof v === "string" ? v.split(" — ")[0] : v)),
@@ -1835,7 +1836,7 @@ describe("Pipeline", () => {
 			const filePath = createTempFile(tmpDir, "fmt.ts", "const x=1;\n");
 			vi.mocked(dispatchLintWithResult).mockResolvedValue(
 				cleanDispatch({
-					unconfirmedStatus: "no language server answered (disabled)",
+					unconfirmedStatus: "no primary language server answered (disabled)",
 				}),
 			);
 			const formatFile = vi.fn(async (fp: string) => {
