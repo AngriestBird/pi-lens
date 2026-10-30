@@ -122,6 +122,7 @@ async function run(
 /** Every tool that takes `paths`, with a call that would otherwise dispatch. */
 function pathsTools(cwd: string) {
 	const astGrep = searchClient();
+	const readCache = vi.fn(() => undefined);
 	return [
 		{
 			name: "ast_grep_search",
@@ -149,16 +150,16 @@ function pathsTools(cwd: string) {
 			name: "symbol_search",
 			tool: createSymbolSearchTool(() => cwd),
 			params: { query: "authenticate user" },
-			dispatched: () => false,
+			// Reaching the word index answers either "No files matched" or that the
+			// index is building; a refusal does neither.
+			dispatched: (result: ToolResult) =>
+				/No files matched|Word index/.test(text(result)),
 		},
 		{
 			name: "lens_diagnostics",
-			tool: createLensDiagnosticsTool(
-				{ readCache: vi.fn(() => undefined) } as never,
-				() => cwd,
-			),
+			tool: createLensDiagnosticsTool({ readCache } as never, () => cwd),
 			params: {},
-			dispatched: () => false,
+			dispatched: () => readCache.mock.calls.length > 0,
 		},
 	];
 }
@@ -178,7 +179,7 @@ describe("#5041 the shared `paths` reader's entry rules", () => {
 					expect(text(result), subject.name).toContain(rule.expects);
 					// A refused entry list never dispatches: the answer must not look
 					// like a real (empty) search.
-					expect(subject.dispatched(), subject.name).toBe(false);
+					expect(subject.dispatched(result), subject.name).toBe(false);
 				}
 			} finally {
 				env.cleanup();
@@ -400,6 +401,25 @@ describe("#5041 `path` is the canonical single-file parameter", () => {
 			);
 			expect(conflict.isError).toBe(true);
 			expect(text(conflict)).toContain("name different files");
+			// An admitted alias must reach the operation's file, not only the
+			// refusal: without the forwarding `hover` answers "path is required".
+			const canonical = await run(
+				tool,
+				{ operation: "hover", path: "missing-5041.ts" },
+				env.tmpDir,
+			);
+			const aliased = await run(
+				tool,
+				{ operation: "hover", file: "missing-5041.ts" },
+				env.tmpDir,
+			);
+			// The envelope in `content` carries the resolved file; `details` keeps
+			// the footer facts only.
+			const resolvedFile = (result: ToolResult) =>
+				(JSON.parse(text(result)) as { filePath?: string }).filePath;
+			expect(resolvedFile(aliased)).toBe(resolvedFile(canonical));
+			expect(resolvedFile(aliased)).toContain("missing-5041.ts");
+			expect(text(aliased)).not.toContain("path is required");
 		} finally {
 			env.cleanup();
 		}
