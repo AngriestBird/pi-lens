@@ -19,6 +19,7 @@ import {
 } from "../../../clients/lsp/session-roots.js";
 import {
 	DenoServer,
+	LSP_SERVERS,
 	OpengrepServer,
 	PythonJediServer,
 	PythonServer,
@@ -87,6 +88,27 @@ describe("unansweredPrimaries names the owner a fallback stood in for (#5014)", 
 				.serverIds,
 		).toEqual(expected);
 	});
+
+	// Shape 10 population: every registered `fallbackFor` alternate (deno,
+	// python-jedi, the C#, Elixir and Docker alternates), not only python's.
+	it.each(
+		LSP_SERVERS.filter((server) => server.fallbackFor !== undefined).map(
+			(server) => [server.id, server.fallbackFor as string] as const,
+		),
+	)(
+		"%s answering for a rooted owner %s never stands in for it",
+		(alternate, owner) => {
+			const info = LSP_SERVERS.find((server) => server.id === alternate);
+			expect(info).toBeDefined();
+			expect(
+				unansweredPrimaries(
+					acquired(info as LSPServerInfo),
+					roots(owner, alternate),
+					FILE,
+				).serverIds,
+			).toEqual([owner]);
+		},
+	);
 
 	it("carries the unstarted cause for a missing owner a fallback replaced", () => {
 		expect(

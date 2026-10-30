@@ -623,12 +623,11 @@ export function unansweredPrimaries(
 	}
 	// An alternate acquired while its owner never resolved a root (deno beside
 	// an unrooted typescript) leaves nothing here: it is the file's only candidate.
-	const serverIds = [
-		...new Set([
-			...[...resolvedPrimaryRoots.keys()].filter((id) => !acquired.has(id)),
-			...disabledServerIds,
-		]),
-	];
+	const missing = new Set<string>();
+	for (const id of resolvedPrimaryRoots.keys())
+		if (!acquired.has(id)) missing.add(id);
+	for (const id of disabledServerIds) missing.add(id);
+	const serverIds = [...missing];
 	return {
 		serverIds,
 		disabledServerIds,

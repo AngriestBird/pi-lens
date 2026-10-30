@@ -204,7 +204,9 @@ file-scoped worklist and receives no project-wide scanner output.
     owner the operator disabled, an alternate whose owner resolved no root) in
     `unansweredPrimaries` (`clients/lsp/index.ts`); every other cause, listed or
     not, lands unconfirmed. Screen: can a file read clean when its primary
-    never answered?
+    never answered? Population enforcer:
+    `tests/clients/lsp/unanswered-primaries-fallback-5014.test.ts` (every
+    registered `fallbackFor` alternate).
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector
