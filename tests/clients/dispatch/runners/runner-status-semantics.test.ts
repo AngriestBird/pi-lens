@@ -889,6 +889,154 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
+	// #5017: the findings arms of the same stale-bound answer. Recurrence: a
+	// primary that completed its policy against older bytes published rows, the
+	// run read as a verdict (`failed` + `blocking_diagnostics`, or `succeeded`),
+	// and `keepUnobserved` retired a live recorded blocker on findings about other
+	// bytes. A stale-bound answer is not an observation of these bytes: its rows
+	// are withheld (only an inconclusive touch names which server they did not
+	// come from, the #4231 provenance) and the run takes the no-verdict arm the
+	// empty answer takes. Cells L, N and P are verify round 3 of #5016.
+	const staleRow = (severity: 1 | 2) => ({
+		severity,
+		message:
+			severity === 1
+				? "Cannot find name 'BAD_OTHER'."
+				: "'unusedVar' is declared but its value is never read.",
+		source: "ts",
+		serverId: "typescript",
+		code: severity === 1 ? 2304 : 6133,
+		range: {
+			start: { line: 0, character: 0 },
+			end: { line: 0, character: 5 },
+		},
+	});
+
+	it("withholds a stale-bound blocking answer from the verdict (#5017 L)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5017-l-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+
+			codeAction.mockResolvedValue([]);
+			touchFile.mockResolvedValue(
+				diagsResult([staleRow(1)], {
+					confirmation: "confirmed",
+					binding: { boundToCurrentDisk: false },
+				}),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect({
+				status: result.status,
+				semantic: result.semantic,
+				reachedNoVerdict: reachedNoVerdict(result),
+				diagnosticCount: result.diagnostics.length,
+			}).toEqual({
+				status: "skipped",
+				semantic: "none",
+				reachedNoVerdict: true,
+				diagnosticCount: 0,
+			});
+
+			// The same row bound to these bytes is still the verdict it was.
+			touchFile.mockResolvedValue(
+				diagsResult([staleRow(1)], {
+					confirmation: "confirmed",
+					binding: { boundToCurrentDisk: true },
+				}),
+			);
+			const bound = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(bound.status).toBe("failed");
+			expect(bound.diagnostics).toHaveLength(1);
+			expect(reachedNoVerdict(bound)).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("withholds a stale-bound warnings-only answer from the verdict (#5017 N)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5017-n-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+
+			touchFile.mockResolvedValue(
+				diagsResult([staleRow(2)], {
+					confirmation: "confirmed",
+					binding: { boundToCurrentDisk: false },
+				}),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect({
+				status: result.status,
+				semantic: result.semantic,
+				reachedNoVerdict: reachedNoVerdict(result),
+				diagnosticCount: result.diagnostics.length,
+			}).toEqual({
+				status: "skipped",
+				semantic: "none",
+				reachedNoVerdict: true,
+				diagnosticCount: 0,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// P: the blocking row must not let `hasErrors` pick `failed` before the
+	// no-verdict decision; the deferred scanner keeps the run `deferred` and its
+	// ids still ride the result for the coverage notice.
+	it("withholds a stale-bound blocking answer beside a deferred scanner from the verdict (#5017 P)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5017-p-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+
+			codeAction.mockResolvedValue([]);
+			touchFile.mockResolvedValue(
+				diagsResult([staleRow(1)], {
+					confirmation: "partial",
+					unconfirmedServerIds: ["opengrep"],
+					deferredServerIds: ["opengrep"],
+					binding: { boundToCurrentDisk: false },
+				}),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect({
+				status: result.status,
+				semantic: result.semantic,
+				reachedNoVerdict: reachedNoVerdict(result),
+				diagnosticCount: result.diagnostics.length,
+				unconfirmedServerIds: result.unconfirmedServerIds,
+				deferredServerIds: result.deferredServerIds,
+			}).toEqual({
+				status: "deferred",
+				semantic: "none",
+				reachedNoVerdict: true,
+				diagnosticCount: 0,
+				unconfirmedServerIds: ["opengrep"],
+				deferredServerIds: ["opengrep"],
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("renders a silenced scanner coverage marker once without claiming an empty touch is clean (#1867)", async () => {
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;
