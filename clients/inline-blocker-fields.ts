@@ -61,6 +61,29 @@ export function inlineBlockerLines(
 	blockers: readonly Diagnostic[],
 	filePath: string,
 ): number[] {
+	return inlineBlockerPlaces(blockers, filePath).map((place) => place.line);
+}
+
+/** One place a blocker is cited in `filePath`: the line, and the rule that
+ *  reported it. */
+export interface InlineBlockerPlace {
+	line: number;
+	rule: string;
+}
+
+/**
+ * #5008: the places a blocker set is cited at, one per blocker that HAS a place
+ * in these bytes. `inlineBlockerLines` is this list's line column, so the
+ * record's line list and the agent-facing `Still unfixed` line cannot disagree
+ * about which blockers are placeable (AGENTS.md shape 83: one owner per rule).
+ *
+ * `rule` falls back to the same source id `inlineBlockerSourceOf` derives, so an
+ * untagged blocker reads as `unknown` rather than citing an empty rule.
+ */
+export function inlineBlockerPlaces(
+	blockers: readonly Diagnostic[],
+	filePath: string,
+): InlineBlockerPlace[] {
 	const own = normalizeEphemeralMapKey(filePath);
 	return blockers
 		.filter(
@@ -68,6 +91,11 @@ export function inlineBlockerLines(
 			// none: the past-EOF sweep would retire the whole record on it.
 			(d) => !d.positionStale && normalizeEphemeralMapKey(d.filePath) === own,
 		)
-		.map((d) => d.line)
-		.filter((line): line is number => typeof line === "number");
+		.map((d) => ({
+			line: d.line,
+			rule: d.rule?.trim() || inlineBlockerSourceOf(d),
+		}))
+		.filter(
+			(place): place is InlineBlockerPlace => typeof place.line === "number",
+		);
 }

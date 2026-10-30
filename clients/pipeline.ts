@@ -25,6 +25,7 @@ import {
 } from "./path-utils.js";
 import {
 	inlineBlockerLines,
+	inlineBlockerPlaces,
 	inlineBlockerSources,
 } from "./inline-blocker-fields.js";
 import {
@@ -1702,40 +1703,66 @@ function buildAllClearOutput(
 }
 
 /**
+ * #5008: the bounded place list both delta lines end with. `total` is the whole
+ * blocker population (what the record and the commit gate count), and every one
+ * of them is accounted for exactly once: a shown place, the `+N more`
+ * remainder, or the trailing count of blockers with no place in these bytes
+ * (a `positionStale` carry, another file's row, or no line). At most five
+ * places are shown.
+ */
+function formatBlockerPlaces(
+	blockers: readonly Diagnostic[],
+	filePath: string,
+): string {
+	const places = inlineBlockerPlaces(blockers, filePath);
+	const shown = places
+		.slice(0, 5)
+		.map((place) => `L${place.line} ${shortBlockerRule(place.rule)}`);
+	const more = places.length - shown.length;
+	if (more > 0) shown.push(`+${more} more`);
+	const unplaced = blockers.length - places.length;
+	const parts: string[] = [];
+	if (shown.length > 0) parts.push(` (${shown.join(", ")})`);
+	if (unplaced > 0) parts.push(`; ${unplaced} with no current line`);
+	return parts.join("");
+}
+
+/** Longest rule id rendered beside a place, so five places stay one line. */
+const MAX_SHOWN_RULE_CHARS = 32;
+
+/** #5008: the rule id beside a place, bounded so five places fit one line. */
+function shortBlockerRule(rule: string): string {
+	return rule.length > MAX_SHOWN_RULE_CHARS
+		? `${rule.slice(0, MAX_SHOWN_RULE_CHARS - 1)}\u2026`
+		: rule;
+}
+
+/**
  * #4484: the one line a write gets for blockers that are still on the file
- * but not new to it (the delta held them back). Bounded: at most five line
- * numbers, then a count.
+ * but not new to it (the delta held them back). Bounded: at most five places,
+ * then a count. #5008: each place carries its rule id, and a blocker the count
+ * includes but these bytes cannot place is named rather than dropped.
  */
 function formatStillUnfixedLine(
 	blockers: readonly Diagnostic[],
 	filePath: string,
 ): string {
-	const lines = [...new Set(inlineBlockerLines(blockers, filePath))];
-	const shown = lines.slice(0, 5).map((line) => `L${line}`);
-	if (lines.length > shown.length)
-		shown.push(`+${lines.length - shown.length} more`);
-	const where = shown.length > 0 ? ` (${shown.join(", ")})` : "";
 	const count = blockers.length;
-	return `🔴 Still unfixed: ${count} blocker${count === 1 ? "" : "s"} reported earlier${where}.`;
+	return `🔴 Still unfixed: ${count} blocker${count === 1 ? "" : "s"} reported earlier${formatBlockerPlaces(blockers, filePath)}.`;
 }
 
 /**
  * #4483: the one line a write gets for linter errors the file already held
  * before its first edit this session (`DispatchResult.preExisting`). They do
- * not stop the agent or shut the commit gate. Bounded like the still-unfixed
- * line: at most five line numbers, then a count.
+ * not stop the agent or shut the commit gate. Bounded and counted the same way
+ * as the still-unfixed line (#5008).
  */
 function formatPreExistingLine(
 	findings: readonly Diagnostic[],
 	filePath: string,
 ): string {
-	const lines = [...new Set(inlineBlockerLines(findings, filePath))];
-	const shown = lines.slice(0, 5).map((line) => `L${line}`);
-	if (lines.length > shown.length)
-		shown.push(`+${lines.length - shown.length} more`);
-	const where = shown.length > 0 ? ` (${shown.join(", ")})` : "";
 	const count = findings.length;
-	return `ℹ Pre-existing: ${count} linter error${count === 1 ? "" : "s"} already in this file before its first edit this session${where}; not blocking.`;
+	return `ℹ Pre-existing: ${count} linter error${count === 1 ? "" : "s"} already in this file before its first edit this session${formatBlockerPlaces(findings, filePath)}; not blocking.`;
 }
 
 export interface FormatPhaseResult {

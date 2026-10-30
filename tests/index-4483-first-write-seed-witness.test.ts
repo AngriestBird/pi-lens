@@ -410,7 +410,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		expect(out).not.toContain("🔴 STOP");
 		expect(out).not.toMatch(/clean/);
 		expect(out).toMatch(
-			/Pre-existing: 1 linter error .*\(L2\); not blocking\./,
+			/Pre-existing: 1 linter error .*\(L2 SC1072\); not blocking\./,
 		);
 		expect(await s.commitBlocked()).toBe(false);
 		// The capture read the bytes before the edit; the record says so.
@@ -449,7 +449,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		const s = await openSession("a3", "scripts/a3.sh", OLD_ERROR);
 		const out = await s.write("#!/bin/sh\necho first\nBAD_SH\necho a\n");
 		expect(out).not.toContain("🔴 STOP");
-		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L3\)/);
+		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L3\b/);
 		expect(await s.commitBlocked()).toBe(false);
 		await s.end();
 	});
@@ -464,7 +464,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		expect(out).toContain("🔴 STOP — 1 issue(s) must be fixed:");
 		expect(out).toContain("L4: [SC2154]");
 		expect(out).not.toContain("L3: [SC1072]");
-		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L3\)/);
+		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L3\b/);
 		expect(await s.commitBlocked()).toBe(true);
 		await s.write("#!/bin/sh\nBAD_SH\nVAR=1\necho $VAR\n");
 		await s.end();
@@ -497,7 +497,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		expect(await rows(s.target, "pre_edit_capture")).toHaveLength(1);
 		expect(out).not.toContain("🔴 STOP");
 		expect(out).not.toMatch(/Still unfixed/);
-		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L2\)/);
+		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L2\b/);
 		expect(await s.commitBlocked()).toBe(false);
 		await s.end();
 	});
@@ -519,7 +519,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		const s = await openSession("c12", "scripts/c12.sh", OLD_ERROR);
 		const out = await s.edit("echo a", "BAD_SH");
 		expect(out).toContain("🔴 STOP — 1 issue(s) must be fixed:");
-		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L(2|3)\)/);
+		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L(2|3)\b/);
 		expect(await s.commitBlocked()).toBe(true);
 		await s.write("#!/bin/sh\necho a\n");
 		await s.end();
@@ -881,7 +881,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		await s.edit("echo b", "echo c");
 		const out = await s.edit("echo c", "echo d");
 		expect(out).not.toContain("🔴 STOP");
-		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L2\)/);
+		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L2\b/);
 		await s.end();
 	});
 
@@ -910,7 +910,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 			tmpDir,
 		);
 		const out = await s.edit("echo a", "echo b");
-		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L2\)/);
+		expect(out).toMatch(/Pre-existing: 1 linter error .*\(L2\b/);
 		expect(
 			new CacheManager(false).readCache<{ blockerContent?: string }>(
 				"turn-end-findings",
@@ -933,7 +933,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		resetDispatchBaselines();
 		const out = await s.edit("#!/bin/sh", "#!/bin/sh -e");
 		expect(out).not.toMatch(/Pre-existing/);
-		expect(out).toMatch(/Still unfixed: 1 blocker reported earlier \(L2\)/);
+		expect(out).toMatch(/Still unfixed: 1 blocker reported earlier \(L2\b/);
 		expect(await s.commitBlocked()).toBe(true);
 		await s.edit("BAD_SH", "echo a");
 		await s.end();
