@@ -1475,6 +1475,78 @@ describe.each([false, true])(
 			});
 		});
 
+		// #4617 population A, the cell the file stamp could not reach: a trivy row
+		// names a PACKAGE, so there is no file:line to stat. Its evidence is the
+		// dependency declaration the scan read, so the advisory cites the
+		// manifests — and a lockfile edit after the turn end supersedes it.
+		it("keeps a trivy CVE advisory current, bound to the manifest it read", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-${guard}`,
+				incident:
+					"A session-start CVE advisory was labelled historical on a bash-only turn",
+				issue: "#4617",
+				async run(h) {
+					h.write("package-lock.json", "{\n}\n");
+					h.scan("trivy", {
+						findings: [
+							{
+								vulnerabilityId: "CVE-2024-0001",
+								pkgName: "left-pad",
+								installedVersion: "1.0.0",
+								fixedVersion: "1.0.1",
+								severity: "HIGH",
+							},
+						],
+						licenses: [],
+						secrets: [],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({ flags });
+					expect(view.text).toContain("Dependency CVEs (trivy");
+					expect(view.text).not.toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
+		// The negative direction: the manifest IS the subject, so a lockfile edit
+		// after the capture supersedes the message.
+		it("labels a trivy CVE advisory historical when the lockfile changed after the turn end", async () => {
+			await runTurnScenario({
+				id: `no-write-provenance-trivy-older-${guard}`,
+				incident: "A lockfile edit must supersede the cached CVE list",
+				issue: "#4617",
+				async run(h) {
+					const manifest = h.write("package-lock.json", "{\n}\n");
+					h.scan("trivy", {
+						findings: [
+							{
+								vulnerabilityId: "CVE-2024-0001",
+								pkgName: "left-pad",
+								installedVersion: "1.0.0",
+								fixedVersion: "1.0.1",
+								severity: "HIGH",
+							},
+						],
+						licenses: [],
+						secrets: [],
+					});
+					h.runtime.appendCascadeRun(silentRun(h.pathOf("src/clean.ts")));
+					h.runtime.beginTurn();
+					const view = await h.turnEnd({
+						flags,
+						beforeDelivery: () => {
+							fs.writeFileSync(manifest, '{\n  "x": 1\n}\n');
+						},
+					});
+					expect(view.text).toContain("Dependency CVEs (trivy");
+					expect(view.text).toContain(HISTORICAL);
+					expect(view.text).not.toContain(UNKNOWN_STAMP);
+				},
+			});
+		});
+
 		// #4617 population B: a part with no file it could be stale against. The
 		// deferred runner's crash note names no file, so the message had no stamp
 		// subject at all and read historical however fresh the failure was.
