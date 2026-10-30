@@ -48,14 +48,14 @@ export const CASCADE_RENAME_EXTRA_DEADLINES = 2;
  * `rename: { to, staleSpecifier, expectFindings }` adds the rename phase
  * (#1677): see `classifyRenameImporter`.
  *
- * `expectDefect: { state, skipReason, reason }` declares a known defect of the
- * cascade for this fixture, with its cause. The row is then a `known-defect`
- * (its own state, never `skip`, which means "unavailable"), and only while the
- * run is exactly the declared shape: `state` `inconclusive` with the
- * `skipReason` the cascade reports. Every other outcome is red, so the
- * declaration covers the one known shape and nothing else: an unconfirmed
- * importer, another skip reason, a wrong verdict, and a run that concluded
- * (the defect is gone: remove the declaration). Declared today: java.
+ * `expectDefect: { skipReason, reason }` declares a known defect of the cascade
+ * for this fixture, with its cause. The row is then a `known-defect` (its own
+ * state, never `skip`, which means "unavailable"), and only while the cascade
+ * skips with exactly `skipReason` (a skip reason is set only on an
+ * inconclusive run). Every other outcome is red, so the declaration covers the
+ * one known shape and nothing else: an unconfirmed importer, another skip
+ * reason, a wrong verdict, and a run that concluded (the defect is gone:
+ * remove the declaration). Declared today: java.
  */
 export const CASCADE_FIXTURES = [
 	{
@@ -123,7 +123,6 @@ export const CASCADE_FIXTURES = [
 		// that change removes this declaration. The short deadline is because
 		// retrying a structural skip proves nothing.
 		expectDefect: {
-			state: "inconclusive",
 			skipReason: "non_code",
 			reason:
 				"java is held out of CASCADE_GRAPH_KINDS until #5040: the cascade reads a push-only server's cached importer answer as confirmed clean, so the cascade skips with non_code",
@@ -353,11 +352,7 @@ export function cascadeRow(fx, m) {
 		};
 	}
 	const why = `${m.concluded?.detail ?? "no cascade ran"} after ${m.attempts} attempt(s), ${m.elapsedMs} ms`;
-	if (
-		defect &&
-		m.concluded?.state === defect.state &&
-		m.concluded.skipReason === defect.skipReason
-	)
+	if (defect && m.concluded?.skipReason === defect.skipReason)
 		// The declared shape and nothing else. It is a row of its own, not a
 		// `skip` (unavailable): the durable record names the cause.
 		return {

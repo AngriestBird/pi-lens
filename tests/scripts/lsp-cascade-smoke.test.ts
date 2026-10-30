@@ -209,7 +209,6 @@ describe("cascadeRow (#1712)", () => {
 	const defectFx = {
 		...fx,
 		expectDefect: {
-			state: "inconclusive" as const,
 			skipReason: "non_code",
 			reason: "the cascade skips the language",
 		},
@@ -453,7 +452,6 @@ describe("cascade fixtures (#1712)", () => {
 		const declared = CASCADE_FIXTURES.filter((f) => f.expectDefect);
 		expect(declared.map((f) => f.lang)).toEqual(["java"]);
 		for (const f of declared) {
-			expect(f.expectDefect?.state).toBe("inconclusive");
 			expect(f.expectDefect?.skipReason).toBeTruthy();
 			expect(String(f.expectDefect?.reason).length).toBeGreaterThan(40);
 		}
@@ -731,7 +729,6 @@ describe("runLspCascade (#1712)", () => {
 
 	const declaredDefect = {
 		expectDefect: {
-			state: "inconclusive" as const,
 			skipReason: "non_code",
 			reason: "the cascade skips the language",
 		},

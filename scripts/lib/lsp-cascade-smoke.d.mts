@@ -21,11 +21,7 @@ export interface CascadeFixture {
 	 * A known defect of the cascade for this fixture: the one outcome it
 	 * excuses, as a `known-defect` row. Every other outcome is red.
 	 */
-	expectDefect?: {
-		state: "inconclusive";
-		skipReason: string;
-		reason: string;
-	};
+	expectDefect?: { skipReason: string; reason: string };
 	/** Env var the workflow sets when it provisioned this server itself. */
 	provisionedBy?: string;
 	warmDeadlineMs?: number;
