@@ -952,7 +952,8 @@ describe("cascade turn-end merge", () => {
 				indeterminate: {
 					reason: "unresolved_reference",
 					detail:
-						"some files reference a changed symbol by name alone (several definitions share the name), so the graph could not tell whether they depend on this edit",
+						"2 file(s) reference a changed symbol by name alone, and several definitions share the name: app.ts, other.ts",
+					unplacedReferrerCount: 2,
 				},
 			});
 
@@ -978,7 +979,10 @@ describe("cascade turn-end merge", () => {
 			const content = findings?.messages[0]?.content ?? "";
 			expect(content).not.toContain("the review graph was unavailable");
 			expect(content).toContain("lib.ts");
-			expect(content).toContain("by name alone");
+			// The cause and the unplaced files appear once, not in a lead and again
+			// in a bullet (#5070 review F6).
+			expect(content.split("by name alone")).toHaveLength(2);
+			expect(content).toContain("app.ts, other.ts");
 			expect(content).toContain("a clean cascade result does not cover them");
 			expect(content).toContain("Advisory — no action required this turn");
 			const indeterminateLog = logCascadeMock.mock.calls
@@ -987,6 +991,9 @@ describe("cascade turn-end merge", () => {
 			expect(indeterminateLog?.metadata?.reasons).toContain(
 				"unresolved_reference",
 			);
+			expect(indeterminateLog?.metadata?.byFile).toEqual([
+				expect.objectContaining({ unplacedReferrerCount: 2 }),
+			]);
 		} finally {
 			env.cleanup();
 		}

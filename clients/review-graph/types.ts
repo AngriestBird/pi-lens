@@ -220,6 +220,8 @@ export interface CascadeIndeterminate {
 	budget?: CascadeBudgetCoverage;
 	/** #1550: log-only evidence for `missing_node` — never agent-facing. */
 	diagnostic?: CascadeMissingNodeDiagnostic;
+	/** #5055: for `unresolved_reference`, how many referrers stayed unplaced. */
+	unplacedReferrerCount?: number;
 }
 
 /**

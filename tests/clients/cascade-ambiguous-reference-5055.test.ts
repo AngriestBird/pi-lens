@@ -91,6 +91,23 @@ const KINDS: KindCase[] = [
 		dependent: "app.cpp",
 		second: { "other.cpp": "int foo() { return 0; }\n" },
 	},
+	{
+		// The issue's own repro (#5054 review F2): a same-package caller needs no
+		// import statement, so only the name reaches the exporter.
+		kind: "java (same-package caller, no import)",
+		files: {
+			"src/p/Lib.java":
+				"package p;\n\npublic class Lib {\n  public static int foo(int x) { return x; }\n}\n",
+			"src/p/App.java":
+				"package p;\n\npublic class App {\n  int run() { return Lib.foo(1); }\n}\n",
+		},
+		edit: ["src/p/Lib.java", "int foo(int x)", "int foo(int x, int y)"],
+		dependent: "src/p/App.java",
+		second: {
+			"src/p/Other.java":
+				"package p;\n\npublic class Other {\n  public static int foo() { return 0; }\n}\n",
+		},
+	},
 ];
 
 async function cascadeAfterEdit(
@@ -166,6 +183,8 @@ describe("a dependent reached by name alone (#5055)", () => {
 				const { run } = await cascadeAfterEdit(c, c.second);
 				expect(run.skipReason).toBe("indeterminate");
 				expect(run.indeterminate?.reason).toBe("unresolved_reference");
+				expect(run.indeterminate?.unplacedReferrerCount).toBe(1);
+				expect(run.indeterminate?.detail).toContain(c.dependent);
 				expect(run.neighborCount).toBe(0);
 			}, 60_000);
 
@@ -231,5 +250,78 @@ describe("a dependent reached by name alone (#5055)", () => {
 		const { run } = await cascadeAfterEdit(c, c.second);
 		expect(run.skipReason).toBe("no_neighbors");
 		expect(run.indeterminate).toBeUndefined();
+	}, 60_000);
+
+	// Recurrence: the advisory named only the edited file, so the agent could not
+	// act, and logged no count, so the live flip rate was unreadable (#5070
+	// review F6). Five unplaced files show the bound: three named, two counted.
+	it("names up to three unplaced files and counts the rest", async () => {
+		const c = KINDS[0];
+		const apps = Object.fromEntries(
+			[1, 2, 3, 4, 5].map((n) => [
+				`app${n}.ts`,
+				'import { foo } from "./index";\nexport function run() { return foo(1); }\n',
+			]),
+		);
+		const { run } = await cascadeAfterEdit(
+			{ ...c, files: { ...c.files, ...apps } },
+			c.second,
+			["app.ts"],
+		);
+		expect(run.skipReason).toBe("indeterminate");
+		expect(run.indeterminate?.unplacedReferrerCount).toBe(5);
+		const detail = run.indeterminate?.detail ?? "";
+		expect(detail).toContain("app1.ts, app2.ts, app3.ts (+2 more)");
+		expect(detail).not.toContain("app4.ts");
+	}, 60_000);
+
+	// Recurrence: the lookup is bounded to the CHANGED symbols. Widening it to
+	// every symbol of the file flipped a leaf edit on an unrelated name that
+	// collides elsewhere (#5070 review F5). The changed-symbol set comes from the
+	// dispatch entity diff (`recordEntitySnapshotDiff`), which the cascade alone
+	// cannot supply, so this reads the real graph's impact query directly.
+	it("the impact query names referrers only of the changed symbols", async () => {
+		const env = setupTestEnvironment("cascade-ambiguous-narrow-");
+		try {
+			const c = KINDS[0];
+			const files: Record<string, string> = {
+				...c.files,
+				...c.second,
+				"lib.ts":
+					"export function foo(x: number) { return x; }\nexport function bar(x: number) { return x; }\n",
+			};
+			for (const [rel, body] of Object.entries(files))
+				fs.writeFileSync(path.join(env.tmpDir, rel), body);
+			const { buildOrUpdateGraph } =
+				await import("../../clients/review-graph/builder.js");
+			const { computeImpactCascade } =
+				await import("../../clients/review-graph/query.js");
+			const { FactStore } =
+				await import("../../clients/dispatch/fact-store.js");
+			const lib = path.join(env.tmpDir, "lib.ts");
+			const app = path.join(env.tmpDir, "app.ts");
+			const graph = await buildOrUpdateGraph(
+				env.tmpDir,
+				[lib],
+				new FactStore(),
+			);
+			const key = [...graph.fileNodes.keys()].find((k) =>
+				k.endsWith("lib.ts"),
+			)!;
+
+			graph.changedSymbolsByFile.set(key, ["bar"]);
+			expect(
+				computeImpactCascade(graph, lib).nameOnlyReferrers,
+			).toBeUndefined();
+
+			graph.changedSymbolsByFile.set(key, ["foo"]);
+			expect(
+				computeImpactCascade(graph, lib).nameOnlyReferrers?.map((f) =>
+					path.resolve(f),
+				),
+			).toEqual([path.resolve(app)]);
+		} finally {
+			env.cleanup();
+		}
 	}, 60_000);
 });

@@ -2803,9 +2803,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			buildAdvisory(
 				referenceRuns,
 				{
-					lead: (fileCount, reasons) =>
-						`Cascade checked the dependents it could place for ${fileCount} edited file(s) this turn, ` +
-						`but ${reasons}; a clean cascade result does not cover them.`,
+					// The bullet below carries the cause and the files, so the lead
+					// does not say it again.
+					lead: (fileCount) =>
+						`Cascade could not place every dependent of ${fileCount} edited file(s) this turn, ` +
+						`so a clean cascade result does not cover them.`,
 					fallbackDetail: () =>
 						"some files reference a changed symbol by an ambiguous name",
 				},
@@ -2887,6 +2889,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			...(r.indeterminate?.budget && { budget: r.indeterminate.budget }),
 			...(r.indeterminate?.diagnostic && {
 				diagnostic: r.indeterminate.diagnostic,
+			}),
+			...(r.indeterminate?.unplacedReferrerCount !== undefined && {
+				unplacedReferrerCount: r.indeterminate.unplacedReferrerCount,
 			}),
 		}));
 		logCascade({
