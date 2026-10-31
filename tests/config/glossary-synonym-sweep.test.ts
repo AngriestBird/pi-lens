@@ -1506,7 +1506,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// stamp and its shape check read the same row.
 		"clients/git-guard.ts": 67,
 		"clients/govulncheck-client.ts": 4,
-		"clients/inline-blocker-dispositions.ts": 4,
+		"clients/inline-blocker-dispositions.ts": 3,
 		// #3654: the unified bridge's own `record()` API (RFC §3) — a method
 		// name, not the retired finding-record noun; the lexical census cannot
 		// tell the two senses apart.

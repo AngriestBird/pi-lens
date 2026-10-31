@@ -22,6 +22,7 @@ import {
 	_resetStateCacheForTests,
 	markDisposition,
 } from "../../../clients/diagnostic-dispositions.js";
+import { applyInlineBlockerPolicy } from "../../../clients/inline-blocker-dispositions.js";
 import { judgeDeferredRunnerFindings } from "../../../clients/deferred-runner-blockers.js";
 import {
 	createDispatchContext,
@@ -414,4 +415,110 @@ describe("pushed findings — a deferred runner's answer reads the file each fin
 			expect(kept).toEqual([]);
 		},
 	);
+});
+
+/**
+ * #5044 r2 F1: the turn-end inline-blocker lane kept its own per-file loop, so
+ * it hid, from an outside-root file, a finding the dispatcher had kept. It now
+ * calls the same `applyFindingPolicyByOwner`. Everything below is the real
+ * `applyInlineBlockerPolicy`, over real files.
+ */
+describe("inline-blocker lane — one per-owner seam with the dispatcher", () => {
+	function outcome(
+		diagnostics: Diagnostic[],
+		recordPath: string = template,
+	): { kept: number; suppressed: number } {
+		const { kept, suppressed } = applyInlineBlockerPolicy(
+			{ filePath: recordPath, summary: "helm", diagnostics },
+			repo,
+		);
+		return { kept, suppressed };
+	}
+
+	// Recurrence: r2 F1, the reviewer's probe: dispatch kept an outside-root
+	// finding that this lane then suppressed under the file's own comment.
+	it("keeps a finding on a file outside the project root under its own comment", () => {
+		writeChart({ template: "kind: ConfigMap\n" });
+		const outside = path.join(tmpDir, "outside", "values.yaml");
+		fs.mkdirSync(path.dirname(outside), { recursive: true });
+		fs.writeFileSync(outside, "# pi-lens-ignore: error\nkey: v\n");
+
+		expect(
+			outcome([{ ...helmErrors([CHART_ERROR])[0]!, filePath: outside }]),
+		).toEqual({ kept: 1, suppressed: 0 });
+	});
+
+	it("control: hides a Chart.yaml error under Chart.yaml's own comment, not the template's", () => {
+		writeChart({
+			template: "# pi-lens-ignore: error\nkind: ConfigMap\n",
+			chartYaml: "name: chart\n",
+		});
+		expect(outcome(helmErrors([CHART_ERROR]))).toEqual({
+			kept: 1,
+			suppressed: 0,
+		});
+
+		fs.writeFileSync(chartYaml, "# pi-lens-ignore: error\nname: chart\n");
+		expect(outcome(helmErrors([CHART_ERROR]))).toEqual({
+			kept: 0,
+			suppressed: 1,
+		});
+	});
+
+	// Recurrence: a project-relative path resolved against the host's working
+	// directory instead of the project root would read nothing and stay visible.
+	it("resolves a project-relative finding path against the project root", () => {
+		writeChart({
+			template: "kind: ConfigMap\n",
+			chartYaml: "# pi-lens-ignore: error\nname: chart\n",
+		});
+		const relative = path.relative(repo, chartYaml);
+
+		expect(
+			outcome([{ ...helmErrors([CHART_ERROR])[0]!, filePath: relative }]),
+		).toEqual({ kept: 0, suppressed: 1 });
+	});
+});
+
+/** #5044 r2 F3: two claims of `applyFindingPolicyByOwner` had no cell. */
+describe("applyFindingPolicyByOwner — result order and a finding with no path", () => {
+	// Recurrence: a result rebuilt from the per-file groups would list the
+	// edited file's findings first and reorder the agent's output.
+	it("keeps the input order across files", () => {
+		writeChart({ template: "kind: ConfigMap\n" });
+		const [onChart, onTemplate, onChartAgain] = helmErrors([
+			CHART_ERROR,
+			TEMPLATE_ERROR,
+			"icon is recommended",
+		]);
+
+		const { kept } = applyPushedFindingPolicy(
+			[onChart!, onTemplate!, onChartAgain!],
+			{ cwd: repo, filePath: template, content: "kind: ConfigMap\n" },
+		);
+
+		expect(kept.map((d) => path.relative(repo, d.filePath))).toEqual([
+			path.join("chart", "Chart.yaml"),
+			path.join("chart", "templates", "deploy.yaml"),
+			path.join("chart", "Chart.yaml"),
+		]);
+	});
+
+	// Recurrence: a baseline record with no path (hand-built, dispatcher-flow)
+	// belongs to the edited file, not to an unreadable group of its own.
+	it("judges a finding with no path by the edited file's content", () => {
+		writeChart({ template: "# pi-lens-ignore: error\nkind: ConfigMap\n" });
+		const pathless = {
+			...helmErrors([CHART_ERROR])[0]!,
+			filePath: undefined as unknown as string,
+		};
+
+		const { kept } = applyPushedFindingPolicy([pathless], {
+			cwd: repo,
+			filePath: template,
+			content: fs.readFileSync(template, "utf8"),
+		});
+
+		expect(kept).toEqual([]);
+	});
 });
