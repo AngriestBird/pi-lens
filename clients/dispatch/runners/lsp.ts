@@ -17,6 +17,7 @@ import { getLspCapableKinds } from "../../language-policy.js";
 import { exceedsLspSyncLimits } from "../../lsp/content-limits.js";
 import {
 	primaryUnavailableCause,
+	readBoundToCurrentDisk,
 	touchCompletedConfirmationPolicy,
 	touchCoverageGap,
 	warmAnswerBinding,
@@ -336,10 +337,11 @@ const lspRunner: RunnerDefinition = {
 					]),
 				];
 				deferredServerIds = touched.deferredServerIds ?? [];
+				// #5051: the cascade's confirmed-touch display reads the same
+				// verdict through the same reader.
+				primaryAnswerStale = readBoundToCurrentDisk(touched) === false;
 				primaryAnswered =
-					touchCompletedConfirmationPolicy(touched) &&
-					touched.binding?.boundToCurrentDisk !== false;
-				primaryAnswerStale = touched.binding?.boundToCurrentDisk === false;
+					touchCompletedConfirmationPolicy(touched) && !primaryAnswerStale;
 				if (primaryAnswerStale) {
 					// #4231, #5017: a stale-bound answer is not an observation of these
 					// bytes, so a row stays only with provenance that its server

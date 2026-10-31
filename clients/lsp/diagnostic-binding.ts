@@ -65,7 +65,7 @@ export interface StoredDiagnosticBinding {
  *         #1092 staleness demotion. This is the class that bit as #1094
  *         (`inconclusive`) and #1096 (`binding`); the cascade reads the binding off
  *         the original `entry` BEFORE any copy for exactly this reason
- *         (`clients/dispatch/integration.ts` `readBoundToCurrentDisk`).
+ *         (`readBoundToCurrentDisk`, below).
  *   - IF A FLAG MUST CROSS A SERIALIZATION BOUNDARY (the warm-attach IPC socket, a
  *     JSON round-trip), re-surface it as an EXPLICIT enumerable field on the
  *     transport DTO — no side-channel (enumerable or not) survives `JSON.stringify`
@@ -614,6 +614,32 @@ export function bindingStateLabel(
 	if (value === true) return "bound";
 	if (value === false) return "mismatch";
 	return "unknown";
+}
+
+/**
+ * Read the content `binding` verdict off a diagnostics result (#1095).
+ *
+ * `touchFile` carries `binding` as an EXPLICIT enumerable field on its
+ * `TouchFileResult` wrapper (#1179), so it survives any copy of `.diags`.
+ * `getAllDiagnostics` still attaches `binding` as a lazy, disk-verifying
+ * NON-enumerable getter on each Map entry — reading it directly off the
+ * producer's own entry (never a spread/clone, which drops non-enumerables)
+ * triggers the disk verify exactly once (memoized per entry). Accepts either
+ * shape; returns `undefined` when no binding was attached at all (a partially-
+ * mocked client, a non-collecting touch) — indistinguishable from "unknown" at
+ * every call site, which is the intended pre-#1095 fall-through.
+ *
+ * #5051: the ONE reader behind every "is this answer for other bytes than disk"
+ * decision on a touch result — the cascade's confirmed-touch display
+ * (`clients/dispatch/integration.ts`) and the LSP runner's `primaryAnswerStale`
+ * (`clients/dispatch/runners/lsp.ts`) both ask `readBoundToCurrentDisk(touch)
+ * === false`, so the two lanes cannot disagree about the same touch.
+ */
+export function readBoundToCurrentDisk(
+	rawDiags: unknown,
+): BoundToCurrentDisk | undefined {
+	return (rawDiags as { binding?: { boundToCurrentDisk?: BoundToCurrentDisk } })
+		?.binding?.boundToCurrentDisk;
 }
 
 /**

@@ -45,7 +45,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
 	BLOCKER,
 	BLOCKING_FILE,
@@ -65,6 +65,7 @@ import {
 	step,
 	textBlocks,
 	toolResults,
+	warmGuardedSession,
 	writeTarget,
 } from "./support/pi-session-commit-gate.js";
 import {
@@ -75,6 +76,9 @@ import {
 } from "./support/pi-session.js";
 
 const fixture = piSessionFixture();
+
+// The first guarded session's cold cost is paid in a hook (#5056, #5061).
+beforeAll(() => warmGuardedSession(fixture.root));
 
 /**
  * The sentence BOTH guard branches answer with: the live latch (`:1358`) and

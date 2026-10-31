@@ -97,6 +97,7 @@ import {
 	type BoundToCurrentDisk,
 	type TouchFileResult,
 	bindingStateLabel,
+	readBoundToCurrentDisk,
 	touchCoverageGap,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
@@ -750,26 +751,6 @@ function cascadeReconcilableLspErrors(
 }
 
 /**
- * Read the content `binding` verdict off a diagnostics result (#1095).
- *
- * `touchFile` carries `binding` as an EXPLICIT enumerable field on its
- * `TouchFileResult` wrapper (#1179), so it survives any copy of `.diags`.
- * `getAllDiagnostics` still attaches `binding` as a lazy, disk-verifying
- * NON-enumerable getter on each Map entry — reading it directly off the
- * producer's own entry (never a spread/clone, which drops non-enumerables)
- * triggers the disk verify exactly once (memoized per entry). Accepts either
- * shape; returns `undefined` when no binding was attached at all (a partially-
- * mocked client, a non-collecting touch) — indistinguishable from "unknown" at
- * every call site, which is the intended pre-#1095 fall-through.
- */
-function readBoundToCurrentDisk(
-	rawDiags: unknown,
-): BoundToCurrentDisk | undefined {
-	return (rawDiags as { binding?: { boundToCurrentDisk?: BoundToCurrentDisk } })
-		?.binding?.boundToCurrentDisk;
-}
-
-/**
  * #1095: is this active-touch result a CONFIRMED observation of the neighbor's
  * current on-disk LSP-error state — safe to reconcile into the footer widget and
  * (when clean) to seed the recently-clean neighbor cache?
@@ -1008,6 +989,7 @@ export const CASCADE_GRAPH_KINDS = new Set([
 	"rust",
 	"ruby",
 	"cxx",
+	"java",
 ]);
 
 /**
@@ -1017,9 +999,9 @@ export const CASCADE_GRAPH_KINDS = new Set([
  * autoPropagate (jsts): tsserver pushes diagnostics automatically, so we
  * read from the passive snapshot instead of touching neighbors actively.
  *
- * Degraded fallback: when the graph produces no neighbors (ungraphed languages
- * like Java/Kotlin/C#), fall back to the passive LSP snapshot from getAllDiagnostics
- * to preserve cascade coverage.
+ * Degraded fallback: when the graph yields no neighbours for a graphed kind,
+ * fall back to the passive LSP snapshot from getAllDiagnostics to preserve
+ * cascade coverage. A kind outside this set skips as `non_code` first.
  */
 /**
  * Whether a cascade neighbour is suppressed by the project's ignore config
@@ -2641,7 +2623,16 @@ export async function computeCascadeForFile(
 					// stay on the `rawDiags` wrapper and are unaffected (the shape-5 fix).
 					// #3157 site 2 of 4: the fresh in-lane touch. `content` is the copy
 					// this touch was computed against — no second read.
-					const diags = cascadeDisplay(rawDiags.diags, neighborPath, content);
+					// #5051: bound-false answers are not displayed either. Rows computed
+					// for bytes the neighbour no longer holds are not this edit's
+					// cascade error; the runner withholds the same rows (#5017 L, one
+					// reader: `readBoundToCurrentDisk`), as the primary-unavailable
+					// branch above does (#5034 r7). The neighbour stays in the result,
+					// flagged `inconclusive` below, so the run owes it its line and
+					// never reads clean.
+					const diags = bindingRejected
+						? []
+						: cascadeDisplay(rawDiags.diags, neighborPath, content);
 					const durationMs = Date.now() - neighborStart;
 
 					// #1899: the A5 same-write cache write stood here.
@@ -2706,7 +2697,9 @@ export async function computeCascadeForFile(
 						reason: neighborReason(importerSet, callerSet, neighborPath),
 						diagnostics: diags,
 						lspTouched: true as const,
-						...(inconclusive && { inconclusive: true as const }),
+						...((inconclusive || bindingRejected) && {
+							inconclusive: true as const,
+						}),
 						// #1459: carry the coverage gap to the agent-facing surface. A
 						// scanner whose breaker was open, whose resync the fan-out gate
 						// deferred, or whom the aux grace timer cut off never looked at this

@@ -103,6 +103,8 @@ function makePushOnlyServer(options: { serverId?: string; filePath: string }) {
 		holdWait: false,
 		/** The server re-checks the file on its own while a wait is open. */
 		publishOnWait: false,
+		/** What that re-check publishes (a clean file by default). */
+		waitDiags: [] as unknown[],
 	};
 	const publish = (diags: unknown[], publishedAt: number): void => {
 		state.diags = diags;
@@ -156,7 +158,7 @@ function makePushOnlyServer(options: { serverId?: string; filePath: string }) {
 		waitForDiagnostics: vi.fn(async () => {
 			if (state.publishOnWait) {
 				state.publishOnWait = false;
-				publish([], Date.now());
+				publish(state.waitDiags, Date.now());
 			}
 			if (state.holdWait) await heldWait;
 		}),
@@ -570,6 +572,10 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 	 */
 	async function runCascade(options: {
 		publishInsideTouch: boolean;
+		/** The exporter's language: go (gopls) or java (jdtls, #5040 remainder). */
+		lang?: "java";
+		/** What the server publishes for the importer inside the touch. */
+		insideTouchDiags?: unknown[];
 		/** The server publishes after the cascade started and before its touch
 		 *  of the neighbour (a stamp after the edit, nothing inside the touch). */
 		publishBeforeTouch?: boolean;
@@ -577,20 +583,22 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 		publishErrorAfterMerge?: boolean;
 	}) {
 		const env = setupTestEnvironment("cascade-pre-edit-answer-");
-		const exporter = path.join(env.tmpDir, "B.go");
-		const importer = path.join(env.tmpDir, "C.go");
+		const java = options.lang === "java";
+		const [serverId, ext] = java ? ["jdtls", ".java"] : ["gopls", ".go"];
+		const exporter = path.join(env.tmpDir, `B${ext}`);
+		const importer = path.join(env.tmpDir, `C${ext}`);
 		fs.writeFileSync(exporter, "package main\n\nfunc Lib() {}\n");
 		fs.writeFileSync(importer, NEIGHBOR_CONTENT);
 		mocks.computeImpactCascade.mockReturnValue(impact(exporter, [importer]));
 
-		const server = makePushOnlyServer({ filePath: importer });
+		const server = makePushOnlyServer({ serverId, filePath: importer });
 		// The answer a jdtls-class server publishes for the importer BEFORE the
 		// edit, and then never republishes for it on its own.
 		server.publish([], Date.now() - 60_000);
 		mocks.createLSPClient.mockResolvedValue(server.client);
 		const onResolveRoot: { current?: () => void } = {};
 		mocks.getServersForFileWithConfig.mockReturnValue([
-			serverConfig("gopls", env.tmpDir, ".go", onResolveRoot),
+			serverConfig(serverId, env.tmpDir, ext, onResolveRoot),
 		]);
 
 		const { LSPService } = await import("../../clients/lsp/index.js");
@@ -603,6 +611,7 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 		// server answers.
 		if (options.publishInsideTouch) {
 			server.state.publishOnWait = true;
+			server.state.waitDiags = options.insideTouchDiags ?? [];
 		}
 		if (options.publishBeforeTouch) {
 			// The graph build runs after `cascadeStart` and before the neighbour
@@ -631,7 +640,7 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 			turnSeq: 1,
 			writeSeq: 1,
 		});
-		return { env, run, importer, server };
+		return { env, run, importer, server, serverId };
 	}
 
 	it("reads a neighbour whose cached answer predates the edit as unconfirmed, never clean", async () => {
@@ -738,6 +747,68 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	// #5040 remainder: java joined CASCADE_GRAPH_KINDS once a push-only server's
+	// pre-edit answer stopped reading as clean. Recurrence each cell prevents:
+	// before the membership, a Java exporter edit ended `skipReason: "non_code"`
+	// before any importer was asked (tool-smoke run 41027095385, 30 attempts, no
+	// importer touched), whatever jdtls would have said; and with the membership
+	// but without the pre-edit refusal, jdtls's silent importer read `clean`
+	// (PR #5035's wire capture). One cell per verdict state of the java cascade.
+	describe("for a java exporter, jdtls's three answers", () => {
+		it("delivers the error jdtls published for the importer inside the touch", async () => {
+			const { env, run, importer, serverId } = await runCascade({
+				lang: "java",
+				publishInsideTouch: true,
+				insideTouchDiags: [LATE_ERROR],
+			});
+			try {
+				expect(serverId).toBe("jdtls");
+				expect(run.skipReason).toBeUndefined();
+				expect(run.unconfirmed).toBeUndefined();
+				expect(run.observedNeighborPaths).toEqual([importer]);
+				expect(run.result?.formatted).toContain("late error");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("confirms a clean importer when jdtls answered inside the touch", async () => {
+			const { env, run, importer } = await runCascade({
+				lang: "java",
+				publishInsideTouch: true,
+			});
+			try {
+				expect(run.skipReason).toBe("clean");
+				expect(run.unconfirmed).toBeUndefined();
+				expect(run.observedNeighborPaths).toEqual([importer]);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("reads an importer jdtls never republished as unconfirmed, never clean", async () => {
+			const { env, run, importer } = await runCascade({
+				lang: "java",
+				publishInsideTouch: false,
+			});
+			try {
+				expect(run.skipReason).toBe("indeterminate");
+				expect(run.result).toBeUndefined();
+				expect(run.unconfirmed?.servers).toEqual([
+					{
+						serverId: "jdtls",
+						reason: "pre-edit-answer",
+						waitMs: 0,
+						paths: [importer],
+					},
+				]);
+				expect(run.observedNeighborPaths).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
 	});
 });
 
@@ -904,6 +975,214 @@ describe("a fallback's rows beside an unanswered primary follow the touch's fres
 			expect(touchRow?.metadata?.preEditAnswer).toBeUndefined();
 			expect(touchRow?.diagnosticCount).toBe(0);
 			expect(run.observedNeighborPaths).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("a primary's touch rows follow the answer's content binding (#5051)", () => {
+	type Binding = "bound" | "other-bytes" | "unknown" | "absent";
+
+	/**
+	 * The production sequence: the importer is read once, the exporter is
+	 * edited, and the cascade's own touch of the importer gets an answer with an
+	 * ERROR row, published inside the touch (so the #5040 age gate admits it).
+	 * The only axis is what the answer's stored content binding says against the
+	 * bytes on disk: the same bytes, other bytes, no fingerprint (a version-less
+	 * server), or no `binding` on the touch result at all.
+	 */
+	async function runBoundCascade(binding: Binding) {
+		const env = setupTestEnvironment("cascade-bound-false-");
+		const exporter = path.join(env.tmpDir, "B.go");
+		const importer = path.join(env.tmpDir, "C.go");
+		fs.writeFileSync(exporter, "package main\n\nfunc Lib() {}\n");
+		fs.writeFileSync(importer, NEIGHBOR_CONTENT);
+		mocks.computeImpactCascade.mockReturnValue(impact(exporter, [importer]));
+
+		const server = makePushOnlyServer({ filePath: importer });
+		server.publish([], Date.now() - 60_000);
+		let answeredHash: string | undefined;
+		server.client.getDiagnosticBinding = () =>
+			answeredHash === undefined
+				? undefined
+				: { version: server.state.version, contentHash: answeredHash };
+		mocks.createLSPClient.mockResolvedValue(server.client);
+		mocks.getServersForFileWithConfig.mockReturnValue([
+			serverConfig("gopls", env.tmpDir, ".go"),
+		]);
+		const { LSPService } = await import("../../clients/lsp/index.js");
+		const service = new LSPService();
+		installLspService(service);
+		await service.touchFile(importer, NEIGHBOR_CONTENT, TOUCH_OPTIONS);
+		// The server answers the cascade's touch with an error, computed for the
+		// bytes the binding names.
+		server.client.waitForDiagnostics = vi.fn(async () => {
+			answeredHash =
+				binding === "bound"
+					? hashDiagnosticContent(NEIGHBOR_CONTENT)
+					: binding === "other-bytes"
+						? hashDiagnosticContent("package main\n\nfunc other() {}\n")
+						: undefined;
+			server.publish([LATE_ERROR], Date.now());
+		});
+		if (binding === "absent") {
+			// A touch result that carries no `binding` (a non-collecting or
+			// partially-mocked client): the wrapper without the field.
+			const touchFile = service.touchFile.bind(service);
+			service.touchFile = (async (...args: Parameters<typeof touchFile>) => {
+				const touched = await touchFile(...args);
+				if (touched === undefined || typeof touched !== "object") {
+					return touched;
+				}
+				const { binding: _binding, ...rest } = touched as {
+					binding?: unknown;
+				};
+				return rest;
+			}) as typeof service.touchFile;
+		}
+		const { computeCascadeForFile } =
+			await import("../../clients/dispatch/integration.js");
+		fs.writeFileSync(exporter, "package main\n\nfunc Lib(a string) {}\n");
+		const run = await computeCascadeForFile(exporter, env.tmpDir, {
+			turnSeq: 1,
+			writeSeq: 1,
+		});
+		const touchRow = mocks.logCascade.mock.calls
+			.map(
+				(args) =>
+					args[0] as {
+						phase?: string;
+						diagnosticCount?: number;
+						metadata?: Record<string, unknown>;
+					},
+			)
+			.filter((row) => row?.phase === "neighbor_touch")
+			.at(-1);
+		return { env, exporter, importer, run, touchRow };
+	}
+
+	// Recurrence (#5051, found by the #5034 r7 verify): the confirmed-touch
+	// branch read the binding for confirmation only, so rows computed for bytes
+	// the importer no longer holds were displayed as this edit's cascade error
+	// while the LSP runner withheld the same rows (#5017 L).
+	it("withholds rows bound to other bytes than disk, keeps the line, never reads clean", async () => {
+		const { env, run, touchRow } = await runBoundCascade("other-bytes");
+		try {
+			expect(run.result?.formatted ?? "").not.toContain("late error");
+			expect(run.result?.neighbors.flatMap((n) => n.diagnostics) ?? []).toEqual(
+				[],
+			);
+			// The run owes the neighbour its line and does not read clean.
+			expect(run.skipReason).not.toBe("clean");
+			expect(run.result?.formatted).toContain("inconclusive for 1");
+			expect(run.result?.formatted).toContain("C.go");
+			expect(run.observedNeighborPaths).toBeUndefined();
+			expect(touchRow?.diagnosticCount).toBe(0);
+			expect(touchRow?.metadata).toMatchObject({ bindingState: "mismatch" });
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Control (the pre-#1095 fall-through): a bound, unknown or absent binding
+	// still displays its rows. Recurrence: a gate that withholds on anything but
+	// an explicit `false` loses every version-less server's findings.
+	it.each(["bound", "unknown", "absent"] as const)(
+		"still displays the rows of an answer whose binding is %s",
+		async (binding) => {
+			const { env, run, touchRow } = await runBoundCascade(binding);
+			try {
+				expect(run.result?.formatted).toContain("late error");
+				expect(touchRow?.diagnosticCount).toBe(1);
+				expect(touchRow?.metadata?.bindingState).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
+	// Acceptance 4: the withheld rows reach turn_end through the real
+	// `handleTurnEnd`. Recurrence: the displayed stale rows were recorded as the
+	// neighbour's pending cascade record, replacing the entry an earlier
+	// delivered observation left (#4487).
+	it("does not record withheld rows as turn_end's observation", async () => {
+		const { env, exporter, importer, run } =
+			await runBoundCascade("other-bytes");
+		try {
+			const { CacheManager } = await import("../../clients/cache-manager.js");
+			const { RuntimeCoordinator } =
+				await import("../../clients/runtime-coordinator.js");
+			const { handleTurnEnd } = await import("../../clients/runtime-turn.js");
+			const { consumeTurnEndFindings } =
+				await import("../../clients/runtime-context.js");
+			const format = await import("../../clients/cascade-format.js");
+			const seeded = (id: string, line: number) => ({
+				id,
+				message: `earlier ${id}`,
+				filePath: importer,
+				line,
+				column: 1,
+				severity: "error" as const,
+				semantic: "blocking" as const,
+				tool: "lsp",
+				rule: "cascade:test",
+			});
+			format.resetCascadePendingNeighbors();
+			format.recordDeliveredCascadeNeighbor(
+				importer,
+				[seeded("a", 1), seeded("b", 2)],
+				0,
+				12345,
+			);
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			cacheManager.addModifiedRange(
+				exporter,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			runtime.beginTurn();
+			runtime.appendCascadeRun(run);
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => ({
+						success: true,
+						issues: [],
+						unusedExports: [],
+						unusedFiles: [],
+						unusedDeps: [],
+						unlistedDeps: [],
+						summary: "skipped",
+					}),
+				},
+				deadCodeClients: [],
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as never);
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+					?.content ?? "";
+			// Recurrence (#5053 review F1): the absences below also hold when the
+			// cascade section is never delivered at all (a dead `blockerParts.push`).
+			// The positive pair pins what turn_end DID deliver: the withheld
+			// neighbour's inconclusive line.
+			expect(content).toContain("inconclusive for 1");
+			expect(content).toContain("C.go");
+			expect(content).not.toContain("late error");
+			expect(content).not.toContain("Cascade errors in");
+			expect(format.listCascadePendingNeighbors()).toEqual([
+				{ filePath: importer, errorCount: 2, checkedAt: 12345 },
+			]);
 		} finally {
 			env.cleanup();
 		}
