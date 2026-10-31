@@ -9,6 +9,7 @@ import yaml from "../../clients/deps/js-yaml.js";
 import {
 	CASCADE_CONCLUSIVE_DEADLINE_MS,
 	CASCADE_FIXTURES,
+	CASCADE_RENAME_EXTRA_DEADLINES,
 	CASCADE_WARM_DEADLINE_MS,
 } from "../../scripts/lib/lsp-cascade-smoke.mjs";
 
@@ -162,8 +163,10 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 
 	it("bounds the lane below the job cap with the worst case of every fixture inside it", () => {
 		// Recurrence: #3123, a hang costing the GitHub default. The worst case is
-		// each fixture's warm-up plus its conclusive deadline; a 5-minute margin
-		// covers installs the tool-tree cache did not restore.
+		// each fixture's warm-up plus its conclusive deadline, and for a fixture
+		// with a rename phase two more conclusive deadlines (the restored
+		// exporter's baseline, then the importers after the move); a 5-minute
+		// margin covers installs the tool-tree cache did not restore.
 		const stepCap = (cascade["timeout-minutes"] ?? Infinity) * 60_000;
 		const jobCap =
 			(workflow.jobs["tool-smoke"]["timeout-minutes"] ?? 0) * 60_000;
@@ -171,7 +174,8 @@ describe("tool-smoke.yml carries the live cascade lane (#1712)", () => {
 			(sum, f) =>
 				sum +
 				(f.warmDeadlineMs ?? CASCADE_WARM_DEADLINE_MS) +
-				(f.conclusiveDeadlineMs ?? CASCADE_CONCLUSIVE_DEADLINE_MS),
+				(f.conclusiveDeadlineMs ?? CASCADE_CONCLUSIVE_DEADLINE_MS) *
+					(1 + (f.rename ? CASCADE_RENAME_EXTRA_DEADLINES : 0)),
 			0,
 		);
 		expect(stepCap).toBeLessThan(jobCap);

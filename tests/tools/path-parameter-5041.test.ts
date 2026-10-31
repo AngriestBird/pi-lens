@@ -27,7 +27,7 @@ import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.j
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
 import { createSymbolSearchTool } from "../../tools/symbol-search.js";
-import { setupTestEnvironment } from "../clients/test-utils.js";
+import { pinFixtureHome, setupTestEnvironment } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 type ToolResult = {
@@ -223,6 +223,77 @@ describe("#5041 the shared `paths` reader's entry rules", () => {
 			]);
 		} finally {
 			env.cleanup();
+		}
+	});
+
+	// RECURRENCE GUARDED: the two seams #5043 (the shared defaulted-cwd home
+	// ceiling) and #5041 (the shared `paths` reader) each decide on `paths`; an
+	// order drift between them is the two-guard disagreement #5039 closed by
+	// sharing one guard. Order, on both ast-grep tools that call both: the
+	// reader runs first, so `paths: []` (not a defaulted cwd, an invalid list)
+	// gets the reader's "paths is empty" refusal even at home, and only an
+	// ABSENT `paths` reaches the home ceiling. Neither refusal dispatches.
+	describe("the reader and the home ceiling compose (#5039 + #5041)", () => {
+		const HOME_TOOLS = [
+			{
+				name: "ast_grep_search",
+				params: { pattern: "foo($X)", lang: "typescript" },
+				create: (client: never) => createAstGrepSearchTool(client),
+				dispatched: (astGrep: ReturnType<typeof searchClient>) =>
+					astGrep.search.mock.calls.length > 0,
+			},
+			{
+				name: "ast_grep_replace",
+				params: { pattern: "var $X", rewrite: "let $X", lang: "typescript" },
+				create: (client: never) => createAstGrepReplaceTool(client),
+				dispatched: (astGrep: ReturnType<typeof searchClient>) =>
+					astGrep.replace.mock.calls.length +
+						astGrep.replaceWithRule.mock.calls.length >
+					0,
+			},
+		];
+		const CASES: {
+			paths: unknown;
+			expects: string;
+			dispatches: boolean;
+		}[] = [
+			{ paths: [], expects: "paths is empty", dispatches: false },
+			{
+				paths: undefined,
+				expects: "Refused: no `paths` given",
+				dispatches: false,
+			},
+			{ paths: null, expects: "Refused: no `paths` given", dispatches: false },
+			{ paths: ["proj"], expects: "", dispatches: true },
+		];
+		for (const tool of HOME_TOOLS) {
+			for (const entry of CASES) {
+				it(`${tool.name} at home with paths ${JSON.stringify(entry.paths) ?? "omitted"}`, async () => {
+					const pin = pinFixtureHome("sg-5041-home-order");
+					try {
+						const astGrep = searchClient();
+						const params: Record<string, unknown> = { ...tool.params };
+						if (entry.paths !== undefined) params.paths = entry.paths;
+						const result = await run(
+							tool.create(astGrep.client as never),
+							params,
+							pin.home,
+						);
+						if (entry.dispatches) {
+							expect(result.isError).toBeFalsy();
+						} else {
+							expect(result.isError).toBe(true);
+							expect(text(result)).toContain(entry.expects);
+							// An empty list is the reader's refusal, not the home one.
+							if (entry.expects === "paths is empty")
+								expect(text(result)).not.toContain("Refused");
+						}
+						expect(tool.dispatched(astGrep)).toBe(entry.dispatches);
+					} finally {
+						pin.restore();
+					}
+				});
+			}
 		}
 	});
 

@@ -29,7 +29,11 @@ function errorTextWithHint(raw: string): string {
 	const hint = astGrepRemediationHint(classifyAstGrepError(raw));
 	return hint ? `Error: ${raw}\n\n${hint}` : `Error: ${raw}`;
 }
-import { readAstGrepLang, readPathsArgument } from "./shared.js";
+import {
+	defaultedCwdHomeRefusal,
+	readAstGrepLang,
+	readPathsArgument,
+} from "./shared.js";
 
 function lineCount(value: string): number {
 	if (!value) return 0;
@@ -232,6 +236,23 @@ export function createAstGrepReplaceTool(
 							text: "ast-grep CLI not found. Install: npm i -D @ast-grep/cli",
 						},
 					],
+					isError: true,
+					details: {},
+				};
+			}
+			// #5039: a write tool needs the home ceiling more than a read tool does.
+			// Decided before any target is resolved, so it covers the dry run and the
+			// apply alike (`apply` only flips a flag on this same dispatch), through
+			// the seam #747/#250's guard became when it was lifted out of
+			// ast_grep_search. It runs AFTER the `paths` reader above: an empty list
+			// (`paths: []`) is the reader's refusal even at home, and only an absent
+			// `paths` reaches this ceiling (keyed on the raw argument, not on
+			// `pathsRead.entries`, which `absent: "cwd"` always fills).
+			const homeRefusal = defaultedCwdHomeRefusal(paths, ctx.cwd);
+			if (homeRefusal) {
+				logOutcome("error", { errorRaw: homeRefusal.reason });
+				return {
+					content: [{ type: "text" as const, text: homeRefusal.text }],
 					isError: true,
 					details: {},
 				};

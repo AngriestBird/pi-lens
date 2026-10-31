@@ -18,11 +18,6 @@ import {
 	synthesizeRule,
 } from "../clients/ast-grep-yaml-synth.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
-import * as os from "node:os";
-import {
-	isAtOrAboveHomeDir,
-	realpathOrResolve,
-} from "../clients/path-utils.js";
 import {
 	type LensToolHost,
 	translateGuidanceToolNames,
@@ -30,6 +25,7 @@ import {
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
 import {
+	defaultedCwdHomeRefusal,
 	readAstGrepLang,
 	MAX_PATHS_ENTRIES,
 	readPathsArgument,
@@ -696,31 +692,19 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 					};
 				}
 
-				// #747/#250: only guard the DEFAULTED-cwd case. Explicit `paths` are
-				// what the user asked to search — never second-guessed. But when no
-				// paths are given we fall back to `ctx.cwd`, and if that resolves at or
-				// above $HOME a full structural scan of the entire home tree would be
-				// spawned. Refuse and tell the caller how to scope it. By real path
-				// on both sides (#4911), so a link on either side is refused too.
-				if (
-					!paths?.length &&
-					isAtOrAboveHomeDir(
-						realpathOrResolve(ctx.cwd || "."),
-						realpathOrResolve(os.homedir()),
-					)
-				) {
-					logOutcome("error", {
-						errorRaw: "defaulted cwd resolves at or above home directory",
-					});
+				// #747/#250, lifted to `defaultedCwdHomeRefusal` by #5039: only the
+				// DEFAULTED-cwd case is guarded. Explicit `paths` are what the user asked
+				// to search — never second-guessed. But when no paths are given we fall
+				// back to `ctx.cwd`, and if that resolves at or above $HOME a full
+				// structural scan of the entire home tree would be spawned. Refuse and
+				// tell the caller how to scope it. Runs after the `paths` reader: an
+				// empty list is the reader's refusal even at home, and the guard keys
+				// on the raw argument because `absent: "cwd"` always fills the entries.
+				const homeRefusal = defaultedCwdHomeRefusal(paths, ctx.cwd);
+				if (homeRefusal) {
+					logOutcome("error", { errorRaw: homeRefusal.reason });
 					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `Refused: no \`paths\` given and the working directory (${
-									ctx.cwd || "."
-								}) resolves at or above the home directory — searching it would scan every unrelated tree under your home. Pass explicit \`paths\`, or run from a project directory.`,
-							},
-						],
+						content: [{ type: "text" as const, text: homeRefusal.text }],
 						isError: true,
 						details: {},
 					};
