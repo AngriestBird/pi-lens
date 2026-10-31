@@ -661,7 +661,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/language-profile.ts": 2,
 		"clients/language-registry.ts": 1,
 		"clients/lens-config.ts": 1,
-		"clients/lens-engine.ts": 3,
+		// 3 -> 2 (#5047 F5): the engine's own blank-entry filter is deleted; the
+		// shared reader in tools/shared.ts owns the rule.
+		"clients/lens-engine.ts": 2,
 		"clients/lens-flag-registry.ts": 2,
 		"clients/lens-map.ts": 2,
 		"clients/lsp-budget.ts": 1,
@@ -1118,7 +1120,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/language-profile.ts": 12,
 		"clients/latency-logger.ts": 2,
 		"clients/lens-config.ts": 3,
-		"clients/lens-engine.ts": 8,
+		// 8 -> 9 (#5047 F1): the path-glob matcher relativizes an entry under cwd.
+		"clients/lens-engine.ts": 9,
 		"clients/lens-flag-registry.ts": 13,
 		"clients/lens-map.ts": 14,
 		"clients/log-cleanup.ts": 9,
