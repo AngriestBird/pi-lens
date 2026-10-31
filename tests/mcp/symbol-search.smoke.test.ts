@@ -23,6 +23,7 @@ import {
 	PROJECT_SNAPSHOT_VERSION,
 	saveProjectSnapshot,
 } from "../../clients/project-snapshot.js";
+import { setupTestEnvironment } from "../clients/test-utils.js";
 import { McpHarness } from "./harness.js";
 
 let snapshotDataRoot: string;
@@ -186,7 +187,10 @@ describe("pilens_symbol_search paths and limit shapes (#5038)", () => {
 	let nextId = 503_800;
 
 	const scopedProject = (prefix: string): { dir: string; dataRoot: string } => {
-		const dir = mkdtempSync(path.join(tmpdir(), prefix));
+		// The shared setup plants the fixture's own `.git` marker, so the project
+		// root the server resolves is `dir` and never a root above the tmp dir
+		// (shape 73, #5047 r1 F8).
+		const dir = setupTestEnvironment(prefix).tmpDir;
 		const dataRoot = mkdtempSync(path.join(tmpdir(), `${prefix}data-`));
 		const source = "export function authenticateUser(id) {\n  return id;\n}\n";
 		writeFileSync(path.join(dir, "auth.ts"), "export const other = 1;\n");

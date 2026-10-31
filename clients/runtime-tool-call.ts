@@ -160,6 +160,9 @@ function getToolCallRawFilePath(
 		// skipped for a file the call had just named. `filePath` stays as the
 		// fallback the branch already accepted, in the same order as `read`.
 		if (typeof inputObj.path === "string") return inputObj.path;
+		// #5041: `file` is a declared alias of `path`; a rename sent through it
+		// must resolve, credit and attribute like the same rename through `path`.
+		if (typeof inputObj.file === "string") return inputObj.file;
 		return typeof inputObj.filePath === "string"
 			? inputObj.filePath
 			: undefined;

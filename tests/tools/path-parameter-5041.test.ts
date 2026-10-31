@@ -520,36 +520,35 @@ describe("#5041 `path` is the canonical single-file parameter", () => {
 		}
 	});
 
-	it("declares `path` on every single-file tool schema", () => {
+	// RECURRENCE GUARDED (#5047 r1 F6): the census accepted `path` OR `paths`
+	// for every tool, so dropping `path` from `lens_diagnostics` (which still
+	// declares `paths`) stayed green. Each tool is held to the one name it takes.
+	it("declares `path` on every single-file tool schema and `paths` on every list tool", () => {
 		const declared = (tool: { parameters: unknown }): string[] =>
 			Object.keys(
 				(tool.parameters as { properties?: Record<string, unknown> })
 					.properties ?? {},
 			);
+		const diagnostics = createLensDiagnosticsTool(
+			{ readCache: vi.fn(() => undefined) } as never,
+			() => ".",
+		);
 		for (const tool of [
-			createAstGrepSearchTool(searchClient().client),
-			createSymbolSearchTool(() => "."),
-			createLensDiagnosticsTool(
-				{ readCache: vi.fn(() => undefined) } as never,
-				() => ".",
-			),
+			diagnostics,
 			createEffectiveConfigTool(() => "."),
 			createLensDiagnosticMarkTool(() => "."),
 			createLspNavigationTool(() => false),
 		]) {
-			// `paths` tools name the plural scope; the single-file tools must name
-			// `path`, the one parameter name a caller can rely on across the surface.
-			const keys = declared(tool);
-			expect(
-				keys.includes("path") || keys.includes("paths"),
-				`${tool.name}: ${keys.join(",")}`,
-			).toBe(true);
-			if (
-				tool.name === "effective_config" ||
-				tool.name === "lens_diagnostic_mark"
-			) {
-				expect(keys, tool.name).toContain("path");
-			}
+			expect(declared(tool), tool.name).toContain("path");
+		}
+		for (const tool of [
+			createAstGrepSearchTool(searchClient().client),
+			createAstGrepOutlineTool(searchClient().client),
+			createAstGrepReplaceTool(searchClient().client),
+			createSymbolSearchTool(() => "."),
+			diagnostics,
+		]) {
+			expect(declared(tool), tool.name).toContain("paths");
 		}
 	});
 });

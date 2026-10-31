@@ -11,12 +11,16 @@ import {
 } from "../clients/path-utils.js";
 
 /**
- * The `paths` cap every tool shares (#5041). Every entry becomes one walk,
- * batch slot or glob probe, so the list needs one bound; before #5041 each
- * tool carried its own (200 for ast-grep search, 100 for lens_diagnostics and
- * ast_grep_outline, none for ast_grep_replace and symbol_search). The shared
- * value is the smallest of them, so no tool admits a list the folded LSP probe
- * (`MAX_BATCH_FILES`) would refuse.
+ * The `paths` cap every tool shares (#5041): one reader, one bound. Every entry
+ * becomes one walk, batch slot or glob probe, and before #5041 each tool carried
+ * its own value (200 in ast-grep search, 100 in `lens_diagnostics` and
+ * `ast_grep_outline`, none in replace and `symbol_search`). 100 is the value the
+ * one tool with a downstream bound already enforced: `lens_diagnostics
+ * source=lsp` reaches `MAX_BATCH_FILES` (100, `tools/lsp-diagnostics.ts`), so a
+ * reader that admitted more would hand that route a list it refuses. The ast-grep
+ * tools share no such bound and gain nothing from 200: no caller in the tree
+ * sends more than 100 entries (#5047 F10), and a longer list narrows by
+ * directory. The refusal names the cap, and the changelog announces it.
  */
 export const MAX_PATHS_ENTRIES = 100;
 

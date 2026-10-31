@@ -812,7 +812,7 @@ const PINNED_REFUSALS: string[] = [
 	"pilens_ast_grep_replace {Precedes} -> precedes",
 	"pilens_ast_grep_replace {Strictness} -> strictness",
 	"pilens_ast_grep_replace {absPath} -> paths",
-	"pilens_ast_grep_replace {applys} -> apply",
+	"pilens_ast_grep_replace {applys} -> apply", // spellchecker:disable-line
 	"pilens_ast_grep_replace {configPath} -> paths",
 	"pilens_ast_grep_replace {cwds} -> cwd",
 	"pilens_ast_grep_replace {dirPath} -> paths",
@@ -999,7 +999,7 @@ const PINNED_REFUSALS: string[] = [
 	"pilens_lsp_navigation {Symbol} -> symbol",
 	"pilens_lsp_navigation {TopLevelOnly} -> topLevelOnly",
 	"pilens_lsp_navigation {absPath} -> path",
-	"pilens_lsp_navigation {applys} -> apply",
+	"pilens_lsp_navigation {applys} -> apply", // spellchecker:disable-line
 	"pilens_lsp_navigation {callHierarchyItems} -> callHierarchyItem",
 	"pilens_lsp_navigation {characters} -> character",
 	"pilens_lsp_navigation {commands} -> command",
@@ -1009,7 +1009,7 @@ const PINNED_REFUSALS: string[] = [
 	"pilens_lsp_navigation {dir_path} -> path",
 	"pilens_lsp_navigation {endCharacters} -> endCharacter",
 	"pilens_lsp_navigation {endLines} -> endLine",
-	"pilens_lsp_navigation {exactMatchs} -> exactMatch",
+	"pilens_lsp_navigation {exactMatchs} -> exactMatch", // spellchecker:disable-line
 	"pilens_lsp_navigation {filePaths} -> filePath",
 	"pilens_lsp_navigation {file_path} -> filePath",
 	"pilens_lsp_navigation {filepaths} -> filePath",
@@ -1025,7 +1025,7 @@ const PINNED_REFUSALS: string[] = [
 	"pilens_lsp_navigation {newNames} -> newName",
 	"pilens_lsp_navigation {paths} -> path",
 	"pilens_lsp_navigation {projectPath} -> path",
-	"pilens_lsp_navigation {querys} -> query",
+	"pilens_lsp_navigation {querys} -> query", // spellchecker:disable-line
 	"pilens_lsp_navigation {rootPath} -> path",
 	"pilens_lsp_navigation {sourcePath} -> path",
 	"pilens_lsp_navigation {source_path} -> path",
@@ -1840,13 +1840,43 @@ describe("pi-lens MCP canonical `path` parameter (#5041)", { retry: 2 }, () => {
 	}, 30_000);
 
 	it("runs pilens_analyze through `path` instead of asking for `file`", async () => {
+		const target = path.join(workspace.tmpDir, "analyzed-5041.ts");
+		fs.writeFileSync(target, "export const analyzed = 1;\n");
 		const result = await call("pilens_analyze", {
-			path: path.join(workspace.tmpDir, "absent.ts"),
+			path: target,
+			mode: "warm",
 			flags: { "no-lsp": true },
 		});
-		// Whatever the analysis says about an absent file, the argument was read:
-		// the pre-fix answer was the "requires a `path`" refusal.
-		expect(text(result)).not.toContain("requires a `path` string");
+		// Pre-fix the call was refused as `required argument(s) \`file\` missing`;
+		// an answer that names the analyzed file proves `path` was read.
+		expect(result.isError, text(result)).toBeFalsy();
+		expect(text(result)).not.toContain("Not run:");
+		expect(text(result)).toContain("[warm]");
+		expect(text(result)).toContain("analyzed-5041.ts");
+	}, 60_000);
+
+	// RECURRENCE GUARDED (#5047 r1 F3): a call that names its file through one
+	// declared spelling and adds an UNDECLARED near-miss of a different spelling
+	// was refused with "looks like a mistyped `filePath`, which was not sent",
+	// although the file was sent. The extra key is still reported, never refused.
+	it("runs a call that names its file and adds a mistyped sibling spelling", async () => {
+		const diagnostics = await call("pilens_diagnostics", {
+			path: "src/app.ts",
+			file_path: "src/app.ts",
+		});
+		expect(diagnostics.isError, text(diagnostics)).not.toBe(true);
+		expect(text(diagnostics)).not.toContain("Not run:");
+		expect(text(diagnostics)).toContain("Ignored unknown argument");
+		expect(text(diagnostics)).toContain("file_path");
+		const analyze = await call("pilens_analyze", {
+			file: path.join(workspace.tmpDir, "analyzed-5041.ts"),
+			sourcePath: "ignored",
+			mode: "warm",
+			flags: { "no-lsp": true },
+		});
+		expect(analyze.isError, text(analyze)).not.toBe(true);
+		expect(text(analyze)).not.toContain("Not run:");
+		expect(text(analyze)).toContain("Ignored unknown argument");
 	}, 60_000);
 
 	it("scopes pilens_diagnostics to the file an alias names", async () => {

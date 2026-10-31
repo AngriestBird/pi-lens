@@ -251,7 +251,9 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 /**
  * Path field, in a fixed order. `path` is pi's spelling; `filePath` and
- * `file_path` are the two spellings third-party edit tools use in practice.
+ * `file_path` are the two spellings third-party edit tools use in practice;
+ * `file` is the alias pi-lens's own single-file tools accept beside `path`
+ * (#5041), so `lsp_navigation {file}` arms and credits like `{path}` (#5047 F4).
  *
  * Exported for #2430: the observational net arms only for a call whose input
  * carries a path-shaped field, and it must ask that question with the SAME
@@ -261,7 +263,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 function resolveMutationPath(
 	input: Record<string, unknown>,
 ): string | undefined {
-	for (const key of ["path", "filePath", "file_path"]) {
+	for (const key of ["path", "filePath", "file_path", "file"]) {
 		const value = input[key];
 		if (typeof value === "string" && value.length > 0) return value;
 	}
@@ -299,8 +301,10 @@ export function readMutationPathField(event: unknown): string | undefined {
  */
 export function readToolResultPathField(event: unknown): string | undefined {
 	const input = asRecord((event as { input?: unknown })?.input);
-	const ownPath = input["path"];
-	if (typeof ownPath === "string" && ownPath.length > 0) return ownPath;
+	for (const key of ["path", "file"]) {
+		const ownPath = input[key];
+		if (typeof ownPath === "string" && ownPath.length > 0) return ownPath;
+	}
 	return classifyMutatingTool(event, { recognizeOnly: true })?.path;
 }
 
