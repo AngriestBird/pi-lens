@@ -6486,7 +6486,7 @@ export class LSPService {
 						spawned.map((entry) => [
 							entry.client,
 							{
-								version: readPathVersion(entry.client),
+								pathVersion: readPathVersion(entry.client),
 								publishedAt: entry.client.getDiagnosticsPublishedAt?.(filePath),
 							},
 						]),
@@ -7068,8 +7068,8 @@ export class LSPService {
 					const merged = answerAtMerge?.get(entry.client);
 					if (
 						versionBeforeTouch !== undefined &&
-						merged?.version !== undefined &&
-						merged.version > versionBeforeTouch
+						merged?.pathVersion !== undefined &&
+						merged.pathVersion > versionBeforeTouch
 					)
 						continue;
 					const publishedAt = merged?.publishedAt;
