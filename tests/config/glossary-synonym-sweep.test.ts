@@ -798,7 +798,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// neighbours a run owns, the pending entries this turn did not observe
 		// and the runs that carry an unconfirmed bucket, three
 		// `Array.prototype.filter` calls, not a delivery filter.
-		"clients/runtime-turn.ts": 33,
+		// 33 -> 34 (#5055): the unresolved-reference advisory bucket selects its
+		// runs with one `Array.prototype.filter`, like the binding and budget buckets.
+		"clients/runtime-turn.ts": 34,
 		"clients/safe-spawn.ts": 5,
 		"clients/scratch-tree-policy.ts": 2,
 		"clients/session-repository.ts": 1,

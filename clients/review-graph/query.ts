@@ -295,11 +295,7 @@ export function computeImpactCascade(
 		].flatMap((symbolName) =>
 			(
 				graph.edgesByTo.get(`${UNRESOLVED_NAME_NODE_PREFIX}${symbolName}`) ?? []
-			).flatMap((edge) =>
-				edge.kind === "calls" || edge.kind === "references"
-					? (filePathFromNode(graph, edge.from) ?? [])
-					: [],
-			),
+			).flatMap((edge) => filePathFromNode(graph, edge.from) ?? []),
 		),
 	);
 
