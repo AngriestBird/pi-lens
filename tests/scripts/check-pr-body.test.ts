@@ -4456,11 +4456,14 @@ describe("table rows split the way GitHub splits them (#5070)", () => {
 		expect(shapeErrors(fixed)).toEqual([]);
 	});
 
-	it.each(SHAPE_CASES)("%s", (_name, table, count, message) => {
-		const errors = shapeErrors(table);
-		expect(errors).toHaveLength(count);
-		if (count) expect(errors[0]).toContain(message);
-	});
+	it.each(SHAPE_CASES)(
+		"reads %s as GitHub renders it",
+		(_name, table, count, message) => {
+			const errors = shapeErrors(table);
+			expect(errors).toHaveLength(count);
+			if (count) expect(errors[0]).toContain(message);
+		},
+	);
 
 	// Recurrence: the test-reference reader located a code span's column by
 	// counting raw pipes before it, so an escaped pipe in an earlier cell moved
