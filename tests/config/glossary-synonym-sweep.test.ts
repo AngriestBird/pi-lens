@@ -589,7 +589,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `Array.prototype.filter` is deleted with the delta.
 		// 19 -> 20 (#4483): the pre-edit capture keeps a dispatch group's
 		// linter runner ids, an `Array.prototype.filter` call.
-		"clients/dispatch/integration.ts": 20,
+		// 20 -> 21 (#5055): the unplaced-referrer check drops the files edited this
+		// turn with one `Array.prototype.filter`.
+		"clients/dispatch/integration.ts": 21,
 		// #4483: the seed's runner and line selection, `Array.prototype.filter`
 		// calls, not a delivery filter.
 		"clients/dispatch/pre-edit-seed.ts": 4,
