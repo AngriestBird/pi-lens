@@ -23,6 +23,6 @@ what is specific to the Claude Code harness.
 - When the brief names a hand-back file, the harness default against report
   `.md` files does not cover it. Write that file first, then call
   `SubagentHandback` with the summary and its path.
-- The summary is the `ORCHESTRATOR SUMMARY` only, at most 30 non-blank lines
-  (`docs/pi-lens-subagent.md` "Deliverable"); a hook refuses a longer call.
+- The summary is the `ORCHESTRATOR SUMMARY` only: at most 20 non-blank lines
+  (`docs/pi-lens-subagent.md` "Deliverable"); a hook refuses a call over 30.
   Probe transcripts, tables and mutation rows go in the file, not the call.
