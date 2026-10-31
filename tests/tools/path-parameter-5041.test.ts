@@ -553,3 +553,140 @@ describe("#5041 `path` is the canonical single-file parameter", () => {
 		}
 	});
 });
+
+// RECURRENCE GUARDED (#5047 r1 F1, F2): the reader resolves an entry against
+// the session cwd, and a workspace directory name is data, not syntax. A
+// `[`/`{` in the name was read as a glob by the symbol_search matcher (F1), and
+// a U+00A0 in it made `lens_diagnostics source=lsp` resolve the already
+// resolved entries a second time, which folded the space and named a sibling
+// directory that does not exist (F2, the #4577 R2-2 shape). Each cell drives
+// the production tool `execute` with the workspace as cwd; the plain name is
+// the control that must answer the same.
+describe("#5047 a workspace name is data on every tool that takes a path", () => {
+	for (const workspaceName of ["plain", "app[1]", "app{a,b}", "proj a"]) {
+		describe(`in a workspace named ${JSON.stringify(workspaceName)}`, () => {
+			function makeWorkspace() {
+				const env = setupTestEnvironment("pi-lens-5047-ws-");
+				const workspace = path.join(env.tmpDir, workspaceName);
+				const file = path.join(workspace, "src", "a.ts");
+				fs.mkdirSync(path.dirname(file), { recursive: true });
+				fs.writeFileSync(file, "export const value: number = 'bad';\n");
+				return { env, workspace, file };
+			}
+
+			it("hands the ast-grep tools the exact resolved target once", async () => {
+				const { env, workspace } = makeWorkspace();
+				try {
+					const astGrep = searchClient();
+					for (const [tool, params, calls] of [
+						[
+							createAstGrepSearchTool(astGrep.client),
+							{ pattern: "foo($X)", lang: "typescript" },
+							astGrep.search,
+						],
+						[
+							createAstGrepOutlineTool(astGrep.client),
+							{ lang: "typescript" },
+							astGrep.outline,
+						],
+						[
+							createAstGrepReplaceTool(astGrep.client),
+							{ pattern: "var $X", rewrite: "let $X", lang: "typescript" },
+							astGrep.replace,
+						],
+					] as const) {
+						const result = await run(
+							tool,
+							{ ...params, paths: ["src"] },
+							workspace,
+						);
+						expect(result.isError, text(result)).toBeFalsy();
+						const call = calls.mock.calls.at(-1) as unknown[];
+						// The only array argument of each client call is its target list.
+						const targets = call.find(Array.isArray) as string[];
+						expect(targets, tool.name).toEqual([path.join(workspace, "src")]);
+					}
+				} finally {
+					env.cleanup();
+				}
+			});
+
+			it("answers `lens_diagnostics source=lsp` for `paths` exactly as for `path`", async () => {
+				const { env, workspace, file } = makeWorkspace();
+				try {
+					const touched: string[] = [];
+					const service = makeLspServiceDouble({
+						touchFile: vi.fn(async (touchedFile: string) => {
+							touched.push(touchedFile);
+							return undefined;
+						}),
+						getDiagnostics: vi.fn(() => []),
+					});
+					const tool = createLensDiagnosticsTool(
+						{ readCache: vi.fn(() => undefined) } as never,
+						() => workspace,
+						() => service as never,
+					);
+					const single = await run(
+						tool,
+						{ source: "lsp", path: "src/a.ts" },
+						workspace,
+					);
+					const list = await run(
+						tool,
+						{ source: "lsp", paths: ["src/a.ts"] },
+						workspace,
+					);
+					expect(text(list)).not.toContain("path not found");
+					expect(text(single)).not.toContain("path not found");
+					expect(list.isError, text(list)).toBe(single.isError);
+					// Every spelling checked the real file, never a folded sibling.
+					expect(touched.length).toBeGreaterThanOrEqual(2);
+					for (const touchedFile of touched) {
+						expect(path.resolve(touchedFile)).toBe(path.resolve(file));
+					}
+				} finally {
+					env.cleanup();
+				}
+			});
+
+			it("scopes the cache routes of `lens_diagnostics` to the resolved entry", async () => {
+				const { env, workspace } = makeWorkspace();
+				try {
+					const tool = createLensDiagnosticsTool(
+						{ readCache: vi.fn(() => undefined) } as never,
+						() => workspace,
+					);
+					const result = await run(
+						tool,
+						{ source: "session", mode: "delta", paths: ["src/a.ts"] },
+						workspace,
+					);
+					expect(text(result)).toContain(
+						"paths restricts this to cached findings",
+					);
+					expect(text(result)).not.toContain("path not found");
+				} finally {
+					env.cleanup();
+				}
+			});
+
+			it("resolves an `lsp_navigation` path once", async () => {
+				const { env, workspace, file } = makeWorkspace();
+				try {
+					const tool = createLspNavigationTool(() => false);
+					const result = await run(
+						tool,
+						{ operation: "hover", path: "src/a.ts" },
+						workspace,
+					);
+					const resolved = (JSON.parse(text(result)) as { filePath?: string })
+						.filePath;
+					expect(resolved).toBe(file);
+				} finally {
+					env.cleanup();
+				}
+			});
+		});
+	}
+});

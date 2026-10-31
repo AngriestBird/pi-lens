@@ -30,7 +30,7 @@ import { extensionsForLanguageToken } from "./language-registry.js";
 import { initLSPConfig } from "./lsp/config.js";
 import { getLSPService } from "./lsp/capabilities.js";
 import { acquireWarmWordIndex } from "./mcp/analyze.js";
-import { normalizeMapKey, toPosix } from "./path-utils.js";
+import { normalizeMapKey, relativeInside, toPosix } from "./path-utils.js";
 import { scanProjectDiagnostics } from "./project-diagnostics/scanner.js";
 import type { ProjectDiagnosticsSnapshot } from "./project-diagnostics/types.js";
 import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
@@ -383,10 +383,13 @@ export function symbolSearchFileMatchesLang(
 
 /** Same glob semantics as ast_grep_search's `paths`: a bare directory/file
  * entry scopes its whole subtree (via a `/**` suffix match), a full glob
- * pattern is matched as-is. Matched against the candidate's `cwd`-relative path
- * AND its absolute path: `paths` entries arrive host-resolved (#5038), so
- * `src`, `./src` and the absolute directory all scope the same files, while a
- * glob a caller wrote (`src/**\/*.ts`) still matches. */
+ * pattern is matched as-is. `paths` entries arrive host-resolved (#5038), so
+ * `src`, `./src` and the absolute directory scope the same files. An entry at
+ * or under `cwd` is matched as its `cwd`-relative spelling: the workspace
+ * prefix is a literal, never glob syntax, so a directory named `app[1]` or
+ * `app{a,b}` keeps its scope (#5047 F1), while the part the caller wrote after
+ * it (`src/**\/*.ts`) is still a pattern. Only an entry outside `cwd` is
+ * matched as an absolute pattern. */
 function fileMatchesPathGlobs(
 	file: string,
 	cwd: string,
@@ -396,11 +399,14 @@ function fileMatchesPathGlobs(
 	const abs = path.resolve(file).split(path.sep).join("/");
 	const options = { dot: true, nocase: process.platform === "win32" };
 	return globs.some((raw) => {
-		const pattern = toPosix(raw);
+		const within = path.isAbsolute(raw) ? relativeInside(cwd, raw) : undefined;
+		// `cwd` itself relativizes to "", which scopes the whole workspace.
+		const pattern =
+			within === undefined ? toPosix(raw) : toPosix(within) || "**";
 		const match = (candidate: string) =>
 			minimatch(candidate, pattern, options) ||
 			minimatch(candidate, `${pattern}/**`, options);
-		return match(rel) || (abs !== rel && match(abs));
+		return match(rel) || (within === undefined && abs !== rel && match(abs));
 	});
 }
 
@@ -408,7 +414,9 @@ function buildSymbolSearchFileFilter(
 	cwd: string,
 	options: SymbolSearchOptions,
 ): ((file: string) => boolean) | undefined {
-	const paths = options.paths?.filter((p) => p.trim().length > 0);
+	// The entries are reader-admitted (`readPathsArgument`, #5041): a blank one
+	// is refused there, so this seam keeps no copy of the rule (#5047 F5).
+	const paths = options.paths;
 	const lang = options.lang?.trim();
 	if (!paths?.length && !lang) return undefined;
 	return (file: string) => {

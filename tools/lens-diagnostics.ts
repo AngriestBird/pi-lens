@@ -674,10 +674,15 @@ export function createLensDiagnosticsTool(
 					details: { mode: legacyMode ?? "delta", pathsError: true },
 				};
 			}
+			// The `source=lsp` route gets the caller's own, reader-validated `paths`,
+			// not `pathsRead.entries`: that route resolves each entry itself
+			// (`expandPathsToFiles`), and `resolveHostToolPath` is not idempotent for
+			// an absolute entry holding a host-unicode space, so a second pass named a
+			// sibling directory that does not exist (#5047 F2). The cache routes below
+			// read `pathEntries`, resolved exactly once.
 			params = {
 				...params,
 				...(singlePath.path ? { path: singlePath.path } : {}),
-				paths: pathsRead.entries,
 			};
 			// #5041: a caller that named ONE file must not get the default scope's
 			// answer. On the cache routes the scope is built from entries, so the
