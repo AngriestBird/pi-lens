@@ -70,6 +70,16 @@ vi.mock("../../clients/quiet-window.js", () => ({
 
 const NEIGHBOR_CONTENT = "package main\n\nfunc main() {}\n";
 
+/** An error the server publishes for the neighbour after its cache was merged. */
+const LATE_ERROR = {
+	message: "late error",
+	severity: 1,
+	range: {
+		start: { line: 0, character: 0 },
+		end: { line: 0, character: 1 },
+	},
+};
+
 /**
  * A push-only language server that publishes ONLY when it decides to, like
  * jdtls holding a clean importer: `publish()` is the server's own decision (the
@@ -86,6 +96,8 @@ function makePushOnlyServer(options: { serverId?: string; filePath: string }) {
 		version: 0,
 		sentContent: undefined as string | undefined,
 		notifies: [] as string[],
+		/** How many times a caller read the cached diagnostics (the merge). */
+		reads: 0,
 		/** The push wait stays open until the case releases it, so only a
 		 *  command or the #707 racer can answer. */
 		holdWait: false,
@@ -129,7 +141,10 @@ function makePushOnlyServer(options: { serverId?: string; filePath: string }) {
 		// answer, without building the client's whole per-file map.
 		getDiagnosticsPublishedAt: () =>
 			state.publishedAt > 0 ? state.publishedAt : undefined,
-		getDiagnostics: () => state.diags,
+		getDiagnostics: () => {
+			state.reads += 1;
+			return state.diags;
+		},
 		getDiagnosticBinding: () => undefined,
 		getAllDiagnostics: () =>
 			state.publishedAt > 0
@@ -171,17 +186,43 @@ function makePushOnlyServer(options: { serverId?: string; filePath: string }) {
 	};
 }
 
+/**
+ * Arms `hook.current` to publish `diags` once, on the first root resolution
+ * AFTER the touch read the cached diagnostics: the merged array is then the
+ * pre-publication one and the publication lands in the touch's later await.
+ */
+function publishAfterMerge(
+	hook: { current?: () => void },
+	server: ReturnType<typeof makePushOnlyServer>,
+	diags: unknown[],
+	publishedAt: number,
+): void {
+	const readsAtArm = server.state.reads;
+	hook.current = () => {
+		if (server.state.reads === readsAtArm) return;
+		hook.current = undefined;
+		server.publish(diags, publishedAt);
+	};
+}
+
 function serverConfig(
 	serverId: string,
 	root: string,
 	extension: string,
+	onResolveRoot?: { current?: () => void },
 ): Record<string, unknown> {
 	return {
 		id: serverId,
 		name: serverId,
 		extensions: [extension],
 		idleEviction: "resident",
-		root: async () => root,
+		root: async () => {
+			// The touch resolves each server's root AFTER it merged the cache (the
+			// readiness mark at the end of `touchFile`), so this is the production
+			// await a server's late publication can land in.
+			onResolveRoot?.current?.();
+			return root;
+		},
 		spawn: vi.fn(async () => ({
 			process: {
 				killed: false,
@@ -239,6 +280,7 @@ async function setupServer(options: {
 	extension?: string;
 	publishPreEdit?: boolean;
 }) {
+	const onResolveRoot: { current?: () => void } = {};
 	const env = setupTestEnvironment(options.prefix);
 	const serverId = options.serverId ?? "gopls";
 	const importer = path.join(env.tmpDir, "C.go");
@@ -251,13 +293,18 @@ async function setupServer(options: {
 	}
 	mocks.createLSPClient.mockResolvedValue(server.client);
 	mocks.getServersForFileWithConfig.mockReturnValue([
-		serverConfig(serverId, env.tmpDir, options.extension ?? ".go"),
+		serverConfig(
+			serverId,
+			env.tmpDir,
+			options.extension ?? ".go",
+			onResolveRoot,
+		),
 	]);
 	const { LSPService } = await import("../../clients/lsp/index.js");
 	const service = new LSPService();
 	// The first touch sends the bytes; a later touch of the same content skips.
 	await service.touchFile(importer, NEIGHBOR_CONTENT, TOUCH_OPTIONS);
-	return { env, serverId, importer, server, service };
+	return { env, serverId, importer, server, service, onResolveRoot };
 }
 
 beforeEach(async () => {
@@ -402,6 +449,94 @@ describe("touchFile reports the cached answer it reused (#5040)", () => {
 		}
 	});
 
+	// Recurrence (Greptile PRRT_kwDORt8rec6yL28Z on #5046): the merge copies the
+	// pre-edit `[]`, then the touch awaits the readiness key, and an ERROR the
+	// server publishes in that await moved the per-path version past the
+	// pre-notify baseline. The version gate then read the touch as having its own
+	// answer, so the stale `[]` returned with no `reusedAnswer` and the cascade
+	// took it as a confirmed clean.
+	it("names the answer it merged when the server publishes after the merge, before the result is built", async () => {
+		const { env, importer, server, service, onResolveRoot } = await setupServer(
+			{ prefix: "cascade-reused-answer-late-" },
+		);
+		try {
+			const preEditPublishedAt = server.state.publishedAt;
+			publishAfterMerge(onResolveRoot, server, [LATE_ERROR], Date.now());
+
+			const result = await service.touchFile(
+				importer,
+				NEIGHBOR_CONTENT,
+				TOUCH_OPTIONS,
+			);
+
+			// The array in the result is the one merged BEFORE the publication.
+			expect(result?.diags).toEqual([]);
+			expect(result?.reusedAnswer).toEqual({
+				serverId: "gopls",
+				publishedAt: preEditPublishedAt,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence: a file served by two primaries (two servers enabled for one
+	// extension) reports the OLDEST cached answer, because a caller's verdict is
+	// only as fresh as the stalest contributor. Newest-wins would read a file
+	// whose other server never re-checked it as post-edit. Only a
+	// `clientScope: "all"` touch spawns both: the cascade's own touch is
+	// primary-scoped and spawns one, so this pins the touch contract, not a
+	// cascade path.
+	it("reports the oldest stamp when two primaries both reused a cached answer", async () => {
+		const env = setupTestEnvironment("cascade-reused-answer-two-primaries-");
+		const importer = path.join(env.tmpDir, "C.go");
+		fs.writeFileSync(importer, NEIGHBOR_CONTENT);
+		try {
+			const newer = makePushOnlyServer({
+				serverId: "gopls-newer",
+				filePath: importer,
+			});
+			const older = makePushOnlyServer({
+				serverId: "gopls",
+				filePath: importer,
+			});
+			newer.publish([], Date.now() - 10_000);
+			older.publish([], Date.now() - 60_000);
+			const byId: Record<string, unknown> = {
+				"gopls-newer": newer.client,
+				gopls: older.client,
+			};
+			mocks.createLSPClient.mockImplementation(
+				async (options: { serverId: string }) => byId[options.serverId],
+			);
+			// The NEWER server is listed first, so first-wins and newest-wins both
+			// return it.
+			mocks.getServersForFileWithConfig.mockReturnValue([
+				serverConfig("gopls-newer", env.tmpDir, ".go"),
+				serverConfig("gopls", env.tmpDir, ".go"),
+			]);
+			const { LSPService } = await import("../../clients/lsp/index.js");
+			const service = new LSPService();
+			await service.touchFile(importer, NEIGHBOR_CONTENT, {
+				...TOUCH_OPTIONS,
+				clientScope: "all",
+			});
+
+			const result = await service.touchFile(importer, NEIGHBOR_CONTENT, {
+				...TOUCH_OPTIONS,
+				clientScope: "all",
+			});
+
+			expect(result?.reusedAnswer).toEqual({
+				serverId: "gopls",
+				publishedAt: older.state.publishedAt,
+			});
+			expect(older.state.publishedAt).toBeLessThan(newer.state.publishedAt);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// The documented fall-through: a client that cannot date its cached answer
 	// keeps today's verdict, exactly as a missing `binding` reads "unknown"
 	// rather than demoted.
@@ -433,7 +568,14 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 	 * importer again. The only difference between the cases is whether the server
 	 * answers inside the cascade's touch.
 	 */
-	async function runCascade(options: { publishInsideTouch: boolean }) {
+	async function runCascade(options: {
+		publishInsideTouch: boolean;
+		/** The server publishes after the cascade started and before its touch
+		 *  of the neighbour (a stamp after the edit, nothing inside the touch). */
+		publishBeforeTouch?: boolean;
+		/** The server publishes an ERROR after the touch merged the cache. */
+		publishErrorAfterMerge?: boolean;
+	}) {
 		const env = setupTestEnvironment("cascade-pre-edit-answer-");
 		const exporter = path.join(env.tmpDir, "B.go");
 		const importer = path.join(env.tmpDir, "C.go");
@@ -446,8 +588,9 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 		// edit, and then never republishes for it on its own.
 		server.publish([], Date.now() - 60_000);
 		mocks.createLSPClient.mockResolvedValue(server.client);
+		const onResolveRoot: { current?: () => void } = {};
 		mocks.getServersForFileWithConfig.mockReturnValue([
-			serverConfig("gopls", env.tmpDir, ".go"),
+			serverConfig("gopls", env.tmpDir, ".go", onResolveRoot),
 		]);
 
 		const { LSPService } = await import("../../clients/lsp/index.js");
@@ -460,6 +603,24 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 		// server answers.
 		if (options.publishInsideTouch) {
 			server.state.publishOnWait = true;
+		}
+		if (options.publishBeforeTouch) {
+			// The graph build runs after `cascadeStart` and before the neighbour
+			// touch, so a stamp from here is a post-edit publication the touch
+			// finds already cached. 1 s ahead keeps it past `cascadeStart` on any
+			// clock tick.
+			mocks.buildOrUpdateGraph.mockImplementationOnce(async () => {
+				server.publish([], Date.now() + 1_000);
+				return emptyGraph();
+			});
+		}
+		if (options.publishErrorAfterMerge) {
+			publishAfterMerge(
+				onResolveRoot,
+				server,
+				[LATE_ERROR],
+				Date.now() + 1_000,
+			);
 		}
 		const { computeCascadeForFile } =
 			await import("../../clients/dispatch/integration.js");
@@ -513,6 +674,54 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 			expect(run.skipReason).toBe("clean");
 			expect(run.unconfirmed).toBeUndefined();
 			expect(run.observedNeighborPaths).toEqual([importer]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// State-table row 4: push-only, notify SKIPPED, but the entry the touch reuses
+	// was published AFTER the edit (jdtls republishing one importer of an edited
+	// exporter, #5035's capture). `reusedAnswer` IS set here, which is what makes
+	// this a different case from the one above, where the version gate drops it.
+	// Recurrence it prevents: an age gate that drops the stamp comparison turns
+	// every republished dependent into an unconfirmed line and loses its error.
+	it("still reads a neighbour clean when the server republished it after the edit", async () => {
+		const { env, run, importer, server } = await runCascade({
+			publishInsideTouch: false,
+			publishBeforeTouch: true,
+		});
+		try {
+			// Nothing was pushed or awaited inside the touch: the reused entry is
+			// the one published after `cascadeStart`.
+			expect(server.state.notifies).toEqual(["open"]);
+			expect(run.skipReason).toBe("clean");
+			expect(run.unconfirmed).toBeUndefined();
+			expect(run.observedNeighborPaths).toEqual([importer]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence (Greptile PRRT_kwDORt8rec6yL28Z on #5046): an error published
+	// between the touch's cache merge and its result assembly read as "the touch
+	// has its own answer", so the stale `[]` was a confirmed clean and the new
+	// error was lost.
+	it("reads a neighbour unconfirmed when its error lands after the touch merged the cache", async () => {
+		const { env, run, importer } = await runCascade({
+			publishInsideTouch: false,
+			publishErrorAfterMerge: true,
+		});
+		try {
+			expect(run.skipReason).toBe("indeterminate");
+			expect(run.unconfirmed?.servers).toEqual([
+				{
+					serverId: "gopls",
+					reason: "pre-edit-answer",
+					waitMs: 0,
+					paths: [importer],
+				},
+			]);
+			expect(run.observedNeighborPaths).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}

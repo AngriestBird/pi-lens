@@ -1650,8 +1650,21 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 				},
 			} as any);
 
+			logCascadeMock.mockClear();
 			const content = await turnEndOf(runtime, cacheManager, env.tmpDir);
 
+			// Recurrence: bucketing by cause made `servers` count cause-groups, so
+			// one server holding both shapes logged `servers: 2` and a monitor
+			// comparing it with `paths` read two populations as one.
+			const rendered = logCascadeMock.mock.calls
+				.map((args) => args[0])
+				.filter((e) => e?.phase === "cascade_unconfirmed_rendered");
+			expect(rendered).toHaveLength(1);
+			expect(rendered[0].metadata).toMatchObject({
+				servers: 1,
+				groups: 2,
+				paths: 2,
+			});
 			expect(content).toContain(
 				"Cascade asked gopls about 1 dependent(s) of a.ts, but its cached answer predates this edit; a clean cascade result does not cover them.",
 			);

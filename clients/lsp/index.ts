@@ -6474,6 +6474,24 @@ export class LSPService {
 			// from tsserver (clean = [], dirty = real findings that a silentOnClean
 			// server had computed but never published). Otherwise merge the push
 			// diagnostics from the client cache as always.
+			// #5040: the version and publish stamp of each contributor, read in the
+			// SAME tick as the cache snapshot below. `reusedAnswer` describes what
+			// `collected` holds, so it must be decided from these, never from a read
+			// after the awaits that follow (the readiness key, the auxiliary skip
+			// scan): a server that publishes in one of those moves its version past
+			// the baseline while `collected` still carries the older array, and the
+			// later read would call that array the touch's own answer.
+			const answerAtMerge = options.collectDiagnostics
+				? new Map(
+						spawned.map((entry) => [
+							entry.client,
+							{
+								version: readPathVersion(entry.client),
+								publishedAt: entry.client.getDiagnosticsPublishedAt?.(filePath),
+							},
+						]),
+					)
+				: undefined;
 			let collected = options.collectDiagnostics
 				? tsserverSyncConfirmed !== undefined
 					? mergeLspDiagnostics(
@@ -7033,24 +7051,28 @@ export class LSPService {
 			// (`syncConfirmed`, a command answer rather than a cached observation) is the
 			// touch's OWN answer and is never reported here. Auxiliaries are excluded:
 			// their findings are file-local, so an edit elsewhere cannot invalidate them
-			// (#1720), and the coverage gap already speaks for their silence.
+			// (#1720), and the coverage gap already speaks for their silence. That
+			// exclusion is defensive and unreachable from the cascade, the only reader:
+			// its touch is primary-scoped, so no auxiliary is ever spawned on it, and
+			// no test pins the line. Likewise the oldest-wins pick below only has two
+			// candidates under a `clientScope: "all"` touch, which no reader makes.
 			if (collected !== undefined && !syncConfirmed) {
 				let reusedAnswer: TouchFileResult["reusedAnswer"];
 				for (const entry of spawned) {
 					if (isAuxiliary(entry.info)) continue;
 					if (notifyWriteTimedOutServerIds.includes(entry.info.id)) continue;
 					// The pre-notify per-path version this touch already read: a
-					// publication past it landed inside the touch.
+					// publication past it, at the moment `collected` was merged, landed
+					// inside the touch and is in `collected`.
 					const versionBeforeTouch = diagnosticBaselines.get(entry.client);
-					const currentPathVersion = readPathVersion(entry.client);
+					const merged = answerAtMerge?.get(entry.client);
 					if (
 						versionBeforeTouch !== undefined &&
-						currentPathVersion !== undefined &&
-						currentPathVersion > versionBeforeTouch
+						merged?.version !== undefined &&
+						merged.version > versionBeforeTouch
 					)
 						continue;
-					const publishedAt =
-						entry.client.getDiagnosticsPublishedAt?.(filePath);
+					const publishedAt = merged?.publishedAt;
 					if (publishedAt === undefined) continue;
 					if (
 						reusedAnswer === undefined ||

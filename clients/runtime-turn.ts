@@ -2948,7 +2948,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				phase: "cascade_unconfirmed_rendered",
 				filePath: cascadeLogFilePath,
 				metadata: {
-					servers: byServer.size,
+					// `servers` stays the distinct server count it was before the
+					// buckets were keyed by cause; `groups` counts the cause buckets.
+					servers: new Set([...byServer.values()].map((b) => b.serverId)).size,
+					groups: byServer.size,
 					paths: pathCount,
 					runs: unconfirmedRuns.length,
 				},

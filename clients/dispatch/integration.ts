@@ -829,15 +829,11 @@ function readInconclusiveAttribution(rawDiags: unknown): {
 	};
 }
 
-function isConfirmedTouch(
-	rawDiags: TouchFileResult,
-	cascadeStart: number,
-): boolean {
+function isConfirmedTouch(rawDiags: TouchFileResult): boolean {
 	return (
 		!readInconclusive(rawDiags) &&
 		touchCoverageGap(rawDiags).length === 0 &&
-		readBoundToCurrentDisk(rawDiags) !== false &&
-		!isPreEditAnswer(rawDiags, cascadeStart)
+		readBoundToCurrentDisk(rawDiags) !== false
 	);
 }
 
@@ -2599,10 +2595,10 @@ export async function computeCascadeForFile(
 					// are folded into `isConfirmedTouch` so no gate below can miss one. A
 					// confirmed result reconciles and counts as this run's observation of
 					// the neighbour (#4487); an unconfirmed one does neither.
-					// #5040: the age axis joined the two disqualifiers above, and it
-					// applies to the CLEAN claim and to the findings alike — an answer
-					// computed before this run's edit describes neither.
-					const confirmed = isConfirmedTouch(rawDiags, cascadeStart);
+					// #5040: the age axis is NOT folded in: it is refused above, in the
+					// branch that also records the ledger row, because it applies to the
+					// CLEAN claim and to the findings alike and returns before this read.
+					const confirmed = isConfirmedTouch(rawDiags);
 					const bindingRejected = readBoundToCurrentDisk(rawDiags) === false;
 					const inconclusive = readInconclusive(rawDiags);
 					// #1470/#1493: the third, independent reason a touch is unconfirmed — an
