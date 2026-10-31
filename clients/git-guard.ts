@@ -2556,12 +2556,33 @@ export function evaluateGitGuard(
 		const absorbed = absorbSettledRunnerBlockers(runtime, cwd);
 		// The inline path refreshes the persisted record beside the latch at
 		// `tool_result`; a recording at the gate has no turn end to do it, and a
-		// session boundary reads the record, not the latch (r1 M3).
-		if (absorbed.recorded > 0) syncGitGuardRecord(runtime, cacheManager, cwd);
+		// session boundary reads the record, not the latch (r1 M3). #5048: both
+		// resyncs persist only the committing session's records into this cwd's
+		// cache. An answer absorbed for another session joins the map (and the
+		// latch) for its owner, whose own write or turn end persists it.
+		if (absorbed.recorded > 0) {
+			syncGitGuardRecord(
+				runtime,
+				cacheManager,
+				cwd,
+				undefined,
+				undefined,
+				undefined,
+				sessionId,
+			);
+		}
 		// #4484 r2: a retire speaks for its file, as a clean write does, so the
 		// persisted record drops that file's section.
 		for (const filePath of absorbed.retiredFiles) {
-			syncGitGuardRecord(runtime, cacheManager, cwd, filePath);
+			syncGitGuardRecord(
+				runtime,
+				cacheManager,
+				cwd,
+				filePath,
+				undefined,
+				undefined,
+				sessionId,
+			);
 		}
 		// #5020: a row naming a file that was deleted since the record was made
 		// has nothing left to fix, and no dispatch will ever re-take it. The gate

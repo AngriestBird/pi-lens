@@ -707,3 +707,133 @@ describe("deferred blocker recording (#3814)", () => {
 		}
 	});
 });
+
+describe("#5048 a secondary's commit gate persists only its own records", () => {
+	const PRIMARY = "pi-lens-5048-primary";
+	const SECONDARY = "pi-lens-5048-secondary";
+	const COMMIT = { toolName: "bash", input: { command: 'git commit -m "x"' } };
+
+	/** Two checkouts: the primary's root A and the secondary's cwd B. The
+	 * `.git/HEAD` marker is what `resolveGitCheckout` reads, so each commit is
+	 * scoped to its own tree (#4941). */
+	function twoRoots(tmpDir: string) {
+		const projA = path.join(tmpDir, "projA");
+		const projB = path.join(tmpDir, "projB");
+		for (const dir of [projA, projB]) {
+			fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, ".git", "HEAD"),
+				"ref: refs/heads/main\n",
+			);
+		}
+		const runtime = new RuntimeCoordinator();
+		runtime.setTelemetryIdentity({ sessionId: PRIMARY });
+		runtime.projectRoot = projA;
+		return { projA, projB, runtime, cacheManager: new CacheManager(false) };
+	}
+
+	async function settledFor(
+		filePath: string,
+		cwd: string,
+		diagnostics: Diagnostic[],
+	): Promise<void> {
+		deferRunnerFindings({
+			filePath,
+			cwd,
+			projectRoot: cwd,
+			runnerId: RUNNER_ID,
+			markedAtMs: Date.now(),
+			promise: Promise.resolve({
+				status: "succeeded",
+				diagnostics,
+				semantic: diagnostics.length > 0 ? "blocking" : "none",
+			} as RunnerResult),
+			sessionId: PRIMARY,
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+
+	// Recurrence it prevents (#5048, PR #5033 verify r3 V2): the gate's
+	// absorb-sync passed no session, so a secondary's commit in project B wrote
+	// the primary's settled blocker into B's cache under the primary's id, and
+	// every later commit of the secondary in B was refused `session_mismatch`.
+	it("records the primary's settled blocker without writing it into the secondary's cache", async () => {
+		const env = setupTestEnvironment("pi-lens-5048-absorb-");
+		try {
+			const { projA, projB, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			fs.writeFileSync(app, "alpha();\n");
+			await settledFor(app, projA, [blocking(app)]);
+
+			const first = evaluateGitGuard(
+				runtime,
+				cacheManager,
+				projB,
+				"pi",
+				SECONDARY,
+				COMMIT,
+			);
+			// The answer joined the map for its owner, and B's cache holds none of it.
+			expect(runtime.inlineBlockerOwner(app)).toBe(PRIMARY);
+			expect(cacheManager.inspectCache("turn-end-findings", projB)).toBe(
+				"missing",
+			);
+			expect(first).toEqual({ block: false });
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT),
+			).toEqual({ block: false });
+			// The primary's commit in its own tree is still refused on its blocker.
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", undefined, COMMIT)
+					.block,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (#5048, the sibling sync in the same block): a
+	// settled clean run retired one of the primary's blockers at a secondary's
+	// commit, and the resync for that file, with no session, wrote the primary's
+	// remaining blocker into B's cache under the primary's id.
+	it("retires the primary's settled-clean blocker without writing its other blockers into the secondary's cache", async () => {
+		const env = setupTestEnvironment("pi-lens-5048-retire-");
+		try {
+			const { projA, projB, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			const other = path.join(projA, "other.ts");
+			for (const file of [app, other]) {
+				fs.writeFileSync(file, "alpha();\n");
+				const bytes = fs.readFileSync(file);
+				runtime.recordInlineBlockers(
+					file,
+					"🔴 STOP",
+					runtime.nextWriteIndex(),
+					undefined,
+					[1],
+					{
+						size: bytes.byteLength,
+						sha256: createHash("sha256").update(bytes).digest("hex"),
+					},
+					[{ ...blocking(file), runnerId: RUNNER_ID }],
+					undefined,
+					1_000,
+				);
+			}
+			await settledFor(app, projA, []);
+
+			evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT);
+			// The clean run retired app.ts for its owner; other.ts stays the primary's.
+			expect(runtime.hasInlineBlocker(app)).toBe(false);
+			expect(runtime.inlineBlockerOwner(other)).toBe(PRIMARY);
+			expect(cacheManager.inspectCache("turn-end-findings", projB)).toBe(
+				"missing",
+			);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT),
+			).toEqual({ block: false });
+		} finally {
+			env.cleanup();
+		}
+	});
+});
