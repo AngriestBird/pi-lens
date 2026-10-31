@@ -97,6 +97,7 @@ import {
 	type BoundToCurrentDisk,
 	type TouchFileResult,
 	bindingStateLabel,
+	readBoundToCurrentDisk,
 	touchCoverageGap,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
@@ -747,26 +748,6 @@ function cascadeReconcilableLspErrors(
 			.slice(0, MAX_PER_FILE),
 		neighborPath,
 	);
-}
-
-/**
- * Read the content `binding` verdict off a diagnostics result (#1095).
- *
- * `touchFile` carries `binding` as an EXPLICIT enumerable field on its
- * `TouchFileResult` wrapper (#1179), so it survives any copy of `.diags`.
- * `getAllDiagnostics` still attaches `binding` as a lazy, disk-verifying
- * NON-enumerable getter on each Map entry — reading it directly off the
- * producer's own entry (never a spread/clone, which drops non-enumerables)
- * triggers the disk verify exactly once (memoized per entry). Accepts either
- * shape; returns `undefined` when no binding was attached at all (a partially-
- * mocked client, a non-collecting touch) — indistinguishable from "unknown" at
- * every call site, which is the intended pre-#1095 fall-through.
- */
-function readBoundToCurrentDisk(
-	rawDiags: unknown,
-): BoundToCurrentDisk | undefined {
-	return (rawDiags as { binding?: { boundToCurrentDisk?: BoundToCurrentDisk } })
-		?.binding?.boundToCurrentDisk;
 }
 
 /**
@@ -2641,7 +2622,16 @@ export async function computeCascadeForFile(
 					// stay on the `rawDiags` wrapper and are unaffected (the shape-5 fix).
 					// #3157 site 2 of 4: the fresh in-lane touch. `content` is the copy
 					// this touch was computed against — no second read.
-					const diags = cascadeDisplay(rawDiags.diags, neighborPath, content);
+					// #5051: bound-false answers are not displayed either. Rows computed
+					// for bytes the neighbour no longer holds are not this edit's
+					// cascade error; the runner withholds the same rows (#5017 L, one
+					// reader: `readBoundToCurrentDisk`), as the primary-unavailable
+					// branch above does (#5034 r7). The neighbour stays in the result,
+					// flagged `inconclusive` below, so the run owes it its line and
+					// never reads clean.
+					const diags = bindingRejected
+						? []
+						: cascadeDisplay(rawDiags.diags, neighborPath, content);
 					const durationMs = Date.now() - neighborStart;
 
 					// #1899: the A5 same-write cache write stood here.
@@ -2706,7 +2696,9 @@ export async function computeCascadeForFile(
 						reason: neighborReason(importerSet, callerSet, neighborPath),
 						diagnostics: diags,
 						lspTouched: true as const,
-						...(inconclusive && { inconclusive: true as const }),
+						...((inconclusive || bindingRejected) && {
+							inconclusive: true as const,
+						}),
 						// #1459: carry the coverage gap to the agent-facing surface. A
 						// scanner whose breaker was open, whose resync the fan-out gate
 						// deferred, or whom the aux grace timer cut off never looked at this
