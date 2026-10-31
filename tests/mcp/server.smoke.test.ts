@@ -1861,6 +1861,10 @@ describe("non-pi workspace trust (#4300)", () => {
 				`#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(answer)} "$@"\n`,
 				{ mode: 0o755 },
 			);
+			fs.writeFileSync(
+				path.join(bin, "jedi-language-server.cmd"),
+				`@"${process.execPath}" "${answer}" %*\r\n`,
+			);
 			const fail = path.join(env.tmpDir, "fail.mjs");
 			fs.writeFileSync(
 				fail,
