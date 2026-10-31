@@ -4295,6 +4295,115 @@ describe("body caps (#5003)", () => {
 	});
 });
 
+describe("table rows split the way GitHub splits them (#5070)", () => {
+	// Recurrence: PR #5070 merged with 12 of the 15 mutation rows holding an
+	// unescaped pipe inside a backticked vitest summary (`1 failed | 217 passed`).
+	// GitHub splits at every unescaped pipe, code span or not, so the Red cell
+	// rendered as a stray "`1 failed" and lost the rest, and the lint passed it
+	// because five split("|") sites never counted cells. The fixture is the real
+	// table, copied from that body.
+	const REAL_TABLE = readFileSync(
+		resolve(
+			repositoryRoot,
+			"tests/fixtures/pr-body-compliance/5070.mutation-table.txt",
+		),
+		"utf8",
+	).trimEnd();
+	const BROKEN_ROWS = REAL_TABLE.split("\n").filter((row) =>
+		/\d failed \| \d+ passed/.test(row),
+	);
+	const shapeErrors = (table: string) =>
+		lintPrBody(
+			["## Summary", "Mutation rows.", "", "### Hand-mutation", table].join(
+				"\n",
+			),
+			{ workingTree: true },
+		).errors.filter((error) => error.startsWith("PR body table row has"));
+	// Header-cell and body-cell counts, named in the message, so a wrong count
+	// (not just any refusal) is what the test reads.
+	const SHAPE_CASES = [
+		[
+			"a pipe in a code span",
+			"| a | b |\n| --- | --- |\n| `x | y` | z |",
+			1,
+			"3 cells but its header has 2",
+		],
+		[
+			"a short row",
+			"| a | b |\n| --- | --- |\n| only |",
+			1,
+			"1 cell but its header has 2",
+		],
+		[
+			"a long row",
+			"| a | b |\n| --- | --- |\n| 1 | 2 | 3 |",
+			1,
+			"3 cells but its header has 2",
+		],
+		[
+			"an escaped pipe in a code span",
+			"| a | b |\n| --- | --- |\n| `x \\| y` | z |",
+			0,
+			"",
+		],
+		[
+			"an escaped pipe in prose",
+			"| a | b |\n| --- | --- |\n| x \\|\\| y | z |",
+			0,
+			"",
+		],
+		["an empty cell", "| a | b |\n| --- | --- |\n| | z |", 0, ""],
+		[
+			"a table in a fence",
+			"```text\n| a | b |\n| --- | --- |\n| 1 |\n```",
+			0,
+			"",
+		],
+	] as const;
+
+	it("fixture holds the 12 broken rows of the merged #5070 table", () => {
+		expect(BROKEN_ROWS).toHaveLength(12);
+	});
+
+	it("refuses every broken row of the real #5070 mutation table", () => {
+		const errors = shapeErrors(REAL_TABLE);
+		expect(errors).toHaveLength(12);
+		expect(errors[0]).toContain("4 cells but its header has 3");
+	});
+
+	it("admits the same table with the pipes escaped", () => {
+		const fixed = REAL_TABLE.replaceAll(
+			/(\d failed) \| (\d+ passed)/g,
+			"$1 \\| $2",
+		);
+		expect(shapeErrors(fixed)).toEqual([]);
+	});
+
+	it.each(SHAPE_CASES)("%s", (_name, table, count, message) => {
+		const errors = shapeErrors(table);
+		expect(errors).toHaveLength(count);
+		if (count) expect(errors[0]).toContain(message);
+	});
+
+	// Recurrence: the test-reference reader located a code span's column by
+	// counting raw pipes before it, so an escaped pipe in an earlier cell moved
+	// a `tests/...` span out of the Test column.
+	it("keeps the Test column when an earlier cell holds an escaped pipe", () => {
+		const table = [
+			"| Claim | Test |",
+			"| --- | --- |",
+			"| `a \\| b` | `names a test that does not exist anywhere` |",
+		].join("\n");
+		const errors = lintPrBody(
+			["## Summary", "x", "", "### Tests", table].join("\n"),
+			{ workingTree: true },
+		).errors.filter((error) =>
+			error.includes("names a test that does not exist"),
+		);
+		expect(errors.length).toBeGreaterThan(0);
+	});
+});
+
 describe("head-tree citations and test references", () => {
 	const headFiles = new Map([
 		[

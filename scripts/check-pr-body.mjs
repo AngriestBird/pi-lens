@@ -18,6 +18,7 @@ import {
 	markdownHeadings,
 	markdownTokens,
 } from "./lib/markdown-lexer.mjs";
+import { splitMarkdownRow } from "./lib/markdown-cell.mjs";
 import { githubGet, parseOwnerRepoFromGitRemote } from "./lib/github-rest.mjs";
 import {
 	changedHookAnchors,
@@ -1611,14 +1612,13 @@ function lintTestReferences(body, options = {}) {
 	};
 	const lines = visibleBody.split(/\r?\n/);
 	let tableHeaders = null;
-	const tableCells = (line) => line.split("|").map((cell) => cell.trim());
 	const isValidSeparator = (line, headers) => {
 		if (!headers) return false;
 		if (!/^\s*\|.*\|\s*$/.test(line)) return false;
-		const cells = tableCells(line);
+		const cells = splitMarkdownRow(line);
 		return (
 			cells.length === headers.length &&
-			cells.slice(1, -1).every((cell) => /^:?-{3,}:?$/.test(cell))
+			cells.every((cell) => /^:?-{3,}:?$/.test(cell))
 		);
 	};
 	for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
@@ -1629,30 +1629,33 @@ function lintTestReferences(body, options = {}) {
 		if (
 			table &&
 			lineIndex + 1 < lines.length &&
-			isValidSeparator(lines[lineIndex + 1], tableCells(line))
+			isValidSeparator(lines[lineIndex + 1], splitMarkdownRow(line))
 		) {
-			tableHeaders = tableCells(line);
+			tableHeaders = splitMarkdownRow(line);
 			continue;
 		}
 		const inTable = table && tableHeaders !== null;
 		if (inTable && isValidSeparator(line, tableHeaders)) continue;
-		for (const match of line.matchAll(/`([^`]+)`/g)) {
-			const cellIndex = inTable
-				? line.slice(0, match.index).split("|").length - 1
-				: -1;
-			const inTestColumn = Boolean(
-				// Word-boundary match (#3013): a bare "id" substring qualified
-				// every "Evidence" column as a test column, so claim-matrix
-				// evidence cells holding commands and code read as missing test
-				// references. A column names tests only when it says so as a
-				// word ("Test", "Test id", "Case").
-				inTable &&
-				/\b(?:test|probe|case|witness|id)\b/i.test(
-					tableHeaders[cellIndex] ?? "",
-				),
-			);
-			addToken(match[1], inTestColumn || (table && !inTable), inTestColumn);
-		}
+		// A table row is read cell by cell, the way GitHub splits it: a code
+		// span cannot hold an unescaped pipe, so it never spans two cells.
+		const segments = inTable
+			? splitMarkdownRow(line).map((cell, index) => [cell, index])
+			: [[line, -1]];
+		for (const [segment, cellIndex] of segments)
+			for (const match of segment.matchAll(/`([^`]+)`/g)) {
+				const inTestColumn = Boolean(
+					// Word-boundary match (#3013): a bare "id" substring qualified
+					// every "Evidence" column as a test column, so claim-matrix
+					// evidence cells holding commands and code read as missing test
+					// references. A column names tests only when it says so as a
+					// word ("Test", "Test id", "Case").
+					inTable &&
+					/\b(?:test|probe|case|witness|id)\b/i.test(
+						tableHeaders[cellIndex] ?? "",
+					),
+				);
+				addToken(match[1], inTestColumn || (table && !inTable), inTestColumn);
+			}
 		for (const match of line.matchAll(/\bit\(\s*(["'])(.*?)\1\s*\)/g))
 			if (isBullet || !inTable) addToken(match[0]);
 	}
@@ -3149,6 +3152,9 @@ function isPlaceholderAnswer(value) {
 	return /^unknown\b/.test(text) || /^(?:n\/a|tbd|\?+)$/.test(text);
 }
 
+const TABLE_SHAPE_MESSAGE = (expected, actual, row) =>
+	`PR body table row has ${actual} cell${actual === 1 ? "" : "s"} but its header has ${expected}: ${row.trim().slice(0, 80)}. GitHub splits a row at every pipe that is not written \\| (a backticked pipe too), so the row renders wrong. Escape the pipe as \\| or reword the cell.`;
+
 const BEHAVIOR_EQUIVALENCE_MESSAGE =
 	'PR body "## Behavior equivalence" must contain a markdown table with Site, Before, and After columns and at least one non-placeholder data row.';
 
@@ -3161,13 +3167,39 @@ function isBehaviorEquivalencePlaceholder(value) {
 	);
 }
 
-function behaviorTableCells(line) {
-	if (!/^\s*\|.*\|\s*$/.test(line)) return null;
-	return line
-		.trim()
-		.slice(1, -1)
-		.split("|")
-		.map((cell) => cell.trim());
+// A pipe-table row's cells, or null when the line is not a bordered table row.
+function tableRowCells(line) {
+	return /^\s*\|.*\|\s*$/.test(line) ? splitMarkdownRow(line) : null;
+}
+
+// A row whose cell count differs from its header's renders wrong on GitHub: an
+// unescaped pipe inside a backticked cell splits it, so the Red cell of a
+// mutation row showed a stray "`1 failed" and lost the rest (#5070 merged with
+// 12 of 15 such rows, and no lint looked). A short row is padded and a long
+// one truncated by the renderer, so either is a cell the reader never sees.
+function lintTableShape(body) {
+	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
+	const errors = [];
+	for (let index = 0; index + 1 < lines.length; index += 1) {
+		const headers = tableRowCells(lines[index]);
+		const separator = tableRowCells(lines[index + 1]);
+		if (
+			!headers ||
+			!separator ||
+			separator.length !== headers.length ||
+			!separator.every((cell) => /^:?-{3,}:?$/.test(cell))
+		)
+			continue;
+		for (let rowIndex = index + 2; rowIndex < lines.length; rowIndex += 1) {
+			const row = tableRowCells(lines[rowIndex]);
+			if (!row) break;
+			if (row.length !== headers.length)
+				errors.push(
+					TABLE_SHAPE_MESSAGE(headers.length, row.length, lines[rowIndex]),
+				);
+		}
+	}
+	return errors;
 }
 
 function lintBehaviorEquivalence(body, headings, title) {
@@ -3186,7 +3218,7 @@ function lintBehaviorEquivalence(body, headings, title) {
 		nextHeading?.index ?? lines.length,
 	);
 	for (let index = 0; index + 1 < tableLines.length; index += 1) {
-		const headers = behaviorTableCells(tableLines[index]);
+		const headers = tableRowCells(tableLines[index]);
 		if (!headers) continue;
 		const normalizedHeaders = headers.map((header) => header.toLowerCase());
 		const site = normalizedHeaders.indexOf("site");
@@ -3207,7 +3239,7 @@ function lintBehaviorEquivalence(body, headings, title) {
 			rowIndex < tableLines.length;
 			rowIndex += 1
 		) {
-			const row = behaviorTableCells(tableLines[rowIndex]);
+			const row = tableRowCells(tableLines[rowIndex]);
 			if (!row) break;
 			if (row.length < headers.length) continue;
 			if (
@@ -3994,11 +4026,7 @@ function controlsNameFile(rows, file) {
 	return rows.some((row) => {
 		if (!namesFile(row, file)) return false;
 		if (/^\s*\|/.test(row)) {
-			const cells = row
-				.split("|")
-				.slice(1, -1)
-				.map((cell) => cell.trim())
-				.filter(Boolean);
+			const cells = splitMarkdownRow(row).filter(Boolean);
 			return cells.length >= 2 && wordCount(cells.join(" ")) >= 2;
 		}
 		return /(?:—|:|because)\s+[A-Za-z0-9].+/.test(row);
@@ -4097,10 +4125,7 @@ function mutationTableRows(visibleRows, headingByLine) {
 		if (!mutationSection || !row.trim()) continue;
 		if (/^\s*\|/.test(row)) {
 			if (/^\s*\|[\s:|-]+\|?\s*$/.test(row)) continue;
-			const cells = row
-				.split("|")
-				.slice(1, -1)
-				.map((cell) => cell.trim());
+			const cells = splitMarkdownRow(row);
 			const label = (cells.at(-1) ?? "").replace(/`/g, "").trim();
 			rows.push({
 				text: row,
@@ -4694,6 +4719,7 @@ export function lintPrBody(body = "", options = {}) {
 	}
 	if (options.workingTree) {
 		errors.push(...lintBodyBudgets(body));
+		errors.push(...lintTableShape(body));
 		const sweep = headings.find((heading) =>
 			hasSection(heading, "class sweep"),
 		);
