@@ -1018,7 +1018,7 @@ describe("a primary's touch rows follow the answer's content binding (#5051)", (
 	// still displays its rows. Recurrence: a gate that withholds on anything but
 	// an explicit `false` loses every version-less server's findings.
 	it.each(["bound", "unknown", "absent"] as const)(
-		"still displays the rows of a %s answer",
+		"still displays the rows of an answer whose binding is %s",
 		async (binding) => {
 			const { env, run, touchRow } = await runBoundCascade(binding);
 			try {
