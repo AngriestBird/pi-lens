@@ -32,7 +32,7 @@ function errorTextWithHint(raw: string): string {
 import {
 	defaultedCwdHomeRefusal,
 	readAstGrepLang,
-	resolveAstGrepPaths,
+	readPathsArgument,
 } from "./shared.js";
 
 function lineCount(value: string): number {
@@ -211,6 +211,22 @@ export function createAstGrepReplaceTool(
 					details: {},
 				};
 			}
+			// #5041: replace used to forward `paths` unchecked, so a non-string
+			// entry, a blank entry or an over-cap list reached the CLI as argv.
+			const pathsRead = readPathsArgument(paths, {
+				cwd: ctx.cwd,
+				absent: "cwd",
+			});
+			if (pathsRead.refusal) {
+				logOutcome("error", { errorRaw: pathsRead.refusal });
+				return {
+					content: [
+						{ type: "text" as const, text: `Error: ${pathsRead.refusal}` },
+					],
+					isError: true,
+					details: {},
+				};
+			}
 			if (!(await astGrepClient.ensureAvailable())) {
 				logOutcome("error", { errorRaw: "ast-grep CLI not found" });
 				return {
@@ -228,7 +244,10 @@ export function createAstGrepReplaceTool(
 			// Decided before any target is resolved, so it covers the dry run and the
 			// apply alike (`apply` only flips a flag on this same dispatch), through
 			// the seam #747/#250's guard became when it was lifted out of
-			// ast_grep_search.
+			// ast_grep_search. It runs AFTER the `paths` reader above: an empty list
+			// (`paths: []`) is the reader's refusal even at home, and only an absent
+			// `paths` reaches this ceiling (keyed on the raw argument, not on
+			// `pathsRead.entries`, which `absent: "cwd"` always fills).
 			const homeRefusal = defaultedCwdHomeRefusal(paths, ctx.cwd);
 			if (homeRefusal) {
 				logOutcome("error", { errorRaw: homeRefusal.reason });
@@ -238,7 +257,7 @@ export function createAstGrepReplaceTool(
 					details: {},
 				};
 			}
-			const searchPaths = resolveAstGrepPaths(paths, ctx.cwd);
+			const searchPaths = pathsRead.entries;
 
 			// Phase 3: structural-intent params → synthesize YAML with fix: field
 			if (

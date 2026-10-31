@@ -59,6 +59,7 @@ import {
 	PYTHON_DECLARATION_CONCURRENCY,
 } from "../clients/python-environment.js";
 import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
+import { readFilePath } from "./shared.js";
 const VALID_OPERATIONS = [
 	"definition",
 	"typeDefinition",
@@ -879,6 +880,10 @@ export function createLspNavigationTool(
 					description: "Target file path.",
 				}),
 			),
+			file: Type.Optional(Type.String({ description: "Alias for `path`." })),
+			filePath: Type.Optional(
+				Type.String({ description: "Alias for `path`." }),
+			),
 			line: Type.Optional(
 				Type.Number({
 					description: "1-based line number.",
@@ -1089,6 +1094,27 @@ export function createLspNavigationTool(
 					},
 				);
 			}
+
+			// #5041: `path` is canonical; `file` and `filePath` stay accepted, so a
+			// caller written against either spelling reaches the same file. A
+			// conflicting pair, a non-string or a blank value is refused rather than
+			// guessed at.
+			const pathRead = readFilePath(params);
+			if (pathRead.refusal) {
+				return finalize(
+					{
+						content: [{ type: "text" as const, text: pathRead.refusal }],
+						isError: true,
+					},
+					{
+						operation: String(params.operation ?? "lsp"),
+						filePath: "(workspace)",
+						failureKind: "invalid_path",
+						resultCount: 0,
+					},
+				);
+			}
+			if (pathRead.path) params = { ...params, path: pathRead.path };
 
 			const {
 				operation: rawOperation,

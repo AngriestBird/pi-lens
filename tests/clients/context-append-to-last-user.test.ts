@@ -447,7 +447,7 @@ describe("context injection appends to last user message (#3693)", () => {
 						);
 						return fauxAssistantMessage([
 							fauxText("checking"),
-							fauxToolCall("lens_diagnostics", { paths: [] }),
+							fauxToolCall("lens_diagnostics", {}),
 						]);
 					},
 					fauxAssistantMessage(fauxText("done")),
