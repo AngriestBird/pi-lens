@@ -19,10 +19,24 @@
  * and the napi tag (`no-eval` / `no-eval-js`). Sharing the normalization keeps
  * the three surfaces from drifting.
  */
+import * as nodePath from "node:path";
 import { normalizeRuleId } from "./rule-id-normalize.js";
-import { resolvePiLensConfig } from "../config-resolve.js";
+import { resolveSessionConfigRoot } from "../analysis-root.js";
+import {
+	type ConfigDocument,
+	type PiLensConfigResolution,
+	resolveOnePiLensConfigDocument,
+	resolvePiLensConfig,
+} from "../config-resolve.js";
 import { getPiLensGlobalConfigPath } from "../lens-config.js";
+import { minimatch } from "../deps/minimatch.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
+import {
+	isUnderDir,
+	isWindowsPath,
+	pathsEqual,
+	toProjectRelativePath,
+} from "../path-utils.js";
 import { isRuleIgnoredForPath } from "./rule-ignores.js";
 
 interface RulePolicyEntry {
@@ -42,15 +56,210 @@ interface RulePolicyEntry {
  */
 export type RulePolicyMap = Record<string, RulePolicyEntry | undefined>;
 
-export function resolvedRulePolicyMap(root: string): RulePolicyMap | undefined {
-	const resolved = resolvePiLensConfig({
+/** The global+project resolution a dispatch policy key is read from. */
+export function resolveDispatchPolicyConfig(
+	root: string,
+): PiLensConfigResolution {
+	return resolvePiLensConfig({
 		cwd: root,
 		globalDir: getGlobalPiLensDir(),
 		globalConfigPath: getPiLensGlobalConfigPath(),
 	});
-	return rulePolicyMapFromConfig(
-		resolved.value.rules as Record<string, unknown> | undefined,
+}
+
+/**
+ * The directory whose config governs `filePath` under the workspace `root`:
+ * the nearest directory at or above the file that holds a project config,
+ * never above `root` (`resolveSessionConfigRoot`), else `root` itself. The
+ * resolver layers upward from this owner, so its resolution carries the
+ * global tier, the workspace root's file, and every nested file between.
+ */
+export function configOwnerFor(filePath: string, root: string): string {
+	return (
+		resolveSessionConfigRoot(nodePath.resolve(root, filePath), root).register ??
+		root
 	);
+}
+
+/**
+ * The resolution every dispatch policy key (`rules`, `dispatch.disabledRunners`)
+ * reads for one file: its config owner's, so a nested `.pi-lens.json` governs
+ * the files under it. One resolution per file, shared by every reader.
+ */
+export function resolveDispatchPolicyConfigForFile(
+	filePath: string,
+	root: string,
+): PiLensConfigResolution {
+	return resolveDispatchPolicyConfig(configOwnerFor(filePath, root));
+}
+
+/**
+ * The rule policy map of one resolution, ready to match paths against the
+ * workspace `root`.
+ *
+ * `ignorePaths` globs are relative to the directory of the config file that
+ * declares them. A global entry, and an entry in the workspace root's own
+ * file, already match against `root`; an entry from a nested `.pi-lens.json`
+ * is re-anchored under its directory, so `generated/**` in `pkg/.pi-lens.json`
+ * carves out `pkg/generated/**` and nothing at the root. The union across
+ * tiers is kept (`array-union`): a nearer file adds carve-outs and never lifts
+ * one.
+ */
+export function rulePolicyMapFromResolution(
+	resolution: PiLensConfigResolution,
+	root: string,
+): RulePolicyMap | undefined {
+	const rules = resolution.value.rules as Record<string, unknown> | undefined;
+	const map = rulePolicyMapFromConfig(rules);
+	if (!map || !Object.values(map).some((entry) => entry?.ignorePaths)) {
+		return map;
+	}
+	const anchored = anchoredIgnorePaths(resolution.documents, root);
+	for (const [key, entry] of Object.entries(map)) {
+		if (!entry?.ignorePaths) continue;
+		const paths = anchored.get(key);
+		if (paths && paths.length > 0) entry.ignorePaths = paths;
+	}
+	return map;
+}
+
+/**
+ * Every document's `rules.<key>.ignorePaths`, each validated on its own and
+ * re-anchored to `root`, unioned in document order. Read per document because
+ * the merged array loses which file a member came from when two files list the
+ * same glob text, and the same text means a different path in each.
+ */
+function anchoredIgnorePaths(
+	documents: readonly ConfigDocument[],
+	root: string,
+): Map<string, string[]> {
+	const byKey = new Map<string, string[]>();
+	for (const document of documents) {
+		// An LSP-scoped legacy file's root keys are LSP settings, not `rules`.
+		if (document.location.lspScoped) continue;
+		const rules = resolveOnePiLensConfigDocument(document).value.rules;
+		if (!rules || typeof rules !== "object" || Array.isArray(rules)) continue;
+		const prefix =
+			document.tier === "global" ? undefined : anchorPrefix(document, root);
+		for (const [key, rawEntry] of Object.entries(rules)) {
+			const ignorePaths = (rawEntry as { ignorePaths?: unknown } | undefined)
+				?.ignorePaths;
+			if (!Array.isArray(ignorePaths)) continue;
+			const list = byKey.get(key) ?? [];
+			for (const pattern of ignorePaths) {
+				if (typeof pattern !== "string" || pattern.length === 0) continue;
+				const anchoredPattern = prefix
+					? anchorPattern(pattern, prefix)
+					: pattern;
+				if (!list.includes(anchoredPattern)) list.push(anchoredPattern);
+			}
+			byKey.set(key, list);
+		}
+	}
+	return byKey;
+}
+
+/**
+ * The forward-slashed path from `root` to the directory `document` configures,
+ * or `undefined` when that directory is `root` itself or lies outside it (its
+ * globs keep matching against `root`, as they always have).
+ */
+function anchorPrefix(
+	document: ConfigDocument,
+	root: string,
+): string | undefined {
+	const pathApi =
+		isWindowsPath(root) || isWindowsPath(document.file)
+			? nodePath.win32
+			: nodePath.posix;
+	let dir = document.file;
+	for (const _segment of document.location.relativePath.split("/")) {
+		dir = pathApi.dirname(dir);
+	}
+	if (pathsEqual(dir, root) || !isUnderDir(dir, root)) return undefined;
+	// Config discovery records `document.file` under its real path, and `root`
+	// may be the caller's link spelling: the relative is lexical when the two
+	// spellings agree and taken on the identity axis when they do not, so a
+	// symlinked root anchors `pkg/`, never `../real/pkg/` (#5011 r8, F25).
+	return toProjectRelativePath(dir, root);
+}
+
+function anchorPattern(pattern: string, prefix: string): string {
+	if (pattern.startsWith("!"))
+		return `!${anchorPattern(pattern.slice(1), prefix)}`;
+	const posix = pattern.replaceAll("\\", "/");
+	if (posix.startsWith("/") || /^[A-Za-z]:\//.test(posix)) return pattern;
+	// The prefix is a directory NAME, not a glob: `pkg[1]` and Next.js `[id]`
+	// would read as character classes and anchor the entry at the wrong path.
+	// `minimatch.escape` leaves braces (expansion), a leading `!` (negation)
+	// and a leading `#` (comment), so those are escaped here; user-authored
+	// `!` stays #5029's decision.
+	const literal = minimatch
+		.escape(prefix)
+		.replace(/[{}]/g, "\\$&")
+		.replace(/^!/, "\\!")
+		.replace(/^#/, "\\#");
+	return `${literal}/${posix.replace(/^(\.\/)+/, "")}`;
+}
+
+/**
+ * The rule policy of every file under one workspace root: each file reads its
+ * config owner's map ({@link rulePolicyMapFromResolution}), so a nested
+ * `.pi-lens.json` governs the files under it on every surface that filters by
+ * it. Owners and maps are memoized for the life of the object; build one per
+ * sweep or per call so a config edit applies on the next one. `known` is a map
+ * already resolved for one file's owner (the dispatcher's `ctx.rulePolicy`):
+ * that owner reads it instead of resolving again, and every other owner still
+ * resolves its own.
+ */
+export interface ProjectRulePolicy {
+	readonly root: string;
+	forFile(filePath: string): RulePolicyMap | undefined;
+}
+
+export function projectRulePolicy(
+	root: string,
+	known?: { filePath: string; map: RulePolicyMap | undefined },
+): ProjectRulePolicy {
+	const ownerByDir = new Map<string, string>();
+	const mapByOwner = new Map<string, RulePolicyMap | undefined>();
+	const ownerOf = (filePath: string): string => {
+		const dir = nodePath.dirname(nodePath.resolve(root, filePath));
+		let owner = ownerByDir.get(dir);
+		if (owner === undefined) {
+			owner = configOwnerFor(filePath, root);
+			ownerByDir.set(dir, owner);
+		}
+		return owner;
+	};
+	// Seeded on the first lookup, so a dispatch with no findings walks nothing.
+	let unseeded = known;
+	return {
+		root,
+		forFile(filePath) {
+			if (unseeded) {
+				mapByOwner.set(ownerOf(unseeded.filePath), unseeded.map);
+				unseeded = undefined;
+			}
+			const owner = ownerOf(filePath);
+			if (!mapByOwner.has(owner)) {
+				mapByOwner.set(
+					owner,
+					rulePolicyMapFromResolution(resolveDispatchPolicyConfig(owner), root),
+				);
+			}
+			return mapByOwner.get(owner);
+		},
+	};
+}
+
+/** What a rule-policy filter accepts: one file's map, or a whole project's. */
+export type RulePolicy = RulePolicyMap | ProjectRulePolicy;
+
+function isProjectRulePolicy(
+	policy: RulePolicy | Record<string, unknown>,
+): policy is ProjectRulePolicy {
+	return typeof (policy as { forFile?: unknown }).forFile === "function";
 }
 
 export function ruleIgnoredForPath(
@@ -137,18 +346,38 @@ function matchesRule(entry: string, raw: string, normalized: string): boolean {
  *
  * Used by both the per-edit dispatcher and the `lens-diagnostics` tool's
  * `mode=delta`/`mode=all`/`mode=full` paths so a project's own policy
- * applies consistently across every output surface.
+ * applies consistently across every output surface. `policy` is one file's
+ * map, applied to every diagnostic, or a {@link ProjectRulePolicy}, which
+ * every surface that can see several files passes (the dispatcher included)
+ * so each diagnostic reads its own file's config owner.
  */
 export function applyRulePolicy<T extends { rule?: string; code?: string }>(
 	diagnostics: T[],
-	policyMap: Record<string, unknown> | undefined,
+	policy: RulePolicy | Record<string, unknown> | undefined,
 	options: { root: string; filePath: string },
 ): T[] {
-	if (!policyMap) return diagnostics;
-	// Fast-path: if every entry has neither disable nor select, there is no
-	// output filter to apply. Keeps the hot path (most projects have only
-	// thresholds) cheap.
-	let hasFilter = false;
+	if (!policy) return diagnostics;
+	const project = isProjectRulePolicy(policy) ? policy : undefined;
+	if (!project && !hasOutputFilter(policy as RulePolicyMap)) return diagnostics;
+	// A project policy reads each diagnostic's own file's owner, matched against
+	// the root the owner's map was anchored to.
+	const anchored = project ? { ...options, root: project.root } : options;
+	return diagnostics.filter((d) => {
+		const map = project
+			? project.forFile(
+					(d as T & { filePath?: string }).filePath ?? options.filePath,
+				)
+			: (policy as RulePolicyMap);
+		return !map || !hasOutputFilter(map) || keptByRulePolicy(d, map, anchored);
+	});
+}
+
+/**
+ * Fast-path: if every entry has neither disable nor select nor ignorePaths,
+ * there is no output filter to apply. Keeps the hot path (most projects have
+ * only thresholds) cheap.
+ */
+function hasOutputFilter(policyMap: Record<string, unknown>): boolean {
 	for (const rawEntry of Object.values(policyMap)) {
 		if (!rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
 			continue;
@@ -163,30 +392,25 @@ export function applyRulePolicy<T extends { rule?: string; code?: string }>(
 			(entry.select?.length ?? 0) > 0 ||
 			(entry.ignorePaths?.length ?? 0) > 0
 		) {
-			hasFilter = true;
-			break;
+			return true;
 		}
 	}
-	if (!hasFilter) return diagnostics;
+	return false;
+}
 
-	return diagnostics.filter((d) => {
-		const ruleId = d.rule ?? d.code;
-		if (!ruleId) return true;
-		const filePath =
-			(d as T & { filePath?: string }).filePath ?? options.filePath;
-		if (
-			filePath &&
-			ruleIgnoredForPath(
-				ruleId,
-				filePath,
-				options.root,
-				policyMap as RulePolicyMap,
-			)
-		)
-			return false;
-		const { dropped } = evaluateRulePolicy(ruleId, policyMap as RulePolicyMap);
-		return !dropped;
-	});
+function keptByRulePolicy<T extends { rule?: string; code?: string }>(
+	d: T,
+	policyMap: RulePolicyMap,
+	options: { root: string; filePath: string },
+): boolean {
+	const ruleId = d.rule ?? d.code;
+	if (!ruleId) return true;
+	const filePath =
+		(d as T & { filePath?: string }).filePath ?? options.filePath;
+	if (filePath && ruleIgnoredForPath(ruleId, filePath, options.root, policyMap))
+		return false;
+	const { dropped } = evaluateRulePolicy(ruleId, policyMap);
+	return !dropped;
 }
 
 /**

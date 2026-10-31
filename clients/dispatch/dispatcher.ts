@@ -77,14 +77,20 @@ import { laneCopyStandsFor, semanticRank } from "./lane-copies.js";
 import { normalizeRuleId } from "./rule-id-normalize.js";
 import {
 	applyRulePolicy,
-	resolvedRulePolicyMap,
-	rulePolicyMapFromConfig,
+	projectRulePolicy,
+	resolveDispatchPolicyConfigForFile,
+	rulePolicyMapFromResolution,
 } from "./rule-policy.js";
+import {
+	DISABLED_BY_CONFIG_SKIP_REASON,
+	disabledRunnerIdsFor,
+} from "./disabled-runners.js";
 import { getToolProfile } from "./tool-profile.js";
 import { classifyPreExisting, preEditSeedFactKey } from "./pre-edit-seed.js";
 import {
 	hasUsableResult,
 	isRunnerClaimSource,
+	isNotApplicableSkipReason,
 	isRunnerSkipReason,
 	reachedNoVerdict,
 } from "./types.js";
@@ -395,7 +401,17 @@ export function createDispatchContext(
 				})
 			: undefined;
 	const projectConfig = loadPiLensProjectConfig(normalizedCwd);
-	const rulePolicy = resolvedRulePolicyMap(normalizedProjectRoot);
+	// One resolution from the file's config owner, read by both policy keys,
+	// so a nested `.pi-lens.json` governs its own files' rules and denials.
+	const policyConfig = resolveDispatchPolicyConfigForFile(
+		absoluteFilePath,
+		normalizedProjectRoot,
+	);
+	const rulePolicy = rulePolicyMapFromResolution(
+		policyConfig,
+		normalizedProjectRoot,
+	);
+	const disabledRunnerIds = disabledRunnerIdsFor(policyConfig);
 
 	return {
 		filePath: normalizedFilePath,
@@ -412,6 +428,7 @@ export function createDispatchContext(
 		facts,
 		projectConfig,
 		rulePolicy,
+		...(disabledRunnerIds !== undefined && { disabledRunnerIds }),
 		blockingOnly,
 		modifiedRanges,
 		writeIndex,
@@ -884,11 +901,40 @@ function buildCoverageNotice(
 	const cause = combinePrimaryUnavailableCauses(
 		relevant.flatMap((r) => r.primaryUnavailableCause ?? []),
 	);
+	// `dispatch.disabledRunners` denials are skipped by the dispatch loop with
+	// a stated reason; they name their own key, not the LSP's.
+	const deniedRunnerIds = relevant
+		.filter((r) => r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON)
+		.map((r) => r.runnerId);
+	const deniedNote = `${deniedRunnerIds.join(", ")} disabled in config by dispatch.disabledRunners`;
+	// A row that is not a tool failure: one the operator switched off (a runner
+	// denial, or a primary LSP `lsp.disabledServers` turned off, with or without
+	// its fallback), or one that skipped with a stated not-applicable reason
+	// (nothing for it to check). The config-only wording holds only when every
+	// row is one; any other row is a tool that is missing, timed out, or failed
+	// (a skip that states no listed reason included), and the notice must still
+	// say so rather than let the denial hide it.
+	const onlySwitchedOff = relevant.every(
+		(r) =>
+			r.skipReason === DISABLED_BY_CONFIG_SKIP_REASON ||
+			isNotApplicableSkipReason(r.skipReason) ||
+			r.primaryUnavailableCause === "disabled" ||
+			r.primaryUnavailableCause === "disabledFallback",
+	);
 	const unconfirmedStatus = cause
-		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})`
-		: "not fully checked (a language tool is missing, timed out, or failed to run)";
+		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})${deniedRunnerIds.length > 0 ? `; ${deniedNote}` : ""}`
+		: deniedRunnerIds.length > 0
+			? onlySwitchedOff
+				? `not checked (${deniedNote})`
+				: `not fully checked (a language tool is missing, timed out, or failed to run; ${deniedNote})`
+			: "not fully checked (a language tool is missing, timed out, or failed to run)";
 
-	if (cause === "disabled" || cause === "disabledFallback") {
+	if (
+		onlySwitchedOff &&
+		(cause === "disabled" ||
+			cause === "disabledFallback" ||
+			(cause === undefined && deniedRunnerIds.length > 0))
+	) {
 		// #4403: the operator turned the primary off on purpose. That is not a
 		// tool that is missing or failed, and it holds for every file the
 		// server serves, so it gets one note per server per session, then the
@@ -897,7 +943,10 @@ function buildCoverageNotice(
 		const disabledIds = [
 			...new Set(relevant.flatMap((r) => r.disabledPrimaryServerIds ?? [])),
 		].sort((a, b) => Number(a > b) - Number(a < b));
-		const onceKeys = disabledIds.map((id) => `disabled-primary:${id}`);
+		const onceKeys = [
+			...disabledIds.map((id) => `disabled-primary:${id}`),
+			...deniedRunnerIds.map((id) => `disabled-runner:${id}`),
+		];
 		if (dedupe) {
 			if (onceKeys.every((key) => coverageNoticeSeen.has(key)))
 				return { unconfirmedStatus };
@@ -905,11 +954,15 @@ function buildCoverageNotice(
 		}
 		return {
 			notice: {
-				id: `coverage-disabled:${ctx.kind}:${disabledIds.join(",")}`,
+				id: `coverage-disabled:${ctx.kind}:${[...disabledIds, ...deniedRunnerIds].join(",")}`,
 				message:
-					cause === "disabled"
-						? `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers, so no language server checks these files this session (not a clean result).`
-						: `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers and its fallback did not answer, so no language server checked these files (not a clean result).`,
+					disabledIds.length === 0
+						? `Pi-lens ${ctx.kind} analysis unconfirmed — Runner (${deniedRunnerIds.join(", ")}) is disabled in config by dispatch.disabledRunners, so no runner checks these files this session (not a clean result).`
+						: deniedRunnerIds.length > 0
+							? `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers and runner (${deniedRunnerIds.join(", ")}) by dispatch.disabledRunners, so nothing checks these files this session (not a clean result).`
+							: cause === "disabled"
+								? `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers, so no language server checks these files this session (not a clean result).`
+								: `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers and its fallback did not answer, so no language server checked these files (not a clean result).`,
 				filePath: ctx.filePath,
 				severity: "warning",
 				semantic: "warning",
@@ -928,7 +981,7 @@ function buildCoverageNotice(
 	return {
 		notice: {
 			id: `coverage-unavailable:${ctx.kind}:${path.basename(ctx.filePath)}`,
-			message: `Pi-lens ${ctx.kind} analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).`,
+			message: `Pi-lens ${ctx.kind} analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).${deniedRunnerIds.length > 0 ? ` Runner (${deniedRunnerIds.join(", ")}) is also disabled in config by dispatch.disabledRunners.` : ""}`,
 			filePath: ctx.filePath,
 			severity: "warning",
 			semantic: "warning",
@@ -1170,6 +1223,36 @@ async function runGroup(
 				diagnosticCount: 0,
 				semantic: "unknown",
 				metadata: { reason: "applies_to", kind: ctx.kind },
+			});
+			continue;
+		}
+
+		// `dispatch.disabledRunners`: the operator turned this runner off. It is
+		// skipped before `when`/`run`, so its tool never spawns (not even an
+		// availability probe), and the skip carries a stated reason, so it is
+		// neither a failure nor a runner that reached no verdict: a fallback
+		// group moves on to its next member as for any other skip.
+		if (ctx.disabledRunnerIds?.has(runnerId)) {
+			const runnerEnd = Date.now();
+			latencies.push({
+				runnerId,
+				startTime: runnerStart,
+				endTime: runnerEnd,
+				durationMs: 0,
+				status: "skipped",
+				diagnosticCount: 0,
+				semantic: "none",
+				skipReason: DISABLED_BY_CONFIG_SKIP_REASON,
+			});
+			logLatency({
+				type: "runner",
+				filePath: ctx.filePath,
+				runnerId,
+				durationMs: 0,
+				status: "skipped",
+				diagnosticCount: 0,
+				semantic: "none",
+				metadata: { skipReason: DISABLED_BY_CONFIG_SKIP_REASON },
 			});
 			continue;
 		}
@@ -1721,20 +1804,27 @@ export async function dispatchForFile(
 		ctx.facts.getFileFact<string>(ctx.filePath, "file.content") ?? "";
 	// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`).
 	//
-	// Resolved from `ctx.projectRoot` (falling back to `ctx.cwd`), NOT
-	// `ctx.projectConfig` — `ctx.projectConfig` is loaded from the nested
-	// LANGUAGE root (`resolveLanguageRootForFile`), so in a monorepo where a
-	// package directory has its own `.pi-lens.json`, `discoverPiLensProjectConfig`'s
-	// upward walk stops there and never sees a repo-root policy.
-	// `lens_diagnostics` loads its policy map from `runtime.projectRoot`; using
-	// the same root here keeps the two surfaces in agreement. `ctx.projectConfig`
-	// itself is untouched — thresholds and mutation flags keep their existing
-	// language-root resolution.
-	const rulePolicy =
-		ctx.rulePolicy ??
-		rulePolicyMapFromConfig(
-			loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
-		);
+	// Each finding is filtered by its OWN file's config owner under
+	// `ctx.projectRoot` (falling back to `ctx.cwd`), NOT `ctx.projectConfig` —
+	// `ctx.projectConfig` is loaded from the nested LANGUAGE root
+	// (`resolveLanguageRootForFile`), and `discoverPiLensProjectConfig`'s upward
+	// walk stops at the first config, so it never sees a repo-root policy. The
+	// owner's resolution layers the global tier, the repo root's file, and each
+	// nested file between. A runner may report on files other than the edited
+	// one (helm-lint puts chart-level findings on `Chart.yaml`), so one owner's
+	// map must not filter another owner's finding (#5011 r8, F24).
+	// `lens_diagnostics` reads the same owner per file (`loadProjectRulePolicy`),
+	// which keeps the two surfaces in agreement. `ctx.projectConfig` itself is
+	// untouched — thresholds and mutation flags keep their existing
+	// language-root resolution. A context `createDispatchContext` built carries
+	// the edited file's map (possibly empty), which that owner reuses.
+	const rulePolicyRoot = ctx.projectRoot ?? ctx.cwd;
+	const rulePolicy = projectRulePolicy(
+		rulePolicyRoot,
+		"rulePolicy" in ctx
+			? { filePath: ctx.filePath, map: ctx.rulePolicy }
+			: undefined,
+	);
 	// The output-only filter pipeline: LSP/docker overlap suppression + inline
 	// `pi-lens-ignore` + agent/user dispositions + project rule policy. Applied
 	// AFTER dedupe so the pi renderer, widget, and delta all see one filtered
@@ -1766,7 +1856,7 @@ export async function dispatchForFile(
 			fileContent,
 		);
 		return applyRulePolicy(disposition, rulePolicy, {
-			root: ctx.projectRoot ?? ctx.cwd,
+			root: rulePolicyRoot,
 			filePath: ctx.filePath,
 		});
 	};

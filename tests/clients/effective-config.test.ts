@@ -26,6 +26,10 @@ import {
 	isEffectiveFileViewError,
 } from "../../clients/effective-config.js";
 import {
+	registerRunnerId,
+	resetRunnerIdentityForTests,
+} from "../../clients/dispatch/known-runner-ids.js";
+import {
 	explainServersForFile,
 	initLSPConfig,
 	isServerDisabled,
@@ -42,6 +46,7 @@ import {
 // same function the view uses rather than spelled as a literal that would
 // agree with a wrong implementation on one platform.
 import { homeRelativePath } from "../../clients/path-utils.js";
+import { createEffectiveConfigTool } from "../../tools/effective-config.js";
 import { removeTempDirSync } from "./test-utils.js";
 import {
 	resetProjectTrust,
@@ -448,6 +453,139 @@ describe("effectiveConfig — why is X running (#2415 AC)", () => {
 				"no-dispatch-plan",
 			]).toContain(tool.reason);
 		}
+	});
+
+	// `dispatch.disabledRunners`: the runner-level sibling of
+	// `lsp.disabledServers`. The view reads the same resolution the dispatch
+	// context does, so a denied runner is named with the tier that denied it
+	// rather than vanishing from the plan.
+	describe("dispatch.disabledRunners", () => {
+		const deniedBuild = (view: EffectiveConfigView) =>
+			resolvedFile(view)?.tools.find((tool) => tool.id === "dotnet-build");
+
+		it("reports a globally denied runner as disabled-by-config with its provenance while lsp stays selected", async () => {
+			const { view } = await viewFor(
+				{
+					files: {
+						".pi-lens/config.json": {
+							dispatch: { disabledRunners: ["dotnet-build"] },
+						},
+						"proj/.pi-lens.json": { dispatch: { disabledRunners: [] } },
+					},
+					startDir: "proj",
+				},
+				{ file: "Program.cs" },
+			);
+
+			const build = deniedBuild(view);
+			expect(build?.selected).toBe(false);
+			expect(build?.reason).toBe("disabled-by-config");
+			expect(build?.decidedBy?.tier).toBe("global");
+			expect(build?.decidedBy?.key).toBe("/dispatch/disabledRunners/0");
+			expect(build?.decidedBy?.file).toContain("config.json");
+			const lsp = resolvedFile(view)?.tools.find((tool) => tool.id === "lsp");
+			expect(lsp?.selected).toBe(true);
+			expect(lsp?.reason).toBe("selected");
+			expect(lsp?.decidedBy).toBeUndefined();
+			// The resolution agrees: the leaf is in the provenance listing.
+			expect(
+				view.provenance.some(
+					(entry) => entry.key === "/dispatch/disabledRunners/0",
+				),
+			).toBe(true);
+		});
+
+		it("attributes a project-added denial to the project tier", async () => {
+			const { view } = await viewFor(
+				{
+					files: {
+						".pi-lens/config.json": {
+							dispatch: { disabledRunners: ["javac"] },
+						},
+						"proj/.pi-lens.json": {
+							dispatch: { disabledRunners: ["dotnet-build"] },
+						},
+					},
+					startDir: "proj",
+				},
+				{ file: "Program.cs" },
+			);
+
+			expect(deniedBuild(view)?.reason).toBe("disabled-by-config");
+			expect(deniedBuild(view)?.decidedBy?.tier).toBe("project");
+		});
+
+		it("states the denied runner count in the effective_config summary line", async () => {
+			const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-effcfg-"));
+			tempRoots.push(home);
+			fs.mkdirSync(path.join(home, ".pi-lens"), { recursive: true });
+			fs.writeFileSync(
+				path.join(home, ".pi-lens", "config.json"),
+				JSON.stringify({ dispatch: { disabledRunners: ["dotnet-build"] } }),
+			);
+			const projectDir = path.join(home, "proj");
+			fs.mkdirSync(projectDir, { recursive: true });
+			const previousHome = process.env.PI_LENS_HOME;
+			process.env.PI_LENS_HOME = path.join(home, ".pi-lens");
+			setConfigPath(path.join(home, ".pi-lens", "config.json"));
+			resetLSPConfigStateForTests();
+			resetLSPConfigWarnCache();
+			try {
+				const tool = createEffectiveConfigTool(() => projectDir);
+				const result = await tool.execute(
+					"t",
+					{ file: "Program.cs" },
+					undefined,
+					undefined,
+					{},
+				);
+				expect(result.details.summary).toMatch(
+					/\d+ tool\(s\), 1 denied by config$/,
+				);
+			} finally {
+				if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+				else process.env.PI_LENS_HOME = previousHome;
+			}
+		});
+
+		// PR #5011 round 5, F18 (greptile thread PRRT_kwDORt8rec6yJQYm): the view
+		// dropped the unknown-id record, so a typo'd id appeared nowhere and the
+		// tool row read as if nothing was denied. The pure `disabledRunnersOf`
+		// derives the record; `effective_config` counts it without reporting.
+		it("counts an unknown disabledRunners id as a PILENS_CFG_0005 record and sends no notice", async () => {
+			registerRunnerId("dotnet-build");
+			try {
+				const { view } = await viewFor(
+					{
+						files: {
+							"proj/.pi-lens.json": {
+								dispatch: { disabledRunners: ["dotnet-bild", "dotnet-build"] },
+							},
+						},
+						startDir: "proj",
+					},
+					{ file: "Program.cs" },
+				);
+
+				expect(view.recordCounts.PILENS_CFG_0005).toBe(1);
+				expect(deniedBuild(view)?.reason).toBe("disabled-by-config");
+				expect(
+					logSink.messages.filter((message) => message.includes("dotnet-bild")),
+				).toEqual([]);
+			} finally {
+				resetRunnerIdentityForTests();
+			}
+		});
+
+		it("selects the runner when nothing denies it", async () => {
+			const { view } = await viewFor(
+				{ files: {}, startDir: "proj" },
+				{ file: "Program.cs" },
+			);
+
+			expect(deniedBuild(view)?.reason).toBe("selected");
+			expect(deniedBuild(view)?.decidedBy).toBeUndefined();
+		});
 	});
 
 	// #4636, the reporter's live evidence: `effective_config` printed

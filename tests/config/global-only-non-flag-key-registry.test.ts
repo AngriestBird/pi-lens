@@ -54,6 +54,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	getGlobalActionableWarningMaxFixes,
 	getPiLensGlobalConfigPath,
+	loadPiLensGlobalConfig,
 	resetGlobalConfigWarnCache,
 } from "../../clients/lens-config.js";
 import { GLOBAL_ONLY_NON_FLAG_KEYS } from "../../clients/lens-flag-registry.js";
@@ -115,6 +116,18 @@ const GLOBAL_HONOR_CHECKS: ReadonlyMap<string, GlobalHonorCheck> = new Map([
 		{
 			value: 483_721,
 			read: (configPath) => getGlobalActionableWarningMaxFixes(configPath),
+		},
+	],
+	[
+		// `dispatch` is recognized at project scope for `dispatch.disabledRunners`,
+		// so this sibling needs the mixed-scope notice. Its reader
+		// (`getRunnerTimeoutFloorMs`) memoizes and merges an env var, so the
+		// proof reads the loader projection it is built from.
+		"dispatch.runnerTimeoutFloorMs",
+		{
+			value: 483_722,
+			read: (configPath) =>
+				loadPiLensGlobalConfig(configPath)?.dispatch?.runnerTimeoutFloorMs,
 		},
 	],
 ]);
