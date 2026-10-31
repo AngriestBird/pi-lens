@@ -4387,24 +4387,26 @@ function lintDiffCompliance(body, options) {
 	return errors;
 }
 
+// ASCII whitespace only: a no-break space renders as space the reader scrolls past.
 const collapsedLength = (text) =>
-	String(text ?? "").replace(/\s+/g, " ").length;
+	String(text ?? "").replace(/[ \t\r\n]+/g, " ").length;
+// A link destination is not rendered text, so only what exceeds an ordinary URL is charged.
+const LINK_DESTINATION_ALLOWANCE = 200;
 
 /**
  * What the body costs a reader, from the lexer's tokens (#5003, #5026). Known
  * kinds are charged for the text they render: prose and code spans count as
  * visible characters, and a `code` token is measured on its own (lines, widest
  * line, total). Fail closed: a token kind this function does not list, raw
- * HTML (a tag, a comment, a `<details>` block), a reference definition and an
- * image are charged for their whole `raw`, never for nothing. A container whose
+ * HTML (a tag, a comment, a `<details>` block), a reference definition, an
+ * image, a hard line break and a rule are charged for their whole `raw`, never
+ * for nothing; a link also pays for a long destination and its title. A container whose
  * children the lexer did not place is charged the same way.
  */
 function tallyTokens(tokens, tally) {
 	for (const token of tokens) {
 		switch (token.type) {
 			case "space":
-			case "br":
-			case "hr":
 				break;
 			case "code": {
 				const rows = token.raw.replace(/\n+$/, "").split("\n");
@@ -4432,6 +4434,12 @@ function tallyTokens(tokens, tally) {
 				const kids = markdownChildren(token);
 				if (kids.length) tallyTokens(kids, tally);
 				else tally.chars += collapsedLength(token.raw);
+				if (token.type === "link")
+					tally.chars +=
+						Math.max(
+							0,
+							String(token.href ?? "").length - LINK_DESTINATION_ALLOWANCE,
+						) + collapsedLength(token.title);
 				break;
 			}
 			default:
