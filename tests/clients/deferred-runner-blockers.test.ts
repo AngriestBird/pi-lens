@@ -33,7 +33,10 @@ import {
 	type GenerationHandle,
 } from "../../clients/generation-guard.js";
 import type { Diagnostic, RunnerResult } from "../../clients/dispatch/types.js";
-import { evaluateGitGuard } from "../../clients/git-guard.js";
+import {
+	evaluateGitGuard,
+	syncGitGuardRecord,
+} from "../../clients/git-guard.js";
 import {
 	flushLatencyLog,
 	getLatencyLogPath,
@@ -991,6 +994,170 @@ describe("#5048 a secondary's commit gate persists only its own records", () => 
 				evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT),
 			).toEqual({ block: false });
 			expect(cacheManager.inspectCache("turn-end-findings", projB)).toBe(
+				"missing",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	/** A blocker recorded on `file`'s current bytes, as a write records it. */
+	function recordOn(
+		runtime: RuntimeCoordinator,
+		file: string,
+		diagnostics: Diagnostic[],
+		session?: string,
+	): void {
+		const bytes = fs.readFileSync(file);
+		runtime.recordInlineBlockers(
+			file,
+			"🔴 STOP",
+			runtime.nextWriteIndex(),
+			undefined,
+			[1],
+			{
+				size: bytes.byteLength,
+				sha256: createHash("sha256").update(bytes).digest("hex"),
+			},
+			diagnostics,
+			undefined,
+			1_000,
+			session,
+		);
+		runtime.updateGitGuardStatus(false, "");
+	}
+
+	const otherRunner = (file: string): Diagnostic => ({
+		...blocking(file),
+		id: "other-runner:app.ts:1",
+		tool: "other-runner",
+		runnerId: "other-runner",
+	});
+
+	// Recurrence it prevents (PR #5052 thread PRRT_kwDORt8rec6yNpkM, review r2
+	// row S2): the retire sync spoke as the committing secondary, so the
+	// primary's cached section for a file its only blocker had left stayed, and
+	// the secondary's commit was refused `session_mismatch` until the primary
+	// wrote again. Master retired it.
+	it("retires the primary's cached section at a same-root secondary's commit once the file left the map", async () => {
+		const env = setupTestEnvironment("pi-lens-5052-retire-cached-");
+		try {
+			const { projA, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			fs.writeFileSync(app, "alpha();\n");
+			await settledFor(app, projA, [blocking(app)], PRIMARY);
+			// The primary's own commit persists its section at its root.
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", undefined, COMMIT)
+					.block,
+			).toBe(true);
+			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
+				"fresh",
+			);
+			await settledFor(app, projA, [], PRIMARY);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT),
+			).toEqual({ block: false });
+			expect(runtime.hasInlineBlocker(app)).toBe(false);
+			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
+				"missing",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (review r2 row S3, Remedy A of the same thread):
+	// a retire passed as a clean verdict for the whole file dropped the cached
+	// section while another runner's blocker on that file was still live, so a
+	// new process read no blocker for it.
+	it("keeps the primary's cached section while another runner still blocks the file", async () => {
+		const env = setupTestEnvironment("pi-lens-5052-retire-two-runners-");
+		try {
+			const { projA, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			fs.writeFileSync(app, "alpha();\n");
+			recordOn(runtime, app, [
+				{ ...blocking(app), runnerId: RUNNER_ID },
+				otherRunner(app),
+			]);
+			syncGitGuardRecord(runtime, cacheManager, projA);
+			await settledFor(app, projA, [], PRIMARY);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT)
+					.block,
+			).toBe(true);
+			// The settled run retired its own blocker only.
+			expect(
+				runtime.getInlineBlockerDiagnostics(app)?.map((d) => d.runnerId),
+			).toEqual(["other-runner"]);
+			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
+				"fresh",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (review r2 G1, row S7): the gate's #5020 retire
+	// resync wrote the session's whole snapshot into the commit's cache, so a
+	// blocker in checkout A refused the commit in checkout B once a cross-file
+	// row there cited a deleted file.
+	it("keeps a blocker in another checkout out of the cache the #5020 retire resync writes", () => {
+		const env = setupTestEnvironment("pi-lens-5052-5020-other-tree-");
+		try {
+			const { projA, projB, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const a = path.join(projA, "a.ts");
+			const x = path.join(projB, "x.yaml");
+			fs.writeFileSync(a, "alpha();\n");
+			fs.writeFileSync(x, "x: 1\n");
+			recordOn(runtime, a, [blocking(a)], SECONDARY);
+			// x.yaml's only row cites a file that no longer exists (#5020).
+			recordOn(
+				runtime,
+				x,
+				[{ ...blocking(path.join(projB, "gone.yaml")), tool: "helm-lint" }],
+				SECONDARY,
+			);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT),
+			).toEqual({ block: false });
+			expect(runtime.hasInlineBlocker(x)).toBe(false);
+			expect(cacheManager.inspectCache("turn-end-findings", projB)).toBe(
+				"missing",
+			);
+			// The blocker still refuses a commit in its own tree.
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT)
+					.block,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (review r2 G2, row S8): with the retire sync's
+	// session dropped, a same-root secondary's commit that retired one of the
+	// primary's blockers persisted the primary's other blocker into the root's
+	// cache under the primary's id (the #5048 shape in one root).
+	it("leaves the primary's other blockers out of the cache a same-root secondary's retire rewrites", async () => {
+		const env = setupTestEnvironment("pi-lens-5052-retire-same-root-");
+		try {
+			const { projA, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			const other = path.join(projA, "other.ts");
+			for (const file of [app, other]) {
+				fs.writeFileSync(file, "alpha();\n");
+				recordOn(runtime, file, [{ ...blocking(file), runnerId: RUNNER_ID }]);
+			}
+			await settledFor(app, projA, [], PRIMARY);
+			// The latch still refuses on other.ts; the root's cache stays unwritten.
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT)
+					.block,
+			).toBe(true);
+			expect(runtime.hasInlineBlocker(app)).toBe(false);
+			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
 				"missing",
 			);
 		} finally {

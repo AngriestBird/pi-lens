@@ -2055,6 +2055,8 @@ export function resyncGitGuardAfterRetire(args: {
 	owner: string | undefined;
 	lensGuardEnabled: boolean;
 	analysisRootMode?: AnalysisRootMode;
+	/** #5052 r2: the commit gate's checkout scope (see `syncGitGuardRecord`). */
+	inCheckout?: ((filePath: string) => boolean) | undefined;
 }): void {
 	args.runtime.updateGitGuardStatus(false, "");
 	if (args.lensGuardEnabled) {
@@ -2066,6 +2068,7 @@ export function resyncGitGuardAfterRetire(args: {
 			args.analysisRootMode,
 			undefined,
 			args.owner,
+			args.inCheckout,
 		);
 	}
 }
@@ -2584,7 +2587,10 @@ export function evaluateGitGuard(
 			);
 		}
 		// #4484 r2: a retire speaks for its file, as a clean write does, so the
-		// persisted record drops that file's section.
+		// persisted record drops that file's section. #5052 r2: the committing
+		// session may not own that section, so the retire is a clean verdict for
+		// the file only once the file has left the map; while another runner
+		// still blocks it, its section stays.
 		for (const filePath of absorbed.retiredFiles) {
 			syncGitGuardRecord(
 				runtime,
@@ -2592,7 +2598,7 @@ export function evaluateGitGuard(
 				cwd,
 				filePath,
 				undefined,
-				undefined,
+				!runtime.hasInlineBlocker(filePath),
 				sessionId,
 				inScope,
 			);
@@ -2614,6 +2620,7 @@ export function evaluateGitGuard(
 				filePath: retired.filePath,
 				owner: retired.owner,
 				lensGuardEnabled: true,
+				inCheckout: inScope,
 			});
 		}
 	} catch (failure) {
