@@ -1008,6 +1008,7 @@ export const CASCADE_GRAPH_KINDS = new Set([
 	"rust",
 	"ruby",
 	"cxx",
+	"java",
 ]);
 
 /**
@@ -1018,7 +1019,7 @@ export const CASCADE_GRAPH_KINDS = new Set([
  * read from the passive snapshot instead of touching neighbors actively.
  *
  * Degraded fallback: when the graph produces no neighbors (ungraphed languages
- * like Java/Kotlin/C#), fall back to the passive LSP snapshot from getAllDiagnostics
+ * like Kotlin/C#), fall back to the passive LSP snapshot from getAllDiagnostics
  * to preserve cascade coverage.
  */
 /**
