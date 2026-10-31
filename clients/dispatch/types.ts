@@ -293,14 +293,40 @@ export interface RunnerDefinition {
  * ownership reasons: a runner may skip because its capability is policy-
  * deferred to a lane that owns it, or because its tool categorically cannot
  * serve the file's dialect — both are policy decisions named at the delivery
- * surface, never an empty output read as clean). */
+ * surface, never an empty output read as clean). `disabled-by-config` is the
+ * operator's own decision (`dispatch.disabledRunners`): the runner never ran,
+ * which is neither a failure nor a verdict on the file. */
 export const RUNNER_SKIP_REASONS = [
 	"no-files-matched",
 	"configured-non-biome-linter",
 	"dialect-unsupported",
 	"covered-by-primary",
+	"disabled-by-config",
 ] as const;
 export type RunnerSkipReason = (typeof RUNNER_SKIP_REASONS)[number];
+
+/**
+ * The skip reasons that say a runner had nothing to check, so beside a
+ * `dispatch.disabledRunners` denial the coverage notice does not read them as
+ * a tool that failed. A closed admission list over {@link RUNNER_SKIP_REASONS}:
+ * a reason added to the taxonomy reads as a failure until it is listed here.
+ * `covered-by-primary` is left out on purpose: it defers to a lane whose answer
+ * is what the denial may have removed. `disabled-by-config` is the denial
+ * itself and the caller handles it. {@link reachedNoVerdict} admits the whole
+ * taxonomy as a verdict; this is the narrower "not a tool failure" subset.
+ */
+export const NOT_APPLICABLE_SKIP_REASONS: readonly RunnerSkipReason[] = [
+	"no-files-matched",
+	"configured-non-biome-linter",
+	"dialect-unsupported",
+];
+
+/** Whether a skip reason states the runner had nothing to check. */
+export function isNotApplicableSkipReason(
+	value: RunnerSkipReason | undefined,
+): boolean {
+	return NOT_APPLICABLE_SKIP_REASONS.some((reason) => reason === value);
+}
 
 /**
  * #4130: why an invoked tool produced no result. The non-`ran` kinds of
@@ -620,6 +646,42 @@ export function checkedWholeFile(
 	);
 }
 
+/**
+ * #5020: the runners that reached a verdict on this run's bytes: a row of the
+ * latency report with a usable result ({@link hasUsableResult}: it succeeded,
+ * or it completed and failed on findings) that is not in
+ * `inconclusiveSources`. A runner that skipped, broke, is still in flight or
+ * answered for part of the file speaks for nothing, which is why this is the
+ * evidence a retire of another file's row asks for
+ * (`RuntimeCoordinator.retireForeignRows`). A run that failed on findings
+ * speaks only through the caller's own guard: the retire also needs the run to
+ * hold no blocker of its own on the file (`stillReported` in
+ * `publishInlineVerdict`), so mypy answering `b.py` while reporting `c.py`
+ * retires the row about `b.py` and keeps every row about `c.py` (PR #5033
+ * round 3).
+ *
+ * An edit-scoped runner (`editScopedRunnerIds`) is refused here for the reason
+ * `checkedWholeFile` refuses the whole run for it: its verdict covers the
+ * edited ranges, so "no blocker reported" says nothing about the rest of the
+ * file a cross-file row would be judged against.
+ */
+export function verdictRunnerIds(
+	result: Pick<
+		DispatchResult,
+		"inconclusiveSources" | "editScopedRunnerIds" | "latencyReport"
+	>,
+): string[] {
+	const noWholeFileVerdict = new Set([
+		...(result.inconclusiveSources?.runnerIds ?? []),
+		...(result.editScopedRunnerIds ?? []),
+	]);
+	return (result.latencyReport?.runners ?? []).flatMap((runner) =>
+		hasUsableResult(runner) && !noWholeFileVerdict.has(runner.runnerId)
+			? [runner.runnerId]
+			: [],
+	);
+}
+
 // --- Dispatch Context ---
 
 /**
@@ -671,8 +733,19 @@ export interface DispatchContext {
 	readonly facts: import("./fact-store.js").FactStore;
 	/** Project-local .pi-lens.json config captured for this dispatch. */
 	readonly projectConfig?: PiLensProjectConfig;
-	/** Shared global+project rule policy, including path-scoped denials. */
+	/**
+	 * The EDITED file's config owner's rule policy, including path-scoped
+	 * denials: runners read it to skip a rule on this file, and the output filter
+	 * reuses it for findings under the same owner (every other owner's finding
+	 * reads its own, #5011 r8 F24).
+	 */
 	readonly rulePolicy?: RulePolicyMap;
+	/**
+	 * Runner ids the operator denied through `dispatch.disabledRunners`
+	 * (union of every config tier). Absent when nothing is denied. The
+	 * dispatcher skips these before their `when`/`run`, so the tool never spawns.
+	 */
+	readonly disabledRunnerIds?: ReadonlySet<string>;
 	/** Only run blocking rules (severity: error) - used for fast feedback on file write */
 	readonly blockingOnly?: boolean;
 	readonly modifiedRanges?: ModifiedRange[];

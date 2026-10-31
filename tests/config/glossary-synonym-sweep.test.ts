@@ -571,7 +571,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// blocking findings it reports and removes its matches from the visible
 		// and held-back lists, `Array.prototype.filter` calls, not a delivery
 		// filter.
-		"clients/dispatch/dispatcher.ts": 21,
+		// 21 -> 22 (#5010): `buildCoverageNotice` keeps the rows
+		// `dispatch.disabledRunners` skipped, an `Array.prototype.filter` call,
+		// not a delivery filter.
+		"clients/dispatch/dispatcher.ts": 22,
 		"clients/dispatch/fact-runner.ts": 1,
 		"clients/dispatch/fact-scheduler.ts": 2,
 		"clients/dispatch/facts/function-facts.ts": 2,
@@ -754,7 +757,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// records, an `Array.prototype.filter` call, not a delivery gate.
 		// 4 -> 5 (#4990): the per-source row retirement keeps the rows the clean
 		// verdict did not cover, the same array call, not a delivery gate.
-		"clients/runtime-coordinator.ts": 5,
+		// 5 -> 6 (#5020): `retireForeignRows` keeps the rows no retire judged, the
+		// same array call, not a delivery gate.
+		"clients/runtime-coordinator.ts": 6,
 		"clients/runtime-session.ts": 4,
 		// 3 -> 5 -> 3 (#4187): round 4's tool-call authorship retirement filtered
 		// the owned in-process mutation paths; round 5 folds two of its three
@@ -1326,7 +1331,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 28 -> 16 (#4689 batch 1 r2): the other eleven inline-store accessors and
 		// the deferMutation key drop their `path.resolve` too; every accessor keys
 		// the raw spelling through normalizeMapKey (review F1).
-		"clients/runtime-coordinator.ts": 16,
+		// 16 -> 17 (#5020): `retireForeignRowsOfMissingFiles` asks `path.isAbsolute`
+		// before it judges a cited file, so a relative cite is never retired.
+		"clients/runtime-coordinator.ts": 17,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).
@@ -1590,6 +1597,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #3867 moved the coverage decision onto `hasUsableResult`: dispatcher.ts
 		// no longer compares the bare `status` field at four sites (37 -> 32), and
 		// the claimSource admission guard (#3968 F2) reads it once more (32 -> 33).
+		// The `dispatch.disabledRunners` skip names the field twice, in the latency
+		// row and in its log row, as the applies_to skip beside it does (33 -> 35).
 		"clients/actionable-warnings.ts": 5,
 		"clients/advisory-provenance.ts": 5,
 		"clients/ast-grep-client.ts": 7,
@@ -1601,7 +1610,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/child-unref.ts": 6,
 		"clients/config-resolve.ts": 11,
 		"clients/dead-code-client.ts": 3,
-		"clients/dispatch/dispatcher.ts": 33,
+		"clients/dispatch/dispatcher.ts": 35,
 		"clients/dispatch/integration.ts": 1,
 		"clients/dispatch/pending-runner-findings.ts": 1,
 		"clients/dispatch/runners/actionlint.ts": 2,

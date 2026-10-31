@@ -1084,7 +1084,7 @@ function formatWriteOrdinal(n: number): string {
  * record. The probe answers per project (#4701 F1) — a `defer` recorded in
  * another project cannot turn this pass on.
  * That second condition is load-bearing on cost, not cosmetic —
- * `applyInlineBlockerPolicy` pays `loadProjectRulePolicyMap` per record
+ * `applyInlineBlockerPolicy` pays `loadProjectRulePolicy` per record
  * (measured 1.39 ms p50, the same price an edit turn already pays for this
  * population), so without it a blocked but unmarked session would re-read every
  * live blocker's file on every reply.
@@ -1781,6 +1781,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			deliveredIds: runnerFindingsDeliveredIds,
 		},
 	});
+
+	// #5020: a row of a record that names a file since deleted has nothing left
+	// to fix and no dispatch will re-take it. The commit gate's latch is a memo
+	// of the map, so a retire re-derives it (the persisted record is rewritten
+	// by the composer below from the survivors, as for every other retire).
+	// Only this turn session's records: the composer persists this session's
+	// survivors into this cwd, so another session's row is its own turn end's
+	// to retire, against its own cwd (#4921; PR #5033 round 3 F1).
+	if (runtime.retireForeignRowsOfMissingFiles({ sessionId }).length > 0) {
+		runtime.updateGitGuardStatus(false, "");
+	}
 
 	// #1641: past-EOF gate. Runs BEFORE the dependency-drift sweep below — a
 	// cheap statSync per cited file is worth paying first so the pricier

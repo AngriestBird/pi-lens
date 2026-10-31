@@ -38,7 +38,7 @@ import { hasAnyDispositionMarks } from "./diagnostic-dispositions.js";
 import {
 	applyFindingPolicy,
 	inlineBlockerIdentities,
-	loadProjectRulePolicyMap,
+	loadProjectRulePolicy,
 } from "./dispatch/finding-policy.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import type { Diagnostic } from "./dispatch/types.js";
@@ -149,8 +149,8 @@ export function applyInlineBlockerPolicy(
 		else byFile.set(owner, [diagnostic]);
 	}
 
-	// `loadPiLensProjectConfig` is mtime-cached, so several groups cost one stat.
-	const policyMap = loadProjectRulePolicyMap(cwd);
+	// One policy for every group: each config owner resolves once.
+	const policyMap = loadProjectRulePolicy(cwd);
 	const dropped = new Set<Diagnostic>();
 	for (const [filePath, group] of byFile) {
 		const { kept } = applyFindingPolicy(group, {

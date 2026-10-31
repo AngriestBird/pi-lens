@@ -20,6 +20,12 @@ import {
 import { compactRenderResult } from "./render-compact.js";
 import { readFilePath } from "./shared.js";
 
+/** How many decisions a config denial decided (`disabled-by-config`). */
+function countDenied(entries: readonly { reason: string }[]): number {
+	return entries.filter((entry) => entry.reason === "disabled-by-config")
+		.length;
+}
+
 /** One line per decision, for the compact renderer. */
 function summarize(view: EffectiveConfigView): string {
 	const documents = `${view.documents.length} config file(s)`;
@@ -28,19 +34,20 @@ function summarize(view: EffectiveConfigView): string {
 		return `effective_config — ${documents} · ${view.file.error}`;
 	}
 	const selected = view.file.servers.filter((entry) => entry.selected).length;
-	const denied = view.file.servers.filter(
-		(entry) => entry.reason === "disabled-by-config",
-	).length;
+	const denied = countDenied(view.file.servers);
 	const tools = view.file.tools.filter((entry) => entry.selected).length;
+	const deniedTools = countDenied(view.file.tools);
 	// The denial clause is built first rather than nested inside the summary
 	// template: a conditional expression inside a template inside a template is
 	// the S3358/nested-template shape SonarCloud flags, and it hid the one
 	// number a reader is looking for (#2427 review round 2, F3).
 	const deniedClause = denied > 0 ? `, ${denied} denied by config` : "";
+	const deniedToolsClause =
+		deniedTools > 0 ? `, ${deniedTools} denied by config` : "";
 	return (
 		`effective_config ${view.file.path} — ${documents} · ` +
 		`${selected} server(s) selected${deniedClause} · ` +
-		`${tools} tool(s)`
+		`${tools} tool(s)${deniedToolsClause}`
 	);
 }
 
