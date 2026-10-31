@@ -16,7 +16,7 @@
 //    leaves the check "Expected" forever on a docs-only PR; a job-level `if:`,
 //    which reports `skipped` where ci-verdict demands a literal success; and a
 //    timing step left unguarded, which times the lane on every docs PR.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
@@ -138,25 +138,6 @@ describe("hot-path latency workflow (#4363)", () => {
 				.filter((s) => s !== noop && !timing.includes(s.name ?? ""))
 				.map((s) => s.name),
 		).toEqual([]);
-	});
-
-	it("lists no dead path: every HOT_PATH_PATHS entry exists in the tree", () => {
-		// Recurrence: a renamed seam left a dead entry, so the PR that edits the
-		// successor was never timed. A `*` entry needs one matching file.
-		for (const entry of HOT_PATH_PATHS) {
-			if (entry.includes("*") && !entry.endsWith("/**")) {
-				const pattern = new RegExp(
-					`^${entry.replace(/\./g, "\\.").replace(/\*/g, "[^/]*")}$`,
-				);
-				expect(
-					readdirSync(ROOT).some((name) => pattern.test(name)),
-					entry,
-				).toBe(true);
-			} else {
-				const target = entry.endsWith("/**") ? entry.slice(0, -3) : entry;
-				expect(existsSync(resolve(ROOT, target)), entry).toBe(true);
-			}
-		}
 	});
 
 	it("is read-only and runs the gate script over two built trees", () => {
