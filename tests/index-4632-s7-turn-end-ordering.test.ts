@@ -78,7 +78,7 @@ const DISABLED_CAUSE = "it is disabled in config by lsp.disabledServers";
 const UNSTARTED_CAUSE = "it could not be started, or was still starting";
 
 const cascadeLine = (ids: string, cause: string): string =>
-	`⚠️ Cascade: no language server answered for neighbor files of ${ids} (${cause}), so their cross-file errors were not checked (not a clean result).`;
+	`⚠️ Cascade: no primary language server answered for neighbor files of ${ids} (${cause}), so their cross-file errors were not confirmed (not a clean result).`;
 
 const UNSTARTED_LINE = cascadeLine("typescript", UNSTARTED_CAUSE);
 

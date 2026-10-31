@@ -280,7 +280,7 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		const { text, details } = await runTool(dir, { path: file });
 
 		expect(text).toMatch(
-			/Primary LSP \(csharp[^)]*\): not available — no language server answered for this file/,
+			/Primary LSP \(csharp[^)]*\): not available — no primary language server answered for this file/,
 		);
 		expect(text).toContain(
 			"csharp-ls: no project root found for this file (looked for *.csproj / *.sln / *.slnx, including a bounded search of 128 directories below it).",
@@ -325,7 +325,7 @@ describe("#3750 an empty result under a server-root fallback", () => {
 			const single = await runTool(dir, { path: first });
 
 			expect(single.text).toMatch(
-				/Primary LSP \(rust\): not available — no language server answered for this file/,
+				/Primary LSP \(rust\): not available — no primary language server answered for this file/,
 			);
 			expect(single.text).toContain(
 				"rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock).",
@@ -342,7 +342,7 @@ describe("#3750 an empty result under a server-root fallback", () => {
 
 			expect(batch.text).toContain("0 files confirmed clean, 2 unconfirmed");
 			expect(batch.text).toContain(
-				"2 with no language server answer (it could not be started, or was still starting): rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock). NOT the same as 0 diagnostics.",
+				"2 with no primary language server answer (it could not be started, or was still starting): rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock). NOT the same as 0 diagnostics.",
 			);
 			expect(batch.text).not.toContain("bounded search");
 		} finally {
@@ -460,7 +460,7 @@ describe("#3750 an empty result under a server-root fallback", () => {
 		// The declined csharp-ls file names its root verdict with the files no
 		// server answered; the rust file keeps the hosted-server wording.
 		expect(text).toContain(
-			"1 with no language server answer (it could not be started, or was still starting): csharp-ls: no project root found for this file (looked for *.csproj / *.sln / *.slnx, including a bounded search of 128 directories below it); the other 1: rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock); the server was started at the file's directory and may not have analysed it",
+			"1 with no primary language server answer (it could not be started, or was still starting): csharp-ls: no project root found for this file (looked for *.csproj / *.sln / *.slnx, including a bounded search of 128 directories below it); the other 1: rust-analyzer: no project root found for this file (looked for Cargo.toml / Cargo.lock); the server was started at the file's directory and may not have analysed it",
 		);
 		expect(text).toContain("NOT the same as 0 diagnostics.");
 	});

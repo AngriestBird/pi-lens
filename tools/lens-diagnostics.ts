@@ -464,7 +464,7 @@ export function createLensDiagnosticsTool(
 						? `lens_diagnostics${scope} — timed out (result may be incomplete)`
 						: // #4322: no language server answered; it is not a silent server.
 							details.primaryUnavailable !== undefined
-							? `lens_diagnostics${scope} — unconfirmed (no language server answered)`
+							? `lens_diagnostics${scope} — unconfirmed (no primary language server answered)`
 							: `lens_diagnostics${scope} — unconfirmed (server cannot confirm clean)`;
 				return `lens_diagnostics${scope} — ${count} ${noun}`;
 			}

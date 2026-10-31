@@ -2508,12 +2508,29 @@ export async function computeCascadeForFile(
 					if (rawDiags.inconclusiveReason === "primary-unavailable") {
 						const serverIds = rawDiags.inconclusiveServerIds ?? [];
 						const cause = rawDiags.primaryUnavailableCause ?? "unstarted";
+						// #5014 r2 (F2): a `fallbackFor` alternate can answer while its
+						// owner is named here. Its findings are delivered beside the
+						// line; they never confirm the neighbour (no reconcile, no
+						// observation).
+						// #5034 r7: and only when they describe this run's bytes. An
+						// answer from before the edit (#5040, the rule the branch below
+						// applies) or one computed for other bytes than disk (#1095, the
+						// rule the runner applies to this touch shape, #5034 r3 F7) is
+						// withheld; the line stays, so the neighbour never reads clean.
+						const preEditAnswer = isPreEditAnswer(rawDiags, cascadeStart)
+							? readReusedAnswer(rawDiags)
+							: undefined;
+						const bindingRejected = readBoundToCurrentDisk(rawDiags) === false;
+						const diags =
+							preEditAnswer || bindingRejected
+								? []
+								: cascadeDisplay(rawDiags.diags, neighborPath, content);
 						const durationMs = Date.now() - neighborStart;
 						logCascade({
 							phase: "neighbor_touch",
 							filePath,
 							neighborFile: neighborPath,
-							diagnosticCount: 0,
+							diagnosticCount: diags.length,
 							durationMs,
 							lspTouched: true,
 							lspServerCount: configuredServerCount,
@@ -2522,12 +2539,21 @@ export async function computeCascadeForFile(
 								inconclusive: true,
 								...readInconclusiveAttribution(rawDiags),
 								primaryUnavailableCause: cause,
+								...(preEditAnswer && {
+									preEditAnswer: true,
+									answerServerId: preEditAnswer.serverId,
+									answerPublishedAt: preEditAnswer.publishedAt,
+									cascadeStart,
+								}),
+								...(bindingRejected && {
+									bindingState: bindingStateLabel(false),
+								}),
 							},
 						});
 						return {
 							filePath: neighborPath,
 							reason: neighborReason(importerSet, callerSet, neighborPath),
-							diagnostics: [],
+							diagnostics: diags,
 							lspTouched: true as const,
 							primaryUnavailable: { serverIds: [...serverIds], cause },
 							durationMs,

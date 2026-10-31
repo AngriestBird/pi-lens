@@ -922,7 +922,7 @@ function buildCoverageNotice(
 			r.primaryUnavailableCause === "disabledFallback",
 	);
 	const unconfirmedStatus = cause
-		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})${deniedRunnerIds.length > 0 ? `; ${deniedNote}` : ""}`
+		? `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})${deniedRunnerIds.length > 0 ? `; ${deniedNote}` : ""}`
 		: deniedRunnerIds.length > 0
 			? onlySwitchedOff
 				? `not checked (${deniedNote})`

@@ -1117,8 +1117,8 @@ export function describePrimaryUnavailable(
 		carriedCause ?? primaryUnavailableCause(serverIds, disabledServerIds);
 	return {
 		text:
-			`Primary LSP (${serverIds.join(", ")}): not available — no language ` +
-			`server answered for this file (${PRIMARY_UNAVAILABLE_CAUSE[cause]}). ` +
+			`Primary LSP (${serverIds.join(", ")}): not available — no primary ` +
+			`language server answered for this file (${PRIMARY_UNAVAILABLE_CAUSE[cause]}). ` +
 			"NOT the same as 0 diagnostics; auxiliary scanners do not check the " +
 			"language itself.",
 		cause,
@@ -2402,9 +2402,9 @@ function auxiliaryOnlyFindingsLine(
 			auxiliaryOnly.flatMap((result) => result.primaryUnavailableCause ?? []),
 		) ?? "unstarted";
 	return (
-		`${count} file${count === 1 ? "" : "s"} with auxiliary findings only: no ` +
-		`language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]}), so the ` +
-		"language itself was not checked."
+		`${count} file${count === 1 ? "" : "s"} with auxiliary or fallback findings only: ` +
+		`no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]}), ` +
+		"so the language itself was not confirmed."
 	);
 }
 
@@ -2429,7 +2429,7 @@ function unconfirmedReasonClause(
 	// The rest of the unconfirmed files keep their own explanation.
 	if (primaryUnavailable.count > 0) {
 		const head =
-			`${primaryUnavailable.count} with no language server answer ` +
+			`${primaryUnavailable.count} with no primary language server answer ` +
 			`(${PRIMARY_UNAVAILABLE_CAUSE[primaryUnavailable.cause ?? "unstarted"]})` +
 			(primaryUnavailable.rootFallbackReasons.length > 0
 				? `: ${primaryUnavailable.rootFallbackReasons.join("; ")}`

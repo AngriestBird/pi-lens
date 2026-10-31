@@ -22,7 +22,12 @@ const diagsResult = (
 	extra: {
 		inconclusive?: boolean;
 		inconclusiveServerIds?: string[];
-		inconclusiveReason?: "notify-write" | "diagnostics-wait" | "mixed";
+		inconclusiveReason?:
+			| "notify-write"
+			| "diagnostics-wait"
+			| "mixed"
+			| "primary-unavailable";
+		primaryUnavailableCause?: "unstarted";
 		// #1470: the narrowed confirmation an aux cut off by the grace timer
 		// produces — the touch is NOT inconclusive, but it no longer speaks for
 		// the named servers.
@@ -1035,6 +1040,67 @@ describe("runner status/semantic edge cases", () => {
 				unconfirmedServerIds: ["opengrep"],
 				deferredServerIds: ["opengrep"],
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #5034 review r3 (F7). Recurrence: since #5014 a fallback-served touch is
+	// `primary-unavailable` and names the OWNER, which was never acquired and
+	// contributed no row and no binding. The stale filter read that name as the
+	// #4231 provenance (the named server is the stale contributor), kept the
+	// fallback's rows about other bytes, and published them as `failed` +
+	// blocking. An auxiliary's rows on the same verdict are the same case.
+	it("withholds a stale-bound fallback answer for an unanswered primary from the verdict (#5034 F7)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-5034-f7-");
+		try {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const filePath = path.join(env.tmpDir, "main.py");
+			fs.writeFileSync(filePath, "x = 1\n");
+			const row = (serverId: string) => ({
+				severity: 1 as const,
+				message: `${serverId} finding about older bytes`,
+				source: serverId,
+				serverId,
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			});
+			const unanswered = (bound: boolean) =>
+				diagsResult([row("python-jedi"), row("typos")], {
+					inconclusive: true,
+					inconclusiveServerIds: ["python"],
+					inconclusiveReason: "primary-unavailable",
+					primaryUnavailableCause: "unstarted",
+					binding: { boundToCurrentDisk: bound },
+				});
+
+			codeAction.mockResolvedValue([]);
+			touchFile.mockResolvedValue(unanswered(false));
+			const stale = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect({
+				status: stale.status,
+				semantic: stale.semantic,
+				reachedNoVerdict: reachedNoVerdict(stale),
+				diagnosticCount: stale.diagnostics.length,
+				primaryUnavailableCause: stale.primaryUnavailableCause,
+			}).toEqual({
+				status: "skipped",
+				semantic: "none",
+				reachedNoVerdict: true,
+				diagnosticCount: 0,
+				primaryUnavailableCause: "unstarted",
+			});
+
+			// Bound to these bytes, the fallback's rows are its real answer.
+			touchFile.mockResolvedValue(unanswered(true));
+			const bound = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(bound.status).toBe("failed");
+			expect(bound.diagnostics).toHaveLength(2);
 		} finally {
 			env.cleanup();
 		}

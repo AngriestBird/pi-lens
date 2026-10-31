@@ -382,7 +382,7 @@ function fileLine(column: Column): string {
 	const { primary } = column;
 	return primary === "fake"
 		? "Primary LSP (json): confirmed clean."
-		: `Primary LSP (${languageOf(column).unanswered}): not available — no language server answered for this file (${CAUSE[primary]}). NOT the same as 0 diagnostics; auxiliary scanners do not check the language itself.`;
+		: `Primary LSP (${languageOf(column).unanswered}): not available — no primary language server answered for this file (${CAUSE[primary]}). NOT the same as 0 diagnostics; auxiliary scanners do not check the language itself.`;
 }
 
 /**
@@ -405,7 +405,7 @@ function fileSecondLine(column: Column, file: string, route: RouteId): string {
 }
 
 function tallyLine(primary: Column["primary"], count: number): string {
-	return `${count} with no language server answer (${CAUSE[primary as Exclude<Column["primary"], "fake">]}). NOT the same as 0 diagnostics.`;
+	return `${count} with no primary language server answer (${CAUSE[primary as Exclude<Column["primary"], "fake">]}). NOT the same as 0 diagnostics.`;
 }
 
 function expectedLines(route: RouteId, column: Column): string[] {
@@ -420,7 +420,7 @@ function expectedLines(route: RouteId, column: Column): string[] {
 					"✓ JSON clean · Nms",
 					"✓ JSON clean · Nms",
 				];
-			const status = `⚠ ${label} unconfirmed — no language server answered (${CAUSE[primary]}) · Nms`;
+			const status = `⚠ ${label} unconfirmed — no primary language server answered (${CAUSE[primary]}) · Nms`;
 			// First write, a later write of it, then a second file's first write:
 			// one note per disabled server per session, one per file otherwise.
 			return primary === "disabled"

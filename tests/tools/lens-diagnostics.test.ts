@@ -319,7 +319,7 @@ describe("lens_diagnostics compact line for a file no language server answered (
 			.render(200)
 			.join("\n");
 		expect(rendered).toContain(
-			"lens_diagnostics probe.json — unconfirmed (no language server answered)",
+			"lens_diagnostics probe.json — unconfirmed (no primary language server answered)",
 		);
 	});
 });

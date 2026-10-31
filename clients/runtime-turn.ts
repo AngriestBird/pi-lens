@@ -2241,6 +2241,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				lastObserver.set(nk, { run, filePath: neighborPath });
 		}
 	}
+	// #5034 r3 (F8): a neighbour listed because no primary answered for it (its
+	// `fallbackFor` alternate's rows, or none) was delivered, not observed. Its
+	// rows never replace the pending record, and the record's line still renders.
+	// The compute never adds such a neighbour to `observedNeighborPaths`.
+	const primaryUnanswered = new Set<string>();
+	for (const [nk, { run }] of lastObserver) {
+		if (
+			run.result?.neighbors.some(
+				(n) =>
+					normalizeMapKey(n.filePath) === nk &&
+					n.primaryUnavailable !== undefined,
+			)
+		)
+			primaryUnanswered.add(nk);
+	}
 	// #4487: a fresh clean observation clears the neighbour's pending errors
 	// at once; errors are recorded only when the section showing them is
 	// delivered (the cascade section's hold below).
@@ -2345,6 +2360,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// its own dispatch; the record keeps nothing for it, even when a
 					// run read it before the edit.
 					if (editedKeys.has(normalizeMapKey(n.filePath))) continue;
+					if (primaryUnanswered.has(normalizeMapKey(n.filePath))) continue;
 					sectionObservations.push({
 						filePath: n.filePath,
 						diagnostics: n.diagnostics,
@@ -2486,7 +2502,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// returns earlier).
 	const pendingCandidates = listCascadePendingNeighbors().filter((entry) => {
 		const key = normalizeMapKey(entry.filePath);
-		if (lastObserver.has(key) || editedKeys.has(key)) return false;
+		if (editedKeys.has(key)) return false;
+		if (lastObserver.has(key) && !primaryUnanswered.has(key)) return false;
 		return isUnderDir(entry.filePath, cwd);
 	});
 	// #4495 (review F1, round 3): each entry is a claim about the file's

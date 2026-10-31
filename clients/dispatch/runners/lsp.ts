@@ -354,11 +354,18 @@ const lspRunner: RunnerDefinition = {
 					// finding from the aggregate binding (#5017: `hasErrors` read such
 					// rows as a `failed` verdict, and `keepUnobserved` retired a live
 					// recorded blocker on findings about other bytes).
+					// #5034 r3 (F7): a `primary-unavailable` touch names primaries that
+					// were never acquired (`resolveTouchVerdict` keeps no wait or notify
+					// id), so they contributed no row and no binding: the stale binding
+					// is a fallback's or an auxiliary's, and no row has the provenance.
+					const namesStaleContributor =
+						diagnosticsInconclusive &&
+						touched.inconclusiveReason !== "primary-unavailable";
 					const unconfirmed = new Set(unconfirmedServerIds);
 					const currentContentDiags: typeof lspDiags = [];
 					for (const diagnostic of lspDiags) {
 						if (
-							diagnosticsInconclusive &&
+							namesStaleContributor &&
 							diagnostic.serverId !== undefined &&
 							!unconfirmed.has(diagnostic.serverId)
 						) {
