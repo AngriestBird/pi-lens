@@ -368,8 +368,11 @@ A night that could not tell never erases an answer (#5060). A row that holds a
 settled answer (`no`, `no (pull)`, `yes`, `yes (saved write)`) keeps it, with its
 evidence, when the run measures `inconclusive` or `cannot measure`; only a
 settled answer replaces a settled one, and a `yes` to `no` change stays a visible
-flip. The held night goes to the run log (`save-verdict: held back <server>`),
-because this table has no column for a night a row was not answered.
+flip. This table has no column for a night a row was not answered, so the held
+night goes to the run log (`save-verdict: held back <server>`), to one
+`::warning::` annotation per held server under GitHub Actions, and to the
+`--summary` JSON (`heldBack`). No counter or issue tracks consecutive held
+nights.
 
 A pull-mode server answers a `textDocument/diagnostic` request rather than
 publishing, so no arm of its run has the save as its only new input: it reads
