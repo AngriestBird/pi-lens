@@ -24,13 +24,13 @@ One red-first transcript per changed test file, cut to the failing lines (at mos
 
 ### Mutations
 
-One table row per new guard or relaxed assertion: the file, the mutation, the result as a backticked `1 failed`, and the failing test's title in backticks. Delete this section when the diff adds none.
+One table row per new guard, branch, filter, cap or fallback, and per relaxed or rewritten assertion: the file, the mutation, the result as a backticked `1 failed`, and the failing test's title in backticks. Delete this section when the diff adds none.
 
 ### Class sweep
 
 `Shape: #N`, the search command in backticks, then `folds onto ...` or `stays distributed because ...`. Use `none: <reason>` only for a diff with no runtime code.
 
-Alignment: <family names, comma-separated> | none: <reason>
+Alignment: <family names, comma-separated> | none: <reason of 12 or more characters>
 
 ### Observability
 

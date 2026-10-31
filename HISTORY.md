@@ -5386,8 +5386,8 @@ A fix on `clients/lsp/`, the read guard, tool registration, or session lifecycle
   row↔probe tie test cannot see a row that never passes (#2893).
 - Before handoff, run `npm run preflight` last and paste its table in
   `PR_BODY.md` — a handoff without it is incomplete.
-- One set of template headings per PR. A fix round APPENDS `## Round N` and
-  edits the existing `## Observability` / `## Tests` sections in place; it
+- One set of template headings per PR. A fix round edits the existing
+  sections in place and never appends a `## Round N` section (#5026); it
   never adds a second `## Observability` (the lint reads the first one, and a
   stale first section was the most common `PR body` red on 2026-09-10). Lint
   the FULL body you will publish (`gh pr view <n> --json body -q .body` plus
