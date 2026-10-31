@@ -1101,6 +1101,12 @@ describe("a primary's touch rows follow the answer's content binding (#5051)", (
 			const content =
 				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
 					?.content ?? "";
+			// Recurrence (#5053 review F1): the absences below also hold when the
+			// cascade section is never delivered at all (a dead `blockerParts.push`).
+			// The positive pair pins what turn_end DID deliver: the withheld
+			// neighbour's inconclusive line.
+			expect(content).toContain("inconclusive for 1");
+			expect(content).toContain("C.go");
 			expect(content).not.toContain("late error");
 			expect(content).not.toContain("Cascade errors in");
 			expect(format.listCascadePendingNeighbors()).toEqual([
