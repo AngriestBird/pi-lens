@@ -1034,12 +1034,17 @@ describe("#5048 a secondary's commit gate persists only its own records", () => 
 		runnerId: "other-runner",
 	});
 
-	// Recurrence it prevents (PR #5052 thread PRRT_kwDORt8rec6yNpkM, review r2
-	// row S2): the retire sync spoke as the committing secondary, so the
-	// primary's cached section for a file its only blocker had left stayed, and
-	// the secondary's commit was refused `session_mismatch` until the primary
-	// wrote again. Master retired it.
-	it("retires the primary's cached section at a same-root secondary's commit once the file left the map", async () => {
+	// Pins an accepted fail-closed regression (PR #5052 thread
+	// PRRT_kwDORt8rec6yNpkM, row S2; maintainer decision 2026-10-31). The retire
+	// sync speaks as the committing secondary, so the primary's cached section
+	// stays, and the secondary's commit is refused `session_mismatch` until the
+	// primary's next commit or write clears it. Master retired it. A clean
+	// verdict for the file here (round 2's Remedy B) also dropped another
+	// process's section for that file and allowed the commit (row S9, a
+	// fail-open). The cure is one owner root per session (#5057): flip this
+	// cell when that lands. The recurrence it prevents is a retire verdict that
+	// drops a section the committing session does not own.
+	it("refuses a same-root secondary's commit until the primary clears its cached section, after its only blocker settles clean", async () => {
 		const env = setupTestEnvironment("pi-lens-5052-retire-cached-");
 		try {
 			const { projA, runtime, cacheManager } = twoRoots(env.tmpDir);
@@ -1055,13 +1060,30 @@ describe("#5048 a secondary's commit gate persists only its own records", () => 
 				"fresh",
 			);
 			await settledFor(app, projA, [], PRIMARY);
-			expect(
-				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT),
-			).toEqual({ block: false });
+			const refused = evaluateGitGuard(
+				runtime,
+				cacheManager,
+				projA,
+				"pi",
+				SECONDARY,
+				COMMIT,
+			);
+			expect(refused.block).toBe(true);
+			expect(refused.reason).toContain("session_mismatch");
 			expect(runtime.hasInlineBlocker(app)).toBe(false);
+			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
+				"fresh",
+			);
+			// Self-clearing: the primary's own next commit retires its section.
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", undefined, COMMIT),
+			).toEqual({ block: false });
 			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
 				"missing",
 			);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT),
+			).toEqual({ block: false });
 		} finally {
 			env.cleanup();
 		}

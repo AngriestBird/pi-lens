@@ -2587,10 +2587,7 @@ export function evaluateGitGuard(
 			);
 		}
 		// #4484 r2: a retire speaks for its file, as a clean write does, so the
-		// persisted record drops that file's section. #5052 r2: the committing
-		// session may not own that section, so the retire is a clean verdict for
-		// the file only once the file has left the map; while another runner
-		// still blocks it, its section stays.
+		// persisted record drops that file's section.
 		for (const filePath of absorbed.retiredFiles) {
 			syncGitGuardRecord(
 				runtime,
@@ -2598,7 +2595,7 @@ export function evaluateGitGuard(
 				cwd,
 				filePath,
 				undefined,
-				!runtime.hasInlineBlocker(filePath),
+				undefined,
 				sessionId,
 				inScope,
 			);
