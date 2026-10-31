@@ -63,6 +63,7 @@ const compact = (fold: string[]) =>
 		"",
 		"## Class sweep",
 		'Defect shape: a documented rule with no gate. Search: `rg -n "fold check" scripts`. Verdict: folded onto the body lint.',
+		"Alignment: none: this fixture touches no family.",
 		"",
 		"## Observability",
 		"No new failure path; no record added.",
@@ -142,7 +143,7 @@ describe("a bot block appended to the body never counts (#4774)", () => {
 				(line) =>
 					line.trim() &&
 					!line.startsWith(TEST_REFERENCE) &&
-					!/^PR body (?:is \d+ visible|has a \d+-line|has a code line|has \d+ code lines|is missing "## Proof and checks"|"## Summary" must hold|"## Notes for the reviewer" allows)/.test(
+					!/^PR body (?:is \d+ visible|has a \d+-line|has a code line|has \d+ code lines|is missing "## Proof and checks"|"Class sweep" needs exactly one line|"## Summary" must hold|"## Notes for the reviewer" allows)/.test(
 						line,
 					),
 			);

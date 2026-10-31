@@ -61,6 +61,10 @@ const REQUIRED_SECTIONS = [
 	"Observability",
 	"Fold check",
 ];
+// The one list of alignment families (#5026). The script keeps no copy: the
+// names are parsed from this file's table on every lint.
+const ALIGNMENT_FAMILIES_PATH = "docs/alignment-families.md";
+const ALIGNMENT_NONE_MIN_REASON = 12;
 // #5003: what a reader scrolls past. Code holds the required transcripts, so
 // it stays out of the character count and is capped by its own lines, width
 // and body-wide total instead. Every cap reads the lexer's token tree
@@ -4498,6 +4502,56 @@ function notesAdmitted(tokens) {
 	);
 }
 
+/**
+ * The family names of `docs/alignment-families.md`: the text before the first
+ * colon in the Family column of its table. A file with no such table throws,
+ * so a gate that cannot read the list never reads a body as clean.
+ */
+function alignmentFamilies() {
+	const table = markdownTokens(
+		readFileSync(resolve(REPO_ROOT, ALIGNMENT_FAMILIES_PATH), "utf8"),
+	)
+		.map(({ token }) => token)
+		.find((token) => token.type === "table");
+	const names = (table?.rows ?? []).map((row) =>
+		String(row[1]?.text ?? "")
+			.split(":")[0]
+			.trim(),
+	);
+	if (
+		table?.header[1]?.text !== "Family" ||
+		names.length === 0 ||
+		names.some((name) => !name || name.includes(","))
+	)
+		throw new Error(
+			`${ALIGNMENT_FAMILIES_PATH} holds no readable family table`,
+		);
+	return names;
+}
+
+/**
+ * `### Class sweep` carries exactly one `Alignment:` line (#5026): the family
+ * names the change touches, comma-separated and spelled as in
+ * `docs/alignment-families.md`, or `none: <reason>` with a reason of at least
+ * ALIGNMENT_NONE_MIN_REASON characters. Fail closed: anything else refuses,
+ * a bare `none` and the template's own placeholder included.
+ */
+function lintAlignmentLine(sweepLines) {
+	const found = sweepLines
+		.map((line) => /^Alignment:(.*)$/.exec(line.trim())?.[1])
+		.filter((value) => value !== undefined);
+	const names = alignmentFamilies();
+	const message = `PR body "Class sweep" needs exactly one line "Alignment: <family names, comma-separated>" or "Alignment: none: <reason of ${ALIGNMENT_NONE_MIN_REASON}+ characters>". Families: ${names.join("; ")}. See ${ALIGNMENT_FAMILIES_PATH}.`;
+	if (found.length !== 1) return [message];
+	const value = found[0].trim();
+	if (value.startsWith("none:"))
+		return value.slice(5).trim().length >= ALIGNMENT_NONE_MIN_REASON
+			? []
+			: [message];
+	const listed = value.split(",").map((name) => name.trim());
+	return listed.every((name) => names.includes(name)) ? [] : [message];
+}
+
 function lintBodyBudgets(body) {
 	const errors = [];
 	const blocks = markdownTokens(body);
@@ -4629,6 +4683,18 @@ export function lintPrBody(body = "", options = {}) {
 	}
 	if (options.workingTree) {
 		errors.push(...lintBodyBudgets(body));
+		const sweep = headings.find((heading) =>
+			hasSection(heading, "class sweep"),
+		);
+		if (sweep)
+			errors.push(
+				...lintAlignmentLine(
+					lines.slice(
+						sweep.contentIndex,
+						nextSectionHeading(sweep)?.index ?? lines.length,
+					),
+				),
+			);
 	}
 	if (options.bugClosing)
 		errors.push(

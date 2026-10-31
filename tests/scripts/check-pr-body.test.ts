@@ -42,7 +42,7 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
 
-const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\n- None.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Proof and checks\nThe proof sections follow.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Fold check\n#4711 not folded: a different issue and a different rule.\n\n## Observability\nThe advisory check run is the record.\n\n`;
+const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\n- None.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Proof and checks\nThe proof sections follow.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\nAlignment: none: this fixture touches no family.\n\n## Fold check\n#4711 not folded: a different issue and a different rule.\n\n## Observability\nThe advisory check run is the record.\n\n`;
 // #4605 F12: the shared `body` fixture carries no mutation table, so a case
 // whose diff adds a guard states its own row-2 proof for the file it changes.
 function withMutationProof(text: string, ...files: string[]) {
@@ -201,7 +201,7 @@ function fetchForEvent(bodyText: string, files: unknown) {
 	});
 }
 const flattenedBody =
-	"## Summary Await the first lifecycle run's asynchronous word-index snapshot promotion before reseeding the current-format snapshot for the fallback run. ## Tests - Native master flake justification for the count barrier: 2/10 forced runs reproduced the promotion race. - Fixed lifecycle test: 5/5 tests passed. ### Test assessment - tests/clients/word-index-lifecycle.test.ts uniquely pins the ordering guard. ## Blast radius This change is test-only. ## Class sweep Defect shape: async-persist lifecycle race. Search `rg -n async-persist clients`. Verdict: none outside this fixture. ## Fold check #4711 not folded: a different issue and a different rule. ## Observability The test observes existing project snapshot records.";
+	"## Summary Await the first lifecycle run's asynchronous word-index snapshot promotion before reseeding the current-format snapshot for the fallback run. ## Tests - Native master flake justification for the count barrier: 2/10 forced runs reproduced the promotion race. - Fixed lifecycle test: 5/5 tests passed. ### Test assessment - tests/clients/word-index-lifecycle.test.ts uniquely pins the ordering guard. ## Blast radius This change is test-only. ## Class sweep Defect shape: async-persist lifecycle race. Search `rg -n async-persist clients`. Verdict: none outside this fixture.\nAlignment: none: this fixture touches no family. ## Fold check #4711 not folded: a different issue and a different rule. ## Observability The test observes existing project snapshot records.";
 const multiRoundFlattenedBody =
 	"## Summary Preserve the repair context across multiple review rounds. ## Tests - The repair fixture exercises distinct numbered fix rounds. ### Test assessment - tests/scripts/check-pr-body.test.ts uniquely pins numbered fix-round repair. ## Fix round 1 The first review round records the initial correction. ## Fix round 2 The second review round records the follow-up correction. ## Blast radius This change is test-only. ## Class sweep Numbered fix rounds remain distinct during repair. ## Observability The repaired body is validated by the existing body lint.";
 const motivatingFlattenedBodies = [
@@ -1061,7 +1061,7 @@ describe("test-reference positive recognition (#3013)", () => {
 });
 
 const escapedNewlineFlattenedBody =
-	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nAdds fixtures pinning literal backslash-n repair outside fences.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nDefect shape: escaped-newline flattening. Search `rg -n backslash-n scripts`. Verdict: sibling of the space-flattening class.\\n\\n## Fold check\\n#4711 not folded: a different issue and a different rule.\\n\\n## Observability\\nA notice logs the repaired PR number.";
+	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nAdds fixtures pinning literal backslash-n repair outside fences.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nDefect shape: escaped-newline flattening. Search `rg -n backslash-n scripts`. Verdict: sibling of the space-flattening class.\\nAlignment: none: this fixture touches no family.\\n\\n## Fold check\\n#4711 not folded: a different issue and a different rule.\\n\\n## Observability\\nA notice logs the repaired PR number.";
 
 const escapedNewlineWithFence =
 	'## Summary\\nRestore real newlines outside fences only (#2145).\\n\\n## Tests\\n```json\\n{"note": "line1\\nline2"}\\n```\\nThe JSON example above documents a genuine escaped newline.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nFence content must never be rewritten during escaped-newline repair.\\n\\n## Observability\\nA notice logs the repaired PR number.';
@@ -3910,6 +3910,7 @@ describe("body caps (#5003)", () => {
 		"",
 		"### Class sweep",
 		"none: this fixture has no runtime change.",
+		"Alignment: none: this fixture touches no family.",
 		"",
 		"### Observability",
 		"No new failure path; no record added.",
@@ -3990,6 +3991,10 @@ describe("body caps (#5003)", () => {
 		["a comment block", `<!-- ${pad} -->`],
 		["inline html", `see <span>${pad}</span>`],
 		["a blockquote", `> ${pad}`],
+		["a code span", `\`${pad}\``],
+		["a link text", `[${pad}](https://example.com)`],
+		["strong text", `**${pad}**`],
+		["a heading", `#### ${pad}`],
 		["a table cell", `| a |\n| --- |\n| ${pad} |`],
 		["a list item", `- ${pad}`],
 		["a setext heading", `${pad}\n---`],
@@ -4172,6 +4177,68 @@ describe("body caps (#5003)", () => {
 		expect(capError(flat, "Proof and checks")).toHaveLength(1);
 		const headless = NEW_BODY.replace("## Proof and checks\n\n", "");
 		expect(capError(headless, "Proof and checks")).toHaveLength(1);
+	});
+
+	// Recurrence: the alignment routine (PR #5011) found one idea implemented
+	// with three meanings, each surfaced only by accident in review. A PR that
+	// touches a family must say so in its body, or say why it touches none.
+	// The family names come from docs/alignment-families.md, the one list.
+	const alignment = (line: string | null) =>
+		NEW_BODY.replace(
+			"Alignment: none: this fixture touches no family.",
+			line ?? "",
+		);
+	const ALIGNMENT = "needs exactly one line";
+
+	it.each([
+		["a missing line", null],
+		["an unknown family", "Alignment: Config sprawl"],
+		[
+			"a known family beside an unknown one",
+			"Alignment: Env tunables, Config sprawl",
+		],
+		["a bare none", "Alignment: none"],
+		["a none with a short reason", "Alignment: none: docs only"],
+		["a none with no reason", "Alignment: none:"],
+		["an empty line", "Alignment:"],
+		["a family number", "Alignment: 7"],
+		["a family in another case", "Alignment: env tunables"],
+		["a capitalised none", "Alignment: None: this fixture touches no family."],
+		[
+			"the template placeholder",
+			"Alignment: <family names, comma-separated> | none: <reason>",
+		],
+		["a bulleted line", "- Alignment: Env tunables"],
+		["a line inside a code fence", "```text\nAlignment: Env tunables\n```"],
+		["two lines", "Alignment: Env tunables\nAlignment: Closed vocabularies"],
+	])("refuses %s in the Alignment line", (_name, line) => {
+		expect(capError(alignment(line), ALIGNMENT)).toHaveLength(1);
+	});
+
+	it.each([
+		["one family", "Alignment: Env tunables"],
+		[
+			"two families",
+			"Alignment: Path globs and their anchors, Closed vocabularies",
+		],
+		[
+			"a none with a reason",
+			"Alignment: none: this fixture touches no family.",
+		],
+		["a none with a 12 character reason", "Alignment: none: 123456789012"],
+	])("admits %s in the Alignment line", (_name, line) => {
+		expect(capError(alignment(line), ALIGNMENT)).toEqual([]);
+	});
+
+	it("keeps the family names in docs/alignment-families.md only", () => {
+		const source = readFileSync(
+			resolve(repositoryRoot, "scripts/check-pr-body.mjs"),
+			"utf8",
+		);
+		expect(source).not.toContain("Env tunables");
+		expect(capError(alignment("Alignment: Env tunables"), ALIGNMENT)).toEqual(
+			[],
+		);
 	});
 
 	it("leaves an older body alone below the repository gates", () => {

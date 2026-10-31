@@ -58,6 +58,7 @@ const TAIL = [
 	"",
 	"## Class sweep",
 	'Defect shape: x. Search: `rg -n "x" scripts`. Verdict: folded onto the lexer.',
+	"Alignment: none: this fixture touches no family.",
 	"",
 	"## Observability",
 	"No new failure path; no record added.",

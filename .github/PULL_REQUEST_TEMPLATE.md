@@ -30,6 +30,8 @@ One table row per new guard or relaxed assertion: the file, the mutation, the re
 
 `Shape: #N`, the search command in backticks, then `folds onto ...` or `stays distributed because ...`. Use `none: <reason>` only for a diff with no runtime code.
 
+Alignment: <family names, comma-separated> | none: <reason>
+
 ### Observability
 
 The record this diff adds, `covered by existing record <kind> at <file>:<line>`, `none: <reason>`, or `No new failure path; no record added.`

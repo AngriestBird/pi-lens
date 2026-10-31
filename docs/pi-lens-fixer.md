@@ -253,7 +253,9 @@ rigor (#2599).
   be able to scan (#5003): `## Summary` (at most three sentences, with the
   closing keyword, which GitHub ignores in a title), `## Notes for the reviewer`
   (at most five bullets, no tables or fences), `## Change outline`, and
-  `## Proof and checks` with `### Tests`, `### Class sweep`,
+  `## Proof and checks` with `### Tests`, `### Class sweep` (ending in one
+  `Alignment:` line that names the families of `docs/alignment-families.md` the
+  change touches, or `none: <reason>` of 12+ characters),
   `### Observability` (a record literal from the runtime diff, `none: <reason>`,
   or exactly `No new failure path; no record added.`, which a new decision
   branch on a session, lifecycle or delivery seam refuses, #3875), and
@@ -277,7 +279,7 @@ rigor (#2599).
   reference written as `owner/repo#N` or a URL is refused unless the body
   already closes a bug, which owes the section whatever else it cites. CI refuses a label
   it cannot read; the local preflight, with no working gh, warns and skips it
-  as for a closed issue (#4968). A non-bug PR either deletes the `## Detection` section or
+  as for a closed issue (#4968). A non-bug PR either deletes the `### Detection` section or
   fills the three lines, and a `Shape:` or `Enforcer:` line it does write is
   validated too; free text in between reds the local preflight. A bug-closing
   PR that answers a layer, the `Gap: none:` reason, the `Shape: new:` name or

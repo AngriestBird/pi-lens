@@ -212,7 +212,7 @@ issue filed without one is a triage defect, not a shortcut.
 **Merge bar (user, 2026-10-18).** A PR merges when no HIGH finding is open and
 every gating check is green on the exact head. Each MEDIUM or LOW finding
 either folds into the same PR or becomes an accepted residual: the PR body
-lists it under `## Accepted residuals`, named `p3` with its severity and live
+lists it under `### Accepted residuals`, named `p3` with its severity and live
 population (for example `p3 (MEDIUM, live 0): <the gap>`), so the gap keeps a
 priority without an issue.
 A residual never becomes a follow-up issue. File an issue only for p2 or
@@ -224,7 +224,7 @@ reopen the round.
 **Known gaps (user, 2026-10-19).** An open p3 issue is an accepted known gap,
 not backlog. The orchestrator closes it as not planned with the `known-gap`
 label and lists it under its seam on the pinned tracker #4626. When a PR
-merges, its `## Accepted residuals` lines join the same tracker under their
+merges, its `### Accepted residuals` lines join the same tracker under their
 seam. A known gap reopens as p2 when it turns material: a live wrong result,
 data loss, a hang, or a leak with no bound.
 
@@ -557,7 +557,7 @@ operator's private notes, so a different orchestrator can run the same train.
   DETECTION lesson in one line: which verification layer caught it and which
   layer SHOULD have caught it earlier and at what cost. The accepted layer
   words are the `DETECTION_LAYERS` list exported by `scripts/check-pr-body.mjs`,
-  which the `## Detection` body check reads; the prose does not restate them.
+  which the `### Detection` body check reads; the prose does not restate them.
   `nightly` may carry its workflow as `nightly:<workflow>`. A PR that only
   references a `bug` or `nightly-drift` issue, in its body or its title, owes
   the section too (#4968: the 2026-10-29 audit found 24 bug-linked PRs merged
@@ -852,7 +852,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | Pushing to a PR branch while a fix round is queued against its old head | Merging master into #4594 staled the queued round's lease; the worker pushed a diverged copy to its handle branch (plegma #723). The orchestrator's push-verify refuses while a round still publishes to that branch. |
 | Resuming a reviewer without naming the deliverable | The resumed verifies of #4575 and #4593 inherited report names that did not match the brief, so the hand-back missed the report. Every resumed round names its `deliverables` explicitly. |
 | Calling an issue "blocked on a release" without reproducing it on master | #4554 waited on a release; 58 runs on master did not reproduce it, and it closed crediting #4563. Reproduce on master before naming a blocker. |
-| Bolding a residual bullet (`- **p3 (LOW, live 0):**`) under `## Accepted residuals` | The tracker parser read only a bare `p3`, so #4832's three residuals were recorded as "none" (2026-10-25). `known-gap-add.sh` now reads the bold form, pinned by its test case (g) |
+| Bolding a residual bullet (`- **p3 (LOW, live 0):**`) under `### Accepted residuals` | The tracker parser read only a bare `p3`, so #4832's three residuals were recorded as "none" (2026-10-25). `known-gap-add.sh` now reads the bold form, pinned by its test case (g) |
 | Planning a tracker layout before measuring the platform's limits | An 11-issue pinned split was proposed and dispatched; GitHub pins 3 issues per repository, and the assumed 65k body cap was already exceeded by #4626 at 91k (2026-10-25). Measure the limit first, then plan |
 | Pasting the `claude-lane.sh` header into a brief | The header began `Worktree (created, ...):`, the brief guard wants `Worktree:`, and two dispatches were refused (2026-10-25). The header now starts with `Worktree:`, pinned by `test-claude-lane-header.sh` |
 | Linting a PR body in the main checkout | The main checkout sits on another branch, so citations resolved against the wrong tree; three edits needed a hand-built head tree (2026-10-25). `pr-body.sh edit` without `--tree` now builds a temp tree at the PR head |
