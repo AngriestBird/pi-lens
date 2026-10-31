@@ -2,8 +2,13 @@
  * Shared constants and helpers for tool definitions
  */
 
+import * as os from "node:os";
 import * as path from "node:path";
-import { resolveHostToolPath } from "../clients/path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	realpathOrResolve,
+	resolveHostToolPath,
+} from "../clients/path-utils.js";
 
 /**
  * Resolve the `paths` argument of an ast-grep tool against the session cwd.
@@ -30,6 +35,40 @@ export function resolveAstGrepPaths(
 	const base = cwd || ".";
 	if (!paths?.length) return [path.resolve(base)];
 	return paths.map((p) => resolveHostToolPath(p, base));
+}
+
+/**
+ * The refusal a defaulted-target ast-grep tool returns when the session cwd
+ * resolves at or above `$HOME`, or `undefined` when the call may proceed.
+ *
+ * #747/#250 guarded `ast_grep_search` only, with an inline copy; #5039 found
+ * the mutating `ast_grep_replace` had no guard at all, so the same cwd served a
+ * dry-run preview and an apply over the whole home tree. One seam now decides
+ * it for both, and the inline copy is gone (net-count rule). Only the
+ * DEFAULTED case is guarded: explicit `paths` are exactly what the caller
+ * asked to touch and are never second-guessed. Both sides compare by real path
+ * (#4911), so a cwd or a `$HOME` spelled through a link is refused too.
+ *
+ * `reason` is the terse code the tool log records as `errorRaw`; `text` is what
+ * the model reads.
+ */
+export function defaultedCwdHomeRefusal(
+	paths: readonly string[] | undefined,
+	cwd: string | undefined,
+): { reason: string; text: string } | undefined {
+	if (paths?.length) return undefined;
+	const spelling = cwd || ".";
+	if (
+		!isAtOrAboveHomeDir(
+			realpathOrResolve(spelling),
+			realpathOrResolve(os.homedir()),
+		)
+	)
+		return undefined;
+	return {
+		reason: "defaulted cwd resolves at or above home directory",
+		text: `Refused: no \`paths\` given and the working directory (${spelling}) resolves at or above the home directory — this would reach every unrelated tree under your home. Pass explicit \`paths\`, or run from a project directory.`,
+	};
 }
 
 export const LANGUAGES = [
