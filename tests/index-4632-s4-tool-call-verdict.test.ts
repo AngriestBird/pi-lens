@@ -87,8 +87,9 @@ const fixture = piSessionFixture();
  * that only the first caller pays; a hook runs against the project's 60 s
  * hookTimeout, and no case timeout is raised to make room for it. The warm-up
  * is the golden case's own path (read, write a blocker, attempt the commit)
- * under a root of its own, and asserts nothing: the cases below still witness
- * the verdict on their own sessions.
+ * under a root of its own, and asserts only that its session recorded no error
+ * (as the golden case did before this hook took its place): the cases below
+ * still witness the verdict on their own sessions.
  */
 beforeAll(async () => {
 	const { proj, target } = seed(fixture.root, "warm-up", CLEAN_FILE);
@@ -100,6 +101,7 @@ beforeAll(async () => {
 	]);
 	try {
 		await handle.prompt("warm the first session up");
+		expect(handle.errors).toEqual([]);
 	} finally {
 		await handle.dispose();
 	}
