@@ -227,14 +227,15 @@ export async function openGuardedSession(
  * the first case of `tests/index-4689-path-identity-witness.test.ts` 2.9 s
  * cold against 1.0 s for its control. On a loaded runner, or in a shuffled
  * order that puts a heavy case first, that crosses vitest's 5000 ms default
- * (Unit tests shard 5/5, runs 41164970939 and 41166485833; the shuffle census,
- * run 41044391479). The cases hold no artificial wait, so the cost is real
+ * (Unit tests shard 5/5, run 41166485833; the shuffle census, run
+ * 41044391479). The cases hold no artificial wait, so the cost is real
  * work only the first caller pays. A hook runs against the project's
  * hookTimeout, and no case timeout is raised to make room for it.
  *
  * Call it as `beforeAll(() => warmGuardedSession(fixture.root))`. It runs the
- * golden path (read, write a blocker, attempt the commit) under a root of its
- * own and asserts only that the throwaway session recorded no error: each
+ * golden path (read, write a blocker, attempt the commit) in `<root>/warm-up`,
+ * inside the file's fixture root and sharing its home and data dirs, and
+ * asserts only that the throwaway session recorded no error: each
  * case still witnesses its verdict on its own session. The session is disposed
  * in a `finally`, so a failed warm-up leaks no host.
  */
