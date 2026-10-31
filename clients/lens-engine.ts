@@ -388,8 +388,8 @@ export function symbolSearchFileMatchesLang(
  * or under `cwd` is matched as its `cwd`-relative spelling: the workspace
  * prefix is a literal, never glob syntax, so a directory named `app[1]` or
  * `app{a,b}` keeps its scope (#5047 F1), while the part the caller wrote after
- * it (`src/**\/*.ts`) is still a pattern. The absolute candidate is still
- * tried, for an entry outside `cwd` and for a relative glob written against it. */
+ * it (`src/**\/*.ts`) is still a pattern. Any other entry (outside `cwd`, or a
+ * relative glob) is also tried against the candidate's absolute spelling. */
 function fileMatchesPathGlobs(
 	file: string,
 	cwd: string,
@@ -398,15 +398,17 @@ function fileMatchesPathGlobs(
 	const rel = path.relative(cwd, file).split(path.sep).join("/");
 	const abs = path.resolve(file).split(path.sep).join("/");
 	const options = { dot: true, nocase: process.platform === "win32" };
+	const matches = (candidate: string, pattern: string) =>
+		minimatch(candidate, pattern, options) ||
+		minimatch(candidate, `${pattern}/**`, options);
 	return globs.some((raw) => {
 		const within = path.isAbsolute(raw) ? relativeInside(cwd, raw) : undefined;
-		// `cwd` itself relativizes to "", which scopes the whole workspace.
-		const pattern =
-			within === undefined ? toPosix(raw) : toPosix(within) || "**";
-		const match = (candidate: string) =>
-			minimatch(candidate, pattern, options) ||
-			minimatch(candidate, `${pattern}/**`, options);
-		return match(rel) || (abs !== rel && match(abs));
+		// An entry at or under `cwd` is matched on the relative spelling alone,
+		// never against the absolute candidate, whose workspace prefix is not a
+		// pattern. `cwd` itself relativizes to "", which scopes the whole workspace.
+		if (within !== undefined) return matches(rel, toPosix(within) || "**");
+		const pattern = toPosix(raw);
+		return matches(rel, pattern) || (abs !== rel && matches(abs, pattern));
 	});
 }
 
