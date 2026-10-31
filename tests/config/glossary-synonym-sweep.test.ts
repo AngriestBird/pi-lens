@@ -757,7 +757,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// records, an `Array.prototype.filter` call, not a delivery gate.
 		// 4 -> 5 (#4990): the per-source row retirement keeps the rows the clean
 		// verdict did not cover, the same array call, not a delivery gate.
-		"clients/runtime-coordinator.ts": 5,
+		// 5 -> 6 (#5020): `retireForeignRows` keeps the rows no retire judged, the
+		// same array call, not a delivery gate.
+		"clients/runtime-coordinator.ts": 6,
 		"clients/runtime-session.ts": 4,
 		// 3 -> 5 -> 3 (#4187): round 4's tool-call authorship retirement filtered
 		// the owned in-process mutation paths; round 5 folds two of its three
@@ -1326,7 +1328,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 28 -> 16 (#4689 batch 1 r2): the other eleven inline-store accessors and
 		// the deferMutation key drop their `path.resolve` too; every accessor keys
 		// the raw spelling through normalizeMapKey (review F1).
-		"clients/runtime-coordinator.ts": 16,
+		// 16 -> 17 (#5020): `retireForeignRowsOfMissingFiles` asks `path.isAbsolute`
+		// before it judges a cited file, so a relative cite is never retired.
+		"clients/runtime-coordinator.ts": 17,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).

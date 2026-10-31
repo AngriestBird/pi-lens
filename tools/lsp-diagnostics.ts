@@ -70,6 +70,7 @@ import {
 	primaryUnavailableCause,
 	touchCompletedConfirmationPolicy,
 	touchCoverageGap,
+	warmAnswerBinding,
 	type DiagnosticBinding,
 	type PrimaryUnavailableCause,
 	type TouchFileResult,
@@ -846,8 +847,9 @@ type DiagnosticsCollectionResult = {
 	 * were computed against current disk. `boundToCurrentDisk === false` means the
 	 * server's view diverged from disk; the caller demotes such a result to
 	 * "unconfirmed" so a stale-but-fresh-looking result never re-cements the
-	 * widget (#1092). Undefined when no touch produced one (warm-attach /
-	 * getDiagnostics fallback) → treated as "unknown" (no demotion).
+	 * widget (#1092). Undefined when no touch produced one (the getDiagnostics
+	 * fallback) → treated as "unknown" (no demotion). A warm-attach answer always
+	 * carries one (#5030).
 	 */
 	binding?: DiagnosticBinding;
 	/**
@@ -970,6 +972,10 @@ async function collectDiagnosticsForFile(
 					...(attached.response.projectIdentity !== undefined && {
 						projectIdentity: attached.response.projectIdentity,
 					}),
+					// #5030: the incumbent's content binding, so a stale-bound answer
+					// is demoted to unconfirmed (`boundMismatch`) like a local one. An
+					// incumbent that sends none reads as not current.
+					binding: warmAnswerBinding(answer),
 				};
 			}
 		}

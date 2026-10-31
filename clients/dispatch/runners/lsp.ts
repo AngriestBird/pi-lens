@@ -19,6 +19,7 @@ import {
 	primaryUnavailableCause,
 	touchCompletedConfirmationPolicy,
 	touchCoverageGap,
+	warmAnswerBinding,
 } from "../../lsp/diagnostic-binding.js";
 import { getLSPService } from "../../lsp/capabilities.js";
 import { disabledPrimaries } from "../../lsp/session-roots.js";
@@ -291,6 +292,10 @@ const lspRunner: RunnerDefinition = {
 						...(answer.unconfirmedServerIds !== undefined && {
 							unconfirmedServerIds: answer.unconfirmedServerIds,
 						}),
+						// #5030: the incumbent's content binding, so a stale-bound answer
+						// takes the same withholding below as a local one. An incumbent
+						// that sends none reads as not current (`warmAnswerBinding`).
+						binding: warmAnswerBinding(answer),
 					}
 				: await lspService.touchFile(ctx.filePath, content, {
 						diagnostics: "document",

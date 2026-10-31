@@ -56,7 +56,10 @@ vi.mock("../../../../clients/dispatch/runners/utils.js", () => ({
 	readFileContent,
 }));
 
-vi.mock("../../../../clients/warm-attach.js", () => ({
+vi.mock("../../../../clients/warm-attach.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../../clients/warm-attach.js")
+	>()),
 	tryWarmAttachedDiagnostics: warmAttach.diagnostics,
 	tryWarmAttachedCodeActions: warmAttach.codeActions,
 }));
@@ -1103,6 +1106,157 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
+	// #5030: the same stale-bound answer, arriving over the warm-attach socket.
+	// Recurrence: the incumbent's DTO dropped the touch's content binding, so this
+	// reader built its wrapper with no binding and read every incumbent answer as
+	// these bytes (`failed` + blocking row for cell L, below). The answer comes
+	// from the REAL producer (`_serveWarmRequestForTests`, a JSON round trip), so
+	// the cell reds on the dropped field, not on a hand-shaped input.
+	describe("warm-attach stale-bound answer (#5030)", () => {
+		const warmFile = (dir: string) => path.join(dir, "main.ts");
+		const incumbentAnswer = async (
+			dir: string,
+			incumbentTouch: Record<string, unknown>,
+		) => {
+			const { _serveWarmRequestForTests } =
+				await import("../../../../clients/warm-attach.js");
+			const { contentHash, WARM_DIAGNOSTICS_SCHEMA_VERSION } =
+				await import("../../../../clients/mcp/ipc.js");
+			const content = "const x = 1;\n";
+			touchFile.mockResolvedValueOnce(incumbentTouch);
+			const served = await _serveWarmRequestForTests({
+				route: "diagnostics",
+				version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+				file: warmFile(dir),
+				cwd: dir,
+				content,
+				contentHash: contentHash(content),
+				deadlineAt: Date.now() + 60_000,
+			});
+			return {
+				available: true,
+				response: JSON.parse(JSON.stringify(served.result)),
+			};
+		};
+		const verdictOf = async (
+			runner: { run: (ctx: never) => Promise<any> },
+			dir: string,
+		) => {
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const result = await runner.run(ctx(warmFile(dir), dir) as never);
+			return {
+				status: result.status,
+				reachedNoVerdict: reachedNoVerdict(result),
+				diagnosticCount: result.diagnostics.length,
+			};
+		};
+		const WITHHELD = {
+			status: "skipped",
+			reachedNoVerdict: true,
+			diagnosticCount: 0,
+		};
+
+		it.each([
+			[false, WITHHELD],
+			[true, { status: "failed", reachedNoVerdict: false, diagnosticCount: 1 }],
+			[
+				"unknown",
+				{ status: "failed", reachedNoVerdict: false, diagnosticCount: 1 },
+			],
+		] as const)(
+			"a warm incumbent's answer bound %s reads as %j",
+			async (bound, expected) => {
+				const runner = (
+					await import("../../../../clients/dispatch/runners/lsp.js")
+				).default;
+				const env = setupTestEnvironment("pi-lens-lsp-5030-bound-");
+				try {
+					fs.writeFileSync(warmFile(env.tmpDir), "const x = 1;\n");
+					codeAction.mockResolvedValue([]);
+					warmAttach.codeActions.mockResolvedValue({ available: false });
+					warmAttach.diagnostics.mockResolvedValue(
+						await incumbentAnswer(
+							env.tmpDir,
+							diagsResult([staleRow(1)], {
+								confirmation: "confirmed",
+								binding: { boundToCurrentDisk: bound },
+							}),
+						),
+					);
+
+					expect(await verdictOf(runner, env.tmpDir)).toEqual(expected);
+				} finally {
+					env.cleanup();
+				}
+			},
+		);
+
+		// Mixed builds: an incumbent built before #5030 sends no binding. The
+		// absence is "not current", never "current" (the same fail-closed rule the
+		// direct route applies to a stale bound), so a binding-less or unreadable
+		// value is withheld too.
+		// Today's response shape, captured from a build before #5030 (a stale-bound
+		// touch served by `_serveWarmRequestForTests`): the corpus fixture is what
+		// the older incumbent actually puts on the socket.
+		it("withholds the response a build before #5030 sends", async () => {
+			const runner = (
+				await import("../../../../clients/dispatch/runners/lsp.js")
+			).default;
+			const env = setupTestEnvironment("pi-lens-lsp-5030-fixture-");
+			try {
+				fs.writeFileSync(warmFile(env.tmpDir), "const x = 1;\n");
+				codeAction.mockResolvedValue([]);
+				warmAttach.codeActions.mockResolvedValue({ available: false });
+				const response = JSON.parse(
+					fs.readFileSync(
+						new URL(
+							"../../../fixtures/warm-attach/diagnostics-response-pre-5030.json",
+							import.meta.url,
+						),
+						"utf8",
+					),
+				);
+				expect(response).not.toHaveProperty("binding");
+				warmAttach.diagnostics.mockResolvedValue({ available: true, response });
+
+				expect(await verdictOf(runner, env.tmpDir)).toEqual(WITHHELD);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it.each([
+			["an older incumbent's answer (no binding field)", undefined],
+			["a null binding", null],
+			["a binding that is not an object", "yes"],
+			["a binding with no verdict", {}],
+			["a binding with an unrecognised verdict", { boundToCurrentDisk: "yes" }],
+		] as const)("withholds %s", async (_label, wire) => {
+			const runner = (
+				await import("../../../../clients/dispatch/runners/lsp.js")
+			).default;
+			const env = setupTestEnvironment("pi-lens-lsp-5030-nobinding-");
+			try {
+				fs.writeFileSync(warmFile(env.tmpDir), "const x = 1;\n");
+				codeAction.mockResolvedValue([]);
+				warmAttach.codeActions.mockResolvedValue({ available: false });
+				warmAttach.diagnostics.mockResolvedValue({
+					available: true,
+					response: {
+						diagnostics: [staleRow(1)],
+						confirmation: "confirmed",
+						...(wire !== undefined && { binding: wire }),
+					},
+				});
+
+				expect(await verdictOf(runner, env.tmpDir)).toEqual(WITHHELD);
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
+
 	it("renders a silenced scanner coverage marker once without claiming an empty touch is clean (#1867)", async () => {
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;
@@ -1483,6 +1637,7 @@ describe("runner status/semantic edge cases", () => {
 			warmAttach.diagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [],
 					confirmation: "partial",
 					unconfirmedServerIds: ["opengrep"],
@@ -1578,6 +1733,7 @@ describe("runner status/semantic edge cases", () => {
 			warmAttach.diagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [
 						{
 							severity: 1,
@@ -1617,6 +1773,7 @@ describe("runner status/semantic edge cases", () => {
 			warmAttach.diagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [
 						{
 							severity: 1,
@@ -1662,6 +1819,7 @@ describe("runner status/semantic edge cases", () => {
 			warmAttach.diagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [
 						{
 							severity: 1,
@@ -1716,6 +1874,7 @@ describe("runner status/semantic edge cases", () => {
 			warmAttach.diagnostics.mockResolvedValue({
 				available: true,
 				response: {
+					binding: { boundToCurrentDisk: true },
 					diagnostics: [],
 					confirmation: "partial",
 					unconfirmedServerIds: ["ast-grep", "typos"],

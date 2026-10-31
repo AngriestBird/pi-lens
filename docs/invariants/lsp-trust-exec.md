@@ -188,6 +188,19 @@
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.
+- A cached answer is evidence about the state it was published for, never about a
+  later change. `touchFile` skips a notify for bytes the server already holds
+  (see the debounce bullet below), so the diagnostics it reports can be an
+  entry the server published before the caller's edit; it names that case
+  (`TouchFileResult.reusedAnswer`, server plus publish stamp) and never claims
+  it as the touch's own answer. The cascade reads it (`isPreEditAnswer`,
+  `clients/dispatch/integration.ts`): an answer published before the run's edit
+  is unconfirmed, never clean, exactly as `isPostEditObservation` already rules
+  for the passive snapshot and both fallbacks. An answer published after the
+  edit (a push or pull inside the touch, the `typescript.tsserverRequest` sync
+  confirm, or a server that republished for the file after the edit) keeps its
+  verdict. A client that cannot date its cache reports no reuse and keeps the
+  pre-#5040 verdict.
 - Document line addressing has one owner, `clients/lsp/content-scan.ts`: the
   `\n` count behind the `lsp_document_send` record's `contentLineCount` and the
   LSP sync bound (`countLfNewlines`), the last LSP-addressable line an

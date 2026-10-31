@@ -29,20 +29,36 @@ import {
 	resolvePiLensConfig,
 } from "../config-resolve.js";
 import { getPiLensGlobalConfigPath } from "../lens-config.js";
-import { minimatch } from "../deps/minimatch.js";
-import { getGlobalPiLensDir } from "../file-utils.js";
+import {
+	getGlobalPiLensDir,
+	isIgnoredByGitignoreLines,
+} from "../file-utils.js";
 import {
 	isUnderDir,
 	isWindowsPath,
 	pathsEqual,
 	toProjectRelativePath,
 } from "../path-utils.js";
-import { isRuleIgnoredForPath } from "./rule-ignores.js";
+
+/**
+ * The `ignorePaths` lines ONE config file declared, with that file's directory.
+ * A leading `/` roots a line at `baseDir`, and a slashless line matches below it
+ * at any depth, as in the `ignore` field (#783, #5029).
+ */
+export interface RuleIgnoreScope {
+	readonly baseDir: string;
+	readonly patterns: readonly string[];
+}
 
 interface RulePolicyEntry {
 	disable?: string[];
 	select?: string[];
-	ignorePaths?: string[];
+	/**
+	 * Bare strings are gitignore lines relative to the workspace root; a
+	 * {@link RuleIgnoreScope} is one config file's lines, relative to its own
+	 * directory.
+	 */
+	ignorePaths?: (string | RuleIgnoreScope)[];
 }
 
 /**
@@ -97,13 +113,17 @@ export function resolveDispatchPolicyConfigForFile(
  * The rule policy map of one resolution, ready to match paths against the
  * workspace `root`.
  *
- * `ignorePaths` globs are relative to the directory of the config file that
- * declares them. A global entry, and an entry in the workspace root's own
- * file, already match against `root`; an entry from a nested `.pi-lens.json`
- * is re-anchored under its directory, so `generated/**` in `pkg/.pi-lens.json`
- * carves out `pkg/generated/**` and nothing at the root. The union across
- * tiers is kept (`array-union`): a nearer file adds carve-outs and never lifts
- * one.
+ * `ignorePaths` entries are gitignore lines, as the `ignore` field reads them
+ * (#783, #5029): last match wins, `!` re-includes, a leading `/` roots a line
+ * at the declaring file's directory, a trailing `/` matches directories only.
+ * They are relative to the directory of the config file that declares them. A
+ * global entry, and an entry in the workspace root's own file, are relative to
+ * `root`; an entry from a nested `.pi-lens.json` is relative to that file's
+ * directory, so `generated/**` in `pkg/.pi-lens.json` carves out
+ * `pkg/generated/**` and nothing at the root. Each file is its own scope and a
+ * path is carved out when ANY scope ignores it (`array-union`): a nearer file
+ * adds carve-outs and never lifts one, so a `!` re-includes only against the
+ * lines of its own file.
  */
 export function rulePolicyMapFromResolution(
 	resolution: PiLensConfigResolution,
@@ -125,15 +145,15 @@ export function rulePolicyMapFromResolution(
 
 /**
  * Every document's `rules.<key>.ignorePaths`, each validated on its own and
- * re-anchored to `root`, unioned in document order. Read per document because
- * the merged array loses which file a member came from when two files list the
- * same glob text, and the same text means a different path in each.
+ * kept as its own {@link RuleIgnoreScope}, in document order. Read per document
+ * because the merged array loses which file a member came from, and the same
+ * text means a different path in each.
  */
 function anchoredIgnorePaths(
 	documents: readonly ConfigDocument[],
 	root: string,
-): Map<string, string[]> {
-	const byKey = new Map<string, string[]>();
+): Map<string, RuleIgnoreScope[]> {
+	const byKey = new Map<string, RuleIgnoreScope[]>();
 	for (const document of documents) {
 		// An LSP-scoped legacy file's root keys are LSP settings, not `rules`.
 		if (document.location.lspScoped) continue;
@@ -141,19 +161,18 @@ function anchoredIgnorePaths(
 		if (!rules || typeof rules !== "object" || Array.isArray(rules)) continue;
 		const prefix =
 			document.tier === "global" ? undefined : anchorPrefix(document, root);
+		const baseDir = prefix ? nodePath.resolve(root, prefix) : root;
 		for (const [key, rawEntry] of Object.entries(rules)) {
 			const ignorePaths = (rawEntry as { ignorePaths?: unknown } | undefined)
 				?.ignorePaths;
 			if (!Array.isArray(ignorePaths)) continue;
-			const list = byKey.get(key) ?? [];
+			const patterns: string[] = [];
 			for (const pattern of ignorePaths) {
-				if (typeof pattern !== "string" || pattern.length === 0) continue;
-				const anchoredPattern = prefix
-					? anchorPattern(pattern, prefix)
-					: pattern;
-				if (!list.includes(anchoredPattern)) list.push(anchoredPattern);
+				if (typeof pattern === "string") patterns.push(pattern);
 			}
-			byKey.set(key, list);
+			const scopes = byKey.get(key) ?? [];
+			scopes.push({ baseDir, patterns });
+			byKey.set(key, scopes);
 		}
 	}
 	return byKey;
@@ -182,24 +201,6 @@ function anchorPrefix(
 	// spellings agree and taken on the identity axis when they do not, so a
 	// symlinked root anchors `pkg/`, never `../real/pkg/` (#5011 r8, F25).
 	return toProjectRelativePath(dir, root);
-}
-
-function anchorPattern(pattern: string, prefix: string): string {
-	if (pattern.startsWith("!"))
-		return `!${anchorPattern(pattern.slice(1), prefix)}`;
-	const posix = pattern.replaceAll("\\", "/");
-	if (posix.startsWith("/") || /^[A-Za-z]:\//.test(posix)) return pattern;
-	// The prefix is a directory NAME, not a glob: `pkg[1]` and Next.js `[id]`
-	// would read as character classes and anchor the entry at the wrong path.
-	// `minimatch.escape` leaves braces (expansion), a leading `!` (negation)
-	// and a leading `#` (comment), so those are escaped here; user-authored
-	// `!` stays #5029's decision.
-	const literal = minimatch
-		.escape(prefix)
-		.replace(/[{}]/g, "\\$&")
-		.replace(/^!/, "\\!")
-		.replace(/^#/, "\\#");
-	return `${literal}/${posix.replace(/^(\.\/)+/, "")}`;
 }
 
 /**
@@ -269,16 +270,25 @@ export function ruleIgnoredForPath(
 	policyMap: RulePolicyMap | undefined,
 ): boolean {
 	const normalized = normalizeRuleId(ruleId);
-	const patterns: string[] = [];
+	const scopes: RuleIgnoreScope[] = [];
 	for (const [configuredId, entry] of Object.entries(policyMap ?? {})) {
 		if (normalizeRuleId(configuredId) !== normalized || !entry?.ignorePaths)
 			continue;
-		patterns.push(...entry.ignorePaths);
+		const rootLines: string[] = [];
+		for (const item of entry.ignorePaths) {
+			if (typeof item === "string") rootLines.push(item);
+			else scopes.push(item);
+		}
+		if (rootLines.length > 0)
+			scopes.push({ baseDir: root, patterns: rootLines });
 	}
 	// The policy is intentionally project-wide like disable/select: a global
-	// denial cannot be removed by a nearer project entry.
-	if (patterns.length === 0) return false;
-	return isRuleIgnoredForPath(filePath, root, patterns);
+	// denial cannot be removed by a nearer project entry, so each scope answers
+	// alone and any one of them ignoring the path carves it out.
+	const absolute = nodePath.resolve(root, filePath);
+	return scopes.some((scope) =>
+		isIgnoredByGitignoreLines(scope.patterns, scope.baseDir, absolute),
+	);
 }
 
 /**

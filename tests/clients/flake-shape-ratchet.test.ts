@@ -282,6 +282,33 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"tool installation and discovery are the host boundary; the stub hands the real typescript-language-server wrapper and a classic compiler to the real launcher, service, client and cascade",
 		},
+	// 2026-10-30 (#5040): the acceptance cell drives the REAL cascade and the
+	// REAL touchFile, so only the language-server client, the graph edges it
+	// walks, the logger it writes and the quiet-window scheduler stand in.
+	"in-process-mock:clients/cascade-pre-edit-answer-5040.test.ts::clients/cascade-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the cell asserts the neighbour_touch row that records WHY a neighbour is unconfirmed; test mode skips the file sink, so the call itself is the only read-back",
+		},
+	"in-process-mock:clients/cascade-pre-edit-answer-5040.test.ts::clients/lsp/client":
+		{
+			detector: "in-process-mock",
+			reason:
+				"a language server is a spawned process; the subject is a push-only server that publishes an importer once and then stays silent, which no real server can be asked to do on demand. Everything above the client — the service, the notify-skip gate, the merge — is real",
+		},
+	"in-process-mock:clients/cascade-pre-edit-answer-5040.test.ts::clients/quiet-window":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the quiet window is a session scheduler the unit lane must not arm; the cell's claim is the run verdict, not the sweep",
+		},
+	"in-process-mock:clients/cascade-pre-edit-answer-5040.test.ts::clients/review-graph/service":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the review graph is a separate subsystem with its own suite; its file-level edges are the fixture here, and the cascade's own neighbour walk is what the cell proves",
+		},
 	// 2026-10-16 (#4495 round 3): the cascade's pending gate runs the shared
 	// freshness gate quiet; whether its rows were written is only visible in
 	// the logLatency call, since turn_end overruns the five-phase ring.
@@ -1325,6 +1352,12 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a language-server client is a spawned process; the cascade's silent-push wait is driven by its per-file publish version and its wait, which a real server cannot be made to answer or leave silent on demand",
 	},
+	"service-double:clients/cascade-pre-edit-answer-5040.test.ts::LSPClientInfo":
+		{
+			detector: "service-double",
+			reason:
+				"a language-server client is a spawned process; the cell drives the real touchFile's reuse decision, which reads the client's per-file publish stamp and its wait, and needs a server that answers once and then never again",
+		},
 	"service-double:clients/cascade-turn-merge.test.ts::LSPClientInfo": {
 		detector: "service-double",
 		reason:
