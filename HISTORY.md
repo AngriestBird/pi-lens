@@ -5018,10 +5018,11 @@ that outlived their purpose, load-heavy files pinning one behavior three
 ways. That weight is what the suite pays for in runtime, OOM pressure, and
 contention flakes.
 
-- **Every PR that touches a test file carries a Test assessment** (the PR
-  template's `### Test assessment` clause): per touched test FILE, one line
-  on what behavior it uniquely pins, plus any test the PR makes redundant.
-  Scope is the touched files only — never the whole suite.
+- **Retired 2026-10-31 (#5003): the PR template's `### Test assessment`
+  clause.** Until then every PR that touched a test file carried one line per
+  touched test FILE on what behavior it uniquely pins, plus any test the PR
+  made redundant. The proof now lives in `### Tests`. Scope stays the touched
+  files only — never the whole suite.
 - **Removal requires proof, not judgment.** A test may be removed only when
   a NAMED surviving test reds on the same mutations the removed test would
   have redded on. Run the mutations and quote the surviving red. "Low value"

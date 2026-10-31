@@ -74,10 +74,10 @@ const SUMMARY_MAX_CHARS = 600;
 const REVIEWER_NOTES_MAX_BULLETS = 5;
 const VISIBLE_BODY_MAX_CHARS = 5000;
 const CODE_MAX_LINES = 20;
-// A chosen bound, not a pinned measurement: 240 admits a long test path and its
-// title (the last 80 merged bodies held line widths of p90 229, p95 279), and
-// 100 lines of 240 characters is what a body can carry as code.
-const CODE_MAX_WIDTH = 240;
+// A chosen bound, not a pinned measurement: the last 80 merged bodies put the
+// p90 of their widest code line at 391 columns, so 400 admits a long test path
+// and its title (verify r2 on #5026; 240 refused 28 of the 80).
+const CODE_MAX_WIDTH = 400;
 const CODE_TOTAL_MAX_LINES = 100;
 // The PR footer the template requires (.github/PULL_REQUEST_TEMPLATE.md).
 const GENERATED_FOOTER =
