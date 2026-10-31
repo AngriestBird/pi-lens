@@ -1848,14 +1848,19 @@ export async function computeCascadeForFile(
 			// run has no neighbor to check, that file is the difference between a
 			// leaf and an unproven dependent set, so it leaves the run indeterminate
 			// instead of `no_neighbors`. Only a file edited this turn is accounted
-			// for (B10: its own pipeline run answers for it); the graph holds no
-			// test, vendor or ignored file, so no other state clears a referrer.
+			// for (B10: its own pipeline run answers for it), and a file removed
+			// outside pi is gone, which the seq fast path's cached graph does not
+			// know until its periodic re-verify (the neighbour chain above filters
+			// the same way). The graph holds no test, vendor or ignored file, so no
+			// other state clears a referrer.
 			// Gated on the empty run on purpose: a run that has neighbors already
 			// speaks, and flagging every unplaced common-name call there marked 185
 			// of 515 files of this repo's own graph.
 			if (eligibleNeighbors.length === 0 && !impact.indeterminate) {
 				const unplaced = (impact.nameOnlyReferrers ?? []).filter(
-					(f) => !primaryFilesThisTurn.has(normalizeMapKey(f)),
+					(f) =>
+						!primaryFilesThisTurn.has(normalizeMapKey(f)) &&
+						nodeFs.existsSync(f),
 				);
 				if (unplaced.length > 0) {
 					const shown = unplaced

@@ -22,6 +22,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toPosix } from "../../clients/path-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
@@ -119,6 +120,8 @@ async function cascadeAfterEdit(
 		cascade: (file: string) => Promise<unknown>,
 		dir: string,
 	) => Promise<void>,
+	/** The runtime's seq state; with it the graph build can take the seq fast path. */
+	seqState?: { projectSeq: () => number; getFilesChangedSince: () => string[] },
 ) {
 	const env = setupTestEnvironment("cascade-ambiguous-ref-");
 	try {
@@ -133,7 +136,7 @@ async function cascadeAfterEdit(
 		await installLspServiceDouble({
 			shutdown: vi.fn(async () => {}),
 			touchFile: vi.fn(async (file: string) => {
-				touched.push(path.relative(env.tmpDir, file));
+				touched.push(toPosix(path.relative(env.tmpDir, file)));
 				return { diags: [] };
 			}),
 		});
@@ -145,6 +148,7 @@ async function cascadeAfterEdit(
 					turnSeq: 1,
 					writeSeq: 1,
 					projectRoot: env.tmpDir,
+					seqState,
 				}),
 			env.tmpDir,
 		);
@@ -155,6 +159,7 @@ async function cascadeAfterEdit(
 			turnSeq: 1,
 			writeSeq: 1,
 			projectRoot: env.tmpDir,
+			seqState,
 		});
 		return { run, touched };
 	} finally {
@@ -323,5 +328,108 @@ describe("a dependent reached by name alone (#5055)", () => {
 		} finally {
 			env.cleanup();
 		}
+	}, 60_000);
+
+	// Recurrence (#5070 review, bot threads): the placeholder lookup took its
+	// names from the symbol nodes that SURVIVE the edit, so a renamed or deleted
+	// definition (the issue's own population: its callers lose their target)
+	// left its callers unnamed and the run read no_neighbors. The changed names
+	// come from the real dispatch diff (`recordEntitySnapshotDiff`), removed
+	// names included.
+	it.each([
+		{ edit: "rename", after: "export function bar(x: number) { return x; }\n" },
+		{ edit: "delete", after: "export const unrelated = 1;\n" },
+	])(
+		"a $edit of an ambiguous definition still names the callers left on its placeholder",
+		async ({ after }) => {
+			const env = setupTestEnvironment("cascade-ambiguous-removed-");
+			try {
+				const c = KINDS[0];
+				const files: Record<string, string> = {
+					...c.files,
+					...c.second,
+					"third.ts": "export function foo() { return 1; }\n",
+				};
+				for (const [rel, body] of Object.entries(files))
+					fs.writeFileSync(path.join(env.tmpDir, rel), body);
+				const { buildOrUpdateGraph } =
+					await import("../../clients/review-graph/builder.js");
+				const { computeImpactCascade, recordEntitySnapshotDiff } =
+					await import("../../clients/review-graph/service.js");
+				const { FactStore } =
+					await import("../../clients/dispatch/fact-store.js");
+				const facts = new FactStore();
+				const lib = path.join(env.tmpDir, "lib.ts");
+				const app = path.join(env.tmpDir, "app.ts");
+				await buildOrUpdateGraph(env.tmpDir, [lib], facts);
+				recordEntitySnapshotDiff(
+					facts,
+					lib,
+					new Map([["function:foo:1", "a"]]),
+				);
+				fs.writeFileSync(lib, after);
+				const next = new Map<string, string>(
+					after.includes("function bar")
+						? [["function:bar:1", "b"]]
+						: [["const:unrelated:1", "b"]],
+				);
+				recordEntitySnapshotDiff(facts, lib, next);
+				const graph = await buildOrUpdateGraph(env.tmpDir, [lib], facts);
+				expect(
+					computeImpactCascade(graph, lib).nameOnlyReferrers?.map((f) =>
+						path.resolve(f),
+					),
+				).toEqual([path.resolve(app)]);
+			} finally {
+				env.cleanup();
+			}
+		},
+		60_000,
+	);
+
+	// Refutation pin for the "deleted caller" bot thread (#5070): the graph holds
+	// the dependent when the exporter is first checked, then the dependent is
+	// removed outside pi before the exporter's next edit. The graph drops a
+	// deleted file on its next build, so no stale caller is named; the control
+	// without the removal shows the dependent really was in the graph.
+	it.each([
+		{ removed: false, skipReason: "indeterminate" },
+		{ removed: true, skipReason: "no_neighbors" },
+	])(
+		"a dependent removed outside pi: removed=$removed reads $skipReason",
+		async ({ removed, skipReason }) => {
+			const c = KINDS[0];
+			const { run } = await cascadeAfterEdit(
+				c,
+				c.second,
+				[],
+				async (cascade, dir) => {
+					await cascade(path.join(dir, "lib.ts"));
+					if (removed) fs.rmSync(path.join(dir, c.dependent));
+				},
+			);
+			expect(run.skipReason).toBe(skipReason);
+		},
+		60_000,
+	);
+
+	// A removal outside pi never bumps projectSeq, so the seq fast path keeps the
+	// cached graph (and its edge from the removed dependent) until the periodic
+	// re-verify. Without the on-disk check the run would name a file that is gone
+	// (#5070 bot thread on integration.ts, "Deleted callers trigger warnings").
+	it("does not name a dependent that was removed outside pi on the seq fast path", async () => {
+		const c = KINDS[0];
+		const seqState = { projectSeq: () => 1, getFilesChangedSince: () => [] };
+		const { run } = await cascadeAfterEdit(
+			c,
+			c.second,
+			[],
+			async (cascade, dir) => {
+				await cascade(path.join(dir, "lib.ts"));
+				fs.rmSync(path.join(dir, c.dependent));
+			},
+			seqState,
+		);
+		expect(run.skipReason).toBe("no_neighbors");
 	}, 60_000);
 });

@@ -287,11 +287,15 @@ export function computeImpactCascade(
 	// hide a cross-file dependent and is not read here.
 	const nameOnlyReferrers = dedupe(
 		[
-			...new Set(
-				effectiveSymbolNodeIds.flatMap(
+			...new Set([
+				// The recorded names include a removed or renamed definition, which
+				// has no node left to read a name from; its callers sit on the
+				// placeholder it used to resolve to.
+				...changedSymbols,
+				...effectiveSymbolNodeIds.flatMap(
 					(nodeId) => graph.nodes.get(nodeId)?.symbolName ?? [],
 				),
-			),
+			]),
 		].flatMap((symbolName) =>
 			(
 				graph.edgesByTo.get(`${UNRESOLVED_NAME_NODE_PREFIX}${symbolName}`) ?? []
