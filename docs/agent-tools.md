@@ -56,12 +56,15 @@ object argument such as `callHierarchyItem`, `rule` or `flags` are not checked):
 - when an ignored key leaves the call without something it needed, the tool
   does not run and the result is an error whose first line is the same
   sentence, followed by `Not run: ...`. That is the case when a
-  schema-`required` input is missing (``Not run: required argument(s) `file`
+  schema-`required` input is missing (``Not run: required argument(s) `lang`
   missing.``), or when the ignored key is a declared parameter the call did not
-  send, written another way: a case or punctuation variant, a plural, or a key
-  whose last word is the parameter (`filePath`, `file_path` and `Path` for the
-  optional `path` of `pilens_diagnostics`: ``Not run: `filePath` looks like a
-  mistyped `path`, which was not sent.``). The exact predicate is named in
+  send, written another way: a case or punctuation variant (`Path` for `path`),
+  a plural (`paths` for `path`), or a key whose last word is a declared
+  parameter (`file_path` for the declared `filePath`). The single-file
+  parameter is `path`, and the MCP tools declare `file` and `filePath` beside it
+  as accepted aliases since #5041, so those spellings run instead of being
+  reported (``Not run: `Path` looks like a mistyped `path`, which was not
+  sent.``). The exact predicate is named in
   [public-api-stability.md](public-api-stability.md). Anything looser (a typo,
   an abbreviation, `files` for `maxLspFiles`, or a count, flag or output key
   such as `maxFiles`, `includeFiles`, `outFile` or `cwdPath` where `cwd` is
