@@ -203,6 +203,10 @@ describe("classifyChangedFiles: the hot-path latency lane (#4363)", () => {
 		["package.json"],
 		["docs/tsconfig.json"],
 		["tsconfig.json.bak"],
+		// Recurrence (review r1 F2): `*` widened to `.*` would cross a directory;
+		// an unescaped `.` would match any character.
+		["tsconfig/x/y.json"],
+		["tsconfigXjson"],
 		["clients"],
 		["clients-extra/a.ts"],
 		["clients/../docs/a.md"],

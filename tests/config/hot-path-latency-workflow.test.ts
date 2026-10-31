@@ -112,6 +112,15 @@ describe("hot-path latency workflow (#4363)", () => {
 		const classify = job.steps.find((s) => s.id === "scope");
 		expect(classify?.run).toMatch(/node scripts\/ci-changed-files\.mjs\b/);
 		expect(classify?.env?.GH_TOKEN).toBe("${{ github.token }}");
+		// Recurrence (review r1 F1): EVENT_NAME hardcoded to `push` classifies
+		// every PR as a push, so every docs PR times (3 min) with no red; a
+		// dropped PR_NUMBER exits 2 and reds every PR.
+		expect(classify?.env?.EVENT_NAME).toBe("${{ github.event_name }}");
+		expect(classify?.env?.PR_NUMBER).toBe(
+			"${{ github.event.pull_request.number }}",
+		);
+		expect(classify?.run).toContain('--event "$EVENT_NAME"');
+		expect(classify?.run).toContain('--pr "$PR_NUMBER"');
 		expect(job.permissions["pull-requests"]).toBe("read");
 		const timing = [
 			"Install dependencies",
