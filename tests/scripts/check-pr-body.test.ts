@@ -42,7 +42,7 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
 
-const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Fold check\n#4711 not folded: a different issue and a different rule.\n\n## Observability\nThe advisory check run is the record.\n\n`;
+const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\n- None.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Proof and checks\nThe proof sections follow.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Fold check\n#4711 not folded: a different issue and a different rule.\n\n## Observability\nThe advisory check run is the record.\n\n`;
 // #4605 F12: the shared `body` fixture carries no mutation table, so a case
 // whose diff adds a guard states its own row-2 proof for the file it changes.
 function withMutationProof(text: string, ...files: string[]) {
@@ -3438,7 +3438,7 @@ describe("PR body lint (#1844)", () => {
 	});
 
 	const LEAD = "The body gate makes review intent explicit.";
-	const LEAD_CAP = '"## Summary" must contain one to 3 sentences';
+	const LEAD_CAP = "one to 3 sentences";
 	const gateErrors = (text: string) =>
 		lintPrBody(text, { workingTree: true }).errors.join(" ");
 
@@ -3606,9 +3606,13 @@ describe("PR body lint (#1844)", () => {
 	});
 
 	it("rejects a body with no Summary or opening paragraph", () => {
-		expect(
-			lintPrBody(body.replace("Summary\nOpening context.\n\n", "")),
-		).toMatchObject({ valid: false });
+		const bare = body
+			.replace("## Why\nThe body gate makes review intent explicit.\n\n", "")
+			.replace("## Summary\nOpening context.\n\n", "");
+		expect(bare).not.toContain("Opening context");
+		expect(lintPrBody(bare).errors).toContain(
+			"PR body is missing a Summary section. See .github/PULL_REQUEST_TEMPLATE.md.",
+		);
 	});
 });
 
@@ -3917,26 +3921,35 @@ describe("body caps (#5003)", () => {
 		lintPrBody(text, { workingTree: true }).errors;
 	const capError = (text: string, needle: string) =>
 		errorsOf(text).filter((error) => error.includes(needle));
-	// Pads Tests with one long plain line until the body's visible text is `size`.
+	// Every budget message: the visible-text cap and the three code caps.
+	const CAP = /visible characters|code fence|code line/;
+	const capErrors = (text: string) =>
+		errorsOf(text).filter((error) => CAP.test(error));
+	// Pads Tests with one long plain word until the body's visible text is
+	// `size`. The base is read off an oversized body's own message, so the
+	// 5000/5001 boundary is the only thing the cap test asserts.
 	const sized = (size: number) => {
-		const visible = NEW_BODY.replace(/```text[\s\S]*?```/, "")
-			.replace(/\s+/g, " ")
-			.trim();
-		return NEW_BODY.replace(
-			"Targeted tests pass.",
-			`Targeted tests pass.${"x".repeat(size - visible.length)}`,
-		);
+		const oversize = NEW_BODY.replace("Targeted tests pass.", "x".repeat(9000));
+		const base =
+			Number(
+				/is (\d+) visible characters/.exec(
+					capError(oversize, "visible characters")[0],
+				)?.[1],
+			) - 9000;
+		return NEW_BODY.replace("Targeted tests pass.", "x".repeat(size - base));
 	};
 	const tests = (text: string) =>
 		NEW_BODY.replace("Targeted tests pass.", text);
 	const notes = (text: string) =>
 		NEW_BODY.replace("- The caps apply only at the repository gates.", text);
+	const summary = (text: string) =>
+		NEW_BODY.replace("The lint caps what a reader scrolls past.", text);
 	const bullets = (count: number) =>
 		Array.from({ length: count }, (_, at) => `- Note ${at}.`).join("\n");
-	const fence = (count: number) =>
-		["```text", ...Array.from({ length: count }, () => "FAIL x"), "```"].join(
-			"\n",
-		);
+	const fence = (count: number, line = "FAIL x") =>
+		["```text", ...Array.from({ length: count }, () => line), "```"].join("\n");
+	// 6000 visible characters: over the 5000 cap on their own.
+	const pad = "word ".repeat(1200).trim();
 
 	it("reports a missing lead once at the repository gates", () => {
 		const leadless = NEW_BODY.replace(
@@ -3958,13 +3971,33 @@ describe("body caps (#5003)", () => {
 		expect(capError(sized(5001), "visible characters")).toHaveLength(1);
 	});
 
-	it("counts text inside a details block", () => {
-		const hidden = sized(5001).replace(
-			"Targeted tests pass.",
-			"<details>\n<summary>Proof</summary>\n\nTargeted tests pass.",
-		);
+	// Recurrence: Greptile PRRT_kwDORt8rec6yNrOl on #5026. The budget blanked
+	// every raw-HTML block, so any spelling a reader still scrolls past
+	// (details with no blank line, div, p, table, a comment) held unlimited
+	// text. The count now reads the lexer's tokens and charges raw HTML in full.
+	it.each([
+		[
+			"a details block with no blank line",
+			`<details>\n<summary>Proof</summary>\n${pad}\n</details>`,
+		],
+		[
+			"a details block with blank lines",
+			`<details>\n<summary>Proof</summary>\n\n${pad}\n\n</details>`,
+		],
+		["a div", `<div>\n${pad}\n</div>`],
+		["a p", `<p>${pad}</p>`],
+		["an html table", `<table><tr><td>${pad}</td></tr></table>`],
+		["a comment block", `<!-- ${pad} -->`],
+		["inline html", `see <span>${pad}</span>`],
+		["a blockquote", `> ${pad}`],
+		["a table cell", `| a |\n| --- |\n| ${pad} |`],
+		["a list item", `- ${pad}`],
+		["a setext heading", `${pad}\n---`],
+		["a reference definition title", `[x]: https://example.com "${pad}"`],
+		["an image alt", `![${pad}](https://example.com/x.png)`],
+	])("counts %s toward the visible cap", (_name, block) => {
 		expect(
-			capError(`${hidden}\n\n</details>`, "visible characters"),
+			capError(tests(`Targeted tests pass.\n\n${block}`), "visible characters"),
 		).toHaveLength(1);
 	});
 
@@ -3981,21 +4014,164 @@ describe("body caps (#5003)", () => {
 		).toHaveLength(1);
 	});
 
-	it("caps reviewer notes at five top-level bullets", () => {
+	// Recurrence: #5026 review F1. Each spelling held unlimited code.
+	it.each([
+		[
+			"an indented block of 200 lines",
+			Array.from({ length: 200 }, () => "    FAIL x").join("\n"),
+			"code fence",
+		],
+		["an indented line of 6000 characters", `    ${pad}`, "code line"],
+		[
+			"a fence line of 2000 characters",
+			fence(3, "x".repeat(2000)),
+			"code line",
+		],
+		[
+			"a fence info string of 2000 characters",
+			`\`\`\`${"x".repeat(2000)}\nFAIL x\n\`\`\``,
+			"code line",
+		],
+		[
+			"twenty fences of 20 lines",
+			Array.from({ length: 20 }, () => fence(20)).join("\n\n"),
+			"code line",
+		],
+		[
+			"a fence inside a list item",
+			`- item\n\n  ${fence(30).replaceAll("\n", "\n  ")}`,
+			"code fence",
+		],
+		[
+			"a fence inside a block quote",
+			fence(30).replaceAll(/^/gm, "> "),
+			"code fence",
+		],
+	])("caps code written as %s", (_name, block, needle) => {
+		expect(capError(tests(block), needle)).toHaveLength(1);
+	});
+
+	// Recurrence: CodeRabbit PRRT_kwDORt8rec6yNwsZ on #5026. `markdownBlocks`
+	// closed a fence on any line that began with a fence marker, info string
+	// included, and subtracted a closing line that an unclosed fence lacks.
+	it("measures a fence by the lexer's code token", () => {
+		const longWithInfoLines = Array.from({ length: 200 }, (_, at) =>
+			at % 15 === 14 ? "```text" : "FAIL x",
+		);
+		expect(
+			capError(
+				tests(["```text", ...longWithInfoLines, "```"].join("\n")),
+				"code fence",
+			),
+		).toHaveLength(1);
+		const unclosed = [
+			"```text",
+			...Array.from({ length: 21 }, () => "FAIL x"),
+		].join("\n");
+		expect(capError(`${NEW_BODY}\n\n${unclosed}`, "21-line")).toHaveLength(1);
+		const closed = fence(21);
+		expect(capError(tests(closed), "21-line")).toHaveLength(1);
+	});
+
+	// Recurrence: Greptile PRRT_kwDORt8rec6yNrOn and CodeRabbit
+	// PRRT_kwDORt8rec6yNwsc on #5026. A line regex counted only `-`, `*`, `+`
+	// and `1.` at column 0, so every other spelling held unlimited notes.
+	it("admits one list of at most five items in reviewer notes", () => {
 		expect(capError(notes(bullets(5)), "allows at most")).toEqual([]);
 		expect(capError(notes(bullets(6)), "allows at most")).toHaveLength(1);
-		expect(
-			capError(notes(`${bullets(5)}\n  - A nested note.`), "allows at most"),
-		).toEqual([]);
 	});
 
 	it.each([
-		["a table", "| a | b |\n| --- | --- |\n| 1 | 2 |"],
-		["a code fence", "```text\nFAIL x\n```"],
-	])("moves %s out of reviewer notes", (_name, block) => {
-		expect(
-			capError(notes(`- Note.\n\n${block}`), "allows at most"),
-		).toHaveLength(1);
+		[
+			"six items with a period marker",
+			Array.from({ length: 6 }, (_, at) => `${at + 1}. Note.`).join("\n"),
+		],
+		[
+			"six items with a paren marker",
+			Array.from({ length: 6 }, (_, at) => `${at + 1}) Note.`).join("\n"),
+		],
+		[
+			"six items indented one space",
+			Array.from({ length: 6 }, () => " - Note.").join("\n"),
+		],
+		[
+			"six items indented three spaces",
+			Array.from({ length: 6 }, () => "   - Note.").join("\n"),
+		],
+		[
+			"six items after a tab",
+			Array.from({ length: 6 }, () => "\t- Note.").join("\n"),
+		],
+		[
+			"one item with nested items",
+			`- Note.\n${Array.from({ length: 20 }, () => "  - Nested.").join("\n")}`,
+		],
+		[
+			"bullets inside a block quote",
+			Array.from({ length: 8 }, () => "> - Note.").join("\n"),
+		],
+		[
+			"plain paragraphs",
+			Array.from({ length: 8 }, (_, at) => `Paragraph ${at}.`).join("\n\n"),
+		],
+		["a paragraph before the list", `Context.\n\n${bullets(2)}`],
+		[
+			"a second list after a marker change",
+			`- One.\n- Two.\n\n* Three.\n* Four.`,
+		],
+		["a table without leading pipes", "- Note.\n\na | b\n- | -\n1 | 2"],
+		["a table with pipes", "- Note.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |"],
+		["a code fence", "- Note.\n\n```text\nFAIL x\n```"],
+		["an indented code block", "    FAIL x"],
+		["a raw html block", "- Note.\n\n<div>x</div>"],
+		["a code fence inside an item", "- Note.\n\n  ```text\n  FAIL x\n  ```"],
+	])("refuses %s in reviewer notes", (_name, block) => {
+		expect(capError(notes(block), "allows at most")).toHaveLength(1);
+	});
+
+	// Recurrence: #5026 review F3. The sentence count needed an uppercase
+	// letter after the terminator (lower-case sentences counted as one), a
+	// bullet list was no sentence at all, and only the first summary heading
+	// was read. The character cap bounds the first; the admission of
+	// paragraphs only, the second; the loop over headings, the third.
+	it.each([
+		["lowercase sentences past the character cap", "fix a. ".repeat(100)],
+		["four sentences", "One. Two. Three. Four."],
+		[
+			"a bullet list",
+			Array.from({ length: 20 }, (_, at) => `- Item ${at}.`).join("\n"),
+		],
+		["a code fence", "Fixed it.\n\n```text\nFAIL x\n```"],
+		["a long paragraph", `${"word ".repeat(150)}end.`],
+		["a table", "Fixed it.\n\n| a |\n| --- |\n| 1 |"],
+		["an html block", "Fixed it.\n\n<details>\nmore\n</details>"],
+	])("holds the Summary to three plain sentences: %s", (_name, text) => {
+		expect(capError(summary(text), "sentences")).toHaveLength(1);
+	});
+
+	it.each(["Why", "Problem", "What changed"])(
+		"applies the Summary cap to a second heading that reads as summary: %s",
+		(name) => {
+			const doubled = NEW_BODY.replace(
+				"## Notes for the reviewer",
+				`## ${name}\n${"Fix a. Fix b. Fix c. Fix d. Fix e."}\n\n## Notes for the reviewer`,
+			);
+			expect(capError(doubled, "sentences")).toHaveLength(1);
+		},
+	);
+
+	// Recurrence: CodeRabbit PRRT_kwDORt8rec6yNwsX on #5026. The template,
+	// AGENTS.md and the fixer contract name four sections, but only the H3s
+	// below `Proof and checks` were required, so a body without the parent
+	// passed.
+	it("requires Proof and checks", () => {
+		const flat = NEW_BODY.replace("## Proof and checks\n\n", "").replaceAll(
+			"### ",
+			"## ",
+		);
+		expect(capError(flat, "Proof and checks")).toHaveLength(1);
+		const headless = NEW_BODY.replace("## Proof and checks\n\n", "");
+		expect(capError(headless, "Proof and checks")).toHaveLength(1);
 	});
 
 	it("leaves an older body alone below the repository gates", () => {
@@ -4003,13 +4179,12 @@ describe("body caps (#5003)", () => {
 		expect(lintPrBody(long).errors).toEqual([]);
 	});
 
-	it("keeps the unfilled template under the character cap", () => {
+	it("keeps the unfilled template under the caps", () => {
 		const template = readFileSync(
 			resolve(repositoryRoot, ".github/PULL_REQUEST_TEMPLATE.md"),
 			"utf8",
 		);
-		expect(capError(template, "visible characters")).toEqual([]);
-		expect(capError(template, "code fence")).toEqual([]);
+		expect(capErrors(template)).toEqual([]);
 		expect(capError(template, "allows at most")).toEqual([]);
 	});
 });

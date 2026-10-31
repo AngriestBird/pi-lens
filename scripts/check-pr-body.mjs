@@ -14,7 +14,9 @@ import {
 import {
 	blankMarkdownRegions,
 	markdownBlockComments,
+	markdownChildren,
 	markdownHeadings,
+	markdownTokens,
 } from "./lib/markdown-lexer.mjs";
 import { githubGet, parseOwnerRepoFromGitRemote } from "./lib/github-rest.mjs";
 import {
@@ -53,17 +55,23 @@ const REQUIRED_SECTIONS = [
 	"Summary",
 	"Notes for the reviewer",
 	"Change outline",
+	"Proof and checks",
 	"Tests",
 	"Class sweep",
 	"Observability",
 	"Fold check",
 ];
-// #5003: what a reader scrolls past. Code fences hold the required transcripts,
-// so they are capped per fence and stay out of the character count.
+// #5003: what a reader scrolls past. Code holds the required transcripts, so
+// it stays out of the character count and is capped by its own lines, width
+// and body-wide total instead. Every cap reads the lexer's token tree
+// (`lintBodyBudgets`); none is a scan for a spelling.
 const SUMMARY_MAX_SENTENCES = 3;
+const SUMMARY_MAX_CHARS = 600;
 const REVIEWER_NOTES_MAX_BULLETS = 5;
 const VISIBLE_BODY_MAX_CHARS = 5000;
-const FENCE_MAX_LINES = 20;
+const CODE_MAX_LINES = 20;
+const CODE_MAX_WIDTH = 160;
+const CODE_TOTAL_MAX_LINES = 100;
 // The PR footer the template requires (.github/PULL_REQUEST_TEMPLATE.md).
 const GENERATED_FOOTER =
 	/^🤖 Generated with \[Claude Code\]\(https:\/\/claude\.com\/claude-code\)$/;
@@ -117,6 +125,7 @@ const SECTION_SYNONYMS = new Map([
 	["why", "summary"],
 	["notes for the reviewer", "notes for the reviewer"],
 	["change outline", "change outline"],
+	["proof and checks", "proof and checks"],
 	["summary", "summary"],
 	["problem", "summary"],
 	["what changed", "summary"],
@@ -142,8 +151,9 @@ const SECTION_SYNONYMS = new Map([
 ]);
 const REVIEW_HEADER_REPAIR_PREFIX =
 	"## Why\nLegacy body normalized for the required review contract.\n\n" +
-	"## Notes for the reviewer\nNone.\n\n" +
-	"## Change outline\n- existing body structure\n";
+	"## Notes for the reviewer\n- None.\n\n" +
+	"## Change outline\n- existing body structure\n\n" +
+	"## Proof and checks\nThe sections below hold the proof.\n";
 
 function sectionMessage(name, detail) {
 	return `PR body ${detail} "## ${name}". See ${TEMPLATE_PATH}.`;
@@ -4373,41 +4383,171 @@ function lintDiffCompliance(body, options) {
 	return errors;
 }
 
-// #5003: a <details> block does not earn room: its text still counts.
+const collapsedLength = (text) =>
+	String(text ?? "").replace(/\s+/g, " ").length;
+
+/**
+ * What the body costs a reader, from the lexer's tokens (#5003, #5026). Known
+ * kinds are charged for the text they render: prose and code spans count as
+ * visible characters, and a `code` token is measured on its own (lines, widest
+ * line, total). Fail closed: a token kind this function does not list, raw
+ * HTML (a tag, a comment, a `<details>` block), a reference definition and an
+ * image are charged for their whole `raw`, never for nothing. A container whose
+ * children the lexer did not place is charged the same way.
+ */
+function tallyTokens(tokens, tally) {
+	for (const token of tokens) {
+		switch (token.type) {
+			case "space":
+			case "br":
+			case "hr":
+				break;
+			case "code": {
+				const rows = token.raw.replace(/\n+$/, "").split("\n");
+				tally.code.push({
+					lines: token.text === "" ? 0 : token.text.split("\n").length,
+					width: Math.max(...rows.map((row) => row.length)),
+				});
+				break;
+			}
+			case "codespan":
+			case "escape":
+				tally.chars += collapsedLength(token.text);
+				break;
+			case "text":
+			case "paragraph":
+			case "heading":
+			case "blockquote":
+			case "list":
+			case "list_item":
+			case "table":
+			case "strong":
+			case "em":
+			case "del":
+			case "link": {
+				const kids = markdownChildren(token);
+				if (kids.length) tallyTokens(kids, tally);
+				else tally.chars += collapsedLength(token.raw);
+				break;
+			}
+			default:
+				tally.chars += collapsedLength(token.raw);
+		}
+	}
+	return tally;
+}
+
+/** A Summary paragraph as the reader reads it: code spans kept, raw HTML and images dropped. */
+function summaryText(tokens) {
+	return tokens
+		.map((token) => {
+			if (token.type === "codespan") return token.raw;
+			if (token.type === "br") return " ";
+			if (token.type === "html" || token.type === "image") return "";
+			const kids = markdownChildren(token);
+			return kids.length ? summaryText(kids) : (token.text ?? token.raw ?? "");
+		})
+		.join("");
+}
+
+/**
+ * Does a Summary section hold what the template admits: paragraphs only, one
+ * to SUMMARY_MAX_SENTENCES sentences, at most SUMMARY_MAX_CHARS characters?
+ * Every other token kind refuses (a list, a table, code, raw HTML, a nested
+ * heading). The sentence count keeps its abbreviation tolerance (#3262): a
+ * sentence that starts in lower case counts with the one before it, so the
+ * character cap, not the count, is what bounds a Summary written that way.
+ */
+function summaryAdmitted(tokens) {
+	if (
+		!tokens.every(
+			(token) => token.type === "paragraph" || token.type === "space",
+		)
+	)
+		return false;
+	const sentences = countSentenceTerminators(
+		tokens.map((token) => summaryText(token.tokens ?? [])),
+	);
+	return (
+		sentences >= 1 &&
+		sentences <= SUMMARY_MAX_SENTENCES &&
+		tallyTokens(tokens, { chars: 0, code: [] }).chars <= SUMMARY_MAX_CHARS
+	);
+}
+
+/**
+ * Does the reviewer-notes section hold what the template admits: exactly one
+ * list of at most REVIEWER_NOTES_MAX_BULLETS items, each holding text or
+ * paragraphs and a task checkbox, nothing nested? Every other token kind
+ * refuses, so a spelling nobody listed (a paragraph, `1)`, an indent, a quote,
+ * a pipe-less table) is refused too.
+ */
+function notesAdmitted(tokens) {
+	const content = tokens.filter((token) => token.type !== "space");
+	if (content.length === 0) return true;
+	const [list] = content;
+	return (
+		content.length === 1 &&
+		list.type === "list" &&
+		list.items.length <= REVIEWER_NOTES_MAX_BULLETS &&
+		list.items.every((item) =>
+			item.tokens.every((token) =>
+				["text", "paragraph", "space", "checkbox"].includes(token.type),
+			),
+		)
+	);
+}
+
 function lintBodyBudgets(body) {
 	const errors = [];
-	const visibleChars = blankMarkdown(body, { htmlBlocks: true })
-		.replace(/\s+/g, " ")
-		.trim().length;
-	if (visibleChars > VISIBLE_BODY_MAX_CHARS)
-		errors.push(
-			`PR body is ${visibleChars} visible characters, over the ${VISIBLE_BODY_MAX_CHARS} cap. Cut narrative and tables; see ${TEMPLATE_PATH}.`,
-		);
-	const longestFence = Math.max(
-		0,
-		...markdownBlocks(body, { tilde: true })
-			.filter((block) => block.fence)
-			.map((block) => block.lines.length - 2),
+	const blocks = markdownTokens(body);
+	const tally = tallyTokens(
+		blocks.map(({ token }) => token),
+		{ chars: 0, code: [] },
 	);
-	if (longestFence > FENCE_MAX_LINES)
+	if (tally.chars > VISIBLE_BODY_MAX_CHARS)
 		errors.push(
-			`PR body has a ${longestFence}-line code fence, over the ${FENCE_MAX_LINES} cap. Quote only the failing lines; see ${TEMPLATE_PATH}.`,
+			`PR body is ${tally.chars} visible characters, over the ${VISIBLE_BODY_MAX_CHARS} cap. Cut narrative and tables; see ${TEMPLATE_PATH}.`,
 		);
-	const notes = sectionContent(body, "notes for the reviewer")?.raw;
-	if (notes !== undefined) {
-		const bullets = notes
-			.split(/\r?\n/)
-			.filter((line) => /^(?:[-*+]|\d+\.)\s/.test(line)).length;
+	const longest = Math.max(0, ...tally.code.map(({ lines }) => lines));
+	if (longest > CODE_MAX_LINES)
+		errors.push(
+			`PR body has a ${longest}-line code fence or block, over the ${CODE_MAX_LINES} cap. Quote only the failing lines; see ${TEMPLATE_PATH}.`,
+		);
+	const widest = Math.max(0, ...tally.code.map(({ width }) => width));
+	if (widest > CODE_MAX_WIDTH)
+		errors.push(
+			`PR body has a code line of ${widest} characters, over the ${CODE_MAX_WIDTH} cap. Cut it to the failing part; see ${TEMPLATE_PATH}.`,
+		);
+	const total = tally.code.reduce((sum, { lines }) => sum + lines, 0);
+	if (total > CODE_TOTAL_MAX_LINES)
+		errors.push(
+			`PR body has ${total} code lines in all, over the ${CODE_TOTAL_MAX_LINES} cap. Give each changed test file its failing lines only; see ${TEMPLATE_PATH}.`,
+		);
+	const headings = bodyHeadings(body);
+	const tokensOf = (heading) => {
+		const end =
+			headings.find(
+				(candidate) =>
+					candidate.index > heading.index && candidate.level <= heading.level,
+			)?.index ?? Number.POSITIVE_INFINITY;
+		return blocks
+			.filter(({ line }) => line >= heading.contentIndex && line < end)
+			.map(({ token }) => token);
+	};
+	for (const heading of headings)
+		if (hasSection(heading, "summary") && !summaryAdmitted(tokensOf(heading)))
+			errors.push(
+				`PR body "## ${heading.name}" must hold plain paragraphs of one to ${SUMMARY_MAX_SENTENCES} sentences and at most ${SUMMARY_MAX_CHARS} characters, with no list, table, code or HTML. See ${TEMPLATE_PATH}.`,
+			);
+	for (const heading of headings)
 		if (
-			bullets > REVIEWER_NOTES_MAX_BULLETS ||
-			markdownBlocks(notes, { tilde: true }).some(
-				(block) => block.fence || block.table,
-			)
+			hasSection(heading, "notes for the reviewer") &&
+			!notesAdmitted(tokensOf(heading))
 		)
 			errors.push(
-				`PR body "## Notes for the reviewer" allows at most ${REVIEWER_NOTES_MAX_BULLETS} bullets and no table or code fence. Move proof under "## Proof and checks"; see ${TEMPLATE_PATH}.`,
+				`PR body "## Notes for the reviewer" allows at most ${REVIEWER_NOTES_MAX_BULLETS} bullets in one flat list and nothing else. Move proof under "## Proof and checks"; see ${TEMPLATE_PATH}.`,
 			);
-	}
 	return errors;
 }
 
@@ -4489,15 +4629,6 @@ export function lintPrBody(body = "", options = {}) {
 	}
 	if (options.workingTree) {
 		errors.push(...lintBodyBudgets(body));
-		if (lead) {
-			const sentences = countSentenceTerminators(
-				rawLines.slice(lead.contentIndex, leadEnd),
-			);
-			if (sentences < 1 || sentences > SUMMARY_MAX_SENTENCES)
-				errors.push(
-					`PR body "## Summary" must contain one to ${SUMMARY_MAX_SENTENCES} sentences. See ${TEMPLATE_PATH}.`,
-				);
-		}
 	}
 	if (options.bugClosing)
 		errors.push(
@@ -4572,13 +4703,6 @@ export async function resolveLivePrBody(
 	}
 }
 
-/**
- * True when the PR touches any file under tests/. Advisory best-effort: one
- * page of 100 files covers this repo's PR sizes; on any failure (including a
- * PR larger than the page, detected via the Link header) return null so the
- * caller SKIPS the conditional check rather than guessing — a lint that can
- * misfire on fetch trouble teaches people to ignore it.
- */
 // #4968: the labels that make an issue owe the detection lesson, for a PR that
 // closes it and for one that references it. One list: 17 of 20 nightly-drift
 // issues carry no `bug` label, and the issue names both for Closes and Refs.

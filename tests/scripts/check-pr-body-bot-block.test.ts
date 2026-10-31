@@ -44,13 +44,16 @@ const compact = (fold: string[]) =>
 		"The body gate records the fold decision.",
 		"",
 		"## Notes for the reviewer",
-		"None.",
+		"- None.",
 		"",
 		"## Change outline",
 		"- scripts/check-pr-body.mjs",
 		"",
 		"## Summary",
 		"The lint reads the fold check section.",
+		"",
+		"## Proof and checks",
+		"The proof sections follow.",
 		"",
 		"## Tests",
 		"Targeted tests pass.",
@@ -129,8 +132,9 @@ describe("a bot block appended to the body never counts (#4774)", () => {
 	setup();
 
 	// What a real-body case may still print: the test-reference error that the
-	// empty corpus earns the body's `tests/...` citations, the caps a body written
-	// before #5003 exceeds, and nothing else.
+	// empty corpus earns the body's `tests/...` citations, the caps and the section
+	// shapes (`Proof and checks`, Summary, Notes) a body written
+	// before #5003 does not meet, and nothing else.
 	const unexpected = (printed: string) =>
 		printed
 			.split("\n")
@@ -138,7 +142,7 @@ describe("a bot block appended to the body never counts (#4774)", () => {
 				(line) =>
 					line.trim() &&
 					!line.startsWith(TEST_REFERENCE) &&
-					!/^PR body (?:is \d+ visible|has a \d+-line|"## Notes for the reviewer" allows)/.test(
+					!/^PR body (?:is \d+ visible|has a \d+-line|has a code line|has \d+ code lines|is missing "## Proof and checks"|"## Summary" must hold|"## Notes for the reviewer" allows)/.test(
 						line,
 					),
 			);
