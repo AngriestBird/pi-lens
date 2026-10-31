@@ -97,8 +97,11 @@ async function cascadeAfterEdit(
 	c: KindCase,
 	extra: Record<string, string>,
 	without: string[] = [],
-	/** A project ignore config, written before the cascade runs. */
-	ignore: string[] = [],
+	/** Runs before the exporter's edit, with a way to ask for another file's cascade. */
+	beforeEdit?: (
+		cascade: (file: string) => Promise<unknown>,
+		dir: string,
+	) => Promise<void>,
 ) {
 	const env = setupTestEnvironment("cascade-ambiguous-ref-");
 	try {
@@ -108,12 +111,6 @@ async function cascadeAfterEdit(
 			const p = path.join(env.tmpDir, rel);
 			fs.mkdirSync(path.dirname(p), { recursive: true });
 			fs.writeFileSync(p, body);
-		}
-		if (ignore.length > 0) {
-			fs.writeFileSync(
-				path.join(env.tmpDir, ".pi-lens.json"),
-				JSON.stringify({ ignore }),
-			);
 		}
 		const touched: string[] = [];
 		await installLspServiceDouble({
@@ -125,6 +122,15 @@ async function cascadeAfterEdit(
 		});
 		const { computeCascadeForFile } =
 			await import("../../clients/dispatch/integration.js");
+		await beforeEdit?.(
+			(file) =>
+				computeCascadeForFile(file, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+					projectRoot: env.tmpDir,
+				}),
+			env.tmpDir,
+		);
 		const [rel, from, to] = c.edit;
 		const target = path.join(env.tmpDir, rel);
 		fs.writeFileSync(target, fs.readFileSync(target, "utf8").replace(from, to));
@@ -193,12 +199,36 @@ describe("a dependent reached by name alone (#5055)", () => {
 		expect(run.indeterminate).toBeUndefined();
 	}, 60_000);
 
-	// Recurrence: a referrer the cascade would never select (a user-ignored
-	// file) is accounted for, not unproven; without this the marker would name a
-	// dependent the project asked cascade to leave alone (#297).
-	it("a referrer the project ignores is accounted for: the run still reads no_neighbors", async () => {
+	// Recurrence: a referrer edited in the same turn is the cascade's own
+	// primary (B10): its dispatch run is the authoritative answer, so naming it
+	// as an unproven dependent would double-report a file pi is already checking.
+	it("a referrer edited in the same turn is accounted for: the run still reads no_neighbors", async () => {
 		const c = KINDS[0];
-		const { run } = await cascadeAfterEdit(c, c.second, [], [c.dependent]);
+		const { run } = await cascadeAfterEdit(
+			c,
+			c.second,
+			[],
+			async (cascade, dir) => {
+				// The agent edited the dependent first; its own cascade run marks it primary.
+				await cascade(path.join(dir, c.dependent));
+			},
+		);
+		expect(run.skipReason).toBe("no_neighbors");
+		expect(run.indeterminate).toBeUndefined();
+	}, 60_000);
+
+	// Recurrence: the exporter's own recursion. Its call to the changed symbol
+	// also stays on the name-only placeholder once a second definition exists,
+	// and a changed file is never its own dependent.
+	it("a changed file's own recursive call is not an unplaced dependent: the run still reads no_neighbors", async () => {
+		const c: KindCase = {
+			...KINDS[0],
+			files: {
+				"lib.ts":
+					"export function foo(x: number): number { return x > 0 ? foo(x - 1) : 0; }\n",
+			},
+		};
+		const { run } = await cascadeAfterEdit(c, c.second);
 		expect(run.skipReason).toBe("no_neighbors");
 		expect(run.indeterminate).toBeUndefined();
 	}, 60_000);
