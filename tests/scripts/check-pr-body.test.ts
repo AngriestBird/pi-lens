@@ -4075,6 +4075,16 @@ describe("body caps (#5003)", () => {
 	// Recurrence: CodeRabbit PRRT_kwDORt8rec6yNwsZ on #5026. `markdownBlocks`
 	// closed a fence on any line that began with a fence marker, info string
 	// included, and subtracted a closing line that an unclosed fence lacks.
+	// Recurrence: verify r2 on #5026 measured the last 80 merged bodies: at 240
+	// columns 28 of them failed (p90 of the widest line per body is 391), so a
+	// long test path and its title were refused. 400 admits them; 401 does not.
+	it("admits a code line of 300 or 400 columns and refuses 401", () => {
+		const wide = (width: number) => tests(fence(3, "x".repeat(width)));
+		expect(capError(wide(300), "code line")).toEqual([]);
+		expect(capError(wide(400), "code line")).toEqual([]);
+		expect(capError(wide(401), "code line")).toHaveLength(1);
+	});
+
 	it("measures a fence by the lexer's code token", () => {
 		const longWithInfoLines = Array.from({ length: 200 }, (_, at) =>
 			at % 15 === 14 ? "```text" : "FAIL x",
