@@ -388,8 +388,8 @@ export function symbolSearchFileMatchesLang(
  * or under `cwd` is matched as its `cwd`-relative spelling: the workspace
  * prefix is a literal, never glob syntax, so a directory named `app[1]` or
  * `app{a,b}` keeps its scope (#5047 F1), while the part the caller wrote after
- * it (`src/**\/*.ts`) is still a pattern. Only an entry outside `cwd` is
- * matched as an absolute pattern. */
+ * it (`src/**\/*.ts`) is still a pattern. The absolute candidate is still
+ * tried, for an entry outside `cwd` and for a relative glob written against it. */
 function fileMatchesPathGlobs(
 	file: string,
 	cwd: string,
@@ -406,7 +406,7 @@ function fileMatchesPathGlobs(
 		const match = (candidate: string) =>
 			minimatch(candidate, pattern, options) ||
 			minimatch(candidate, `${pattern}/**`, options);
-		return match(rel) || (within === undefined && abs !== rel && match(abs));
+		return match(rel) || (abs !== rel && match(abs));
 	});
 }
 

@@ -555,6 +555,11 @@ describe("symbol_search tool", () => {
 					expect(await hitsFor(["scripts"]), "other dir").toEqual([
 						"scripts/authenticate.py",
 					]);
+					// The workspace itself scopes to every hit, not to none: the entry
+					// relativizes to "" and must read as the whole workspace.
+					expect((await hitsFor(["."])).sort(), "cwd").toEqual(
+						["scripts/authenticate.py", "src/auth/login.ts"].sort(),
+					);
 					// A directory that holds no hit still scopes everything out: the
 					// fix must not turn the literal prefix into "match everything".
 					expect(await hitsFor(["docs"]), "empty dir").toEqual([]);
