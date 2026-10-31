@@ -740,3 +740,172 @@ describe("the cascade does not read a pre-edit answer as this edit's clean", () 
 		}
 	});
 });
+
+describe("a fallback's rows beside an unanswered primary follow the touch's freshness (#5034 r7)", () => {
+	/** The finding the fallback published for the importer. */
+	const FALLBACK_ERROR = { ...LATE_ERROR, message: "fallback finding" };
+
+	/**
+	 * The #5014 production shape through the real service: the owner (`gopls`)
+	 * resolves a root and fails to start, so its `fallbackFor` alternate
+	 * (`gopls-alt`) is acquired and answers the importer. Every touch then
+	 * names the owner (`primary-unavailable`) and carries the alternate's rows.
+	 * The alternate stores the content binding of the bytes it last answered,
+	 * like a version-echoing client.
+	 */
+	async function runFallbackCascade(options: {
+		/** When the alternate's answer for the importer was published:
+		 *  before the edit, or after the cascade started (during its graph build). */
+		answer: "pre-edit" | "post-edit";
+		/** The importer is rewritten on disk after the alternate last saw it,
+		 *  with nothing telling the server (a formatter, a checkout). */
+		rewriteImporterOutOfBand?: boolean;
+	}) {
+		const env = setupTestEnvironment("cascade-fallback-freshness-");
+		const exporter = path.join(env.tmpDir, "B.go");
+		const importer = path.join(env.tmpDir, "C.go");
+		fs.writeFileSync(exporter, "package main\n\nfunc Lib() {}\n");
+		fs.writeFileSync(importer, NEIGHBOR_CONTENT);
+		mocks.computeImpactCascade.mockReturnValue(impact(exporter, [importer]));
+
+		const alternate = makePushOnlyServer({
+			serverId: "gopls-alt",
+			filePath: importer,
+		});
+		// The binding of the bytes the alternate's stored answer was computed for.
+		let answeredHash: string | undefined;
+		alternate.client.getDiagnosticBinding = () =>
+			answeredHash === undefined
+				? undefined
+				: { version: alternate.state.version, contentHash: answeredHash };
+		const publishFor = (bytes: string, publishedAt: number) => {
+			answeredHash = hashDiagnosticContent(bytes);
+			alternate.publish([FALLBACK_ERROR], publishedAt);
+		};
+		if (options.answer === "pre-edit") {
+			publishFor(NEIGHBOR_CONTENT, Date.now() - 60_000);
+		}
+		mocks.createLSPClient.mockImplementation(
+			async (spawnOptions: { serverId: string }) => {
+				if (spawnOptions.serverId === "gopls-alt") return alternate.client;
+				throw new Error("spawn gopls ENOENT");
+			},
+		);
+		mocks.getServersForFileWithConfig.mockReturnValue([
+			serverConfig("gopls", env.tmpDir, ".go"),
+			{
+				...serverConfig("gopls-alt", env.tmpDir, ".go"),
+				fallbackFor: "gopls",
+			},
+		]);
+
+		const { LSPService } = await import("../../clients/lsp/index.js");
+		const service = new LSPService();
+		installLspService(service);
+		// The importer was read once before the edit: the alternate holds its bytes.
+		await service.touchFile(importer, NEIGHBOR_CONTENT, TOUCH_OPTIONS);
+		if (options.rewriteImporterOutOfBand) {
+			fs.writeFileSync(importer, `${NEIGHBOR_CONTENT}\nfunc other() {}\n`);
+		}
+		if (options.answer === "post-edit") {
+			// After `cascadeStart`, before the neighbour touch: the alternate
+			// republishes the importer for the bytes it holds.
+			mocks.buildOrUpdateGraph.mockImplementationOnce(async () => {
+				publishFor(NEIGHBOR_CONTENT, Date.now() + 1_000);
+				return emptyGraph();
+			});
+		}
+		const { computeCascadeForFile } =
+			await import("../../clients/dispatch/integration.js");
+
+		fs.writeFileSync(exporter, "package main\n\nfunc Lib(a string) {}\n");
+		const run = await computeCascadeForFile(exporter, env.tmpDir, {
+			turnSeq: 1,
+			writeSeq: 1,
+		});
+		const touchRow = mocks.logCascade.mock.calls
+			.map(
+				(args) =>
+					args[0] as {
+						phase?: string;
+						diagnosticCount?: number;
+						metadata?: Record<string, unknown>;
+					},
+			)
+			.filter((row) => row?.phase === "neighbor_touch")
+			.at(-1);
+		return { env, run, importer, alternate, touchRow };
+	}
+
+	// Control (state-table row P4): the alternate's reused answer was published
+	// after the edit, for the bytes on disk. Its finding is delivered beside
+	// the owner's line. Recurrence: a gate that withholds every fallback row
+	// (an over-broad freshness check) loses the finding #5014 r2 F2 delivered.
+	it("delivers a fallback's post-edit answer for the current bytes beside the line", async () => {
+		const { env, run, touchRow } = await runFallbackCascade({
+			answer: "post-edit",
+		});
+		try {
+			expect(touchRow?.metadata).toMatchObject({
+				inconclusiveReason: "primary-unavailable",
+			});
+			expect(run.result?.unansweredPrimaries?.notes).toHaveLength(1);
+			expect(run.result?.formatted).toContain("fallback finding");
+			expect(touchRow?.diagnosticCount).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence (CodeRabbit PRRT_kwDORt8rec6yMj20 on #5034, row P3): the
+	// alternate's answer predates the edit (notify skipped, nothing published
+	// since), and the primary-unavailable branch displayed it before the #5040
+	// pre-edit check that guards the confirmed branch below it.
+	it("withholds a fallback's pre-edit rows and keeps the owner's line", async () => {
+		const { env, run, alternate, touchRow } = await runFallbackCascade({
+			answer: "pre-edit",
+		});
+		try {
+			expect(run.result?.formatted).not.toContain("fallback finding");
+			expect(run.result?.unansweredPrimaries?.notes).toHaveLength(1);
+			// Nothing was sent: the alternate already held these bytes.
+			expect(alternate.state.notifies).toEqual(["open"]);
+			expect(touchRow?.metadata).toMatchObject({
+				inconclusiveReason: "primary-unavailable",
+				preEditAnswer: true,
+				answerServerId: "gopls-alt",
+			});
+			expect(touchRow?.diagnosticCount).toBe(0);
+			expect(run.observedNeighborPaths).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence (CodeRabbit PRRT_kwDORt8rec6yMj20 on #5034, row P5): the
+	// alternate republished after the edit, but for bytes the importer no
+	// longer holds on disk (`binding.boundToCurrentDisk === false`). The runner
+	// withholds such rows on the same touch shape (#5034 r3 F7); the cascade
+	// displayed them.
+	it("withholds a fallback's rows bound to other bytes than disk and keeps the owner's line", async () => {
+		const { env, run, alternate, touchRow } = await runFallbackCascade({
+			answer: "post-edit",
+			rewriteImporterOutOfBand: true,
+		});
+		try {
+			expect(run.result?.formatted).not.toContain("fallback finding");
+			expect(run.result?.unansweredPrimaries?.notes).toHaveLength(1);
+			// The touch sent the new bytes; the alternate did not answer them.
+			expect(alternate.state.notifies).toHaveLength(2);
+			expect(touchRow?.metadata).toMatchObject({
+				inconclusiveReason: "primary-unavailable",
+				bindingState: "mismatch",
+			});
+			expect(touchRow?.metadata?.preEditAnswer).toBeUndefined();
+			expect(touchRow?.diagnosticCount).toBe(0);
+			expect(run.observedNeighborPaths).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+});
