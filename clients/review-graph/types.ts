@@ -244,11 +244,12 @@ export interface ImpactCascadeResult {
 	 */
 	indeterminate?: CascadeIndeterminate;
 	/**
-	 * #5055: files (never the changed file) whose reference to a changed symbol
-	 * stayed on its name-only placeholder, so no `calls`/`references` edge reaches
-	 * the symbol and the graph cannot say whether they depend on it. The caller
-	 * owns the verdict: a run with no other neighbor to check and a referrer the
-	 * cascade would select is indeterminate, never `no_neighbors`.
+	 * #5055: files whose reference to a changed symbol stayed on its name-only
+	 * placeholder, so no `calls`/`references` edge reaches the symbol and the
+	 * graph cannot say whether they depend on it. The changed file may be among
+	 * them (its own calls). The caller owns the verdict: a run with no other
+	 * neighbor to check and a referrer the cascade would select is
+	 * indeterminate, never `no_neighbors`.
 	 */
 	nameOnlyReferrers?: string[];
 }

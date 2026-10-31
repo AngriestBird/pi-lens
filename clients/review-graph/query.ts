@@ -280,9 +280,11 @@ export function computeImpactCascade(
 	// hint did not narrow it) stays on its `symbol-name:` placeholder, so none
 	// of the edge reads above reaches the changed symbol. Those files are not
 	// dependents the graph found and not leaves it proved: name them and let the
-	// caller decide whether the run can still be called a leaf. A qualified placeholder (`symbol-qualified-name:`) is minted
-	// only for a receiver class defined in the calling file, so it cannot hide a
-	// cross-file dependent and is not read here.
+	// caller decide whether the run can still be called a leaf. The changed file
+	// may be among them (its own recursive call); the caller drops it with the
+	// other primaries. A qualified placeholder (`symbol-qualified-name:`) is
+	// minted only for a receiver class defined in the calling file, so it cannot
+	// hide a cross-file dependent and is not read here.
 	const nameOnlyReferrers = dedupe(
 		[
 			...new Set(
@@ -299,7 +301,7 @@ export function computeImpactCascade(
 					: [],
 			),
 		),
-	).filter((candidate) => normalizeMapKey(candidate) !== normalizedFile);
+	);
 
 	// Module-level downstream expansion for monorepos
 	const downstreamModuleFiles: string[] = [];
