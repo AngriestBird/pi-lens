@@ -33,8 +33,9 @@ import { applyInlineSuppressions } from "./inline-suppressions.js";
 import { readFileContent } from "./runners/utils.js";
 import {
 	applyRulePolicy,
-	resolvedRulePolicyMap,
-	rulePolicyMapFromConfig,
+	type ProjectRulePolicy,
+	projectRulePolicy,
+	type RulePolicy,
 } from "./rule-policy.js";
 import type { Diagnostic } from "./types.js";
 import { convertLspDiagnostics } from "./utils/lsp-diagnostics.js";
@@ -58,7 +59,7 @@ export interface FindingPolicyOptions<T> {
 	 * hide a finding over an I/O error (AGENTS.md shape 48).
 	 */
 	content: string;
-	policyMap: Record<string, unknown> | undefined;
+	policyMap: RulePolicy | undefined;
 	/**
 	 * Every `(tool, rule)` spelling a mark against THIS surface's rendering of
 	 * the diagnostic can carry. Omit for a surface whose rendered identity IS
@@ -111,13 +112,13 @@ export function applyFindingPolicy<
 	};
 }
 
-/** The project's `.pi-lens.json` `rules.<id>.disable`/`select` policy map.
- * One derivation for every surface that filters by it — `loadPiLensProjectConfig`
- * is mtime-cached, so repeated calls in one sweep cost one stat. */
-export function loadProjectRulePolicyMap(
-	cwd: string,
-): ReturnType<typeof rulePolicyMapFromConfig> {
-	return resolvedRulePolicyMap(cwd);
+/** The project's `.pi-lens.json` `rules.<id>.disable`/`select`/`ignorePaths`
+ * policy. One derivation for every surface that filters by it: each file reads
+ * its config owner's policy, so a nested `.pi-lens.json` governs the files
+ * under it. Resolved lazily and memoized per owner for the life of the
+ * returned object. */
+export function loadProjectRulePolicy(cwd: string): ProjectRulePolicy {
+	return projectRulePolicy(cwd);
 }
 
 /**
@@ -295,8 +296,8 @@ export function applyPushedFindingPolicy<
 		cwd: options.cwd,
 		filePath: options.filePath,
 		content: options.content ?? "",
-		// mtime-cached, so several files in one drain cost one stat.
-		policyMap: loadProjectRulePolicyMap(options.cwd),
+		// The file's own config owner decides, so a nested `.pi-lens.json` applies.
+		policyMap: loadProjectRulePolicy(options.cwd),
 		identities: renderedRuleIdentities,
 	});
 	return { kept, suppressed: findings.length - kept.length };
@@ -394,7 +395,7 @@ export function applyLspFindingPolicy(
 		filePath: string;
 		/** `undefined` when the content could not be read — see `content` above. */
 		content: string | undefined;
-		policyMap: Record<string, unknown> | undefined;
+		policyMap: RulePolicy | undefined;
 		fileRole: FileRole;
 	},
 ): LspFindingPolicyResult {

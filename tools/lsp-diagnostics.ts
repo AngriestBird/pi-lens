@@ -53,7 +53,7 @@ import {
 } from "../clients/dispatch/auxiliary-lsp.js";
 import {
 	applyLspFindingPolicy,
-	loadProjectRulePolicyMap,
+	loadProjectRulePolicy,
 } from "../clients/dispatch/finding-policy.js";
 import { readFileContent } from "../clients/dispatch/runners/utils.js";
 import { lookForOutOfBandChanges } from "../clients/out-of-band-changes.js";
@@ -1397,7 +1397,7 @@ export function applyProbeFindingPolicy(
 			cwd,
 			filePath: file,
 			content,
-			policyMap: loadProjectRulePolicyMap(cwd),
+			policyMap: loadProjectRulePolicy(cwd),
 			fileRole: detectFileRole(file, content),
 		});
 		// #4638: jedi compiles with the interpreter it launched, so under a

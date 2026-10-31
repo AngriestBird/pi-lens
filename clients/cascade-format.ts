@@ -8,7 +8,7 @@ import type {
 import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
 import {
 	applyFindingPolicy,
-	loadProjectRulePolicyMap,
+	loadProjectRulePolicy,
 	renderedRuleIdentities,
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
@@ -401,7 +401,7 @@ export function applyCascadeDisplayPolicy(
 		cwd: policyRoot,
 		filePath,
 		content: content ?? "",
-		policyMap: loadProjectRulePolicyMap(policyRoot),
+		policyMap: loadProjectRulePolicy(policyRoot),
 		identities: renderedRuleIdentities,
 	});
 	return {

@@ -66,6 +66,7 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	relativeInside,
+	walkUpDirs,
 } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { SecurityScanClient } from "./security-scan-client.js";
@@ -480,16 +481,17 @@ function isInsideNestedGitRepository(file: string, cwd: string): boolean {
 		: path.resolve(root, file);
 	if (relativeInside(root, absoluteFile) === undefined) return false;
 
-	let directory = path.dirname(absoluteFile);
-	while (directory !== root) {
+	// The ceiling is the caller's spelling of `cwd`, so the climb stays on the
+	// spelling too: a nested checkout is judged on the chain the finding names.
+	for (const directory of walkUpDirs(path.dirname(absoluteFile), {
+		spelling: true,
+	})) {
+		if (directory === root) return false;
 		try {
 			if (fs.existsSync(path.join(directory, ".git"))) return true;
 		} catch {
 			return false;
 		}
-		const parent = path.dirname(directory);
-		if (parent === directory) return false;
-		directory = parent;
 	}
 	return false;
 }

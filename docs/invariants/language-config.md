@@ -19,10 +19,15 @@
   legacy migrations, and namespaces live in the config-location/schema modules.
   A new config key or environment flag needs a forcing function, stability tier,
   diagnostic code, tests, and docs.
-- `rules.<id>.ignorePaths` is an experimental, project-relative path denial
-  resolved by config-core with array-union semantics: global entries cannot be
-  cleared by project config. Ast-grep and tree-sitter apply it before scanning;
-  other runner output uses the shared rule-policy filter.
+- `rules.<id>.ignorePaths` is an experimental path denial resolved by
+  config-core with array-union semantics: global entries cannot be cleared by
+  project config. Each glob is relative to the directory of the file that
+  declares it (the project root for a global entry). Ast-grep and tree-sitter
+  apply it before scanning; other runner output uses the shared rule-policy
+  filter.
+- `rules` and `dispatch.disabledRunners` are read per file from its config
+  owner (`resolveDispatchPolicyConfigForFile`, `loadProjectRulePolicy`), so a
+  nested `.pi-lens.json` governs its own files on every surface.
 - `lens_diagnostics` has one model-facing diagnostic surface. `source` is
   `session` or `lsp`; `scope` is `paths` or `workspace`; explicit paths always
   win. Severity is a threshold. Retired compatibility names must not widen a

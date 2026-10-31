@@ -293,14 +293,40 @@ export interface RunnerDefinition {
  * ownership reasons: a runner may skip because its capability is policy-
  * deferred to a lane that owns it, or because its tool categorically cannot
  * serve the file's dialect — both are policy decisions named at the delivery
- * surface, never an empty output read as clean). */
+ * surface, never an empty output read as clean). `disabled-by-config` is the
+ * operator's own decision (`dispatch.disabledRunners`): the runner never ran,
+ * which is neither a failure nor a verdict on the file. */
 export const RUNNER_SKIP_REASONS = [
 	"no-files-matched",
 	"configured-non-biome-linter",
 	"dialect-unsupported",
 	"covered-by-primary",
+	"disabled-by-config",
 ] as const;
 export type RunnerSkipReason = (typeof RUNNER_SKIP_REASONS)[number];
+
+/**
+ * The skip reasons that say a runner had nothing to check, so beside a
+ * `dispatch.disabledRunners` denial the coverage notice does not read them as
+ * a tool that failed. A closed admission list over {@link RUNNER_SKIP_REASONS}:
+ * a reason added to the taxonomy reads as a failure until it is listed here.
+ * `covered-by-primary` is left out on purpose: it defers to a lane whose answer
+ * is what the denial may have removed. `disabled-by-config` is the denial
+ * itself and the caller handles it. {@link reachedNoVerdict} admits the whole
+ * taxonomy as a verdict; this is the narrower "not a tool failure" subset.
+ */
+export const NOT_APPLICABLE_SKIP_REASONS: readonly RunnerSkipReason[] = [
+	"no-files-matched",
+	"configured-non-biome-linter",
+	"dialect-unsupported",
+];
+
+/** Whether a skip reason states the runner had nothing to check. */
+export function isNotApplicableSkipReason(
+	value: RunnerSkipReason | undefined,
+): boolean {
+	return NOT_APPLICABLE_SKIP_REASONS.some((reason) => reason === value);
+}
 
 /**
  * #4130: why an invoked tool produced no result. The non-`ran` kinds of
@@ -671,8 +697,19 @@ export interface DispatchContext {
 	readonly facts: import("./fact-store.js").FactStore;
 	/** Project-local .pi-lens.json config captured for this dispatch. */
 	readonly projectConfig?: PiLensProjectConfig;
-	/** Shared global+project rule policy, including path-scoped denials. */
+	/**
+	 * The EDITED file's config owner's rule policy, including path-scoped
+	 * denials: runners read it to skip a rule on this file, and the output filter
+	 * reuses it for findings under the same owner (every other owner's finding
+	 * reads its own, #5011 r8 F24).
+	 */
 	readonly rulePolicy?: RulePolicyMap;
+	/**
+	 * Runner ids the operator denied through `dispatch.disabledRunners`
+	 * (union of every config tier). Absent when nothing is denied. The
+	 * dispatcher skips these before their `when`/`run`, so the tool never spawns.
+	 */
+	readonly disabledRunnerIds?: ReadonlySet<string>;
 	/** Only run blocking rules (severity: error) - used for fast feedback on file write */
 	readonly blockingOnly?: boolean;
 	readonly modifiedRanges?: ModifiedRange[];

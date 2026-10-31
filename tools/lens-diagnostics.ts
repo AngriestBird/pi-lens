@@ -28,7 +28,7 @@ import { DEPENDENCY_DRIFT_MAX_DELIVERIES } from "../clients/blocker-freshness.js
 import { freshnessFromMtime } from "../clients/freshness.js";
 import {
 	applyFindingPolicy,
-	loadProjectRulePolicyMap,
+	loadProjectRulePolicy,
 } from "../clients/dispatch/finding-policy.js";
 import { readFileContent } from "../clients/dispatch/runners/utils.js";
 import {
@@ -54,7 +54,7 @@ import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
 import {
 	applyRulePolicy,
-	rulePolicyMapFromConfig,
+	type RulePolicy,
 } from "../clients/dispatch/rule-policy.js";
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
@@ -1045,7 +1045,7 @@ function applyCachedDispositions<
 function filterDeltaReportDispositions(
 	report: ProjectDiagnosticsDeltaReport | undefined,
 	cwd: string,
-	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
+	policyMap: RulePolicy | undefined,
 ): ProjectDiagnosticsDeltaReport | undefined {
 	if (!report?.diagnostics.length) return report;
 	const kept = report.diagnostics.filter(
@@ -1271,7 +1271,7 @@ function formatDeltaMode(
 	// policy oversight (the per-edit dispatch already filters, but the cache
 	// snapshots predate the user's project config edit and would replay
 	// filtered findings). Weak-anchored like weak disposition — zero I/O.
-	const policyMap = loadProjectRulePolicyMap(cwd);
+	const policyMap = loadProjectRulePolicy(cwd);
 	const projectDelta = filterDeltaReportDispositions(
 		loadProjectDiagnosticsDeltaReport(cwd),
 		cwd,
@@ -1650,7 +1650,7 @@ function filterProjectDiagnosticsDeltaReport(
  */
 function applyProjectRulePolicy<T extends { diagnostics: ProjectDiagnostic[] }>(
 	value: T | undefined,
-	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
+	policyMap: RulePolicy | undefined,
 	root: string,
 ): T | undefined {
 	if (!value) return undefined;
@@ -2237,13 +2237,13 @@ function mergeDiagnosticsWithWidgetSummaries(
  * Also applies the project's `.pi-lens.json` `rules.<id>.disable`/`select`
  * policy AFTER inline suppression / disposition so the same set of findings
  * the per-edit `dispatcher.ts` filters is what's rendered here. The policy
- * map is passed in (computed once per `formatFullMode` call) rather than
- * re-deriving per file — see `loadProjectRulePolicyMap(cwd)`.
+ * is passed in (built once per `formatFullMode` call, memoizing each config
+ * owner) and reads each file's own owner — see `loadProjectRulePolicy(cwd)`.
  */
 async function applyInlineSuppressionsToSummaries(
 	summaries: FileDiagnosticSummary[],
 	cwd: string,
-	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
+	policyMap: RulePolicy | undefined,
 	/**
 	 * #1634: receives the rows a disposition mark hid, so the caller can state
 	 * the count scoped to its severity. Inline `pi-lens-ignore` and rule-policy
@@ -2665,7 +2665,7 @@ async function formatFullMode(
 	// applies. A project config read failure is treated as "no policy"
 	// (defensive, matches the `applyInlineSuppressionsToSummaries` read-error
 	// discipline).
-	const policyMap = loadProjectRulePolicyMap(cwd);
+	const policyMap = loadProjectRulePolicy(cwd);
 	// #571: reconcile this scan's fresh, CONFIRMED per-file results into the
 	// footer cache. A footer write is never allowed to fail the tool call, so
 	// any unexpected throw is swallowed.
@@ -3512,7 +3512,7 @@ async function formatAllMode(
 	// dispositions through the shared applyCachedDispositions seam — strict
 	// false-positive anchors against current content when the file is
 	// unchanged since observation, weak-only fallback otherwise.
-	const policyMap = loadProjectRulePolicyMap(cwd);
+	const policyMap = loadProjectRulePolicy(cwd);
 	// #1634 criterion 4: what marks hide is counted and said, scoped to the
 	// requested paths and severity like the rows themselves. Without it a file
 	// whose findings the agent marked after a mode=full read "No issues ✓" a
