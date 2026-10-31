@@ -4359,6 +4359,83 @@ describe("table rows split the way GitHub splits them (#5070)", () => {
 			0,
 			"",
 		],
+		// #5026 r4 verify N1-N3: every spelling below renders as a table (or not)
+		// on GitHub as `gh api markdown -f mode=gfm` showed; the gate read seven
+		// of them by its own row regex and got each one wrong. Recurrence: a
+		// row with no trailing pipe, a short separator, a pipe-less or quoted
+		// table escaped the lint, and a table GitHub never renders was refused.
+		[
+			"a row with no trailing pipe",
+			"| a | b |\n| --- | --- |\n| `x | y` | z",
+			1,
+			"3 cells but its header has 2",
+		],
+		[
+			"a row after an unterminated row",
+			"| a | b |\n| --- | --- |\n| 1 | 2\n| x | y | z |",
+			1,
+			"3 cells but its header has 2: | x | y | z |",
+		],
+		[
+			"a one-dash separator",
+			"| a | b |\n| - | - |\n| `x | y` | z |",
+			1,
+			"3 cells but its header has 2",
+		],
+		[
+			"a two-dash separator",
+			"| a | b |\n| -- | -- |\n| `x | y` | z |",
+			1,
+			"3 cells but its header has 2",
+		],
+		[
+			"a table with no borders",
+			"a | b\n--- | ---\n`x | y` | z",
+			1,
+			"3 cells but its header has 2",
+		],
+		[
+			"a table in a block quote",
+			"> | a | b |\n> | --- | --- |\n> | `x | y` | z |",
+			1,
+			"3 cells but its header has 2",
+		],
+		[
+			"a prose line right after the table",
+			"| a | b |\n| --- | --- |\n| 1 | 2 |\nsome prose",
+			1,
+			"1 cell but its header has 2: some prose",
+		],
+		[
+			"a header whose backslash-pipe GitHub keeps whole",
+			"| a \\\\| b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |",
+			2,
+			"3 cells but its header has 2",
+		],
+		[
+			"a pipe after a double backslash",
+			"| a | b |\n| --- | --- |\n| x \\\\| y | z |",
+			0,
+			"",
+		],
+		[
+			"a table in pre",
+			"<pre>\n| a | b |\n| --- | --- |\n| `x | y` | z |\n</pre>",
+			0,
+			"",
+		],
+		[
+			"a table in details with no blank line",
+			"<details>\n| a | b |\n| --- | --- |\n| `x | y` | z |\n</details>",
+			0,
+			"",
+		],
+		[
+			"a table in an HTML comment",
+			"<!--\n| a | b |\n| --- | --- |\n| `x | y` | z |\n-->",
+			0,
+			"",
+		],
 	] as const;
 
 	it("fixture holds the 12 broken rows of the merged #5070 table", () => {

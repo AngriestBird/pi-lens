@@ -3177,26 +3177,24 @@ function tableRowCells(line) {
 // mutation row showed a stray "`1 failed" and lost the rest (#5070 merged with
 // 12 of 15 such rows, and no lint looked). A short row is padded and a long
 // one truncated by the renderer, so either is a cell the reader never sees.
+// What is a table, and which lines are its rows, is the lexer's answer, never a
+// row regex of ours: the regex missed a row with no trailing pipe, a short
+// separator, a borderless or quoted table, and refused a table in `<pre>` or a
+// comment (#5026 r4 verify). Each raw line is re-split as GitHub splits it,
+// because the token's own cells are already padded or cut to the header, and
+// the header too, because the lexer splits `\\|` where GitHub does not.
 function lintTableShape(body) {
-	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
+	const tables = (tokens) =>
+		tokens.flatMap((token) =>
+			token.type === "table" ? [token] : tables(markdownChildren(token)),
+		);
 	const errors = [];
-	for (let index = 0; index + 1 < lines.length; index += 1) {
-		const headers = tableRowCells(lines[index]);
-		const separator = tableRowCells(lines[index + 1]);
-		if (
-			!headers ||
-			!separator ||
-			separator.length !== headers.length ||
-			!separator.every((cell) => /^:?-{3,}:?$/.test(cell))
-		)
-			continue;
-		for (let rowIndex = index + 2; rowIndex < lines.length; rowIndex += 1) {
-			const row = tableRowCells(lines[rowIndex]);
-			if (!row) break;
-			if (row.length !== headers.length)
-				errors.push(
-					TABLE_SHAPE_MESSAGE(headers.length, row.length, lines[rowIndex]),
-				);
+	for (const table of tables(markdownTokens(body).map(({ token }) => token))) {
+		const [header, ...lines] = table.raw.replace(/\n+$/, "").split("\n");
+		const width = splitMarkdownRow(header).length;
+		for (const line of lines) {
+			const cells = splitMarkdownRow(line).length;
+			if (cells !== width) errors.push(TABLE_SHAPE_MESSAGE(width, cells, line));
 		}
 	}
 	return errors;
