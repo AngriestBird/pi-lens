@@ -77,6 +77,7 @@ import {
 	cascadeRow,
 	cascadeTimesRecord,
 	classifyCascadeRun,
+	classifyRenameImporter,
 	describeLastTouch,
 } from "./lib/lsp-cascade-smoke.mjs";
 import { touchAnsweredDiagnostics } from "./lib/touch-result.mjs";
@@ -2054,9 +2055,14 @@ export function passFloorBreach(rows, minPass) {
 	if (minPass === null || minPass === undefined || minPass <= 0) return null;
 	// The comparison is the shared proof-of-work helper's (#4518); a NaN floor
 	// (`--min-pass=abc`) makes it throw, which main() turns into exit 2: red.
+	// A `known-defect` row (a fixture's declared defect, reached only after its
+	// server answered the warm-up) counts as work done, as the declared java row
+	// did before it had a state of its own (#1712); a `skip` (unavailable) never.
 	const verdict = assertEvaluated({
 		producer: "smoke-tools",
-		evaluated: rows.filter((r) => r.state === "pass").length,
+		evaluated: rows.filter(
+			(r) => r.state === "pass" || r.state === "known-defect",
+		).length,
 		expectedAtLeast: minPass,
 	});
 	if (verdict.ok) return null;
@@ -2483,7 +2489,13 @@ export function fixtureDispatchCwd(fixture, workspace) {
 // fixture's pre-touch setup step (e.g. `npm install typescript@7`) itself
 // broke — infrastructure, not the assertion under test — but it still counts
 // toward the failure exit code so it can't silently pass the nightly.
-const ICON = { pass: "✓", fail: "✗", skip: "⚠", "setup-failed": "✗" };
+const ICON = {
+	pass: "✓",
+	fail: "✗",
+	skip: "⚠",
+	"known-defect": "≈",
+	"setup-failed": "✗",
+};
 
 export function report(rows, title, { failOnSkipOnly = false } = {}) {
 	const pad = (s, n) => String(s).padEnd(n);
@@ -2496,17 +2508,26 @@ export function report(rows, title, { failOnSkipOnly = false } = {}) {
 			`${ICON[r.state]}  ${pad(r.lang, 12)} ${pad(r.runner, 28)} ${pad(r.diags, 5)} ${r.detail}`,
 		);
 	}
-	const counts = { pass: 0, fail: 0, skip: 0, "setup-failed": 0 };
+	const counts = {
+		pass: 0,
+		fail: 0,
+		skip: 0,
+		"known-defect": 0,
+		"setup-failed": 0,
+	};
 	for (const r of rows) counts[r.state]++;
-	const summary = `${counts.pass} passed · ${counts.fail} failed · ${counts["setup-failed"]} setup-failed · ${counts.skip} skipped (tool/config unavailable)`;
+	// The known-defect clause trails the line `tool-smoke-drift.mjs` parses, and
+	// appears only when a row has that state (#1712).
+	const summary = `${counts.pass} passed · ${counts.fail} failed · ${counts["setup-failed"]} setup-failed · ${counts.skip} skipped (tool/config unavailable)${counts["known-defect"] ? ` · ${counts["known-defect"]} known-defect (declared, not a pass)` : ""}`;
 	const skippedOnly =
 		counts.pass === 0 &&
 		counts.fail === 0 &&
 		counts["setup-failed"] === 0 &&
+		counts["known-defect"] === 0 &&
 		counts.skip > 0;
 	console.log(`\n${skippedOnly ? "SKIPPED: " : ""}${summary}`);
 	console.log(
-		"Legend: ✓ ok  ✗ failure/setup-failed  ⚠ unavailable (not a failure)\n",
+		`Legend: ✓ ok  ✗ failure/setup-failed  ⚠ unavailable (not a failure)${counts["known-defect"] ? "  ≈ known defect (declared, not a failure)" : ""}\n`,
 	);
 	return failOnSkipOnly && skippedOnly
 		? 1
@@ -3236,6 +3257,124 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 }
 
 /**
+ * The rename phase of the live cascade layer (#1677, #1712): restore the
+ * exporter and wait until its importers are clean again, move it through
+ * `LSPService.renameFile` (the rename tool's own service call, which sends the
+ * bounded `didClose` and `didRenameFiles` notifies), then ask the importers
+ * until each one's verdict matches its file (`classifyRenameImporter`). The
+ * time runs from the start of the rename call, so the notify's own bound is
+ * part of the number.
+ *
+ * Returns the `rename` measurement `cascadeRow` reads: `concluded` or the
+ * stage that failed, with a detail naming the cause.
+ */
+async function runCascadeRename(
+	fx,
+	{
+		lsp,
+		workspace,
+		exporterBefore,
+		touchOptions,
+		deadlineMs,
+		intervalMs = 500,
+	},
+) {
+	const abs = (rel) => path.join(workspace, rel);
+	const exporter = abs(fx.file);
+	const answerOf = async (rel) => {
+		const content = fs.readFileSync(abs(rel), "utf8");
+		const touched = await lsp.touchFile(abs(rel), content, touchOptions);
+		const diags = touchAnsweredDiagnostics(touched, touchOptions, lsp);
+		return {
+			content,
+			messages:
+				diags === undefined || touched?.inconclusive
+					? undefined
+					: diags.map((d) => d.message),
+		};
+	};
+	// Baseline: the exporter as it was, every importer clean, so the next
+	// finding is the rename's and not the edit cascade's leftover.
+	fs.writeFileSync(exporter, exporterBefore);
+	await lsp.touchFile(exporter, exporterBefore, touchOptions);
+	const baseline = await pollUntil(
+		async () => {
+			for (const rel of fx.neighbours) {
+				const { messages } = await answerOf(rel);
+				if (messages === undefined || messages.length > 0) return false;
+			}
+			return true;
+		},
+		{ deadlineMs, intervalMs: 1000 },
+	);
+	if (!baseline.ok)
+		return {
+			state: "no-baseline",
+			detail: `the importers did not return to clean after the exporter was restored (${baseline.elapsedMs} ms), so a rename finding would prove nothing`,
+		};
+	const started = Date.now();
+	let result;
+	try {
+		result = await lsp.renameFile(exporter, abs(fx.rename.to), {
+			cwd: workspace,
+			apply: true,
+		});
+	} catch (err) {
+		return {
+			state: "rename-failed",
+			detail: `renameFile threw: ${err?.message ?? err}`,
+		};
+	}
+	const measured = { renameMs: Date.now() - started };
+	const failures = [
+		...result.willRenameFailures.map(
+			(f) => `willRename ${f.serverId}: ${f.error}`,
+		),
+		...result.didRenameFailures.map(
+			(f) => `didRename ${f.serverId} (${f.disposition}): ${f.error}`,
+		),
+	];
+	if (failures.length > 0)
+		return {
+			...measured,
+			state: "notify-failed",
+			detail: `the rename notify failed: ${failures.join("; ")}`,
+		};
+	const importers = {};
+	const concluded = await pollUntil(
+		async () => {
+			for (const rel of fx.neighbours)
+				importers[rel] = classifyRenameImporter(fx.rename, await answerOf(rel));
+			return fx.neighbours.every((rel) => importers[rel] === "concluded");
+		},
+		{ deadlineMs, intervalMs },
+	);
+	const timeToConclusiveMs = Date.now() - started;
+	const rewritten = fx.neighbours.filter(
+		(rel) =>
+			!fs.readFileSync(abs(rel), "utf8").includes(fx.rename.staleSpecifier),
+	).length;
+	const base = {
+		...measured,
+		importers,
+		timeToConclusiveMs,
+		// How many importers the server's own willRenameFiles edit rewrote.
+		importersRewritten: rewritten,
+	};
+	return concluded.ok
+		? {
+				...base,
+				state: "concluded",
+				detail: `importers concluded ${timeToConclusiveMs} ms after the rename (${measured.renameMs} ms in renameFile; ${rewritten} of ${fx.neighbours.length} rewritten by the server)`,
+			}
+		: {
+				...base,
+				state: "unconcluded",
+				detail: `after ${timeToConclusiveMs} ms the importers read ${JSON.stringify(importers)}: stale-clean means the server never learned the file moved`,
+			};
+}
+
+/**
  * Live cascade layer (`--lsp-cascade`, #1712). Per `CASCADE_FIXTURES` row:
  * warm the exporter and its importers through `LSPService.touchFile`, break the
  * exporter's signature on disk, then call the production
@@ -3493,6 +3632,19 @@ export async function runLspCascade({
 				}
 				if (measured.elapsedMs + CASCADE_RETRY_INTERVAL_MS > deadlineMs) break;
 				await sleep(CASCADE_RETRY_INTERVAL_MS);
+			}
+			if (fx.rename && measured.concluded.state === "conclusive") {
+				measured.rename = await runCascadeRename(fx, {
+					lsp,
+					workspace,
+					exporterBefore: before,
+					touchOptions,
+					deadlineMs,
+				});
+				if (verbose)
+					console.error(
+						`[${fx.lang}] rename: ${measured.rename.state} (${measured.rename.detail})`,
+					);
 			}
 			const row = cascadeRow(fx, measured);
 			push(row.state, row.detail, row.diags);
