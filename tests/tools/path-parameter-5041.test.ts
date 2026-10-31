@@ -354,6 +354,30 @@ describe("#5041 `path` is the canonical single-file parameter", () => {
 		}
 	});
 
+	it("ignores a blank alias when another spelling names the file", async () => {
+		const env = setupTestEnvironment("pi-lens-5041-blank-alias-");
+		try {
+			const target = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(target, "export const value = 1;\n");
+			const tool = createEffectiveConfigTool(() => env.tmpDir);
+			// Some clients fill every declared property with "": declaring the
+			// aliases must not turn such a call into a refusal (#2418).
+			const filled = await run(
+				tool,
+				{ path: "app.ts", file: "", filePath: "" },
+				env.tmpDir,
+			);
+			expect(filled.isError, text(filled)).toBeFalsy();
+			expect(filled.details?.file).toBe(target);
+			// A lone blank still names nothing, and says so.
+			const lone = await run(tool, { file: "  " }, env.tmpDir);
+			expect(lone.isError).toBe(true);
+			expect(text(lone)).toContain("`file` is blank");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("scopes the cache routes to a single `path` too, so an accepted alias never widens", async () => {
 		const env = setupTestEnvironment("pi-lens-5041-lensdiag-scope-");
 		try {

@@ -33,25 +33,39 @@ export interface FilePathRead {
  *
  * Admitted: no spelling (the caller owns its own "required" message), one
  * spelling, or several spellings that name the same file. Refused, fail
- * closed: a non-string value, a blank value, or two spellings that name
- * different files — each would otherwise make this reader guess which file the
- * caller meant, and the tool would answer for a file the caller never named.
+ * closed: a non-string value, a blank value that leaves no file, or two
+ * spellings that name different files — each would otherwise make this reader
+ * guess which file the caller meant, and the tool would answer for a file the
+ * caller never named.
+ *
+ * A blank string is ignored when another spelling names a file, and refused
+ * when none does. Some clients fill every declared property with `""`, and
+ * declaring `file`/`filePath` beside `path` must not turn such a call into a
+ * refusal (#2418); a lone blank still names nothing, so the caller hears it.
  */
 export function readFilePath(
 	params: Readonly<Record<string, unknown>>,
 ): FilePathRead {
 	const sent: { key: (typeof FILE_PATH_KEYS)[number]; value: string }[] = [];
+	const blanks: (typeof FILE_PATH_KEYS)[number][] = [];
 	for (const key of FILE_PATH_KEYS) {
 		const raw = params[key];
 		if (raw === undefined || raw === null) continue;
 		if (typeof raw !== "string")
 			return { path: "", key, refusal: `\`${key}\` must be a string path` };
-		if (!raw.trim())
-			return { path: "", key, refusal: `\`${key}\` is blank — name a file` };
+		if (!raw.trim()) {
+			blanks.push(key);
+			continue;
+		}
 		sent.push({ key, value: raw });
 	}
 	const first = sent[0];
-	if (!first) return { path: "" };
+	if (!first) {
+		const blank = blanks[0];
+		return blank
+			? { path: "", key: blank, refusal: `\`${blank}\` is blank — name a file` }
+			: { path: "" };
+	}
 	if (new Set(sent.map((entry) => entry.value)).size > 1) {
 		return {
 			path: "",
