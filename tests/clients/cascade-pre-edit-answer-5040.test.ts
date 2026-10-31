@@ -42,7 +42,8 @@ const mocks = vi.hoisted(() => ({
 	logCascade: vi.fn(),
 }));
 
-vi.mock("../../clients/lsp/client.js", () => ({
+vi.mock("../../clients/lsp/client.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/lsp/client.js")>()),
 	createLSPClient: mocks.createLSPClient,
 }));
 

@@ -7039,12 +7039,14 @@ export class LSPService {
 				for (const entry of spawned) {
 					if (isAuxiliary(entry.info)) continue;
 					if (notifyWriteTimedOutServerIds.includes(entry.info.id)) continue;
-					const baseline = diagnosticBaselines.get(entry.client);
+					// The pre-notify per-path version this touch already read: a
+					// publication past it landed inside the touch.
+					const versionBeforeTouch = diagnosticBaselines.get(entry.client);
 					const currentPathVersion = readPathVersion(entry.client);
 					if (
-						baseline !== undefined &&
+						versionBeforeTouch !== undefined &&
 						currentPathVersion !== undefined &&
-						currentPathVersion > baseline
+						currentPathVersion > versionBeforeTouch
 					)
 						continue;
 					const publishedAt =
