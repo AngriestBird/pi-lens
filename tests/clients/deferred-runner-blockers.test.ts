@@ -736,6 +736,7 @@ describe("#5048 a secondary's commit gate persists only its own records", () => 
 		filePath: string,
 		cwd: string,
 		diagnostics: Diagnostic[],
+		owner: string = PRIMARY,
 	): Promise<void> {
 		deferRunnerFindings({
 			filePath,
@@ -748,7 +749,7 @@ describe("#5048 a secondary's commit gate persists only its own records", () => 
 				diagnostics,
 				semantic: diagnostics.length > 0 ? "blocking" : "none",
 			} as RunnerResult),
-			sessionId: PRIMARY,
+			sessionId: owner,
 		});
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
@@ -832,6 +833,166 @@ describe("#5048 a secondary's commit gate persists only its own records", () => 
 			expect(
 				evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT),
 			).toEqual({ block: false });
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (#5052 review, the absorb-sync): a
+	// secondary's own settled blocker in checkout A joined B's cache through the
+	// gate's absorb-sync, so its commit in B was refused for a file in another
+	// tree. A commit is judged by its own repository (#4941).
+	it("keeps a secondary's own blocker in another checkout out of the commit's cache and refusal", async () => {
+		const env = setupTestEnvironment("pi-lens-5048-own-other-tree-");
+		try {
+			const { projA, projB, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			fs.writeFileSync(app, "alpha();\n");
+			await settledFor(app, projA, [blocking(app)], SECONDARY);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT),
+			).toEqual({ block: false });
+			expect(cacheManager.inspectCache("turn-end-findings", projB)).toBe(
+				"missing",
+			);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT),
+			).toEqual({ block: false });
+			// Its own commit in A is still refused on the blocker it owns.
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT)
+					.block,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (#5052 review, the same absorb-sync for the
+	// primary): the primary's settled blocker in checkout A was persisted into
+	// B's cache, so its commit in B was refused for a file in another tree.
+	it("judges the primary's commit in another checkout by that checkout's blockers", async () => {
+		const env = setupTestEnvironment("pi-lens-5048-primary-other-tree-");
+		try {
+			const { projA, projB, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			fs.writeFileSync(app, "alpha();\n");
+			await settledFor(app, projA, [blocking(app)], PRIMARY);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projB, "pi", undefined, COMMIT),
+			).toEqual({ block: false });
+			expect(cacheManager.inspectCache("turn-end-findings", projB)).toBe(
+				"missing",
+			);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", undefined, COMMIT)
+					.block,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (#5048 review r1 F1, same root): a secondary's
+	// commit in the primary's own root persisted the primary's settled blocker
+	// into that root's cache, and the next session there was refused
+	// `session_mismatch`. Pins the head: the root's cache stays missing, both
+	// secondary commits are refused by the latch, and the primary's own commit
+	// is refused. The record-loss window is the accepted p3 residual (PR body).
+	it("leaves the primary's settled blocker out of a same-root secondary's commit cache", async () => {
+		const env = setupTestEnvironment("pi-lens-5048-same-root-");
+		try {
+			const { projA, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			fs.writeFileSync(app, "alpha();\n");
+			await settledFor(app, projA, [blocking(app)], PRIMARY);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT)
+					.block,
+			).toBe(true);
+			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
+				"missing",
+			);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT)
+					.block,
+			).toBe(true);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", undefined, COMMIT)
+					.block,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (#5048 review r1 F2): a secondary's commit that
+	// finds another session's commit-gate record at its root leaves that record
+	// in place and records the non-owner write. The gate path reaches
+	// `git-guard-non-owner-write`; master wrote no record here.
+	it("records a same-root secondary's non-owner write and leaves the primary's record", async () => {
+		const env = setupTestEnvironment("pi-lens-5048-non-owner-");
+		resetDegradationLedger();
+		try {
+			const { projA, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			const other = path.join(projA, "other.ts");
+			fs.writeFileSync(app, "alpha();\n");
+			fs.writeFileSync(other, "alpha();\n");
+			await settledFor(app, projA, [blocking(app)], PRIMARY);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", undefined, COMMIT)
+					.block,
+			).toBe(true);
+			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
+				"fresh",
+			);
+			await settledFor(other, projA, [blocking(other)], PRIMARY);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT)
+					.block,
+			).toBe(true);
+			expect(cacheManager.inspectCache("turn-end-findings", projA)).toBe(
+				"fresh",
+			);
+			const row = getDegradationSummary().find(
+				(group) => group.kind === "git-guard-non-owner-write",
+			);
+			expect(row?.count).toBe(1);
+			expect(row?.latestReasons[0]?.subject).toBe(SECONDARY);
+		} finally {
+			resetDegradationLedger();
+			env.cleanup();
+		}
+	});
+
+	// Recurrence it prevents (#5048 review, the retire sync of the same
+	// absorb-sync): a clean settled run retired the primary's blocker at the
+	// secondary's commit in B, and the retire's resync wrote the secondary's own
+	// blocker in checkout A into B's cache, refusing the commit there.
+	it("keeps a secondary's blocker in another checkout out of the cache a clean retire rewrites", async () => {
+		const env = setupTestEnvironment("pi-lens-5048-retire-other-tree-");
+		try {
+			const { projA, projB, runtime, cacheManager } = twoRoots(env.tmpDir);
+			const app = path.join(projA, "app.ts");
+			const other = path.join(projA, "other.ts");
+			fs.writeFileSync(app, "alpha();\n");
+			fs.writeFileSync(other, "alpha();\n");
+			await settledFor(app, projA, [blocking(app)], PRIMARY);
+			await settledFor(other, projA, [blocking(other)], SECONDARY);
+			// The secondary's own blocker reaches the map through its commit in A.
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projA, "pi", SECONDARY, COMMIT)
+					.block,
+			).toBe(true);
+			// The primary's app.ts settles clean: the next commit retires its blocker.
+			await settledFor(app, projA, [], PRIMARY);
+			expect(
+				evaluateGitGuard(runtime, cacheManager, projB, "pi", SECONDARY, COMMIT),
+			).toEqual({ block: false });
+			expect(cacheManager.inspectCache("turn-end-findings", projB)).toBe(
+				"missing",
+			);
 		} finally {
 			env.cleanup();
 		}
