@@ -24,6 +24,7 @@ import {
 	inlineBlockerLines,
 	inlineBlockerSourceOf,
 	inlineBlockerSources,
+	isCrossFileBlocker,
 } from "./inline-blocker-fields.js";
 import type { MutationKind } from "./mutating-tool.js";
 import {
@@ -547,6 +548,27 @@ const TOOL_CALL_ATTRIBUTION_CAPACITY = 256;
  * round-trip; only guards against genuine identity reuse, not slow tools.
  */
 const TOOL_CALL_ATTRIBUTION_TTL_MS = 5 * 60_000;
+
+/**
+ * A record narrowed to the rows that survive a retirement. The derived fields
+ * (`summary`, `sources`, `lines`) come from the surviving rows, never from the
+ * old record, so a narrowed record cannot keep a source or a line count that
+ * only a retired row held. The one rebuild every partial retire uses
+ * (`retireUnobservedRunnerBlockers`, `retireInlineBlockerOnConfirmedClean`,
+ * `retireForeignRows`).
+ */
+function narrowedRecord(
+	existing: InlineBlockerRecord,
+	kept: Diagnostic[],
+): InlineBlockerRecord {
+	return {
+		...existing,
+		summary: formatDiagnostics(kept, "blocking").trim(),
+		diagnostics: kept,
+		sources: inlineBlockerSources(kept),
+		lines: inlineBlockerLines(kept, existing.filePath),
+	};
+}
 
 /**
  * #3613 (session-scope S4): per-turn warnings partitioned by the session
@@ -2114,13 +2136,7 @@ export class RuntimeCoordinator {
 			this._pendingInlineBlockers.delete(key);
 			return retired.length;
 		}
-		this._pendingInlineBlockers.set(key, {
-			...existing,
-			summary: formatDiagnostics(kept, "blocking").trim(),
-			diagnostics: kept,
-			sources: inlineBlockerSources(kept),
-			lines: inlineBlockerLines(kept, existing.filePath),
-		});
+		this._pendingInlineBlockers.set(key, narrowedRecord(existing, kept));
 		return retired.length;
 	}
 
@@ -2570,16 +2586,116 @@ export class RuntimeCoordinator {
 			this._pendingInlineBlockers.delete(key);
 			return true;
 		}
-		// Same rebuild `retireUnobservedRunnerBlockers` performs: the derived
-		// fields come from the surviving rows, never from the old record.
-		this._pendingInlineBlockers.set(key, {
-			...existing,
-			summary: formatDiagnostics(kept, "blocking").trim(),
-			diagnostics: kept,
-			sources: inlineBlockerSources(kept),
-			lines: inlineBlockerLines(kept, existing.filePath),
-		});
+		// The derived fields come from the surviving rows, never from the old
+		// record (`narrowedRecord`).
+		this._pendingInlineBlockers.set(key, narrowedRecord(existing, kept));
 		return true;
+	}
+
+	/**
+	 * #5020: retire the rows of other files' records that cite a file a fresh
+	 * observation has settled. A chart-wide runner (helm-lint, helm-render) or an
+	 * import-following one (mypy, phpstan) reports a blocking row against a file
+	 * it did not dispatch for, so the row lands in the WRITTEN file's record
+	 * (#1641). That record is re-taken only by a dispatch of the written file,
+	 * which the agent has no reason to make once the cited file is fixed or gone:
+	 * `clearInlineBlockers` never ran for it, and the commit gate stayed shut with
+	 * nothing left to fix.
+	 *
+	 * The row is another file's claim, so the cited file's own state retires it
+	 * (`why`), and only two states do. `"cited-file-clean"`: the cited file was
+	 * dispatched and the runner that raised the row answered with no blocker of
+	 * its own on it (the caller proves that; `shouldRetire` is its verdict per
+	 * row). `"cited-file-missing"`: the cited file no longer exists, which the
+	 * #1245 reconcile already decides for a record's OWN file. Everything else
+	 * stays, rows with no structured diagnostics included (fail closed), and so
+	 * does a row that cites no file (`isCrossFileBlocker` is total).
+	 *
+	 * A clean verdict retires only a record it is strictly newer than
+	 * (`confirmedAtWriteOrder`, turn first), as `retireInlineBlockerOnConfirmedClean`
+	 * orders its own: a slow old clean must not erase a newer observation.
+	 *
+	 * `of` limits the retire to one session's records, the partition
+	 * `getInlineBlockersSnapshot` reads. Omitted, every session's record is
+	 * judged.
+	 *
+	 * @returns one entry per record that lost rows, with the session that owns
+	 * it, so the caller can bring the commit gate (the latch and the persisted
+	 * record) back in line. Counted once per file in the degradation ledger.
+	 */
+	retireForeignRows(
+		why: "cited-file-clean" | "cited-file-missing",
+		shouldRetire: (row: Diagnostic) => boolean,
+		confirmedAtWriteOrder?: number,
+		of?: { sessionId: string | undefined },
+	): Array<{ filePath: string; owner: string | undefined }> {
+		const changed: Array<{ filePath: string; owner: string | undefined }> = [];
+		for (const existing of this.getInlineBlockersSnapshot(of)) {
+			const key = existing.filePath;
+			if (
+				confirmedAtWriteOrder !== undefined &&
+				existing.writeOrder !== undefined &&
+				confirmedAtWriteOrder <= existing.writeOrder
+			)
+				continue;
+			const diagnostics = existing.diagnostics;
+			if (!diagnostics) continue;
+			const kept = diagnostics.filter(
+				(row) =>
+					!(isCrossFileBlocker(row, existing.filePath) && shouldRetire(row)),
+			);
+			if (kept.length === diagnostics.length) continue;
+			changed.push({
+				filePath: existing.filePath,
+				owner: existing.session ?? this._telemetrySessionId,
+			});
+			incrementDegradationCount({
+				kind: "cross-file-row-retired",
+				subject: normalizeMapKey(existing.filePath),
+				reason:
+					why === "cited-file-clean"
+						? "a row naming another file left the record: that file was dispatched and its runner reported nothing on it (#5020)"
+						: "a row naming another file left the record: that file no longer exists (#5020)",
+			});
+			if (kept.length === 0) {
+				if (why === "cited-file-clean")
+					this.noteResolvedBlockerFile(existing, undefined, true);
+				this._pendingInlineBlockers.delete(key);
+			} else {
+				this._pendingInlineBlockers.set(key, narrowedRecord(existing, kept));
+			}
+		}
+		return changed;
+	}
+
+	/**
+	 * #5020: the rows whose cited file is gone, for the two reads the commit gate
+	 * depends on (the turn end and the gate's own evaluation). Only an ABSOLUTE
+	 * cite is judged: a relative one is relative to whatever the runner ran in,
+	 * which the record does not keep, so a row that cannot be placed stays
+	 * (fail closed) rather than being resolved against a guess.
+	 *
+	 * Both reads persist what they retire into the caller's own cwd cache, and
+	 * each caller retires only its OWN session's records (`of`, required): the
+	 * acting session's own records, whose cache is the coordinator root's cache
+	 * or the session cwd's, whichever wrote them. A sweep by another session at
+	 * another cwd would write the wrong project's cache and leave the owner's
+	 * record refusing its next commit (PR #5033 round 3, F1 and item 4).
+	 * Another session's dead cite is that session's own turn end or commit gate
+	 * to retire.
+	 */
+	retireForeignRowsOfMissingFiles(of: {
+		sessionId: string | undefined;
+	}): Array<{
+		filePath: string;
+		owner: string | undefined;
+	}> {
+		return this.retireForeignRows(
+			"cited-file-missing",
+			(row) => path.isAbsolute(row.filePath) && !fs.existsSync(row.filePath),
+			undefined,
+			of,
+		);
 	}
 
 	/**

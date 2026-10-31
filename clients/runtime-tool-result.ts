@@ -128,7 +128,9 @@ import type {
 	RuntimeCoordinator,
 } from "./runtime-coordinator.js";
 import { EXPANSION_LIMIT_LINES } from "./read-expansion.js";
-import { syncGitGuardRecord } from "./git-guard.js";
+import { resyncGitGuardAfterRetire, syncGitGuardRecord } from "./git-guard.js";
+import { isCrossFileBlocker } from "./inline-blocker-fields.js";
+import { writeOrderToken } from "./write-ordering-guard.js";
 import { hashFileBytes } from "./content-stamp.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
@@ -1458,6 +1460,46 @@ function publishInlineVerdict(args: {
 
 	// A superseded verdict must not latch the commit gate either (#3507).
 	if (resultLive) {
+		// #5020: this write's clean verdict on `filePath` also speaks for the rows
+		// OTHER files' records hold against it. A chart-wide runner reports
+		// `other-b.yaml` while `deploy-a.yaml` is written, so the row sits in
+		// `deploy-a.yaml`'s record, which no dispatch of `other-b.yaml` ever
+		// clears. Only an authored, applied run whose raising runner answered and
+		// holds no blocker of its own on this file may say so. There is no
+		// `isError` term: `PipelineResult.isError` is `false` from
+		// `analysePipeline`'s only return, so the branch could never be taken.
+		if (inlineVerdictApplied && authored) {
+			const verdict = new Set(result.verdictRunnerIds);
+			const stillReported = new Set(
+				(result.inlineBlockerDiagnostics ?? []).flatMap((d) =>
+					d.runnerId !== undefined && !isCrossFileBlocker(d, filePath)
+						? [d.runnerId]
+						: [],
+				),
+			);
+			for (const retired of runtime.retireForeignRows(
+				"cited-file-clean",
+				(row) =>
+					!isCrossFileBlocker(row, filePath) &&
+					row.runnerId !== undefined &&
+					verdict.has(row.runnerId) &&
+					!stillReported.has(row.runnerId),
+				writeOrderToken(
+					result.orderTurn ?? writeOrderTurn,
+					result.writeIndex ?? writeIndex,
+				),
+			)) {
+				resyncGitGuardAfterRetire({
+					runtime,
+					cacheManager,
+					cwd: turnStateCwd,
+					filePath: retired.filePath,
+					owner: retired.owner,
+					lensGuardEnabled: !!getFlag("lens-guard"),
+					analysisRootMode,
+				});
+			}
+		}
 		runtime.updateGitGuardStatus(
 			inlineVerdictApplied && result.hasBlockers,
 			result.output,

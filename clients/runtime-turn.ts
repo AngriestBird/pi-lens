@@ -1782,6 +1782,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		},
 	});
 
+	// #5020: a row of a record that names a file since deleted has nothing left
+	// to fix and no dispatch will re-take it. The commit gate's latch is a memo
+	// of the map, so a retire re-derives it (the persisted record is rewritten
+	// by the composer below from the survivors, as for every other retire).
+	// Only this turn session's records: the composer persists this session's
+	// survivors into this cwd, so another session's row is its own turn end's
+	// to retire, against its own cwd (#4921; PR #5033 round 3 F1).
+	if (runtime.retireForeignRowsOfMissingFiles({ sessionId }).length > 0) {
+		runtime.updateGitGuardStatus(false, "");
+	}
+
 	// #1641: past-EOF gate. Runs BEFORE the dependency-drift sweep below — a
 	// cheap statSync per cited file is worth paying first so the pricier
 	// import-parsing sweep can skip anything already taken out of the

@@ -251,6 +251,14 @@ export type DegradationKind =
 	 */
 	| "context-injection-retain-declined"
 	/**
+	 * #5020: a row of an inline-blocker record that names ANOTHER file (a
+	 * chart-wide or import-following runner reports one against the written
+	 * file) left the record because the cited file was dispatched clean by the
+	 * runner that raised it, or no longer exists. The reason names which. One
+	 * subject per record file key, counted across the session.
+	 */
+	| "cross-file-row-retired"
+	/**
 	 * A warm-only client lookup (`getWarmClientForFile`) found no live client
 	 * for a file that HAS a language server with a resolvable root (#1934).
 	 * Subject is the candidate `serverId:root` set, so the ledger still answers
