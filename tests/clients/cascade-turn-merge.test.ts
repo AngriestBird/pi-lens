@@ -924,6 +924,74 @@ describe("cascade turn-end merge", () => {
 		}
 	});
 
+	// #5055: an `unresolved_reference` run is a graph that WAS available; only
+	// files that name a changed symbol ambiguously were left unplaced. Recurrence:
+	// the bucket filter lists the reasons it excludes, so a new reason falls into
+	// the "review graph was unavailable" frame (#1104's mis-attribution) unless it
+	// is excluded there too.
+	it("words an unresolved_reference run as its own cause and logs its reason (#5055)", async () => {
+		const env = setupTestEnvironment("cascade-unresolved-reference-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "lib.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			runtime.appendCascadeRun({
+				filePath: primary,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				indeterminate: {
+					reason: "unresolved_reference",
+					detail:
+						"some files reference a changed symbol by name alone (several definitions share the name), so the graph could not tell whether they depend on this edit",
+				},
+			});
+
+			logCascadeMock.mockClear();
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				deadCodeClients: [],
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const findings = consumeTurnEndFindings(cacheManager, env.tmpDir);
+			const content = findings?.messages[0]?.content ?? "";
+			expect(content).not.toContain("the review graph was unavailable");
+			expect(content).toContain("lib.ts");
+			expect(content).toContain("by name alone");
+			expect(content).toContain("a clean cascade result does not cover them");
+			expect(content).toContain("Advisory — no action required this turn");
+			const indeterminateLog = logCascadeMock.mock.calls
+				.map((args) => args[0])
+				.find((entry) => entry?.phase === "cascade_indeterminate");
+			expect(indeterminateLog?.metadata?.reasons).toContain(
+				"unresolved_reference",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// #1445: a `missing_node` compute has two causes that read identically to
 	// the advisory text but mean opposite things — "the graph genuinely
 	// doesn't know this file" versus "this file's role (test, #260) is

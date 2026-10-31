@@ -1,0 +1,205 @@
+// flake-shape: service-double — #5055: a language server cannot be spawned in this lane; the review graph, its name resolver, the cascade compute and the neighbour selection are real, and only the server's answer is a double
+/**
+ * #5055: a dependent the graph could not resolve is never reported as a leaf.
+ *
+ * The recurrence: the #5054 review (F2) found that a Java caller with no import
+ * statement reaches the cascade through a resolved `references` edge
+ * (`neighborCount 1`), and that adding ONE more class defining the same method
+ * name leaves the reference unresolved (`resolveDeferredSymbolEdges` keeps a
+ * name with 2+ candidates on its `symbol-name:` placeholder). The caller then
+ * dropped out of the cascade and the run read `skipReason: "no_neighbors"`, the
+ * same verdict a true leaf gets, which `integration.ts` itself calls "the exact
+ * silent all-clear". The rule is graph-wide: every kind below reproduced it on
+ * master through the real graph and `computeCascadeForFile`.
+ *
+ * Each case builds the dependent the way the kind really does it without an
+ * import edge the graph can follow (a TypeScript barrel re-export, a Ruby
+ * autoloaded constant, a Rust `use` of a sibling module, a C forward
+ * declaration, a Python builtins-injected name), edits the exporter and asks
+ * for the cascade twice: once with a unique definition (resolves, a neighbour)
+ * and once with a second same-named definition elsewhere (unresolved).
+ */
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setupTestEnvironment } from "./test-utils.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
+
+interface KindCase {
+	kind: string;
+	files: Record<string, string>;
+	/** The exporter's edit: [file, before, after]. */
+	edit: [string, string, string];
+	/** The dependent the graph reaches only by name. */
+	dependent: string;
+	/** The second definition of the same name, which makes the name ambiguous. */
+	second: Record<string, string>;
+}
+
+const KINDS: KindCase[] = [
+	{
+		kind: "jsts (barrel re-export)",
+		files: {
+			"lib.ts": "export function foo(x: number) { return x; }\n",
+			"index.ts": 'export * from "./lib";\n',
+			"app.ts":
+				'import { foo } from "./index";\nexport function run() { return foo(1); }\n',
+		},
+		edit: ["lib.ts", "foo(x: number)", "foo(x: string)"],
+		dependent: "app.ts",
+		second: { "other.ts": "export function foo() { return 0; }\n" },
+	},
+	{
+		kind: "python (builtins-injected name)",
+		files: {
+			"lib.py": "def foo(x):\n    return x\n",
+			"app.py": "def run():\n    return foo(1)\n",
+		},
+		edit: ["lib.py", "def foo(x):", "def foo(x, y):"],
+		dependent: "app.py",
+		second: { "other.py": "def foo():\n    return 0\n" },
+	},
+	{
+		kind: "ruby (autoloaded constant)",
+		files: {
+			"lib.rb": "class Lib\n  def self.foo(x)\n    x\n  end\nend\n",
+			"app.rb": "class App\n  def run\n    Lib.foo(1)\n  end\nend\n",
+		},
+		edit: ["lib.rb", "def self.foo(x)", "def self.foo(x, y)"],
+		dependent: "app.rb",
+		second: { "other.rb": "class Other\n  def self.foo\n    0\n  end\nend\n" },
+	},
+	{
+		kind: "rust (use of a sibling module)",
+		files: {
+			"Cargo.toml": '[package]\nname = "ex"\nversion = "0.1.0"\n',
+			"src/main.rs": "mod lib;\nmod app;\nfn main() {}\n",
+			"src/lib.rs": "pub fn foo(x: i32) -> i32 { x }\n",
+			"src/app.rs": "use crate::lib::foo;\npub fn run() -> i32 { foo(1) }\n",
+		},
+		edit: ["src/lib.rs", "foo(x: i32)", "foo(x: String)"],
+		dependent: "src/app.rs",
+		second: { "src/other.rs": "pub fn foo() -> i32 { 0 }\n" },
+	},
+	{
+		kind: "cxx (forward declaration)",
+		files: {
+			"lib.cpp": "int foo(int x) { return x; }\n",
+			"app.cpp": "int foo(int x);\nint run() { return foo(1); }\n",
+		},
+		edit: ["lib.cpp", "int foo(int x) {", "int foo(int x, int y) {"],
+		dependent: "app.cpp",
+		second: { "other.cpp": "int foo() { return 0; }\n" },
+	},
+];
+
+async function cascadeAfterEdit(
+	c: KindCase,
+	extra: Record<string, string>,
+	without: string[] = [],
+	/** A project ignore config, written before the cascade runs. */
+	ignore: string[] = [],
+) {
+	const env = setupTestEnvironment("cascade-ambiguous-ref-");
+	try {
+		const files = { ...c.files, ...extra };
+		for (const drop of without) delete files[drop];
+		for (const [rel, body] of Object.entries(files)) {
+			const p = path.join(env.tmpDir, rel);
+			fs.mkdirSync(path.dirname(p), { recursive: true });
+			fs.writeFileSync(p, body);
+		}
+		if (ignore.length > 0) {
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".pi-lens.json"),
+				JSON.stringify({ ignore }),
+			);
+		}
+		const touched: string[] = [];
+		await installLspServiceDouble({
+			shutdown: vi.fn(async () => {}),
+			touchFile: vi.fn(async (file: string) => {
+				touched.push(path.relative(env.tmpDir, file));
+				return { diags: [] };
+			}),
+		});
+		const { computeCascadeForFile } =
+			await import("../../clients/dispatch/integration.js");
+		const [rel, from, to] = c.edit;
+		const target = path.join(env.tmpDir, rel);
+		fs.writeFileSync(target, fs.readFileSync(target, "utf8").replace(from, to));
+		const run = await computeCascadeForFile(target, env.tmpDir, {
+			turnSeq: 1,
+			writeSeq: 1,
+			projectRoot: env.tmpDir,
+		});
+		return { run, touched };
+	} finally {
+		env.cleanup();
+	}
+}
+
+describe("a dependent reached by name alone (#5055)", () => {
+	beforeEach(async () => {
+		vi.resetModules();
+		const { resetDispatchBaselines } =
+			await import("../../clients/dispatch/integration.js");
+		resetDispatchBaselines();
+	}, 30_000);
+
+	for (const c of KINDS) {
+		describe(c.kind, () => {
+			it("control: a unique definition resolves the reference and the dependent is a neighbour", async () => {
+				const { run, touched } = await cascadeAfterEdit(c, {});
+				expect(run.skipReason).toBe("clean");
+				expect(run.neighborCount).toBe(1);
+				expect(touched).toEqual([c.dependent]);
+			}, 60_000);
+
+			it("a second same-named definition leaves the name ambiguous: the run is indeterminate, never no_neighbors", async () => {
+				const { run } = await cascadeAfterEdit(c, c.second);
+				expect(run.skipReason).toBe("indeterminate");
+				expect(run.indeterminate?.reason).toBe("unresolved_reference");
+				expect(run.neighborCount).toBe(0);
+			}, 60_000);
+
+			it("a healthy leaf still reads no_neighbors: the same second definition with no dependent", async () => {
+				const { run } = await cascadeAfterEdit(c, c.second, [
+					c.dependent,
+					// The barrel has no other reader once its only importer is gone.
+					...Object.keys(c.files).filter((f) => f === "index.ts"),
+				]);
+				expect(run.skipReason).toBe("no_neighbors");
+				expect(run.indeterminate).toBeUndefined();
+			}, 60_000);
+		});
+	}
+
+	// Recurrence: the over-correction #1023 names. Flagging every unplaced
+	// bare-name call on a run that already has neighbours marked 185 of 515
+	// files of this repo's own graph (common local names such as `resolve`,
+	// `reset`, `run`), so the marker is gated on the run that would read
+	// `no_neighbors`. The run below has a resolved neighbour AND an unplaced one.
+	it("a run that already has a neighbour does not carry the marker for an unplaced one", async () => {
+		const c = KINDS[0];
+		const { run, touched } = await cascadeAfterEdit(c, {
+			...c.second,
+			// Imports the exporter directly: the import hint resolves it.
+			"direct.ts":
+				'import { foo } from "./lib";\nexport function use() { return foo(1); }\n',
+		});
+		expect(touched).toEqual(["direct.ts"]);
+		expect(run.skipReason).toBe("clean");
+		expect(run.indeterminate).toBeUndefined();
+	}, 60_000);
+
+	// Recurrence: a referrer the cascade would never select (a user-ignored
+	// file) is accounted for, not unproven; without this the marker would name a
+	// dependent the project asked cascade to leave alone (#297).
+	it("a referrer the project ignores is accounted for: the run still reads no_neighbors", async () => {
+		const c = KINDS[0];
+		const { run } = await cascadeAfterEdit(c, c.second, [], [c.dependent]);
+		expect(run.skipReason).toBe("no_neighbors");
+		expect(run.indeterminate).toBeUndefined();
+	}, 60_000);
+});

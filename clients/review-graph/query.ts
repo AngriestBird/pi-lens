@@ -6,12 +6,13 @@ import {
 	getDownstreamModules,
 	getModuleSourceFiles,
 } from "./workspace-modules.js";
-import type {
-	CascadeMissingNodeDiagnostic,
-	ImpactCascadeResult,
-	ReviewGraph,
-	ReviewGraphEdge,
-	ReviewGraphEdgeKind,
+import {
+	UNRESOLVED_NAME_NODE_PREFIX,
+	type CascadeMissingNodeDiagnostic,
+	type ImpactCascadeResult,
+	type ReviewGraph,
+	type ReviewGraphEdge,
+	type ReviewGraphEdgeKind,
 } from "./types.js";
 
 function dedupe(items: Iterable<string>): string[] {
@@ -275,6 +276,31 @@ export function computeImpactCascade(
 		...referenceFiles,
 	]).filter((candidate) => normalizeMapKey(candidate) !== normalizedFile);
 
+	// #5055: a reference whose bare name has 2+ definitions (or whose import
+	// hint did not narrow it) stays on its `symbol-name:` placeholder, so none
+	// of the edge reads above reaches the changed symbol. Those files are not
+	// dependents the graph found and not leaves it proved: name them and let the
+	// caller decide whether the run can still be called a leaf. A qualified placeholder (`symbol-qualified-name:`) is minted
+	// only for a receiver class defined in the calling file, so it cannot hide a
+	// cross-file dependent and is not read here.
+	const nameOnlyReferrers = dedupe(
+		[
+			...new Set(
+				effectiveSymbolNodeIds.flatMap(
+					(nodeId) => graph.nodes.get(nodeId)?.symbolName ?? [],
+				),
+			),
+		].flatMap((symbolName) =>
+			(
+				graph.edgesByTo.get(`${UNRESOLVED_NAME_NODE_PREFIX}${symbolName}`) ?? []
+			).flatMap((edge) =>
+				edge.kind === "calls" || edge.kind === "references"
+					? (filePathFromNode(graph, edge.from) ?? [])
+					: [],
+			),
+		),
+	).filter((candidate) => normalizeMapKey(candidate) !== normalizedFile);
+
 	// Module-level downstream expansion for monorepos
 	const downstreamModuleFiles: string[] = [];
 	if (moduleGraph) {
@@ -331,5 +357,6 @@ export function computeImpactCascade(
 		directCallers: callerFiles,
 		neighborFiles,
 		riskFlags: riskFlagList,
+		...(nameOnlyReferrers.length > 0 && { nameOnlyReferrers }),
 	};
 }

@@ -1825,20 +1825,51 @@ export async function computeCascadeForFile(
 			referenceCount = impact.neighborFiles.filter(
 				(n) => !importerOrCallerSet.has(n),
 			).length;
-			const eligibleNeighbors = [...impact.neighborFiles]
-				.filter((n) => nodeFs.existsSync(n))
-				.filter((n) => !isExternalOrVendorFile(n, cwd))
-				// Honour the project's ignore config: a user-ignored neighbour (e.g.
-				// `**/*.test.ts`) must not surface as collateral cascade noise (#297).
-				.filter((n) => !isIgnoredCascadeNeighbor(n, cwd))
-				// B10: exclude files already edited as primary this turn — their own pipeline
-				// run is the authoritative diagnostic source; showing them as neighbors is noise.
-				.filter((n) => !primaryFilesThisTurn.has(normalizeMapKey(n)))
-				.sort((a, b) => {
-					const rank = (p: string) =>
-						importerSet.has(p) ? 0 : callerSet.has(p) ? 1 : 2;
-					return rank(a) - rank(b);
-				});
+			// The files a cascade may select at all. #5055 reads the same list for the
+			// files that reference a changed symbol by name alone, so "excluded by
+			// design" has one definition.
+			const selectableCascadeFiles = (files: readonly string[]): string[] =>
+				files
+					.filter((n) => nodeFs.existsSync(n))
+					.filter((n) => !isExternalOrVendorFile(n, cwd))
+					// Honour the project's ignore config: a user-ignored neighbour (e.g.
+					// `**/*.test.ts`) must not surface as collateral cascade noise (#297).
+					.filter((n) => !isIgnoredCascadeNeighbor(n, cwd))
+					// B10: exclude files already edited as primary this turn — their own pipeline
+					// run is the authoritative diagnostic source; showing them as neighbors is noise.
+					.filter((n) => !primaryFilesThisTurn.has(normalizeMapKey(n)));
+			const eligibleNeighbors = selectableCascadeFiles(
+				impact.neighborFiles,
+			).sort((a, b) => {
+				const rank = (p: string) =>
+					importerSet.has(p) ? 0 : callerSet.has(p) ? 1 : 2;
+				return rank(a) - rank(b);
+			});
+			// #5055: a file whose reference to a changed symbol stayed on its
+			// name-only placeholder is a dependent the graph could not see. When the
+			// run has no neighbor to check, that file is the difference between a
+			// leaf and an unproven dependent set, so it leaves the run indeterminate
+			// instead of `no_neighbors`. A referrer is accounted for only when the
+			// cascade would never select it (vendor, ignored, edited this turn, gone
+			// from disk; the graph holds no test-role file); any other state leaves
+			// it unproven. Gated on the empty run on
+			// purpose: a run that has neighbors already speaks, and flagging every
+			// unplaced common-name call there marked 185 of 515 files of this repo's
+			// own graph.
+			const unresolvedReferrers = selectableCascadeFiles(
+				impact.nameOnlyReferrers ?? [],
+			);
+			if (
+				eligibleNeighbors.length === 0 &&
+				unresolvedReferrers.length > 0 &&
+				!impact.indeterminate
+			) {
+				impact.indeterminate = {
+					reason: "unresolved_reference",
+					detail:
+						"some files reference a changed symbol by name alone (several definitions share the name), so the graph could not tell whether they depend on this edit",
+				};
+			}
 			cascadeEligibleCount = eligibleNeighbors.length;
 			cascadeFilterDroppedCount = Math.max(
 				0,
