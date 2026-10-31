@@ -19,6 +19,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { CacheManager } from "../../clients/cache-manager.js";
 import { createAstGrepOutlineTool } from "../../tools/ast-grep-outline.js";
 import { createAstGrepReplaceTool } from "../../tools/ast-grep-replace.js";
 import { createAstGrepSearchTool } from "../../tools/ast-grep-search.js";
@@ -622,7 +623,7 @@ describe("#5047 a workspace name is data on every tool that takes a path", () =>
 						getDiagnostics: vi.fn(() => []),
 					});
 					const tool = createLensDiagnosticsTool(
-						{ readCache: vi.fn(() => undefined) } as never,
+						new CacheManager(false),
 						() => workspace,
 						() => service as never,
 					);
@@ -653,7 +654,7 @@ describe("#5047 a workspace name is data on every tool that takes a path", () =>
 				const { env, workspace } = makeWorkspace();
 				try {
 					const tool = createLensDiagnosticsTool(
-						{ readCache: vi.fn(() => undefined) } as never,
+						new CacheManager(false),
 						() => workspace,
 					);
 					const result = await run(

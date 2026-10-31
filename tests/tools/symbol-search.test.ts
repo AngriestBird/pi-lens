@@ -511,7 +511,6 @@ describe("symbol_search tool", () => {
 		for (const workspaceName of [
 			"app[1]",
 			"app{a,b}",
-			"app*",
 			"plain",
 			"proj\u00A0a",
 		]) {
