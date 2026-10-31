@@ -571,7 +571,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// blocking findings it reports and removes its matches from the visible
 		// and held-back lists, `Array.prototype.filter` calls, not a delivery
 		// filter.
-		"clients/dispatch/dispatcher.ts": 21,
+		// 21 -> 22 (#5010): `buildCoverageNotice` keeps the rows
+		// `dispatch.disabledRunners` skipped, an `Array.prototype.filter` call,
+		// not a delivery filter.
+		"clients/dispatch/dispatcher.ts": 22,
 		"clients/dispatch/fact-runner.ts": 1,
 		"clients/dispatch/fact-scheduler.ts": 2,
 		"clients/dispatch/facts/function-facts.ts": 2,
@@ -1587,6 +1590,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #3867 moved the coverage decision onto `hasUsableResult`: dispatcher.ts
 		// no longer compares the bare `status` field at four sites (37 -> 32), and
 		// the claimSource admission guard (#3968 F2) reads it once more (32 -> 33).
+		// The `dispatch.disabledRunners` skip names the field twice, in the latency
+		// row and in its log row, as the applies_to skip beside it does (33 -> 35).
 		"clients/actionable-warnings.ts": 5,
 		"clients/advisory-provenance.ts": 5,
 		"clients/ast-grep-client.ts": 7,
@@ -1598,7 +1603,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/child-unref.ts": 6,
 		"clients/config-resolve.ts": 11,
 		"clients/dead-code-client.ts": 3,
-		"clients/dispatch/dispatcher.ts": 33,
+		"clients/dispatch/dispatcher.ts": 35,
 		"clients/dispatch/integration.ts": 1,
 		"clients/dispatch/pending-runner-findings.ts": 1,
 		"clients/dispatch/runners/actionlint.ts": 2,
