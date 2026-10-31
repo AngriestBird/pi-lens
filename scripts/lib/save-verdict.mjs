@@ -347,6 +347,68 @@ export function describeHeldBack(held) {
 }
 
 /**
+ * Emit the held rows for the run: one log line per server and, under GitHub
+ * Actions, one `::warning::` annotation with the same text (#5060 F1). A held
+ * night leaves the doc unchanged, so the refresh PR shows nothing; the
+ * annotation is what puts it on the run's summary page. One record per server
+ * per run, however often a row repeats. A staleness counter or an issue is new
+ * state and not built here.
+ *
+ * @param {Array<{ server: string, prior: string, measured: string, verdict: string }>} heldBack
+ * @param {{ env: Record<string, string | undefined>, log: (line: string) => void }} sink
+ */
+export function reportHeldBack(heldBack, { env, log }) {
+	const seen = new Set();
+	for (const held of heldBack) {
+		if (seen.has(held.server)) continue;
+		seen.add(held.server);
+		const line = describeHeldBack(held);
+		log(line);
+		if (env.GITHUB_ACTIONS) log(`::warning::${line}`);
+	}
+}
+
+/**
+ * Rows of this run that reached their table row: written or held back. The
+ * driver's "none has a table row" floor reads it, so a night that held every
+ * row is not reported as a missing row (#5060).
+ *
+ * @param {{ measured: string[], heldBack: unknown[] }} refreshed
+ * @returns {number}
+ */
+export function rowsReached(refreshed) {
+	return refreshed.measured.length + refreshed.heldBack.length;
+}
+
+/**
+ * The `--summary` record of a run, `heldBack` included (#5060 F1).
+ *
+ * @param {{
+ *   command: string,
+ *   src: string,
+ *   waitMs: number,
+ *   rows: Array<{ cells: Record<string, string> | undefined }>,
+ *   refreshed: ReturnType<typeof refreshSaveVerdictTable>,
+ *   notMeasured: unknown[],
+ *   budgetExhausted: boolean,
+ * }} run
+ */
+export function saveVerdictSummary(run) {
+	return {
+		command: run.command,
+		src: run.src,
+		waitMs: run.waitMs,
+		measured: run.rows.map((row) => row.cells),
+		wrote: run.refreshed.measured,
+		notInTable: run.refreshed.notInTable,
+		kept: run.refreshed.kept,
+		heldBack: run.refreshed.heldBack,
+		notMeasured: run.notMeasured,
+		budgetExhausted: run.budgetExhausted,
+	};
+}
+
+/**
  * Merge this run's measured rows into the doc's save-verdict table.
  *
  * Rows this run did not measure are copied verbatim — the merge guard that keeps

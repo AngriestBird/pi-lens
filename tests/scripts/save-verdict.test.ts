@@ -14,9 +14,12 @@
  * `tests/scripts/clean-signal.test.ts`).
  */
 
+import * as fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { GENERATED_LSP_DOCS } from "../../scripts/lib/md-matrix.mjs";
 import { listRefreshFlips } from "../../scripts/lib/refresh-flips.mjs";
+import { stripCommentsAndStrings } from "../support/session-state-scan.js";
 import {
 	classifySaveVerdict,
 	describeArm,
@@ -25,11 +28,14 @@ import {
 	orderByNeed,
 	parseSaveVerdictRows,
 	refreshSaveVerdictTable,
+	reportHeldBack,
+	rowsReached,
 	SAVE_VERDICT_COLUMN,
 	SAVE_VERDICT_COMMAND,
 	SAVE_VERDICT_MARKER,
 	SAVE_VERDICT_VALUES,
 	saveVerdictCells,
+	saveVerdictSummary,
 } from "../../scripts/lib/save-verdict.mjs";
 
 const MATRIX_DOC = GENERATED_LSP_DOCS[0];
@@ -588,6 +594,95 @@ describe("refreshSaveVerdictTable: a night with no answer keeps the last answer 
 			}),
 		]);
 		expect(back.text).toContain("| expert | `save` | no |");
+	});
+});
+
+describe("the held night reaches the Actions run (#5060 F1, F2)", () => {
+	// Recurrence: PR #5069 round 1 held a night in a stderr line nothing read, and
+	// the review deleted the driver's log loop and the `wroteCount` term with all
+	// 70 tests still green. These cells cover the report, the floor count and the
+	// summary at the functions the driver calls, and pin the calls themselves.
+	const held = () =>
+		refreshSaveVerdictTable(REAL_DOC, [measureExpert(), measureFsharp()])
+			.heldBack;
+
+	it("logs one line per held server and no annotation off Actions", () => {
+		const lines: string[] = [];
+		reportHeldBack(held(), {
+			env: {},
+			log: (line: string) => lines.push(line),
+		});
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toMatch(/^save-verdict: held back expert: kept "no"/);
+		expect(lines[1]).toMatch(/^save-verdict: held back fsharp: kept "no"/);
+	});
+
+	it("adds one ::warning:: per held server under GITHUB_ACTIONS", () => {
+		const lines: string[] = [];
+		reportHeldBack(held(), {
+			env: { GITHUB_ACTIONS: "true" },
+			log: (line: string) => lines.push(line),
+		});
+		const warnings = lines.filter((line) => line.startsWith("::warning::"));
+		expect(warnings).toHaveLength(2);
+		expect(warnings[0]).toContain("held back expert");
+		expect(warnings[1]).toContain("held back fsharp");
+		expect(lines).toHaveLength(4);
+	});
+
+	it("emits one record per server per run, however often the row repeats", () => {
+		const lines: string[] = [];
+		const [expert] = held();
+		reportHeldBack([expert, expert, expert], {
+			env: { GITHUB_ACTIONS: "true" },
+			log: (line: string) => lines.push(line),
+		});
+		expect(lines).toHaveLength(2);
+	});
+
+	it("counts a held row as reached, so an all-held night is not 'no table row'", () => {
+		const result = refreshSaveVerdictTable(REAL_DOC, [
+			measureExpert(),
+			measureFsharp(),
+		]);
+		expect(result.measured).toEqual([]);
+		expect(rowsReached(result)).toBe(2);
+		expect(rowsReached({ measured: ["cpp"], heldBack: held() })).toBe(3);
+	});
+
+	it("puts heldBack in the --summary record", () => {
+		const result = refreshSaveVerdictTable(REAL_DOC, [measureExpert()]);
+		const summary = saveVerdictSummary({
+			command: "node scripts/probe-save-verdict.mjs",
+			src: "ci",
+			waitMs: 6000,
+			rows: [{ cells: measureExpert() }],
+			refreshed: result,
+			notMeasured: [],
+			budgetExhausted: false,
+		});
+		expect(summary.heldBack.map((h: { server: string }) => h.server)).toEqual([
+			"expert",
+		]);
+		expect(summary.wrote).toEqual([]);
+		expect(summary.measured).toEqual([measureExpert()]);
+	});
+
+	it("the driver calls the report, the floor count and the summary builder", () => {
+		// The driver cannot run here (it spawns language servers), so this is the
+		// closest executable check: the three calls exist in its code, read from
+		// comment-and-string-blanked text so a comment naming them proves nothing.
+		const driver = stripCommentsAndStrings(
+			fs.readFileSync(
+				fileURLToPath(
+					new URL("../../scripts/probe-save-verdict.mjs", import.meta.url),
+				),
+				"utf8",
+			),
+		);
+		expect(driver).toMatch(/\breportHeldBack\(\s*refreshed\.heldBack\b/);
+		expect(driver).toMatch(/\browsReached\(\s*refreshed\s*\)/);
+		expect(driver).toMatch(/\bsaveVerdictSummary\(\s*\{/);
 	});
 });
 

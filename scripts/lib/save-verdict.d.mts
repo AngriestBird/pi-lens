@@ -75,6 +75,40 @@ export interface SaveVerdictHeldBack {
 
 export function describeHeldBack(held: SaveVerdictHeldBack): string;
 
+export function reportHeldBack(
+	heldBack: SaveVerdictHeldBack[],
+	sink: {
+		env: Record<string, string | undefined>;
+		log: (line: string) => void;
+	},
+): void;
+
+export function rowsReached(refreshed: {
+	measured: string[];
+	heldBack: unknown[];
+}): number;
+
+export function saveVerdictSummary(run: {
+	command: string;
+	src: string;
+	waitMs: number;
+	rows: Array<{ cells: Record<string, string> | undefined }>;
+	refreshed: ReturnType<typeof refreshSaveVerdictTable>;
+	notMeasured: unknown[];
+	budgetExhausted: boolean;
+}): {
+	command: string;
+	src: string;
+	waitMs: number;
+	measured: Array<Record<string, string> | undefined>;
+	wrote: string[];
+	notInTable: string[];
+	kept: string[];
+	heldBack: SaveVerdictHeldBack[];
+	notMeasured: unknown[];
+	budgetExhausted: boolean;
+};
+
 export interface SaveVerdictRow {
 	server: string;
 	save: string;
