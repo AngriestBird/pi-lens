@@ -559,6 +559,37 @@ export function composeBoundToCurrentDisk(
 	return true;
 }
 
+/**
+ * #5030: the binding a reader takes from a warm-attach incumbent's answer. The
+ * answer crosses a process boundary between sessions that may run different
+ * builds, so the field is read as untrusted input and the gate admits only the
+ * three known verdicts: an absent field (an incumbent built before the field
+ * existed), a malformed one, or any other value reads as `false`, never as
+ * current. `contentHash` rides along only when it is a string; the sweep
+ * records that fingerprint so a later cache replay is disk-gated like a local
+ * touch's. `version` is informational and no reader asks for it, so it stays
+ * off the reader's side.
+ */
+export function warmAnswerBinding(answer: {
+	readonly binding?: unknown;
+}): DiagnosticBinding {
+	const wire = answer.binding;
+	const fields =
+		typeof wire === "object" && wire !== null
+			? (wire as Record<string, unknown>)
+			: {};
+	const verdict = fields.boundToCurrentDisk;
+	return {
+		...(typeof fields.contentHash === "string" && {
+			contentHash: fields.contentHash,
+		}),
+		boundToCurrentDisk:
+			verdict === true || verdict === false || verdict === "unknown"
+				? verdict
+				: false,
+	};
+}
+
 /** One-word summary of a binding verdict for latency/observability logs. */
 export function bindingStateLabel(
 	value: BoundToCurrentDisk,

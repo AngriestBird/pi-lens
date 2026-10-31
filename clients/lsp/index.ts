@@ -101,6 +101,7 @@ import {
 	type DiskBindingCache,
 	type StoredDiagnosticBinding,
 	type TouchFileResult,
+	warmAnswerBinding,
 } from "./diagnostic-binding.js";
 import { getServersForFileWithConfig } from "./config.js";
 import { serverIdsForConfigFile } from "./server-config-files.js";
@@ -9469,9 +9470,10 @@ export class LSPService {
 				// `TouchFileResult` wrapper shape so the flag reads below come off
 				// EXPLICIT fields, not a non-enumerable side-channel a copy would drop.
 				// The warm-attach IPC branch resolves a plain diagnostics array with
-				// `inconclusive` re-surfaced as an enumerable DTO field (the socket can
-				// carry no binding, and the IPC client already rejects an inconclusive
-				// answer, so `available` implies confirmed) — wrap it as `{ diags }`;
+				// `inconclusive` re-surfaced as an enumerable DTO field (and, since
+				// #5030, the binding the same way; the IPC client already rejects an
+				// inconclusive answer, so `available` implies confirmed) — wrap it as
+				// `{ diags }`;
 				// the incumbent branch already returns the wrapper.
 				// #4944: the incumbent answers every auxiliary; drop the rows and the
 				// coverage-gap names of the ones this sweep's exclusion set (the
@@ -9506,6 +9508,9 @@ export class LSPService {
 							...(answer.unconfirmedServerIds !== undefined && {
 								unconfirmedServerIds: answer.unconfirmedServerIds,
 							}),
+							// #5030: the incumbent's content binding, read below as a local
+							// touch's is. An incumbent that sends none reads as not current.
+							binding: warmAnswerBinding(answer),
 						}
 					: await withDeadline(
 							this.touchFile(filePath, content, {
@@ -9954,6 +9959,18 @@ export class LSPService {
 				result.timedOut ||
 				(result.unconfirmedServerIds?.length ?? 0) > 0 ||
 				scannedAt === undefined
+			) {
+				continue;
+			}
+			// #5030: a stale-bound answer with no fingerprint (an incumbent built
+			// before the binding crossed the socket reads as one, see
+			// `warmAnswerBinding`) cannot be disk-gated at replay, so the entry
+			// would serve its rows as this file's current answer. One that carries
+			// its fingerprint stays recordable: `lookup` withholds it while the
+			// bytes differ.
+			if (
+				result.boundToCurrentDisk === false &&
+				result.contentHash === undefined
 			) {
 				continue;
 			}

@@ -64,7 +64,6 @@
 	"tests/clients/dispatch/runners/runner-helpers.test.ts:../../../../clients/safe-spawn.js:[\"safeSpawn\",\"safeSpawnAsync\"]": 26,
 	"tests/clients/dispatch/runners/runner-status-semantics.test.ts:../../../../clients/dispatch/runners/utils/lazy-installer.js:[\"tryLazyInstall\"]": 1,
 	"tests/clients/dispatch/runners/runner-status-semantics.test.ts:../../../../clients/safe-spawn.js:[\"safeSpawn\",\"safeSpawnAsync\"]": 15,
-	"tests/clients/dispatch/runners/runner-status-semantics.test.ts:../../../../clients/warm-attach.js:[\"tryWarmAttachedCodeActions\",\"tryWarmAttachedDiagnostics\"]": 1,
 	"tests/clients/dispatch/runners/secondary-language-runners.test.ts:../../../../clients/safe-spawn.js:[\"safeSpawnAsync\"]": 16,
 	"tests/clients/dispatch/runners/shellcheck.test.ts:../../../../clients/safe-spawn.js:[\"safeSpawn\",\"safeSpawnAsync\"]": 13,
 	"tests/clients/dispatch/runners/shfmt.test.ts:../../../../clients/installer/index.js:[\"ensureTool\"]": 52,

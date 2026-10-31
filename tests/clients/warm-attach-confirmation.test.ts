@@ -187,6 +187,47 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 		expect(result.unconfirmedServerIds).toEqual(["opengrep"]);
 	});
 
+	// #5030: the incumbent's touch composes a content binding (does the answer
+	// describe the bytes on disk), and the socket used to drop it. Recurrence it
+	// prevents: a stale-bound answer crossed the wire as a bare row set and every
+	// attached reader took it for the current bytes, #5017 on the warm route.
+	// The field is ALWAYS present on a new incumbent (`"unknown"` when its touch
+	// composed none), so its absence on the far side can only mean an older
+	// incumbent: that is what lets a reader fail closed on it.
+	it.each([
+		[false, false],
+		[true, true],
+		["unknown", "unknown"],
+	] as const)(
+		"carries the touch's content binding %s across the wire (#5030)",
+		async (bound, onTheWire) => {
+			touchFile.mockResolvedValue({
+				diags: [],
+				confirmation: "confirmed",
+				binding: { contentHash: "fp-of-sent-bytes", boundToCurrentDisk: bound },
+			});
+
+			const result = JSON.parse(
+				JSON.stringify(await serve()),
+			) as WarmDiagnosticsResponse;
+
+			expect(result.binding).toEqual({
+				contentHash: "fp-of-sent-bytes",
+				boundToCurrentDisk: onTheWire,
+			});
+		},
+	);
+
+	it("sends 'unknown', never an absent field, for a touch that composed no binding (#5030)", async () => {
+		touchFile.mockResolvedValue({ diags: [], confirmation: "confirmed" });
+
+		const result = JSON.parse(
+			JSON.stringify(await serve()),
+		) as WarmDiagnosticsResponse;
+
+		expect(result.binding).toEqual({ boundToCurrentDisk: "unknown" });
+	});
+
 	// #4645: only the incumbent owns the client that can answer membership, so
 	// it asks and sends the answer beside the server's RAW rows. The reader runs
 	// the one demotion pipeline with it (pinned in
