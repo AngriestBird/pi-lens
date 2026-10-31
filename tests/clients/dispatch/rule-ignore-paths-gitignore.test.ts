@@ -32,6 +32,7 @@ import {
 	ruleIgnoredForPath,
 } from "../../../clients/dispatch/rule-policy.js";
 import type { Diagnostic } from "../../../clients/dispatch/types.js";
+import { toPosix } from "../../../clients/path-utils.js";
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
 import { useConfigPath } from "../../support/global-config.js";
 import { removeTempDirSync } from "../test-utils.js";
@@ -221,7 +222,7 @@ describe("rules.<id>.ignorePaths across config tiers (#5029)", () => {
 			],
 			loadProjectRulePolicy(repo),
 			{ root: repo, filePath: repo },
-		).map((d) => path.relative(repo, d.filePath));
+		).map((d) => toPosix(path.relative(repo, d.filePath)));
 
 		// pkg's `!legacy/keep.ts` lifts pkg's own `legacy/**`, but the root's
 		// `**/legacy/**` still carves out pkg/legacy/keep.ts.
@@ -244,7 +245,7 @@ describe("rules.<id>.ignorePaths across config tiers (#5029)", () => {
 			],
 			loadProjectRulePolicy(repo),
 			{ root: repo, filePath: repo },
-		).map((d) => path.relative(repo, d.filePath));
+		).map((d) => toPosix(path.relative(repo, d.filePath)));
 
 		expect(kept).toEqual(["src/c.ts"]);
 	});
@@ -265,7 +266,7 @@ describe("rules.<id>.ignorePaths across config tiers (#5029)", () => {
 			content: "eval('1');\n",
 		});
 
-		expect(kept.map((d) => path.relative(repo, d.filePath))).toEqual([
+		expect(kept.map((d) => toPosix(path.relative(repo, d.filePath)))).toEqual([
 			"legacy/keep.ts",
 			"src/c.ts",
 		]);
@@ -284,6 +285,18 @@ describe("ruleIgnoredForPath on a policy map built from bare strings (#5029)", (
 	it("reads a lone rooted entry relative to the workspace root", () => {
 		expect(verdict(["/legacy/**"], "legacy/a.ts")).toBe(true);
 		expect(verdict(["/legacy/**"], "src/legacy/a.ts")).toBe(false);
+	});
+
+	// Recurrence: a refactor that hands `ruleIgnoredForPath`'s root-relative
+	// `filePath` to the gitignore evaluator unresolved. `relativeInside` then
+	// resolves it against the process cwd, not the workspace root, so the
+	// rooted `/legacy/**` misses `legacy/a.ts` (#5029).
+	it("resolves a root-relative file path against the workspace root", () => {
+		expect(
+			ruleIgnoredForPath("no-eval", "legacy/a.ts", repo, {
+				"no-eval": { ignorePaths: ["/legacy/**"] },
+			}),
+		).toBe(true);
 	});
 
 	it("reads a negation against the entries before it", () => {

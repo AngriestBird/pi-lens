@@ -339,7 +339,9 @@ matches under `pkg/`:
 
 The files are a union: a path is carved out when any file's entries carve it out. A nearer file
 adds carve-outs and never lifts one, so a `!` entry re-includes only against the entries of its
-own file, and a project `!` cannot clear a carve-out the global config declared.
+own file, and a project `!` cannot clear a carve-out the global config declared. Unlike the
+`ignore` field, `ignorePaths` has no cross-file lift: a nearer file's `!` can lift a path that a
+parent file's `ignore` line hid, but never a path that a parent file's `ignorePaths` entry carves out.
 
 ## Legacy locations (still read; being removed)
 
