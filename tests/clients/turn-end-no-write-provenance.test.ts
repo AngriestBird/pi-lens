@@ -151,7 +151,14 @@ describe.each([false, true])(
 						diagnosticCount: 0,
 						unconfirmed: {
 							count: 1,
-							servers: [{ serverId: "ts", waitMs: 500, paths: [neighbor] }],
+							servers: [
+								{
+									serverId: "ts",
+									reason: "no-answer",
+									waitMs: 500,
+									paths: [neighbor],
+								},
+							],
 						},
 					});
 					const view = await h.turnEnd({ flags });
@@ -1291,7 +1298,14 @@ describe.each([false, true])(
 						diagnosticCount: 0,
 						unconfirmed: {
 							count: neighbors.length,
-							servers: [{ serverId: "ts", waitMs: 500, paths: neighbors }],
+							servers: [
+								{
+									serverId: "ts",
+									reason: "no-answer",
+									waitMs: 500,
+									paths: neighbors,
+								},
+							],
 						},
 					});
 					const view = await h.turnEnd({
@@ -1329,7 +1343,14 @@ describe.each([false, true])(
 							diagnosticCount: 0,
 							unconfirmed: {
 								count: 1,
-								servers: [{ serverId: "ts", waitMs: 500, paths: [neighbor] }],
+								servers: [
+									{
+										serverId: "ts",
+										reason: "no-answer",
+										waitMs: 500,
+										paths: [neighbor],
+									},
+								],
 							},
 						});
 					}

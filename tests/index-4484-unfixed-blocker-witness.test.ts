@@ -142,9 +142,17 @@ const boundary = vi.hoisted(() => {
 		 * touch whose diagnostics wait hit its deadline, `partial` one where
 		 * another server answered but typescript did not, `throw` a server
 		 * that failed, `hold` an answer that arrives only when the test
-		 * releases it.
+		 * releases it. #5017: `stale` is a confirmed answer the server computed
+		 * for older bytes (`boundToCurrentDisk: false`): one blocking row that
+		 * is not in these bytes.
 		 */
-		mode: "answer" as "answer" | "inconclusive" | "partial" | "throw" | "hold",
+		mode: "answer" as
+			| "answer"
+			| "inconclusive"
+			| "partial"
+			| "stale"
+			| "throw"
+			| "hold",
 		/**
 		 * #5008: the shape `clients/lsp/index.ts` produces when a scanner never
 		 * reported — the primary's own answer for these bytes, `confirmation:
@@ -238,6 +246,24 @@ const boundary = vi.hoisted(() => {
 					],
 					inconclusive: true,
 					inconclusiveServerIds: ["typescript"],
+				};
+			if (lsp.mode === "stale")
+				return {
+					diags: [
+						{
+							severity: 1,
+							message: "Cannot find name 'BAD_OTHER'.",
+							code: 2304,
+							source: "ts",
+							serverId: "typescript",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 5 },
+							},
+						},
+					],
+					confirmation: "confirmed",
+					binding: { boundToCurrentDisk: false },
 				};
 			if (lsp.mode === "throw")
 				throw new Error("connection closed: the JSON RPC server exited");
@@ -1029,6 +1055,25 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 		const w2 = await s.write(V2_OTHER_LINE);
 		expect(w2).not.toMatch(/✓ .*clean/);
 		expect(w2).toMatch(STILL_UNFIXED);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		boundary.lsp.mode = "answer";
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// #5017 recurrence: the server answered with findings it computed for older
+	// bytes (`boundToCurrentDisk: false`). The run read as a verdict, so the
+	// recorded BAD_CALL, still on disk, left the record and the gate opened on a
+	// finding about other bytes. The stale row is not these bytes' either, so it
+	// never enters the record.
+	it("keeps a blocker pending when the server's findings are about older bytes (#5017)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("stale", "src/carry-stale.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		boundary.lsp.mode = "stale";
+		const w2 = await s.write(V2_OTHER_LINE);
+		expect(w2).toMatch(STILL_UNFIXED);
+		expect(w2).not.toContain("BAD_OTHER");
 		expect(await s.commitBlocked()).toBe(true);
 		expect(await s.endTurn()).not.toContain("Resolved this turn");
 		boundary.lsp.mode = "answer";

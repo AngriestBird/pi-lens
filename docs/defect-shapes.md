@@ -195,6 +195,18 @@ file-scoped worklist and receives no project-wide scanner output.
     kept entry with no place in a write's bytes is recorded as such
     (`positionStale`), never inferred later from one line's hash, and a line
     with no word character owes nothing by its text.
+    A non-authoritative answer never stands in for a primary that never
+    answered: a `fallbackFor` alternate (python-jedi beside a pyright that was
+    trust-refused, failed to start, sat in a breaker cool-down or was not
+    installed) is not its owner, so the file reads unavailable with the owner
+    named, never "confirmed clean" (#5014). The rule admits the known-good
+    forms (a non-alternate primary acquired, an alternate standing in for an
+    owner the operator disabled, an alternate whose owner resolved no root) in
+    `unansweredPrimaries` (`clients/lsp/index.ts`); every other cause, listed or
+    not, lands unconfirmed. Screen: can a file read clean when its primary
+    never answered? Population enforcer:
+    `tests/clients/lsp/unanswered-primaries-fallback-5014.test.ts` (every
+    registered `fallbackFor` alternate).
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector
@@ -605,11 +617,13 @@ file-scoped worklist and receives no project-wide scanner output.
     the lane's timeout scale and is refused; a same-named local constant is
     admitted and an import alias of the shared one is refused (no live member
     either way). Screen: does this case call a walker or read a binding one
-    produced, and is its third argument one of those two forms? Census: 151 in
-    `tests/config`, all budgeted; 79 outside it still keep the default (a probe,
-    not a command). Enforcer: `tests/config/tree-census-timeout.test.ts` (it
-    derives the declaration callee from the file's vitest imports, resolves
-    walker aliases, and counts a test-shaped call it cannot trace as a census).
+    produced, and is its third argument one of those two forms? Census: 244
+    under `tests/` (154 in `tests/config`, all budgeted; 90 outside it, of which
+    87 are refused and admitted by name in
+    `tests/config/tree-census-timeout.baseline.json`, and 3 budgeted). Enforcer:
+    `tests/config/tree-census-timeout.test.ts` (it derives the declaration
+    callee from the file's vitest imports, resolves walker aliases, and counts a
+    test-shaped call it cannot trace as a census).
     It does not read a walker reached through a helper in another module, a
     variable-bound arrow-function walker, a local spawn wrapper, or a walk named
     only by an enclosing `describe.each` or loop; `Unit tests Windows` is the
@@ -725,8 +739,27 @@ file-scoped worklist and receives no project-wide scanner output.
     <reason>`, and a `session` owner states `sessionSeamException`, why a scope
     cell cannot hold it yet. A moved store has no process container and no
     entry; `scanScopeCellKeys` pins every cell by file and key
-    (`SESSION_CELL_KEYS`). Partial: it reads the registered stores only, so an
-    unregistered module-level field is still not scanned.
+    (`SESSION_CELL_KEYS`). The same `auditOwnerKeys` reads all three lists:
+    `SESSION_STATE_REGISTRY`, the file-level `EXEMPT_SESSION_STATE_FILES` rows
+    and the declared `SESSION_STORE_REGISTRY` rows (#5027); a file with several
+    owners states the narrowest. The scan behind them
+    (`scanSessionStateCandidates`) flags a file for a module-level container
+    with or without a reset, except one admitted constant: an UPPER_SNAKE
+    built-in `Map`/`Set`/`WeakMap`/`WeakSet` declared `const` whose every use
+    in `clients/`, `tools/`, `mcp/` and `index.ts` is a read; and for a class
+    field or `this.x` assignment bound to `new <container or clients/ class>`
+    or `[]`, or a depth-1 `key: new <container>` member of a module-level
+    object literal (`globalState = { reads: new Map() }`). An admitted
+    constant removes the symbol, not the file: a file that also exports a
+    reset stays a candidate with a 0 pin. One symbol-count pin counts the
+    containers, fields and members. Partial: it walks `clients/`;
+    `tools/` holds no candidate today, `index.ts` is censused by
+    `tests/config/session-scope-sweep.test.ts` (#3611), and `mcp/server.ts`
+    (`lspReadyCwds`) is outside the scan root. A field built by a factory call,
+    through another binding or an aliased constructor is not read, and an
+    admitted constant's `forEach` callback or stored value can be mutated
+    unseen (`SWEEP_HEURISTIC_LIMITS`; live population 0), and the owner value
+    itself is a judgment the audit only forces to be stated.
 
 87. **Factory-time read of a host value set later:** pi applies an extension flag's command-line value after every factory has run, so a flag read while the factory runs answers the registered default. Screen: does any flag read run while the factory runs, and does the host test apply the value after the factory, as pi does? Read it in a handler, a command or a tool, or once in `session_start`. Enforcer: `tests/config/factory-flag-read-sweep.test.ts` (partial: a reader handed to a callee that invokes it synchronously is not seen). Instances and dates: `HISTORY.md`.
 

@@ -101,6 +101,7 @@ import {
 	type DiskBindingCache,
 	type StoredDiagnosticBinding,
 	type TouchFileResult,
+	warmAnswerBinding,
 } from "./diagnostic-binding.js";
 import { getServersForFileWithConfig } from "./config.js";
 import { serverIdsForConfigFile } from "./server-config-files.js";
@@ -582,12 +583,15 @@ export interface LSPDiagnosticsHealth {
  * primary that resolved a root for this file (`resolvedPrimaryRoots`, filled by
  * `ensureClientForServer` before it spawns) was tried and not acquired. A file
  * with no rootable primary (an auxiliary-only language) has none; a touch that
- * acquired any primary, a `fallbackFor` alternate included, has none either.
+ * acquired a primary has none either. #5014: a `fallbackFor` alternate is not
+ * its owner. It counts as the primary only when its owner never resolved a root
+ * or the operator turned the owner off; otherwise the owner is named here, so a
+ * fallback's answer never reads as the owner's "confirmed clean".
  * #4403: a primary the operator disabled for this file did not answer either
  * (`disabledPrimaryServerIds`, clients/lsp/session-roots.ts), so it is
  * named too, and listed apart so a reader can say why.
  */
-interface UnansweredPrimaries {
+export interface UnansweredPrimaries {
 	serverIds: string[];
 	disabledServerIds: string[];
 	/**
@@ -599,17 +603,32 @@ interface UnansweredPrimaries {
 	cause: PrimaryUnavailableCause;
 }
 
-function unansweredPrimaries(
+export function unansweredPrimaries(
 	spawned: readonly SpawnedServer[],
 	resolvedPrimaryRoots: ReadonlyMap<string, string>,
 	filePath: string,
 ): UnansweredPrimaries {
-	if (spawned.some((entry) => !isAuxiliary(entry.info)))
-		return { serverIds: [], disabledServerIds: [], cause: "unstarted" };
 	const { disabledServerIds, fallbackServerIds } = disabledPrimaries(filePath);
-	const serverIds = [
-		...new Set([...resolvedPrimaryRoots.keys(), ...disabledServerIds]),
-	];
+	// #5014 (shape 10): a primary answered only when the acquired server is not
+	// a `fallbackFor` alternate, or is one standing in for an owner the operator
+	// turned off. An alternate beside an owner that resolved a root and was not
+	// acquired (trust-refused, spawn failed, breaker open, not installed, any
+	// cause not listed here) answers for itself, never for the owner.
+	const standIns = new Set(fallbackServerIds);
+	const acquired = new Set<string>();
+	for (const entry of spawned) {
+		if (isAuxiliary(entry.info)) continue;
+		if (entry.info.fallbackFor === undefined || standIns.has(entry.info.id))
+			return { serverIds: [], disabledServerIds: [], cause: "unstarted" };
+		acquired.add(entry.info.id);
+	}
+	// An alternate acquired while its owner never resolved a root (deno beside
+	// an unrooted typescript) leaves nothing here: it is the file's only candidate.
+	const missing = new Set<string>();
+	for (const id of resolvedPrimaryRoots.keys())
+		if (!acquired.has(id)) missing.add(id);
+	for (const id of disabledServerIds) missing.add(id);
+	const serverIds = [...missing];
 	return {
 		serverIds,
 		disabledServerIds,
@@ -6474,6 +6493,24 @@ export class LSPService {
 			// from tsserver (clean = [], dirty = real findings that a silentOnClean
 			// server had computed but never published). Otherwise merge the push
 			// diagnostics from the client cache as always.
+			// #5040: the version and publish stamp of each contributor, read in the
+			// SAME tick as the cache snapshot below. `reusedAnswer` describes what
+			// `collected` holds, so it must be decided from these, never from a read
+			// after the awaits that follow (the readiness key, the auxiliary skip
+			// scan): a server that publishes in one of those moves its version past
+			// the baseline while `collected` still carries the older array, and the
+			// later read would call that array the touch's own answer.
+			const answerAtMerge = options.collectDiagnostics
+				? new Map(
+						spawned.map((entry) => [
+							entry.client,
+							{
+								pathVersion: readPathVersion(entry.client),
+								publishedAt: entry.client.getDiagnosticsPublishedAt?.(filePath),
+							},
+						]),
+					)
+				: undefined;
 			let collected = options.collectDiagnostics
 				? tsserverSyncConfirmed !== undefined
 					? mergeLspDiagnostics(
@@ -7019,6 +7056,51 @@ export class LSPService {
 							],
 						);
 				result.binding = binding;
+			}
+
+			// #5040: WHICH contributor's answer this merge reports without having
+			// refreshed it. A push-only server that already holds these bytes has its
+			// notify skipped (`shouldSkipNotify`), so `clearDiagnosticsForPath` never runs
+			// and the cache entry this merge reads may predate the caller's own change.
+			// Name the oldest such entry so a caller that owns the edit clock can decide
+			// whether the answer describes the state after that change — never inferred
+			// here, because only the caller knows what changed. A publication that landed
+			// for the path inside this touch (`getDiagnosticsVersionForPath` past the
+			// pre-notify baseline, which covers push AND pull) or the #707 sync confirm
+			// (`syncConfirmed`, a command answer rather than a cached observation) is the
+			// touch's OWN answer and is never reported here. Auxiliaries are excluded:
+			// their findings are file-local, so an edit elsewhere cannot invalidate them
+			// (#1720), and the coverage gap already speaks for their silence. That
+			// exclusion is defensive and unreachable from the cascade, the only reader:
+			// its touch is primary-scoped, so no auxiliary is ever spawned on it, and
+			// no test pins the line. Likewise the oldest-wins pick below only has two
+			// candidates under a `clientScope: "all"` touch, which no reader makes.
+			if (collected !== undefined && !syncConfirmed) {
+				let reusedAnswer: TouchFileResult["reusedAnswer"];
+				for (const entry of spawned) {
+					if (isAuxiliary(entry.info)) continue;
+					if (notifyWriteTimedOutServerIds.includes(entry.info.id)) continue;
+					// The pre-notify per-path version this touch already read: a
+					// publication past it, at the moment `collected` was merged, landed
+					// inside the touch and is in `collected`.
+					const versionBeforeTouch = diagnosticBaselines.get(entry.client);
+					const merged = answerAtMerge?.get(entry.client);
+					if (
+						versionBeforeTouch !== undefined &&
+						merged?.pathVersion !== undefined &&
+						merged.pathVersion > versionBeforeTouch
+					)
+						continue;
+					const publishedAt = merged?.publishedAt;
+					if (publishedAt === undefined) continue;
+					if (
+						reusedAnswer === undefined ||
+						publishedAt < reusedAnswer.publishedAt
+					) {
+						reusedAnswer = { serverId: entry.info.id, publishedAt };
+					}
+				}
+				if (reusedAnswer) result.reusedAnswer = reusedAnswer;
 			}
 
 			// The recent-touches entries are recorded per server inside the notify-write
@@ -9469,9 +9551,10 @@ export class LSPService {
 				// `TouchFileResult` wrapper shape so the flag reads below come off
 				// EXPLICIT fields, not a non-enumerable side-channel a copy would drop.
 				// The warm-attach IPC branch resolves a plain diagnostics array with
-				// `inconclusive` re-surfaced as an enumerable DTO field (the socket can
-				// carry no binding, and the IPC client already rejects an inconclusive
-				// answer, so `available` implies confirmed) — wrap it as `{ diags }`;
+				// `inconclusive` re-surfaced as an enumerable DTO field (and, since
+				// #5030, the binding the same way; the IPC client already rejects an
+				// inconclusive answer, so `available` implies confirmed) — wrap it as
+				// `{ diags }`;
 				// the incumbent branch already returns the wrapper.
 				// #4944: the incumbent answers every auxiliary; drop the rows and the
 				// coverage-gap names of the ones this sweep's exclusion set (the
@@ -9506,6 +9589,9 @@ export class LSPService {
 							...(answer.unconfirmedServerIds !== undefined && {
 								unconfirmedServerIds: answer.unconfirmedServerIds,
 							}),
+							// #5030: the incumbent's content binding, read below as a local
+							// touch's is. An incumbent that sends none reads as not current.
+							binding: warmAnswerBinding(answer),
 						}
 					: await withDeadline(
 							this.touchFile(filePath, content, {
@@ -9954,6 +10040,18 @@ export class LSPService {
 				result.timedOut ||
 				(result.unconfirmedServerIds?.length ?? 0) > 0 ||
 				scannedAt === undefined
+			) {
+				continue;
+			}
+			// #5030: a stale-bound answer with no fingerprint (an incumbent built
+			// before the binding crossed the socket reads as one, see
+			// `warmAnswerBinding`) cannot be disk-gated at replay, so the entry
+			// would serve its rows as this file's current answer. One that carries
+			// its fingerprint stays recordable: `lookup` withholds it while the
+			// bytes differ.
+			if (
+				result.boundToCurrentDisk === false &&
+				result.contentHash === undefined
 			) {
 				continue;
 			}

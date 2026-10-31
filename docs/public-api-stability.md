@@ -375,7 +375,7 @@ are part of the contract, so the predicate is named here** (`refusalMatches` in
 
 Everything else stays a warning and the tool runs, exactly as it did before: a
 misspelled mode name, an abbreviation (`max`), a substring or reverse containment
-(`files` for `maxLspFiles`, `file` for `path`), a leading or middle word
+(`files` for `maxLspFiles`, `pth` for `path`), a leading or middle word
 (`sourcePath` is not `source`), a key whose qualifier retargets the head noun
 (`maxFiles`). Such keys still get the `did you mean` hint, except that a
 retargeted head noun is never the hint (`maxFiles` gets none, `cwdPath` gets
@@ -390,6 +390,22 @@ JSON-RPC `-32602` error; `arguments` absent, `null` or `[]` means no arguments.
 **Rejecting every unknown key outright is deliberately not done:** callers that
 pass extra keys today would break, so it needs a major, through the removal
 checklist in section 4.
+
+### The single-file tool parameter is `path`
+
+Every pi-lens tool that acts on one named file takes it as **`path`** (#5041).
+That is the canonical spelling: new tools declare it, and the description a
+model reads names it. It is also what keeps a call from being answered for the
+wrong scope — a tool that only declares an older name refuses or ignores the
+canonical one, and an ignored file parameter leaves the call running on its
+default scope, whose answer then reads as if it were about the named file.
+
+The MCP tools keep accepting **`file`**, and `lens_diagnostic_mark` keeps
+accepting **`filePath`**, as declared aliases of `path`, so no caller written
+against an older spelling breaks. A call may send any one of them; a call that
+sends two spellings naming different files is refused rather than guessed at.
+Adding a fourth spelling, or dropping one of these, changes this contract
+through section 4.
 
 ## 6. File I/O Lifecycle Bridge (v2)
 

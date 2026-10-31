@@ -260,7 +260,10 @@ describe("formal/store-freshness workspace-cache replays (#3505)", () => {
 					warm.attached = true;
 					warm.diagnostics.mockResolvedValue({
 						available: true,
-						response: { diagnostics: [] },
+						response: {
+							diagnostics: [],
+							binding: { boundToCurrentDisk: true },
+						},
 					});
 					const landed = afterFirstRead(file, () => {
 						if (written) rewriteFile();

@@ -1418,6 +1418,34 @@ describe("Git ownership certainty preserves the legacy marker API", () => {
 		}
 	});
 
+	it("reports home-ceiling when a climb of fewer than 64 directories stops at the home ceiling", () => {
+		const env = setupTestEnvironment("pi-lens-marker-detailed-below-home-");
+		try {
+			// Recurrence (#4966 review F1): the walkUpDirs fold rebuilt the
+			// `home-ceiling` reason after the loop from `climbed >= 64`. Every older
+			// cell started AT the ceiling, so a walk that climbed two directories and
+			// then stopped at home was never driven and the predicate was unpinned.
+			const nested = path.join(env.tmpDir, "proj", "src");
+			fs.mkdirSync(nested, { recursive: true });
+			const probed: string[] = [];
+			expect(
+				findNearestMarkerRootDetailed(nested, [".git"], {
+					homeDir: env.tmpDir,
+					markerPredicate: (file) => {
+						probed.push(file);
+						return { kind: "absent" };
+					},
+				}),
+			).toEqual({ kind: "not-found", reason: "home-ceiling" });
+			expect(probed).toEqual([
+				path.join(realpathOrResolve(nested), ".git"),
+				path.join(realpathOrResolve(path.join(env.tmpDir, "proj")), ".git"),
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("reports reason root when the walk reaches the filesystem root below an unrelated home", async () => {
 		// Recurrence (#3691 F4): `parent === current` was never exercised. On posix
 		// "/" is an ancestor of every home, so the ceiling always fires first; a

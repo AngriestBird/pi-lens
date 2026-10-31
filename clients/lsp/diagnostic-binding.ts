@@ -197,6 +197,23 @@ export interface TouchFileResult {
 	 * `supersededServerIds`. Absent when every server got it.
 	 */
 	supersededServerIds?: string[];
+	/**
+	 * #5040: the answer this touch reports WITHOUT having refreshed it — a
+	 * primary server's cache entry that stood unchanged through the touch (its
+	 * notify was skipped because the server already held these bytes, and
+	 * nothing was published for the path while the touch waited). `publishedAt`
+	 * is that entry's publish stamp, so a caller that must know whether the
+	 * answer describes the state after its OWN change can compare it against its
+	 * own edit clock; the cascade does, through `isPostEditObservation`.
+	 *
+	 * Present only for a REUSE: absent when the touch produced its own answer (a
+	 * publish or a pull inside the touch, the #707 sync confirm) and absent when
+	 * no server had a cached answer at all (the #799 silence-clean conclusion,
+	 * which is about silence rather than a reused observation). Auxiliary
+	 * contributors never appear: their answers are file-local, so an edit to
+	 * another file cannot invalidate them (#1720).
+	 */
+	reusedAnswer?: { serverId: string; publishedAt: number };
 	binding?: DiagnosticBinding;
 }
 
@@ -557,6 +574,37 @@ export function composeBoundToCurrentDisk(
 		return "unknown";
 	}
 	return true;
+}
+
+/**
+ * #5030: the binding a reader takes from a warm-attach incumbent's answer. The
+ * answer crosses a process boundary between sessions that may run different
+ * builds, so the field is read as untrusted input and the gate admits only the
+ * three known verdicts: an absent field (an incumbent built before the field
+ * existed), a malformed one, or any other value reads as `false`, never as
+ * current. `contentHash` rides along only when it is a string; the sweep
+ * records that fingerprint so a later cache replay is disk-gated like a local
+ * touch's. `version` is informational and no reader asks for it, so it stays
+ * off the reader's side.
+ */
+export function warmAnswerBinding(answer: {
+	readonly binding?: unknown;
+}): DiagnosticBinding {
+	const wire = answer.binding;
+	const fields =
+		typeof wire === "object" && wire !== null
+			? (wire as Record<string, unknown>)
+			: {};
+	const verdict = fields.boundToCurrentDisk;
+	return {
+		...(typeof fields.contentHash === "string" && {
+			contentHash: fields.contentHash,
+		}),
+		boundToCurrentDisk:
+			verdict === true || verdict === false || verdict === "unknown"
+				? verdict
+				: false,
+	};
 }
 
 /** One-word summary of a binding verdict for latency/observability logs. */

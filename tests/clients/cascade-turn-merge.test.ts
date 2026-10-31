@@ -1610,6 +1610,76 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 		}
 	});
 
+	// #5040: the second shape of absence gets its own sentence. A reused pre-edit
+	// answer DID arrive, so the #4485 "no answer arrived" wording would be false
+	// for it, and one server can hold both shapes in one turn, so the grouping
+	// cannot merge them.
+	it("turn_end words a pre-edit answer as its own cause, beside the no-answer line for the same server", async () => {
+		const env = setupTestEnvironment("cascade-5040-pending-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.ts");
+			const preEdit = path.join(env.tmpDir, "pre-edit.ts");
+			const silent = path.join(env.tmpDir, "silent.ts");
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				selectedNeighborPaths: [preEdit, silent],
+				unconfirmed: {
+					count: 2,
+					servers: [
+						{
+							serverId: "gopls",
+							reason: "pre-edit-answer",
+							waitMs: 0,
+							paths: [preEdit],
+						},
+						{
+							serverId: "gopls",
+							reason: "no-answer",
+							waitMs: 1000,
+							paths: [silent],
+						},
+					],
+				},
+			} as any);
+
+			logCascadeMock.mockClear();
+			const content = await turnEndOf(runtime, cacheManager, env.tmpDir);
+
+			// Recurrence: bucketing by cause made `servers` count cause-groups, so
+			// one server holding both shapes logged `servers: 2` and a monitor
+			// comparing it with `paths` read two populations as one.
+			const rendered = logCascadeMock.mock.calls
+				.map((args) => args[0])
+				.filter((e) => e?.phase === "cascade_unconfirmed_rendered");
+			expect(rendered).toHaveLength(1);
+			expect(rendered[0].metadata).toMatchObject({
+				servers: 1,
+				groups: 2,
+				paths: 2,
+			});
+			expect(content).toContain(
+				"Cascade asked gopls about 1 dependent(s) of a.ts, but its cached answer predates this edit; a clean cascade result does not cover them.",
+			);
+			expect(content).toContain(
+				"Cascade sent 1 dependent(s) of a.ts to gopls, but no answer arrived within 1000 ms; a clean cascade result does not cover them.",
+			);
+			expect(content).toContain("  • gopls: pre-edit.ts");
+			expect(content).toContain("  • gopls: silent.ts");
+			expect(occurrences(content, "predates this edit")).toBe(1);
+			expect(occurrences(content, "no answer arrived")).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// Recurrence (#4487): with the rolling delta gone, a result that owns only
 	// some of its neighbours rendered all of them, so a neighbour a later
 	// result also covered reached the agent twice in one turn.
@@ -1740,16 +1810,105 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 				"n1.ts",
 			);
 
-			// Turn 4: nothing left pending.
-			runtime.beginTurn();
-			edit(cacheManager, other, env.tmpDir);
-			expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).not.toContain(
-				"unresolved",
-			);
+			// Nothing left pending. #5034 r3: read the record itself; a fourth
+			// turn reaches the turn-cycle cap and returns before the cascade merge
+			// (`isMaxCyclesExceeded`), so its silence proved nothing.
+			const { listCascadePendingNeighbors } =
+				await import("../../clients/cascade-format.js");
+			expect(listCascadePendingNeighbors()).toEqual([]);
 		} finally {
 			env.cleanup();
 		}
 	});
+
+	// #5034 review r3 (F8). Recurrence: a neighbour no primary answered for is
+	// listed with its `fallbackFor` alternate's rows (round 2, F2) but is not an
+	// observation (no `observedNeighborPaths`). Its delivery REPLACED the
+	// primary's pending record with the fallback's rows, and the listing hid the
+	// record's unresolved line; a clean fallback answer then left the record
+	// silent with no way to clear it. Delivery must neither drop nor pin it.
+	// Three turns per cell: a fourth reaches the turn-cycle cap and returns
+	// before the cascade merge (`isMaxCyclesExceeded`).
+	it.each([
+		["with a finding of its own", ["fallback finding"]],
+		["clean", []],
+	])(
+		"a fallback-served neighbour answering %s neither replaces nor hides the primary's pending errors (#5034 F8)",
+		async (_label, fallbackRows) => {
+			const env = setupTestEnvironment("cascade-5034-f8-");
+			try {
+				const { cascadeStillPresentSince, listCascadePendingNeighbors } =
+					await import("../../clients/cascade-format.js");
+				const runtime = new RuntimeCoordinator();
+				const cacheManager = new CacheManager(false);
+				const a = path.join(env.tmpDir, "a.py");
+				const n1 = path.join(env.tmpDir, "n1.py");
+				const primaryError = diagnostic(n1, "primary error", 1);
+				const pending = () =>
+					listCascadePendingNeighbors().map((e) => e.errorCount);
+
+				// Turn 1: the primary answers and shows its error.
+				runtime.beginTurn();
+				edit(cacheManager, a, env.tmpDir);
+				runtime.appendCascadeRun({
+					filePath: a,
+					result: await computedResult(env.tmpDir, a, [
+						[n1, ["primary error"]],
+					]),
+					neighborCount: 1,
+					diagnosticCount: 1,
+					observedNeighborPaths: [n1],
+					checkedAt: Date.now(),
+				} as any);
+				expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).toContain(
+					"primary error",
+				);
+				expect(pending()).toEqual([1]);
+
+				// Turn 2: only the fallback answers. It confirms nothing (#5014),
+				// so the primary's error stays pending, unchanged, and named.
+				runtime.beginTurn();
+				edit(cacheManager, a, env.tmpDir);
+				const result = await computedResult(env.tmpDir, a, [
+					[n1, fallbackRows],
+				]);
+				result.neighbors[0].primaryUnavailable = {
+					serverIds: ["python"],
+					cause: "unstarted",
+				};
+				runtime.appendCascadeRun({
+					filePath: a,
+					result,
+					neighborCount: 1,
+					diagnosticCount: fallbackRows.length,
+					checkedAt: Date.now(),
+				} as any);
+				const second = await turnEndOf(runtime, cacheManager, env.tmpDir);
+				for (const row of fallbackRows) expect(second).toContain(row);
+				expect(second).toMatch(/n1\.py: 1 error\(s\) unresolved/);
+				expect(cascadeStillPresentSince(n1, primaryError, 99)).toBe(1);
+				expect(pending()).toEqual([1]);
+
+				// Turn 3: the primary answers clean, which clears it.
+				runtime.beginTurn();
+				edit(cacheManager, a, env.tmpDir);
+				runtime.appendCascadeRun({
+					filePath: a,
+					result: undefined,
+					neighborCount: 1,
+					diagnosticCount: 0,
+					skipReason: "clean",
+					observedNeighborPaths: [n1],
+				} as any);
+				expect(
+					await turnEndOf(runtime, cacheManager, env.tmpDir),
+				).not.toContain("n1.py");
+				expect(pending()).toEqual([]);
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
 
 	// Recurrence (#4689 review r1 F5): a cascade names its neighbours by path
 	// identity (review-graph keys) while turn_end holds the session root as

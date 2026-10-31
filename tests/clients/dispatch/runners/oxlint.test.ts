@@ -142,6 +142,9 @@ describe("oxlint runner", () => {
 			// decisions carried to the delivery surface, never a silent clean.
 			"dialect-unsupported",
 			"covered-by-primary",
+			// `dispatch.disabledRunners`: the operator's own decision, so the
+			// dispatcher records it as a stated skip, never a failed run.
+			"disabled-by-config",
 		]);
 		const valid: RunnerResult = {
 			status: "skipped",

@@ -190,6 +190,14 @@ export type DegradationKind =
 	| "cascade-pending-cap"
 	/** #4487: the pending neighbour-error record reached its cap. */
 	| "cascade-pending-neighbors-evicted"
+	/**
+	 * #5040: a cascade neighbour's only answer was a cache entry published BEFORE
+	 * the run's edit (a push-only server that never republishes a dependent). The
+	 * neighbour is now unconfirmed rather than clean; the subject is
+	 * `<serverId>:<path key>` and the record counts per session, so a repeated
+	 * exporter edit does not need a new kind to be visible.
+	 */
+	| "cascade-pre-edit-answer"
 	| "cascade-tier3-backlog-evicted"
 	/**
 	 * #3511: the change-log lock stayed held past its bounded wait (or its
@@ -250,6 +258,14 @@ export type DegradationKind =
 	 * (`clients/context-injection-ledger.ts`).
 	 */
 	| "context-injection-retain-declined"
+	/**
+	 * #5020: a row of an inline-blocker record that names ANOTHER file (a
+	 * chart-wide or import-following runner reports one against the written
+	 * file) left the record because the cited file was dispatched clean by the
+	 * runner that raised it, or no longer exists. The reason names which. One
+	 * subject per record file key, counted across the session.
+	 */
+	| "cross-file-row-retired"
 	/**
 	 * A warm-only client lookup (`getWarmClientForFile`) found no live client
 	 * for a file that HAS a language server with a resolvable root (#1934).

@@ -2099,7 +2099,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"twin.",
 		owner: "#2523 slice 2",
 	},
-	"mcp/server.ts#callTool:d42985f0~9545d834": {
+	"mcp/server.ts#callTool:d42985f0~048b6116": {
 		family: "hook-await",
 		site: "off-hook",
 		reason:

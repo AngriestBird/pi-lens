@@ -414,10 +414,14 @@ export const GLOBAL_NON_FLAG_CONFIG_SECTIONS: readonly string[] = [
  * reports the section. Swept at #3131: every other non-flag dotted key either
  * loader parses (`dispatch.runnerTimeoutFloorMs`, `widget.visible`,
  * `startup.mode`, `startup.scans.enabled`) fails (a) or (c) — see that PR's
- * body for the per-member table — so this is currently the only member.
+ * body for the per-member table. `dispatch.runnerTimeoutFloorMs` joined when
+ * `dispatch` became recognized at project scope for `dispatch.disabledRunners`
+ * (it now satisfies (c)), so a project file carrying the floor is told it does
+ * nothing there instead of being silently dropped.
  */
 export const GLOBAL_ONLY_NON_FLAG_KEYS: readonly string[] = [
 	"actionableWarnings.autoFix.maxFixes",
+	"dispatch.runnerTimeoutFloorMs",
 ];
 
 /**
@@ -482,9 +486,14 @@ const LSP_PROJECT_HONORED_KEYS: readonly string[] =
  * keys beside it, so a project config that has already been migrated must not
  * be told its `lsp` section is a global-only setting. Its tolerance is
  * SUB-KEY-SCOPED — see {@link PROJECT_FOREIGN_NAMESPACE_HONORED_KEYS}.
+ *
+ * `dispatch` joined for `dispatch.disabledRunners`, the dispatch loader's
+ * denial list (`clients/dispatch/disabled-runners.ts`). It is mixed-scope the
+ * same way: `dispatch.runnerTimeoutFloorMs` stays global-only.
  */
 export const PROJECT_FOREIGN_CONFIG_NAMESPACES: readonly string[] = [
 	"lsp",
+	"dispatch",
 	// DERIVED, not restated: the four legacy root keys are exactly the
 	// `kind: "key"` rows of the deprecation registry, and a hand-copied second
 	// list of them would be a place for the accepted set and the removal
@@ -511,7 +520,10 @@ export const PROJECT_FOREIGN_CONFIG_NAMESPACES: readonly string[] = [
 export const PROJECT_FOREIGN_NAMESPACE_HONORED_KEYS: ReadonlyMap<
 	string,
 	readonly string[]
-> = new Map([["lsp", LSP_PROJECT_HONORED_KEYS]]);
+> = new Map([
+	["lsp", LSP_PROJECT_HONORED_KEYS],
+	["dispatch", ["disabledRunners"]],
+]);
 
 /**
  * The distinct TOP-LEVEL section keys a set of flags lives under (the first

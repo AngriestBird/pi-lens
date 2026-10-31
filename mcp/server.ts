@@ -89,8 +89,9 @@ import {
 	createAstGrepSearchTool,
 } from "../tools/ast-grep-search.js";
 import { createLensDiagnosticsTool } from "../tools/lens-diagnostics.js";
+import { readFilePath, readPathsArgument } from "../tools/shared.js";
 import { peekMcpSessionRuntime } from "../clients/mcp/session.js";
-import { isUnderDir } from "../clients/path-utils.js";
+import { isUnderDir, walkUpDirs } from "../clients/path-utils.js";
 import { loadPiLensGlobalConfig } from "../clients/lens-config.js";
 import { loadPiLensProjectConfig } from "../clients/project-lens-config.js";
 import {
@@ -199,8 +200,7 @@ function isWarmBuildStale(): boolean {
 }
 
 function findRepoRoot(start: string): string {
-	let dir = start;
-	for (let depth = 0; depth < 6; depth++) {
+	for (const dir of walkUpDirs(start, { maxDepth: 6 })) {
 		const pkgPath = path.join(dir, "package.json");
 		if (fs.existsSync(pkgPath)) {
 			try {
@@ -212,9 +212,6 @@ function findRepoRoot(start: string): string {
 				// keep walking up
 			}
 		}
-		const parent = path.dirname(dir);
-		if (parent === dir) break;
-		dir = parent;
 	}
 	return path.resolve(start, "..", "..");
 }
@@ -649,11 +646,13 @@ const ALL_TOOLS = [
 		inputSchema: {
 			type: "object",
 			properties: {
-				file: {
+				path: {
 					type: "string",
 					description:
 						"Path to the file to analyze (absolute, or relative to cwd).",
 				},
+				file: { type: "string", description: "Alias for `path`." },
+				filePath: { type: "string", description: "Alias for `path`." },
 				cwd: {
 					type: "string",
 					description: "Project root. Defaults to the server's workspace.",
@@ -670,7 +669,6 @@ const ALL_TOOLS = [
 						'Optional pi-lens flag overrides for this run, e.g. {"no-lsp": true} to bench the non-LSP path.',
 				},
 			},
-			required: ["file"],
 		},
 	},
 	{
@@ -765,6 +763,11 @@ const ALL_TOOLS = [
 					type: "string",
 					description: "File to report on (absolute or relative to cwd).",
 				},
+				path: {
+					type: "string",
+					description: "File to report on (the canonical spelling of `file`).",
+				},
+				filePath: { type: "string", description: "Alias for `path`." },
 				cwd: { type: "string" },
 				maxRefsPerSymbol: {
 					type: "number",
@@ -802,7 +805,6 @@ const ALL_TOOLS = [
 						"Per-direction cap for call-graph relations (default 20).",
 				},
 			},
-			required: ["file"],
 		},
 	},
 	{
@@ -840,6 +842,12 @@ const ALL_TOOLS = [
 			type: "object",
 			properties: {
 				file: { type: "string", description: "File containing the symbol." },
+				path: {
+					type: "string",
+					description:
+						"File containing the symbol (the canonical spelling of `file`).",
+				},
+				filePath: { type: "string", description: "Alias for `path`." },
 				symbol: {
 					type: "string",
 					description:
@@ -852,7 +860,7 @@ const ALL_TOOLS = [
 				},
 				cwd: { type: "string" },
 			},
-			required: ["file", "symbol"],
+			required: ["symbol"],
 		},
 	},
 	{
@@ -867,6 +875,12 @@ const ALL_TOOLS = [
 					description:
 						"Absolute or workspace-relative path to the source file.",
 				},
+				path: {
+					type: "string",
+					description:
+						"Absolute or workspace-relative path to the source file (the canonical spelling of `file`).",
+				},
+				filePath: { type: "string", description: "Alias for `path`." },
 				line: {
 					type: "number",
 					description:
@@ -896,7 +910,7 @@ const ALL_TOOLS = [
 						"Maximum lines for onOversize=slice; defaults to maxLines, then 80.",
 				},
 			},
-			required: ["file", "line"],
+			required: ["line"],
 		},
 	},
 	{
@@ -922,6 +936,11 @@ const ALL_TOOLS = [
 						"outside it is rejected with the `cwd` it was measured against; " +
 						"re-query with `cwd` set to that file's own workspace instead.",
 				},
+				path: {
+					type: "string",
+					description: "Path to explain (the canonical spelling of `file`).",
+				},
+				filePath: { type: "string", description: "Alias for `path`." },
 			},
 		},
 	},
@@ -1117,10 +1136,14 @@ async function callTool(
 		return astGrepDumpCompatibilityResult(args, "mcp");
 	}
 	if (name === "pilens_analyze") {
-		const file = args.file;
-		if (typeof file !== "string" || file.length === 0) {
+		// #5041: `path` is canonical; `file` and `filePath` stay accepted (#2418).
+		const fileRead = readFilePath(args);
+		if (fileRead.refusal)
+			return { ...toolText(fileRead.refusal), isError: true };
+		const file = fileRead.path;
+		if (!file) {
 			return {
-				...toolText("pilens_analyze requires a 'file' string."),
+				...toolText("pilens_analyze requires a `path` string."),
 				isError: true,
 			};
 		}
@@ -1278,13 +1301,17 @@ async function callTool(
 		const query = typeof args.query === "string" ? args.query : "";
 		if (!query.trim()) return toolText("Provide a non-empty `query`.");
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
+		// #5041: one reader owns the `paths` entry rules; #5038: the engine clamps
+		// `limit` and resolves each entry as a host path (this handler used to
+		// drop a non-string entry and clamp a second time).
+		const pathsRead = readPathsArgument(args.paths, { cwd });
+		if (pathsRead.refusal)
+			return { ...toolText(pathsRead.refusal), isError: true };
 		const limit =
 			typeof args.limit === "number" && Number.isFinite(args.limit)
-				? Math.max(1, Math.floor(args.limit))
-				: 20;
-		const paths = Array.isArray(args.paths)
-			? args.paths.filter((p): p is string => typeof p === "string")
-			: undefined;
+				? args.limit
+				: undefined;
+		const paths = pathsRead.entries.length > 0 ? pathsRead.entries : undefined;
 		const lang = typeof args.lang === "string" ? args.lang : undefined;
 		const {
 			available,
@@ -1368,9 +1395,11 @@ async function callTool(
 	}
 
 	if (name === "pilens_module_report") {
-		const file = typeof args.file === "string" ? args.file : "";
-		if (!file.trim())
-			return { ...toolText("Provide a `file`."), isError: true };
+		const fileRead = readFilePath(args);
+		if (fileRead.refusal)
+			return { ...toolText(fileRead.refusal), isError: true };
+		const file = fileRead.path;
+		if (!file) return { ...toolText("Provide a `path`."), isError: true };
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const maxRefsPerSymbol =
 			typeof args.maxRefsPerSymbol === "number" &&
@@ -1495,10 +1524,13 @@ async function callTool(
 	}
 
 	if (name === "pilens_read_symbol") {
-		const file = typeof args.file === "string" ? args.file : "";
+		const fileRead = readFilePath(args);
+		if (fileRead.refusal)
+			return { ...toolText(fileRead.refusal), isError: true };
+		const file = fileRead.path;
 		const symbol = typeof args.symbol === "string" ? args.symbol : "";
-		if (!file.trim() || !symbol.trim()) {
-			return { ...toolText("Provide `file` and `symbol`."), isError: true };
+		if (!file || !symbol.trim()) {
+			return { ...toolText("Provide `path` and `symbol`."), isError: true };
 		}
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const kind = typeof args.kind === "string" ? args.kind : undefined;
@@ -1540,11 +1572,14 @@ async function callTool(
 	}
 
 	if (name === "pilens_read_enclosing") {
-		const file = typeof args.file === "string" ? args.file : "";
+		const fileRead = readFilePath(args);
+		if (fileRead.refusal)
+			return { ...toolText(fileRead.refusal), isError: true };
+		const file = fileRead.path;
 		const line = typeof args.line === "number" ? args.line : Number.NaN;
-		if (!file.trim() || !Number.isFinite(line)) {
+		if (!file || !Number.isFinite(line)) {
 			return {
-				...toolText("Provide `file` and a numeric `line`."),
+				...toolText("Provide `path` and a numeric `line`."),
 				isError: true,
 			};
 		}
@@ -1696,9 +1731,12 @@ async function callTool(
 
 	if (name === "pilens_effective_config") {
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
+		const fileRead = readFilePath(args);
+		if (fileRead.refusal)
+			return { ...toolText(fileRead.refusal), isError: true };
 		const view = await effectiveConfig({
 			cwd,
-			...(typeof args.file === "string" ? { file: args.file } : {}),
+			...(fileRead.path ? { file: fileRead.path } : {}),
 			redact: true,
 		});
 		const fileLines =

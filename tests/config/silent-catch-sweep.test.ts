@@ -827,7 +827,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		// unreadable `@effect/tsgo` manifest and skips a missing bin candidate, the
 		// same shape as `findNativeTypeScriptLsp`'s probe; either way the launch
 		// falls back to the native `tsc`, whose own session-start line names it.
-		identities: "badb29b973468d1c",
+		identities: "b84df3748a14a0b7",
 		reason: PRE_RULE,
 	}, // :223, :377, :890, :921, :1150, :1350, :1483, :1615, :1806, :1953, :1975, :2306, :2385, :2400, :2414, :2431, :2449, :2481, :2508, :2521, :2601, :2613, :2634, :2659, :2700, :2714, :2928, :2936, :2966, :3610
 	"clients/lsp/service-singleton.ts": {
@@ -1336,10 +1336,12 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :110, :188, :222, :337, :387, :412
 	"tools/lens-diagnostics.ts": {
-		silent: 7,
-		identities: "0939abd4809b0410",
+		// 7 -> 6 (#5041): the `paths` cap guard's try/catch is gone, because the
+		// shared reader refuses an over-cap list before the scope is built.
+		silent: 6,
+		identities: "58466145d579efae",
 		reason: PRE_RULE,
-	}, // :254, :678, :879, :939, :1391, :1471, :2162
+	}, // :276, :980, :1040, :1495, :1555, :2269
 	"tools/lsp-diagnostics.ts": {
 		silent: 10,
 		identities: "2e5c32f96dcee285",

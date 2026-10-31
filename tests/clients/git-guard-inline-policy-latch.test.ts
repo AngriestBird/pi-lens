@@ -751,7 +751,7 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 	it("judges nothing on a closed gate with no mark in the project", async () => {
 		// #4698's pass reacts to a MARK: a file-less turn can change a survivor
 		// only through one. The guard is load-bearing on cost as well as on
-		// meaning — `applyInlineBlockerPolicy` pays `loadProjectRulePolicyMap` per
+		// meaning — `applyInlineBlockerPolicy` pays `loadProjectRulePolicy` per
 		// record — so a blocked but unmarked session must re-read nothing on a
 		// quiet turn. Without it, every reply in that state runs the whole policy
 		// pass over every live blocker.

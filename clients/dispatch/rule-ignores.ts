@@ -11,6 +11,12 @@
  * file is filtered by the CLI and unfiltered over LSP. So every pi-lens path
  * that delivers ast-grep's LSP diagnostics has to apply the carve-out itself;
  * the runner-side matcher below is what it applies.
+ *
+ * This matcher is for a RULE'S OWN `ignores:` globs, which mirror
+ * `ast-grep scan`. A user's `rules.<id>.ignorePaths` is not matched here: it is
+ * a gitignore line list, like the `ignore` field, and
+ * `clients/dispatch/rule-policy.ts` (`ruleIgnoredForPath`) evaluates it with
+ * `isIgnoredByGitignoreLines` (#5029).
  */
 
 import * as path from "node:path";

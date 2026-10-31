@@ -385,3 +385,84 @@ describe("metrics-history repository guard through a directory link (#4689 item 
 		30_000,
 	);
 });
+
+describe("metrics-history commit lookup through a file link (#4966)", () => {
+	it.skipIf(!hasGit())(
+		"records the target's repository commit for a file link that sits in another repository",
+		(ctx) => {
+			// RECURRENCE GUARDED (PR #5037 review F2): the lookup started at the
+			// directory of the file LINK, so `decoy/src/x.ts -> real/pkg/src/x.ts`
+			// recorded the decoy repository's commit in `metrics-history.json` and
+			// the same file answered two commits by spelling.
+			const tmp = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-metrics-history-flink-"),
+			);
+			const fixtureEnv = gitFixtureEnv(tmp);
+			fixtureEnv.PI_LENS_SKIP_HOOKS = "1";
+			const real = path.join(tmp, "real");
+			const decoy = path.join(tmp, "decoy");
+			const head = (repo: string) =>
+				(
+					gitExecFileSync("git", ["rev-parse", "--short", "HEAD"], {
+						cwd: repo,
+						encoding: "utf-8",
+						env: fixtureEnv,
+					}) as string
+				).trim();
+			try {
+				for (const repo of [real, decoy]) {
+					fs.mkdirSync(path.join(repo, "pkg", "src"), { recursive: true });
+					const git = (...args: string[]) =>
+						gitExecFileSync("git", args, {
+							cwd: repo,
+							stdio: "ignore",
+							env: fixtureEnv,
+						});
+					git("init", "-q");
+					git("config", "user.email", "test@example.com");
+					git("config", "user.name", "pi-lens test");
+					fs.writeFileSync(
+						path.join(repo, "owner.txt"),
+						`${path.basename(repo)}\n`,
+					);
+					git("add", "owner.txt");
+					git("commit", "-qm", path.basename(repo));
+				}
+				const target = path.join(real, "pkg", "src", "x.ts");
+				fs.writeFileSync(target, "export const x = 1;\n");
+				const link = path.join(decoy, "src", "x.ts");
+				fs.mkdirSync(path.dirname(link), { recursive: true });
+				try {
+					fs.symlinkSync(target, link, "file");
+				} catch (err) {
+					return ctx.skip(`cannot create symlinks here: ${String(err)}`);
+				}
+				const script = [
+					`process.chdir(${JSON.stringify(tmp)});`,
+					`const { captureSnapshots } = require(${JSON.stringify(METRICS_HISTORY_JS)});`,
+					`const files = ${JSON.stringify([link, target])};`,
+					"const history = captureSnapshots(files.map((filePath) => ({ filePath, metrics: {",
+					"  maintainabilityIndex: 90, cognitiveComplexity: 1, maxNestingDepth: 1,",
+					"  linesOfCode: 10, maxCyclomatic: 1, entropy: 1,",
+					"} })));",
+					"process.stdout.write(JSON.stringify(files.map((filePath) => history.files[require('node:path').relative(process.cwd(), filePath)].latest.commit)));",
+				].join("\n");
+				const result = spawnSync(process.execPath, ["-e", script], {
+					cwd: tmp,
+					encoding: "utf-8",
+					env: {
+						...fixtureEnv,
+						PILENS_DATA_DIR: path.join(tmp, ".pilens-data"),
+					},
+				});
+				expect(result.error).toBeUndefined();
+				expect(result.status).toBe(0);
+				expect(head(real)).not.toBe(head(decoy));
+				expect(JSON.parse(result.stdout)).toEqual([head(real), head(real)]);
+			} finally {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+});

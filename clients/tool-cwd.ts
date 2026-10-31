@@ -3,7 +3,6 @@ import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { type ExtensionLogLevel, logExtension } from "./extension-log.js";
 import {
-	isAtOrAboveHomeDir,
 	isRealGitMarker,
 	isUnderDir,
 	isWindowsPath,
@@ -11,6 +10,7 @@ import {
 	normalizeEphemeralMapKey,
 	realpathOrResolve,
 	toPosix,
+	walkUpDirs,
 } from "./path-utils.js";
 import {
 	getDegradationLedgerGeneration,
@@ -139,19 +139,17 @@ function syncGeneration(): void {
 }
 
 /**
- * `startDir` is a path identity: `resolveToolCwd` resolves the file once and
- * hands its directory here, so the climb names the parents the kernel opens
- * and `homeDir` is on the same axis (the caller resolves it too). A caller
- * that passes a spelling climbs the link's parents instead (#4689 item 6).
+ * `walkUpDirs` resolves `startDir` and `homeDir` to path identities itself, so
+ * the climb names the parents the kernel opens and a caller may pass a
+ * spelling (#4689 item 6, #4966). `resolveToolCwd` hands over the directory
+ * of the file's resolved target.
  */
 function walkMarkerRoot(
 	startDir: string,
 	markers: readonly string[],
 	homeDir: string,
 ): { root: string | null; marker?: string } {
-	let current = path.resolve(startDir);
-	for (let depth = 0; depth < 64; depth++) {
-		if (isAtOrAboveHomeDir(current, homeDir)) break;
+	for (const current of walkUpDirs(startDir, { homeDir, maxDepth: 64 })) {
 		for (const marker of markers) {
 			const slash = toPosix(marker).lastIndexOf("/");
 			const parent = slash >= 0 ? marker.slice(0, slash) : "";
@@ -175,9 +173,6 @@ function walkMarkerRoot(
 			}
 			if (found) return { root: current, marker };
 		}
-		const parentDir = path.dirname(current);
-		if (parentDir === current) break;
-		current = parentDir;
 	}
 	return { root: null };
 }
