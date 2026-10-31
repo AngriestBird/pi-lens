@@ -553,13 +553,16 @@ export function splitCascadeUnansweredPrimaries(
 		if (
 			group.serverIds.every((id) => cascadeUnansweredPrimariesDelivered.has(id))
 		) {
-			dropped.push(...group.neighbors);
+			// #5014 r2 (F2): the line is said once, the findings every run. A
+			// fallback's findings stay visible; only an empty neighbour drops.
+			for (const neighbor of group.neighbors)
+				(neighbor.diagnostics.length > 0 ? unanswered : dropped).push(neighbor);
 			continue;
 		}
 		unanswered.push(...group.neighbors);
 		notes.push({
 			serverIds: group.serverIds,
-			line: `⚠️ Cascade: no language server answered for neighbor files of ${group.serverIds.join(", ")} (${PRIMARY_UNAVAILABLE_CAUSE[group.cause]}), so their cross-file errors were not checked (not a clean result).`,
+			line: `⚠️ Cascade: no primary language server answered for neighbor files of ${group.serverIds.join(", ")} (${PRIMARY_UNAVAILABLE_CAUSE[group.cause]}), so their cross-file errors were not confirmed (not a clean result).`,
 		});
 	}
 	return { answered, unanswered, dropped, notes };

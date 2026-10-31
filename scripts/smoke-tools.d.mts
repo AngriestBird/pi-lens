@@ -300,7 +300,7 @@ export function runLensFull(options?: {
 export interface SmokeRow {
 	lang?: string;
 	runner?: string;
-	state: "pass" | "fail" | "skip" | "setup-failed";
+	state: "pass" | "fail" | "skip" | "known-defect" | "setup-failed";
 	detail?: string;
 	diags?: number;
 }

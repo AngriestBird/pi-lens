@@ -162,7 +162,7 @@ describe("ast_grep_search tool", () => {
 			).properties;
 			expect(properties).toHaveProperty("nodeKind");
 			expect(properties).toHaveProperty("hasDescendantKind");
-			expect((properties.paths as { maxItems?: number }).maxItems).toBe(200);
+			expect((properties.paths as { maxItems?: number }).maxItems).toBe(100);
 			expect(properties).toHaveProperty("dump");
 			expect(properties).not.toHaveProperty("ast_grep_dump");
 		});
@@ -405,14 +405,14 @@ describe("ast_grep_search tool", () => {
 				{
 					lang: "typescript",
 					pattern: "foo()",
-					paths: Array.from({ length: 201 }, (_, index) => `src/${index}.ts`),
+					paths: Array.from({ length: 101 }, (_, index) => `src/${index}.ts`),
 				},
 				new AbortController().signal,
 				null,
 				{ cwd: "." },
 			);
 			expect(result.isError).toBe(true);
-			expect(String(result.content[0].text)).toContain("at most 200");
+			expect(String(result.content[0].text)).toContain("at most 100");
 			expect(search).not.toHaveBeenCalled();
 		});
 

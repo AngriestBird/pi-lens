@@ -71,7 +71,7 @@ const PREFIX = "pi-lens-4403-cascade-";
 const turnEndCap = RUNTIME_CONFIG.turnEnd as { maxChars: number };
 
 const cascadeLine = (ids: string, cause: string): string =>
-	`⚠️ Cascade: no language server answered for neighbor files of ${ids} (${cause}), so their cross-file errors were not checked (not a clean result).`;
+	`⚠️ Cascade: no primary language server answered for neighbor files of ${ids} (${cause}), so their cross-file errors were not confirmed (not a clean result).`;
 
 // The cause matrix moved to the tier-2 file (#4632 slice 7); this file keeps
 // only the cap-bound cells, which need a compile-time constant, and the one

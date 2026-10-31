@@ -5,7 +5,11 @@ import type {
 } from "../clients/ast-grep-client.js";
 import { Type } from "../clients/deps/typebox.js";
 import { compactRenderResult } from "./render-compact.js";
-import { readAstGrepLang, resolveAstGrepPaths } from "./shared.js";
+import {
+	MAX_PATHS_ENTRIES,
+	readAstGrepLang,
+	readPathsArgument,
+} from "./shared.js";
 
 // Cap the wire payload so an outline over a large directory can't flood context.
 const MAX_FILES = 50;
@@ -64,7 +68,7 @@ export function createAstGrepOutlineTool(astGrepClient: AstGrepClient) {
 		parameters: Type.Object({
 			paths: Type.Array(Type.String(), {
 				minItems: 1,
-				maxItems: 100,
+				maxItems: MAX_PATHS_ENTRIES,
 				description:
 					"Files or directories to outline (workspace-relative or absolute).",
 			}),
@@ -129,15 +133,17 @@ export function createAstGrepOutlineTool(astGrepClient: AstGrepClient) {
 			ctx: { cwd?: string },
 		) {
 			const cwd = ctx.cwd || ".";
-			const rawPaths = (params.paths ?? []).filter(
-				(p): p is string => typeof p === "string" && p.trim().length > 0,
-			);
-			if (rawPaths.length === 0) return errorResult("paths is required");
+			// #5041: the shared `paths` reader owns the entry rules (non-string,
+			// blank, empty list, cap) and the host-path spelling for every tool.
+			const pathsRead = readPathsArgument(params.paths, { cwd });
+			if (pathsRead.refusal) return errorResult(`Error: ${pathsRead.refusal}`);
+			if (pathsRead.entries.length === 0)
+				return errorResult("paths is required");
 			const { lang, refusal: langError } = readAstGrepLang(params.lang, false);
 			if (langError) return errorResult(`Error: ${langError}`);
-			// Resolve relative paths against the workspace; pass absolute paths to the
-			// CLI (execFile-style args — no shell interpolation).
-			const absPaths = resolveAstGrepPaths(rawPaths, cwd);
+			// The CLI receives absolute targets (execFile-style args — no shell
+			// interpolation).
+			const absPaths = pathsRead.entries;
 
 			if (!(await astGrepClient.ensureAvailable())) {
 				return errorResult(

@@ -241,6 +241,12 @@ async function serveRequest(
 			servedAt,
 			fresh: servedAt <= req.deadlineAt && touched !== undefined,
 			inconclusive: touched?.inconclusive === true,
+			// #5030: the touch's content binding, as an explicit enumerable field
+			// like `inconclusive` above (a binding hung off the diagnostics array
+			// does not survive `JSON.stringify`). Always sent, `"unknown"` for a
+			// touch that composed none, so a reader can tell an incumbent that
+			// predates the field (absent) from one that has no verdict.
+			binding: touched?.binding ?? { boundToCurrentDisk: "unknown" },
 			// #1253: carry the touch's own confirmation verdict across the socket
 			// as an explicit enumerable field (same doctrine as `inconclusive`) —
 			// without it, an incumbent-served empty result from a silent-on-clean

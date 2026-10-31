@@ -195,6 +195,18 @@ file-scoped worklist and receives no project-wide scanner output.
     kept entry with no place in a write's bytes is recorded as such
     (`positionStale`), never inferred later from one line's hash, and a line
     with no word character owes nothing by its text.
+    A non-authoritative answer never stands in for a primary that never
+    answered: a `fallbackFor` alternate (python-jedi beside a pyright that was
+    trust-refused, failed to start, sat in a breaker cool-down or was not
+    installed) is not its owner, so the file reads unavailable with the owner
+    named, never "confirmed clean" (#5014). The rule admits the known-good
+    forms (a non-alternate primary acquired, an alternate standing in for an
+    owner the operator disabled, an alternate whose owner resolved no root) in
+    `unansweredPrimaries` (`clients/lsp/index.ts`); every other cause, listed or
+    not, lands unconfirmed. Screen: can a file read clean when its primary
+    never answered? Population enforcer:
+    `tests/clients/lsp/unanswered-primaries-fallback-5014.test.ts` (every
+    registered `fallbackFor` alternate).
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector

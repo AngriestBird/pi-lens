@@ -164,7 +164,7 @@ instead of a flat blob of source. See
 [`module-report-read-symbol.md`](module-report-read-symbol.md)
 for the full design and token-efficiency numbers.
 
-**`module_report(filePath, maxRefsPerSymbol?, focus?, view?, blastRadius?, blastRadiusDepth?)`** —
+**`module_report(path, maxRefsPerSymbol?, focus?, view?, blastRadius?, blastRadiusDepth?)`** —
 returns a structured outline: every symbol's name/kind/startLine/endLine/signature
 (plus a first-line `doc` summary when a doc comment is attached — #512),
 exported vs internal split (with class/interface members nested under their
@@ -184,7 +184,7 @@ instead of JSON — same data, opt-in. Tree-sitter extract + cached review-graph
 lookup; never builds the graph, never calls LSP on this path.
 `semantic.source` reports what backed the data (`review-graph` | `none`).
 
-**`read_symbol(filePath, symbol)`** — returns the verbatim body of one
+**`read_symbol(path, symbol)`** — returns the verbatim body of one
 named symbol plus a one-line header (`<kind> <name>  <basename>:<startLine>-<endLine>`).
 Records the read against the read-guard so a follow-up edit anywhere in
 that symbol's range passes the read-before-edit check (an outline from

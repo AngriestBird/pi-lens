@@ -538,6 +538,81 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		expect(result.unconfirmedStatus).toContain("failed to run");
 	});
 
+	// Recurrence: PR #5034 (the "no primary language server answered" wording)
+	// and PR #5011 (the `deniedNote` suffix and the `onlySwitchedOff` arm) each
+	// rewrote the one `unconfirmedStatus` expression; the merge kept one side
+	// and the other's wording pin (`toContain`) went stale. One exact assertion
+	// per row of the expression, so a merge that drops either side reds here.
+	// Rows: (cause set | unset) x (denied | not denied) x (only switched off).
+	it.each([
+		{
+			row: "cause set, no denial",
+			lsp: { ...SKIPPED, primaryUnavailableCause: "unstarted" as const },
+			build: SKIPPED,
+			denied: undefined,
+			status:
+				"no primary language server answered (it could not be started, or was still starting)",
+		},
+		{
+			row: "cause set, denied runner",
+			lsp: { ...SKIPPED, primaryUnavailableCause: "unstarted" as const },
+			build: BLOCKING_BUILD,
+			denied: "dotnet-build",
+			status:
+				"no primary language server answered (it could not be started, or was still starting); dotnet-build disabled in config by dispatch.disabledRunners",
+		},
+		{
+			row: "no cause, denied, only switched off",
+			lsp: SUCCEEDED,
+			build: { ...SKIPPED, skipReason: "no-files-matched" as const },
+			denied: "lsp",
+			status:
+				"not checked (lsp disabled in config by dispatch.disabledRunners)",
+		},
+		{
+			row: "no cause, denied, a tool failed",
+			lsp: SUCCEEDED,
+			build: SKIPPED,
+			denied: "lsp",
+			status:
+				"not fully checked (a language tool is missing, timed out, or failed to run; lsp disabled in config by dispatch.disabledRunners)",
+		},
+		{
+			row: "no cause, no denial",
+			lsp: SKIPPED,
+			build: SKIPPED,
+			denied: undefined,
+			status:
+				"not fully checked (a language tool is missing, timed out, or failed to run)",
+		},
+	])("words the unconfirmed status for $row exactly", async (row) => {
+		if (row.denied)
+			writeProject({ dispatch: { disabledRunners: [row.denied] } });
+		const csharp = path.join(projectDir, "Program.cs");
+		fs.writeFileSync(csharp, "class P {}\n");
+		const registry = new RunnerRegistry();
+		registry.register({
+			...countingRunner("lsp", row.lsp).runner,
+			appliesTo: ["csharp"],
+		});
+		registry.register({
+			...countingRunner("dotnet-build", row.build).runner,
+			appliesTo: ["csharp"],
+		});
+		const ctx = createDispatchContext(
+			csharp,
+			projectDir,
+			{ getFlag: () => false },
+			new FactStore(),
+			false,
+		);
+		clearCoverageNoticeState();
+
+		const result = await dispatchForFile(ctx, fallbackGroup, registry);
+
+		expect(result.unconfirmedStatus).toBe(row.status);
+	});
+
 	// Recurrence: round 4 admitted three reasons and pinned two, and nothing
 	// pinned the closed direction, so a change that admitted the whole taxonomy
 	// (or dropped one entry) shipped green. Every taxonomy reason outside the
@@ -603,7 +678,9 @@ describe("dispatch.disabledRunners — dispatch", () => {
 		expect(result.output).not.toContain(
 			"so no language server checks these files",
 		);
-		expect(result.unconfirmedStatus).toContain("no language server answered");
+		expect(result.unconfirmedStatus).toContain(
+			"no primary language server answered",
+		);
 	});
 
 	it("names both keys when lsp.disabledServers and dispatch.disabledRunners deny the file's checkers", async () => {

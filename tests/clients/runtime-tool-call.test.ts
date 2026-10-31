@@ -1265,6 +1265,63 @@ describe("lsp_navigation call-side path field (#3650)", () => {
 	});
 });
 
+/**
+ * RECURRENCE GUARDED (#5047 r1 F4): #5041 declared `file` and `filePath` as
+ * accepted spellings of `lsp_navigation`'s `path`, but both host readers on
+ * this seam read only `path` (and `filePath`, call-side). A rename sent with
+ * `file` therefore resolved no path at `tool_call`: no read credit for the
+ * agent's own edit, no touch, and no attribution, while the same rename through
+ * `path` had all three. Driven through the real `handleToolCall`; the credit is
+ * the read guard's own `noteCheckedPaths`, observed with a pass-through spy.
+ */
+describe("lsp_navigation call-side `file` alias (#5047 F4)", () => {
+	for (const spelling of ["path", "file", "filePath"] as const) {
+		it(`resolves, touches and credits a rename sent through \`${spelling}\``, async () => {
+			touchFileMock.mockClear();
+			const env = setupTestEnvironment("pi-lens-5047-nav-alias-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"src/app.ts",
+					"export const value = 1;\n",
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				const credited = vi.spyOn(runtime.readGuard, "noteCheckedPaths");
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						baseDeps({
+							runtime,
+							event: {
+								toolName: "lsp_navigation",
+								toolCallId: `call-nav-${spelling}`,
+								input: {
+									operation: "rename",
+									[spelling]: "src/app.ts",
+									line: 1,
+									character: 14,
+									newName: "renamed",
+								},
+							},
+							ctx: { cwd: env.tmpDir },
+						}),
+					),
+				);
+				expect(touchFileMock).toHaveBeenCalledWith(
+					filePath,
+					expect.any(String),
+					expect.objectContaining({ source: "tool_call:lsp_navigation" }),
+				);
+				expect(credited).toHaveBeenCalledWith(`call-nav-${spelling}`, [
+					filePath,
+				]);
+			} finally {
+				env.cleanup();
+			}
+		});
+	}
+});
+
 // ---------------------------------------------------------------------------
 // #4187 R4-1 — the licensed set is the set the call NAMED, never the wider set
 // it wrote. Third recurrence of "named path vs written set" on this seam

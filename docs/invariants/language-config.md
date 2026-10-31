@@ -21,10 +21,16 @@
   diagnostic code, tests, and docs.
 - `rules.<id>.ignorePaths` is an experimental path denial resolved by
   config-core with array-union semantics: global entries cannot be cleared by
-  project config. Each glob is relative to the directory of the file that
-  declares it (the project root for a global entry). Ast-grep and tree-sitter
-  apply it before scanning; other runner output uses the shared rule-policy
-  filter.
+  project config. Each entry is a gitignore line, matched as the `ignore` field
+  matches (#783: last match wins, `!` re-includes, a leading `/` roots it, a
+  trailing `/` is directory-only) through `isIgnoredByGitignoreLines`
+  (`clients/file-utils.ts`), relative to the directory of the file that
+  declares it (the project root for a global entry). Each file is its own
+  scope and a path is carved out when any scope ignores it, so a `!` never
+  lifts another file's carve-out. A rule's own YAML `ignores:` stays on the
+  ast-grep glob matcher (`isRuleIgnoredForPath`), which mirrors
+  `ast-grep scan`. Ast-grep and tree-sitter apply `ignorePaths` before
+  scanning; other runner output uses the shared rule-policy filter.
 - `rules` and `dispatch.disabledRunners` are read per file from its config
   owner (`resolveDispatchPolicyConfigForFile`, `loadProjectRulePolicy`), so a
   nested `.pi-lens.json` governs its own files on every surface.

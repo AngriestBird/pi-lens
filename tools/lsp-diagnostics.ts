@@ -70,6 +70,7 @@ import {
 	primaryUnavailableCause,
 	touchCompletedConfirmationPolicy,
 	touchCoverageGap,
+	warmAnswerBinding,
 	type DiagnosticBinding,
 	type PrimaryUnavailableCause,
 	type TouchFileResult,
@@ -846,8 +847,9 @@ type DiagnosticsCollectionResult = {
 	 * were computed against current disk. `boundToCurrentDisk === false` means the
 	 * server's view diverged from disk; the caller demotes such a result to
 	 * "unconfirmed" so a stale-but-fresh-looking result never re-cements the
-	 * widget (#1092). Undefined when no touch produced one (warm-attach /
-	 * getDiagnostics fallback) → treated as "unknown" (no demotion).
+	 * widget (#1092). Undefined when no touch produced one (the getDiagnostics
+	 * fallback) → treated as "unknown" (no demotion). A warm-attach answer always
+	 * carries one (#5030).
 	 */
 	binding?: DiagnosticBinding;
 	/**
@@ -970,6 +972,10 @@ async function collectDiagnosticsForFile(
 					...(attached.response.projectIdentity !== undefined && {
 						projectIdentity: attached.response.projectIdentity,
 					}),
+					// #5030: the incumbent's content binding, so a stale-bound answer
+					// is demoted to unconfirmed (`boundMismatch`) like a local one. An
+					// incumbent that sends none reads as not current.
+					binding: warmAnswerBinding(answer),
 				};
 			}
 		}
@@ -1111,8 +1117,8 @@ export function describePrimaryUnavailable(
 		carriedCause ?? primaryUnavailableCause(serverIds, disabledServerIds);
 	return {
 		text:
-			`Primary LSP (${serverIds.join(", ")}): not available — no language ` +
-			`server answered for this file (${PRIMARY_UNAVAILABLE_CAUSE[cause]}). ` +
+			`Primary LSP (${serverIds.join(", ")}): not available — no primary ` +
+			`language server answered for this file (${PRIMARY_UNAVAILABLE_CAUSE[cause]}). ` +
 			"NOT the same as 0 diagnostics; auxiliary scanners do not check the " +
 			"language itself.",
 		cause,
@@ -2396,9 +2402,9 @@ function auxiliaryOnlyFindingsLine(
 			auxiliaryOnly.flatMap((result) => result.primaryUnavailableCause ?? []),
 		) ?? "unstarted";
 	return (
-		`${count} file${count === 1 ? "" : "s"} with auxiliary findings only: no ` +
-		`language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]}), so the ` +
-		"language itself was not checked."
+		`${count} file${count === 1 ? "" : "s"} with auxiliary or fallback findings only: ` +
+		`no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]}), ` +
+		"so the language itself was not confirmed."
 	);
 }
 
@@ -2423,7 +2429,7 @@ function unconfirmedReasonClause(
 	// The rest of the unconfirmed files keep their own explanation.
 	if (primaryUnavailable.count > 0) {
 		const head =
-			`${primaryUnavailable.count} with no language server answer ` +
+			`${primaryUnavailable.count} with no primary language server answer ` +
 			`(${PRIMARY_UNAVAILABLE_CAUSE[primaryUnavailable.cause ?? "unstarted"]})` +
 			(primaryUnavailable.rootFallbackReasons.length > 0
 				? `: ${primaryUnavailable.rootFallbackReasons.join("; ")}`

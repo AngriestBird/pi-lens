@@ -20,6 +20,7 @@ import type {
 	CascadeResult,
 	CascadeRun,
 	CascadeSkipReason,
+	CascadeUnconfirmedReason,
 } from "./cascade-types.js";
 import {
 	blockerPartitionFields,
@@ -1782,6 +1783,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		},
 	});
 
+	// #5020: a row of a record that names a file since deleted has nothing left
+	// to fix and no dispatch will re-take it. The commit gate's latch is a memo
+	// of the map, so a retire re-derives it (the persisted record is rewritten
+	// by the composer below from the survivors, as for every other retire).
+	// Only this turn session's records: the composer persists this session's
+	// survivors into this cwd, so another session's row is its own turn end's
+	// to retire, against its own cwd (#4921; PR #5033 round 3 F1).
+	if (runtime.retireForeignRowsOfMissingFiles({ sessionId }).length > 0) {
+		runtime.updateGitGuardStatus(false, "");
+	}
+
 	// #1641: past-EOF gate. Runs BEFORE the dependency-drift sweep below — a
 	// cheap statSync per cited file is worth paying first so the pricier
 	// import-parsing sweep can skip anything already taken out of the
@@ -2229,6 +2241,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				lastObserver.set(nk, { run, filePath: neighborPath });
 		}
 	}
+	// #5034 r3 (F8): a neighbour listed because no primary answered for it (its
+	// `fallbackFor` alternate's rows, or none) was delivered, not observed. Its
+	// rows never replace the pending record, and the record's line still renders.
+	// The compute never adds such a neighbour to `observedNeighborPaths`.
+	const primaryUnanswered = new Set<string>();
+	for (const [nk, { run }] of lastObserver) {
+		if (
+			run.result?.neighbors.some(
+				(n) =>
+					normalizeMapKey(n.filePath) === nk &&
+					n.primaryUnavailable !== undefined,
+			)
+		)
+			primaryUnanswered.add(nk);
+	}
 	// #4487: a fresh clean observation clears the neighbour's pending errors
 	// at once; errors are recorded only when the section showing them is
 	// delivered (the cascade section's hold below).
@@ -2333,6 +2360,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					// its own dispatch; the record keeps nothing for it, even when a
 					// run read it before the edit.
 					if (editedKeys.has(normalizeMapKey(n.filePath))) continue;
+					if (primaryUnanswered.has(normalizeMapKey(n.filePath))) continue;
 					sectionObservations.push({
 						filePath: n.filePath,
 						diagnostics: n.diagnostics,
@@ -2474,7 +2502,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// returns earlier).
 	const pendingCandidates = listCascadePendingNeighbors().filter((entry) => {
 		const key = normalizeMapKey(entry.filePath);
-		if (lastObserver.has(key) || editedKeys.has(key)) return false;
+		if (editedKeys.has(key)) return false;
+		if (lastObserver.has(key) && !primaryUnanswered.has(key)) return false;
 		return isUnderDir(entry.filePath, cwd);
 	});
 	// #4495 (review F1, round 3): each entry is a claim about the file's
@@ -2854,9 +2883,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const unconfirmedRuns = cascadeRuns.filter((r) => r.unconfirmed);
 	if (unconfirmedRuns.length > 0) {
 		const runOrder = new Map(cascadeRuns.map((r, i) => [r, i]));
+		// #5040: keyed by server AND reason, because one server can leave one
+		// neighbour unanswered and another holding a pre-edit answer in the same
+		// turn — merging the two would word one cause's paths with the other's
+		// sentence (defect shape 24).
 		const byServer = new Map<
 			string,
 			{
+				serverId: string;
+				reason: CascadeUnconfirmedReason;
 				waitMs: number;
 				primaries: Set<string>;
 				paths: Map<string, string>;
@@ -2875,7 +2910,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						(runOrder.get(observer) ?? -1) > (runOrder.get(run) ?? -1)
 					)
 						continue;
-					const bucket = byServer.get(group.serverId) ?? {
+					// A record from before #5040 carries no reason; it is the #4485
+					// no-answer shape it was written as.
+					const reason: CascadeUnconfirmedReason = group.reason ?? "no-answer";
+					const bucketKey = `${reason}:${group.serverId}`;
+					const bucket = byServer.get(bucketKey) ?? {
+						serverId: group.serverId,
+						reason,
 						waitMs: group.waitMs,
 						primaries: new Set<string>(),
 						paths: new Map<string, string>(),
@@ -2888,7 +2929,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					bucket.paths.set(nk, neighborDisplay);
 					bucket.raw.set(primaryDisplay, run.filePath);
 					bucket.raw.set(neighborDisplay, neighborPath);
-					byServer.set(group.serverId, bucket);
+					byServer.set(bucketKey, bucket);
 				}
 			}
 		}
@@ -2900,7 +2941,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		/** #4617: the files the lines name, as `capped` shows them. */
 		const unconfirmedNamed: string[] = [];
 		let pathCount = 0;
-		for (const [serverId, bucket] of byServer) {
+		for (const bucket of byServer.values()) {
+			const serverId = bucket.serverId;
 			const paths = [...bucket.paths.values()];
 			for (const display of [
 				...[...bucket.primaries].slice(0, 3),
@@ -2910,11 +2952,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 			pathCount += paths.length;
 			const within = bucket.waitMs > 0 ? ` within ${bucket.waitMs} ms` : "";
-			blocks.push(
-				`Cascade sent ${paths.length} dependent(s) of ${capped([...bucket.primaries], 3)} to ${serverId}, ` +
-					`but no answer arrived${within}; a clean cascade result does not cover them.\n` +
-					`  • ${serverId}: ${capped(paths, 5)}`,
-			);
+			const dependents = capped([...bucket.primaries], 3);
+			// #5040: one sentence per cause. A reused pre-edit answer DID arrive,
+			// so the no-answer wording would be false for it.
+			const cause =
+				bucket.reason === "pre-edit-answer"
+					? `Cascade asked ${serverId} about ${paths.length} dependent(s) of ${dependents}, ` +
+						`but its cached answer predates this edit; a clean cascade result does not cover them.`
+					: `Cascade sent ${paths.length} dependent(s) of ${dependents} to ${serverId}, ` +
+						`but no answer arrived${within}; a clean cascade result does not cover them.`;
+			blocks.push(`${cause}\n  • ${serverId}: ${capped(paths, 5)}`);
 		}
 		if (blocks.length > 0) {
 			const pendingAdvisory = withCarryLabel(
@@ -2929,7 +2976,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				phase: "cascade_unconfirmed_rendered",
 				filePath: cascadeLogFilePath,
 				metadata: {
-					servers: byServer.size,
+					// `servers` stays the distinct server count it was before the
+					// buckets were keyed by cause; `groups` counts the cause buckets.
+					servers: new Set([...byServer.values()].map((b) => b.serverId)).size,
+					groups: byServer.size,
 					paths: pathCount,
 					runs: unconfirmedRuns.length,
 				},

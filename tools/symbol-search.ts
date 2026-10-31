@@ -13,6 +13,7 @@ import {
 	type SymbolSearchResult,
 } from "../clients/lens-engine.js";
 import { compactRenderResult } from "./render-compact.js";
+import { readPathsArgument } from "./shared.js";
 
 /**
  * Machine-actionable follow-up hint (#771) — mirrors ast-grep-search.ts's
@@ -83,10 +84,21 @@ export function createSymbolSearchTool(getProjectRoot: () => string) {
 			ctx: { cwd?: string },
 		) {
 			const cwd = getProjectRoot() || ctx.cwd || ".";
+			// #5041: one reader owns the `paths` entry rules and the host-path
+			// spelling. #5038: the entries reach the engine as host paths, so `src`,
+			// `./src` and the absolute directory now scope the same files.
+			const pathsRead = readPathsArgument(params.paths, { cwd });
+			if (pathsRead.refusal) {
+				return {
+					content: [{ type: "text" as const, text: pathsRead.refusal }],
+					isError: true,
+					details: { available: true, query: params.query },
+				};
+			}
 			let result: SymbolSearchResult;
 			try {
 				result = await symbolSearch(params.query, cwd, params.limit, {
-					paths: params.paths,
+					...(pathsRead.entries.length > 0 ? { paths: pathsRead.entries } : {}),
 					lang: params.lang,
 				});
 			} catch (err) {

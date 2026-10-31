@@ -1087,6 +1087,30 @@ describe("#3650 adapter-declared mutation path", () => {
 	});
 
 	/**
+	 * RECURRENCE GUARDED (#5047 r1 F4): `file` is a declared alias of `path` on
+	 * `lsp_navigation` (#5041), but the tool_result reader and the arming
+	 * predicate read `path` only, so a rename sent with `file` resolved to no
+	 * path at either seam. `path` still wins when both are sent.
+	 */
+	it("reads the `file` alias of `path` at both host readers", async () => {
+		const { readMutationPathField, readToolResultPathField } =
+			await import("../../clients/mutating-tool.js");
+		const event = (input: Record<string, unknown>) => ({
+			toolName: "lsp_navigation",
+			input,
+		});
+		expect(readToolResultPathField(event({ file: "src/a.ts" }))).toBe(
+			"src/a.ts",
+		);
+		expect(readMutationPathField(event({ file: "src/a.ts" }))).toBe("src/a.ts");
+		expect(
+			readToolResultPathField(event({ path: "src/a.ts", file: "src/b.ts" })),
+		).toBe("src/a.ts");
+		expect(readToolResultPathField(event({ file: "" }))).toBe(undefined);
+		expect(readToolResultPathField(event({ file: 42 }))).toBe(undefined);
+	});
+
+	/**
 	 * An empty `path` is rejected and the `filePath` fallback wins. This
 	 * kills dropping the `ownPath.length > 0` half of the guard (an empty
 	 * string would be returned before classification ever ran).

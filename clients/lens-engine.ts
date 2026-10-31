@@ -30,7 +30,7 @@ import { extensionsForLanguageToken } from "./language-registry.js";
 import { initLSPConfig } from "./lsp/config.js";
 import { getLSPService } from "./lsp/capabilities.js";
 import { acquireWarmWordIndex } from "./mcp/analyze.js";
-import { normalizeMapKey, toPosix } from "./path-utils.js";
+import { normalizeMapKey, relativeInside, toPosix } from "./path-utils.js";
 import { scanProjectDiagnostics } from "./project-diagnostics/scanner.js";
 import type { ProjectDiagnosticsSnapshot } from "./project-diagnostics/types.js";
 import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
@@ -383,21 +383,32 @@ export function symbolSearchFileMatchesLang(
 
 /** Same glob semantics as ast_grep_search's `paths`: a bare directory/file
  * entry scopes its whole subtree (via a `/**` suffix match), a full glob
- * pattern is matched as-is. Matched relative to `cwd` so absolute index paths
- * and repo-relative globs line up regardless of platform path separators. */
+ * pattern is matched as-is. `paths` entries arrive host-resolved (#5038), so
+ * `src`, `./src` and the absolute directory scope the same files. An entry at
+ * or under `cwd` is matched as its `cwd`-relative spelling: the workspace
+ * prefix is a literal, never glob syntax, so a directory named `app[1]` or
+ * `app{a,b}` keeps its scope (#5047 F1), while the part the caller wrote after
+ * it (`src/**\/*.ts`) is still a pattern. Any other entry (outside `cwd`, or a
+ * relative glob) is also tried against the candidate's absolute spelling. */
 function fileMatchesPathGlobs(
 	file: string,
 	cwd: string,
 	globs: readonly string[],
 ): boolean {
 	const rel = path.relative(cwd, file).split(path.sep).join("/");
+	const abs = path.resolve(file).split(path.sep).join("/");
 	const options = { dot: true, nocase: process.platform === "win32" };
+	const matches = (candidate: string, pattern: string) =>
+		minimatch(candidate, pattern, options) ||
+		minimatch(candidate, `${pattern}/**`, options);
 	return globs.some((raw) => {
+		const within = path.isAbsolute(raw) ? relativeInside(cwd, raw) : undefined;
+		// An entry at or under `cwd` is matched on the relative spelling alone,
+		// never against the absolute candidate, whose workspace prefix is not a
+		// pattern. `cwd` itself relativizes to "", which scopes the whole workspace.
+		if (within !== undefined) return matches(rel, toPosix(within) || "**");
 		const pattern = toPosix(raw);
-		return (
-			minimatch(rel, pattern, options) ||
-			minimatch(rel, `${pattern}/**`, options)
-		);
+		return matches(rel, pattern) || (abs !== rel && matches(abs, pattern));
 	});
 }
 
@@ -405,7 +416,9 @@ function buildSymbolSearchFileFilter(
 	cwd: string,
 	options: SymbolSearchOptions,
 ): ((file: string) => boolean) | undefined {
-	const paths = options.paths?.filter((p) => p.trim().length > 0);
+	// The entries are reader-admitted (`readPathsArgument`, #5041): a blank one
+	// is refused there, so this seam keeps no copy of the rule (#5047 F5).
+	const paths = options.paths;
 	const lang = options.lang?.trim();
 	if (!paths?.length && !lang) return undefined;
 	return (file: string) => {
@@ -522,6 +535,13 @@ export async function symbolSearch(
 	limit = 20,
 	options: SymbolSearchOptions = {},
 ): Promise<SymbolSearchResult> {
+	// #5038: `limit` follows the same `max(1, floor)` rule as `project_report`.
+	// A zero, negative or fractional limit used to reach `searchWordIndex`
+	// unchanged, and `limit: 0` answered "no files matched" — a wrong answer for
+	// a call that only mis-spelled its budget.
+	const effectiveLimit = Number.isFinite(limit)
+		? Math.max(1, Math.floor(limit))
+		: 20;
 	const warmLease = acquireWarmWordIndex(cwd);
 	const snapshot = loadProjectSnapshotWithoutWordIndex(cwd);
 	const index = warmLease.index;
@@ -563,7 +583,11 @@ export async function symbolSearch(
 			(file) => normalizeMapKey(path.resolve(file)),
 		);
 		const fileFilter = buildSymbolSearchFileFilter(cwd, options);
-		results = searchWordIndex(index, query, { limit, centrality, fileFilter });
+		results = searchWordIndex(index, query, {
+			limit: effectiveLimit,
+			centrality,
+			fileFilter,
+		});
 	} finally {
 		warmLease.release();
 	}

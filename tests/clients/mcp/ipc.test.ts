@@ -12,6 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import fc from "fast-check";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { warmAnswerBinding } from "../../../clients/lsp/diagnostic-binding.js";
 import type { McpAnalyzeResult } from "../../../clients/mcp/analyze.js";
 import {
 	boundUnixSocketPath,
@@ -140,6 +141,91 @@ describe("requestWarmDiagnostics", () => {
 			contentHash("const x = 1;"),
 		);
 		removeTempDirSync(cwd);
+	});
+
+	// #5030 corpus: every diagnostics response shape a released build has put on
+	// the socket (`tests/fixtures/warm-attach/`) still parses on the current
+	// transport, and `warmAnswerBinding` reads it as that build meant. The
+	// pre-#5030 shape has no binding, so it reads as not current: a session on
+	// this build attached to an incumbent on an older one withholds the rows
+	// instead of reading them as the current bytes. A response shape a released
+	// build adds gets a fixture and a row here.
+	const WARM_FIXTURES = new URL("../../fixtures/warm-attach/", import.meta.url);
+	const READ_AS = {
+		"diagnostics-response-pre-5030.json": { boundToCurrentDisk: false },
+		"diagnostics-response-5030-stale-bound.json": {
+			contentHash:
+				"2ad21d5e89849c34021330c42624e67b494ed26f33fca1819704af80434ba91c",
+			boundToCurrentDisk: false,
+		},
+	} as const;
+	it.each(Object.keys(READ_AS) as (keyof typeof READ_AS)[])(
+		"parses the %s response and reads its binding (#5030)",
+		async (name) => {
+			const fixture = JSON.parse(
+				fs.readFileSync(new URL(name, WARM_FIXTURES), "utf8"),
+			) as Record<string, unknown>;
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-corpus-"));
+			const pid = 99002;
+			activeServer = net.createServer((socket) => {
+				socket.setEncoding("utf8");
+				socket.once("data", (chunk: string) => {
+					const request = JSON.parse(chunk.trim()) as { contentHash: string };
+					socket.end(
+						`${JSON.stringify({
+							result: {
+								...fixture,
+								contentHash: request.contentHash,
+								servedAt: Date.now(),
+							},
+						})}\n`,
+					);
+				});
+			});
+			await new Promise<void>((resolve) =>
+				activeServer?.listen(diagnosticsIpcPathForCwd(cwd, pid), resolve),
+			);
+			try {
+				const result = await requestWarmDiagnostics(
+					cwd,
+					pid,
+					"/x/app.ts",
+					"const x = 1;",
+					1000,
+				);
+				expect(result.available).toBe(true);
+				if (!result.available) return;
+				expect(result.response.diagnostics).toEqual(fixture.diagnostics);
+				expect(warmAnswerBinding(result.response)).toEqual(READ_AS[name]);
+			} finally {
+				removeTempDirSync(cwd);
+			}
+		},
+	);
+
+	// #5030: the compatibility rule for a binding the reader cannot trust, at the
+	// one function every reader takes it through. Gates fail closed: only the
+	// three known verdicts pass, whatever else arrives reads as not current.
+	it.each([
+		[undefined, { boundToCurrentDisk: false }],
+		[null, { boundToCurrentDisk: false }],
+		["true", { boundToCurrentDisk: false }],
+		[[], { boundToCurrentDisk: false }],
+		[{}, { boundToCurrentDisk: false }],
+		[{ boundToCurrentDisk: 1 }, { boundToCurrentDisk: false }],
+		[{ boundToCurrentDisk: "yes" }, { boundToCurrentDisk: false }],
+		[{ boundToCurrentDisk: true }, { boundToCurrentDisk: true }],
+		[{ boundToCurrentDisk: "unknown" }, { boundToCurrentDisk: "unknown" }],
+		[
+			{ boundToCurrentDisk: false, version: 2, contentHash: 7 },
+			{ boundToCurrentDisk: false },
+		],
+		[
+			{ boundToCurrentDisk: true, version: 2, contentHash: "ab" },
+			{ boundToCurrentDisk: true, contentHash: "ab" },
+		],
+	])("reads the wire binding %j as %j (#5030)", (binding, expected) => {
+		expect(warmAnswerBinding({ binding })).toEqual(expected);
 	});
 
 	// #1108 shape-5 (side-channel copy-loss). `inconclusive` rides the touchFile

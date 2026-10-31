@@ -660,6 +660,42 @@ export function checkedWholeFile(
 	);
 }
 
+/**
+ * #5020: the runners that reached a verdict on this run's bytes: a row of the
+ * latency report with a usable result ({@link hasUsableResult}: it succeeded,
+ * or it completed and failed on findings) that is not in
+ * `inconclusiveSources`. A runner that skipped, broke, is still in flight or
+ * answered for part of the file speaks for nothing, which is why this is the
+ * evidence a retire of another file's row asks for
+ * (`RuntimeCoordinator.retireForeignRows`). A run that failed on findings
+ * speaks only through the caller's own guard: the retire also needs the run to
+ * hold no blocker of its own on the file (`stillReported` in
+ * `publishInlineVerdict`), so mypy answering `b.py` while reporting `c.py`
+ * retires the row about `b.py` and keeps every row about `c.py` (PR #5033
+ * round 3).
+ *
+ * An edit-scoped runner (`editScopedRunnerIds`) is refused here for the reason
+ * `checkedWholeFile` refuses the whole run for it: its verdict covers the
+ * edited ranges, so "no blocker reported" says nothing about the rest of the
+ * file a cross-file row would be judged against.
+ */
+export function verdictRunnerIds(
+	result: Pick<
+		DispatchResult,
+		"inconclusiveSources" | "editScopedRunnerIds" | "latencyReport"
+	>,
+): string[] {
+	const noWholeFileVerdict = new Set([
+		...(result.inconclusiveSources?.runnerIds ?? []),
+		...(result.editScopedRunnerIds ?? []),
+	]);
+	return (result.latencyReport?.runners ?? []).flatMap((runner) =>
+		hasUsableResult(runner) && !noWholeFileVerdict.has(runner.runnerId)
+			? [runner.runnerId]
+			: [],
+	);
+}
+
 // --- Dispatch Context ---
 
 /**
@@ -711,7 +747,12 @@ export interface DispatchContext {
 	readonly facts: import("./fact-store.js").FactStore;
 	/** Project-local .pi-lens.json config captured for this dispatch. */
 	readonly projectConfig?: PiLensProjectConfig;
-	/** Shared global+project rule policy, including path-scoped denials. */
+	/**
+	 * The EDITED file's config owner's rule policy, including path-scoped
+	 * denials: runners read it to skip a rule on this file, and the output filter
+	 * reuses it for findings under the same owner (every other owner's finding
+	 * reads its own, #5011 r8 F24).
+	 */
 	readonly rulePolicy?: RulePolicyMap;
 	/**
 	 * Runner ids the operator denied through `dispatch.disabledRunners`

@@ -10,7 +10,8 @@ let warmAttached = false;
 const tryWarmAttachedDiagnostics = vi.fn();
 
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
-vi.mock("../../../clients/warm-attach.js", () => ({
+vi.mock("../../../clients/warm-attach.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../clients/warm-attach.js")>()),
 	isWarmAttached: () => warmAttached,
 	tryWarmAttachedDiagnostics,
 }));
@@ -64,6 +65,7 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		tryWarmAttachedDiagnostics.mockImplementation(async (file: string) => ({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [diagnostic(`attached:${path.basename(file)}`)],
 			},
 		}));
@@ -109,6 +111,7 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		tryWarmAttachedDiagnostics.mockResolvedValue({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [],
 				confirmation: "partial",
 				unconfirmedServerIds: ["typos"],
@@ -142,7 +145,7 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		fs.writeFileSync(file, "const x = 1;\n");
 		tryWarmAttachedDiagnostics.mockResolvedValue({
 			available: true,
-			response: { diagnostics: [] },
+			response: { diagnostics: [], binding: { boundToCurrentDisk: true } },
 		});
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
@@ -169,6 +172,7 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		tryWarmAttachedDiagnostics.mockResolvedValue({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [
 					{
 						...diagnostic("Type 'number' is not assignable to type 'string'."),
@@ -196,6 +200,110 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 			loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(file)];
 		expect(entry?.diagnostics[0]?.severity).toBe(2);
 		expect(entry?.diagnostics[0]?.message).toContain(INFERRED_PROJECT_MARKER);
+	});
+
+	// #5030: the incumbent's content binding, read by the sweep. Recurrence: the
+	// DTO dropped it, so a stale-bound answer (rows about older bytes) was
+	// swept in as a result for the current bytes, with no `boundToCurrentDisk`
+	// for `lens_diagnostics` to classify it by, and no fingerprint for the
+	// workspace cache to gate a replay on. The answer comes from the REAL
+	// producer through a JSON round trip. An incumbent built before #5030 sends
+	// no binding, and that reads as not current.
+	describe("incumbent binding (#5030)", () => {
+		const servedAnswer = async (
+			file: string,
+			incumbentTouch: Record<string, unknown>,
+			edit: (response: Record<string, unknown>) => void = () => undefined,
+		) => {
+			const { installLspServiceDouble } =
+				await import("../../support/lsp-service-seam.js");
+			await installLspServiceDouble({
+				touchFile: vi.fn(async () => incumbentTouch),
+			});
+			const { _serveWarmRequestForTests } =
+				await import("../../../clients/warm-attach.js");
+			const { contentHash, WARM_DIAGNOSTICS_SCHEMA_VERSION } =
+				await import("../../../clients/mcp/ipc.js");
+			const content = fs.readFileSync(file, "utf-8");
+			const served = await _serveWarmRequestForTests({
+				route: "diagnostics",
+				version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+				file,
+				cwd: path.dirname(file),
+				content,
+				contentHash: contentHash(content),
+				deadlineAt: Date.now() + 60_000,
+			});
+			const response = JSON.parse(JSON.stringify(served.result));
+			edit(response);
+			return { available: true, response };
+		};
+		const sweepOne = async (
+			incumbentTouch: Record<string, unknown>,
+			edit?: (response: Record<string, unknown>) => void,
+		) => {
+			fs.mkdirSync(path.join(tmp, ".pi-lens"), { recursive: true });
+			const file = path.join(tmp, "a.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			tryWarmAttachedDiagnostics.mockResolvedValue(
+				await servedAnswer(file, incumbentTouch, edit),
+			);
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const [result] = await new LSPService().runWorkspaceDiagnostics(tmp, {
+				files: [file],
+			});
+			const { cacheKeyFor, loadWorkspaceDiagnosticsCache } =
+				await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+			return {
+				bound: result?.boundToCurrentDisk,
+				contentHash: result?.contentHash,
+				cached: loadWorkspaceDiagnosticsCache(tmp)?.entries[cacheKeyFor(file)],
+			};
+		};
+		const touch = (binding: Record<string, unknown>) => ({
+			diags: [{ ...diagnostic("older bytes"), serverId: "typescript" }],
+			confirmation: "confirmed",
+			binding,
+		});
+
+		it.each([false, true, "unknown"] as const)(
+			"reads an incumbent answer bound %s as that verdict and keeps its fingerprint",
+			async (bound) => {
+				const swept = await sweepOne(
+					touch({ contentHash: "fp-of-sent-bytes", boundToCurrentDisk: bound }),
+				);
+
+				expect(swept.bound).toBe(bound);
+				expect(swept.contentHash).toBe("fp-of-sent-bytes");
+				// The fingerprint rides into the cache entry, so a replay is
+				// disk-gated exactly like a local touch's.
+				expect(swept.cached?.contentHash).toBe("fp-of-sent-bytes");
+			},
+		);
+
+		it.each([
+			["an older incumbent's answer (no binding field)", undefined],
+			["a null binding", null],
+			["a binding that is not an object", "yes"],
+			["a binding with no verdict", {}],
+			["a binding with an unrecognised verdict", { boundToCurrentDisk: "yes" }],
+		] as const)(
+			"reads %s as not current and does not cache it",
+			async (_label, wire) => {
+				const swept = await sweepOne(
+					touch({ boundToCurrentDisk: true }),
+					(response) => {
+						if (wire === undefined) delete response.binding;
+						else response.binding = wire;
+					},
+				);
+
+				expect(swept.bound).toBe(false);
+				// No fingerprint, so a replay could not be disk-gated: the entry
+				// would serve the withheld rows as the file's current answer.
+				expect(swept.cached).toBeUndefined();
+			},
+		);
 	});
 
 	it("promotes after an IPC failure and completes that file and the remainder locally", async () => {
@@ -259,6 +367,7 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		tryWarmAttachedDiagnostics.mockResolvedValue({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [
 					{
 						...diagnostic("ts finding"),
@@ -295,6 +404,7 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		tryWarmAttachedDiagnostics.mockResolvedValue({
 			available: true,
 			response: {
+				binding: { boundToCurrentDisk: true },
 				diagnostics: [],
 				confirmation: "partial",
 				unconfirmedServerIds: ["ast-grep", "opengrep", "typos"],
@@ -349,7 +459,7 @@ describe("runWorkspaceDiagnostics warm attach sweeps (#822)", () => {
 		});
 		tryWarmAttachedDiagnostics.mockResolvedValue({
 			available: true,
-			response: { diagnostics: [] },
+			response: { diagnostics: [], binding: { boundToCurrentDisk: true } },
 		});
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 

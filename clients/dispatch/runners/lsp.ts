@@ -17,8 +17,10 @@ import { getLspCapableKinds } from "../../language-policy.js";
 import { exceedsLspSyncLimits } from "../../lsp/content-limits.js";
 import {
 	primaryUnavailableCause,
+	readBoundToCurrentDisk,
 	touchCompletedConfirmationPolicy,
 	touchCoverageGap,
+	warmAnswerBinding,
 } from "../../lsp/diagnostic-binding.js";
 import { getLSPService } from "../../lsp/capabilities.js";
 import { disabledPrimaries } from "../../lsp/session-roots.js";
@@ -291,6 +293,10 @@ const lspRunner: RunnerDefinition = {
 						...(answer.unconfirmedServerIds !== undefined && {
 							unconfirmedServerIds: answer.unconfirmedServerIds,
 						}),
+						// #5030: the incumbent's content binding, so a stale-bound answer
+						// takes the same withholding below as a local one. An incumbent
+						// that sends none reads as not current (`warmAnswerBinding`).
+						binding: warmAnswerBinding(answer),
 					}
 				: await lspService.touchFile(ctx.filePath, content, {
 						diagnostics: "document",
@@ -331,10 +337,11 @@ const lspRunner: RunnerDefinition = {
 					]),
 				];
 				deferredServerIds = touched.deferredServerIds ?? [];
+				// #5051: the cascade's confirmed-touch display reads the same
+				// verdict through the same reader.
+				primaryAnswerStale = readBoundToCurrentDisk(touched) === false;
 				primaryAnswered =
-					touchCompletedConfirmationPolicy(touched) &&
-					touched.binding?.boundToCurrentDisk !== false;
-				primaryAnswerStale = touched.binding?.boundToCurrentDisk === false;
+					touchCompletedConfirmationPolicy(touched) && !primaryAnswerStale;
 				if (primaryAnswerStale) {
 					// #4231, #5017: a stale-bound answer is not an observation of these
 					// bytes, so a row stays only with provenance that its server
@@ -349,11 +356,18 @@ const lspRunner: RunnerDefinition = {
 					// finding from the aggregate binding (#5017: `hasErrors` read such
 					// rows as a `failed` verdict, and `keepUnobserved` retired a live
 					// recorded blocker on findings about other bytes).
+					// #5034 r3 (F7): a `primary-unavailable` touch names primaries that
+					// were never acquired (`resolveTouchVerdict` keeps no wait or notify
+					// id), so they contributed no row and no binding: the stale binding
+					// is a fallback's or an auxiliary's, and no row has the provenance.
+					const namesStaleContributor =
+						diagnosticsInconclusive &&
+						touched.inconclusiveReason !== "primary-unavailable";
 					const unconfirmed = new Set(unconfirmedServerIds);
 					const currentContentDiags: typeof lspDiags = [];
 					for (const diagnostic of lspDiags) {
 						if (
-							diagnosticsInconclusive &&
+							namesStaleContributor &&
 							diagnostic.serverId !== undefined &&
 							!unconfirmed.has(diagnostic.serverId)
 						) {

@@ -661,7 +661,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/language-profile.ts": 2,
 		"clients/language-registry.ts": 1,
 		"clients/lens-config.ts": 1,
-		"clients/lens-engine.ts": 3,
+		// 3 -> 2 (#5047 F5): the engine's own blank-entry filter is deleted; the
+		// shared reader in tools/shared.ts owns the rule.
+		"clients/lens-engine.ts": 2,
 		"clients/lens-flag-registry.ts": 2,
 		"clients/lens-map.ts": 2,
 		"clients/lsp-budget.ts": 1,
@@ -757,7 +759,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// records, an `Array.prototype.filter` call, not a delivery gate.
 		// 4 -> 5 (#4990): the per-source row retirement keeps the rows the clean
 		// verdict did not cover, the same array call, not a delivery gate.
-		"clients/runtime-coordinator.ts": 5,
+		// 5 -> 6 (#5020): `retireForeignRows` keeps the rows no retire judged, the
+		// same array call, not a delivery gate.
+		"clients/runtime-coordinator.ts": 6,
 		"clients/runtime-session.ts": 4,
 		// 3 -> 5 -> 3 (#4187): round 4's tool-call authorship retirement filtered
 		// the owned in-process mutation paths; round 5 folds two of its three
@@ -822,12 +826,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/word-index.ts": 14,
 		"clients/workspace-topology.ts": 1,
 		"tools/activate-tools.ts": 2,
-		"tools/ast-grep-outline.ts": 1,
 		"tools/effective-config.ts": 4,
 		"tools/lens-diagnostic-mark.ts": 1,
 		// Six array projections scope and count request-local session evidence;
 		// these are Array.prototype.filter calls, not new delivery-policy seams.
-		"tools/lens-diagnostics.ts": 43,
+		// 43 -> 42 (#5041): the `paths` entry filter moved into tools/shared.ts's
+		// one reader, which every tool now calls.
+		"tools/lens-diagnostics.ts": 42,
 		// 12 -> 13 (#4346): the batch selects its finding-bearing files to resolve.
 		// 13 -> 14 (#4322): the batch counts its files with auxiliary findings
 		// only, one `Array.prototype.filter` use, not a delivery filter.
@@ -835,7 +840,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lsp-navigation.ts": 6,
 		"tools/render-compact.ts": 3,
 		"mcp/analyze-cli.ts": 1,
-		"mcp/server.ts": 9,
+		// 9 -> 8 (#5041): pilens_symbol_search's own entry filter is deleted; the
+		// shared reader in tools/shared.ts applies the rule now.
+		"mcp/server.ts": 8,
 		"mcp/tool-arguments.ts": 4,
 		// #1416: /lens-health's effective tool projection adds two semantic
 		// filters; keep the existing census entry pinned to the live population.
@@ -1113,7 +1120,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/language-profile.ts": 12,
 		"clients/latency-logger.ts": 2,
 		"clients/lens-config.ts": 3,
-		"clients/lens-engine.ts": 6,
+		// 8 -> 9 (#5047 F1): the path-glob matcher relativizes an entry under cwd.
+		"clients/lens-engine.ts": 9,
 		"clients/lens-flag-registry.ts": 13,
 		"clients/lens-map.ts": 14,
 		"clients/log-cleanup.ts": 9,
@@ -1326,7 +1334,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 28 -> 16 (#4689 batch 1 r2): the other eleven inline-store accessors and
 		// the deferMutation key drop their `path.resolve` too; every accessor keys
 		// the raw spelling through normalizeMapKey (review F1).
-		"clients/runtime-coordinator.ts": 16,
+		// 16 -> 17 (#5020): `retireForeignRowsOfMissingFiles` asks `path.isAbsolute`
+		// before it judges a cited file, so a relative cite is never retired.
+		"clients/runtime-coordinator.ts": 17,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).
@@ -1433,11 +1443,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// its own `path` import and two `path.*` calls.
 		"tools/ast-grep-outline.ts": 5,
 		"tools/ast-grep-search.ts": 2,
-		"tools/effective-config.ts": 2,
+		"tools/effective-config.ts": 6,
 		// 6 -> 4 (#4577 M2): the `path` argument folds onto
 		// `resolveHostToolPath`, dropping the `path.isAbsolute`/`path.resolve`
 		// pair.
-		"tools/lens-diagnostic-mark.ts": 4,
+		"tools/lens-diagnostic-mark.ts": 6,
 		// 30 -> 27 (#4576): `resolvePathsScope` folds onto
 		// `resolveHostToolPath`, dropping three `path.*` calls.
 		// 27 -> 26 (#4689 r2): mode=all renders a row's file through
@@ -1446,7 +1456,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `toProjectRelativePath` too.
 		// 25 -> 19 (#4689 batch 4): mode=full's merge keys its Sets, dedup key and
 		// per-file map by `normalizeMapKey`, dropping six `path.resolve` calls.
-		"tools/lens-diagnostics.ts": 17,
+		"tools/lens-diagnostics.ts": 22,
 		// 10 -> 8 (#4577 M2): the scalar and batch `path`/`paths` arguments fold
 		// onto `resolveHostToolPath`, dropping one `path.resolve` each.
 		"tools/lsp-diagnostics.ts": 8,
@@ -1457,7 +1467,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.isAbsolute`/`path.resolve` calls goes and the merged file keeps
 		// path OPERATIONS only (`path.basename`, `path.resolve` of a read target),
 		// the sense the glossary does not retire.
-		"tools/lsp-navigation.ts": 11,
+		"tools/lsp-navigation.ts": 14,
 		// 29 -> 27 (#4577 M2): `resolveFile` folds onto `resolveHostToolPath`,
 		// dropping the `path.isAbsolute`/`path.resolve` pair.
 		"tools/module-report.ts": 27,
@@ -1466,12 +1476,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.resolve(base)` alone instead of going through
 		// `resolveHostToolPath`, because that generated path is pi-lens's own and
 		// must keep its bytes.
-		"tools/shared.ts": 2,
+		"tools/shared.ts": 8,
 		"tools/symbol-search.ts": 5,
 		"mcp/analyze-cli.ts": 4,
 		"mcp/cli.ts": 2,
 		// 31 -> 30 (#4966): the upward climb folds onto `walkUpDirs`, so a `path.dirname` / `path.resolve` use leaves the module.
-		"mcp/server.ts": 30,
+		"mcp/server.ts": 41,
 		"index.ts": 20,
 	},
 	record: {
