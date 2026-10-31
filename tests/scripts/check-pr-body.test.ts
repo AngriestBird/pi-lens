@@ -3976,7 +3976,7 @@ describe("body caps (#5003)", () => {
 	// every raw-HTML block, so any spelling a reader still scrolls past
 	// (details with no blank line, div, p, table, a comment) held unlimited
 	// text. The count now reads the lexer's tokens and charges raw HTML in full.
-	it.each([
+	const VISIBLE_BLOCKS: Array<[string, string]> = [
 		[
 			"a details block with no blank line",
 			`<details>\n<summary>Proof</summary>\n${pad}\n</details>`,
@@ -4008,11 +4008,18 @@ describe("body caps (#5003)", () => {
 		["a setext heading", `${pad}\n---`],
 		["a reference definition title", `[x]: https://example.com "${pad}"`],
 		["an image alt", `![${pad}](https://example.com/x.png)`],
-	])("counts %s toward the visible cap", (_name, block) => {
-		expect(
-			capError(tests(`Targeted tests pass.\n\n${block}`), "visible characters"),
-		).toHaveLength(1);
-	});
+	];
+	it.each(VISIBLE_BLOCKS)(
+		"counts %s toward the visible cap",
+		(_name, block) => {
+			expect(
+				capError(
+					tests(`Targeted tests pass.\n\n${block}`),
+					"visible characters",
+				),
+			).toHaveLength(1);
+		},
+	);
 
 	it("leaves a code fence out of the character count", () => {
 		const padded = `${sized(5000)}\n\n${fence(20)}`;
@@ -4028,7 +4035,7 @@ describe("body caps (#5003)", () => {
 	});
 
 	// Recurrence: #5026 review F1. Each spelling held unlimited code.
-	it.each([
+	const CODE_CAPPED: Array<[string, string, string]> = [
 		[
 			"an indented block of 200 lines",
 			Array.from({ length: 200 }, () => "    FAIL x").join("\n"),
@@ -4060,7 +4067,8 @@ describe("body caps (#5003)", () => {
 			fence(30).replaceAll(/^/gm, "> "),
 			"code fence",
 		],
-	])("caps code written as %s", (_name, block, needle) => {
+	];
+	it.each(CODE_CAPPED)("caps code written as %s", (_name, block, needle) => {
 		expect(capError(tests(block), needle)).toHaveLength(1);
 	});
 
@@ -4094,7 +4102,7 @@ describe("body caps (#5003)", () => {
 		expect(capError(notes(bullets(6)), "allows at most")).toHaveLength(1);
 	});
 
-	it.each([
+	const NOTES_REFUSED: Array<[string, string]> = [
 		[
 			"six items with a period marker",
 			Array.from({ length: 6 }, (_, at) => `${at + 1}. Note.`).join("\n"),
@@ -4138,7 +4146,8 @@ describe("body caps (#5003)", () => {
 		["an indented code block", "    FAIL x"],
 		["a raw html block", "- Note.\n\n<div>x</div>"],
 		["a code fence inside an item", "- Note.\n\n  ```text\n  FAIL x\n  ```"],
-	])("refuses %s in reviewer notes", (_name, block) => {
+	];
+	it.each(NOTES_REFUSED)("refuses %s in reviewer notes", (_name, block) => {
 		expect(capError(notes(block), "allows at most")).toHaveLength(1);
 	});
 
@@ -4147,7 +4156,7 @@ describe("body caps (#5003)", () => {
 	// bullet list was no sentence at all, and only the first summary heading
 	// was read. The character cap bounds the first; the admission of
 	// paragraphs only, the second; the loop over headings, the third.
-	it.each([
+	const SUMMARY_REFUSED: Array<[string, string]> = [
 		["lowercase sentences past the character cap", "fix a. ".repeat(100)],
 		["four sentences", "One. Two. Three. Four."],
 		[
@@ -4158,9 +4167,13 @@ describe("body caps (#5003)", () => {
 		["a long paragraph", `${"word ".repeat(150)}end.`],
 		["a table", "Fixed it.\n\n| a |\n| --- |\n| 1 |"],
 		["an html block", "Fixed it.\n\n<details>\nmore\n</details>"],
-	])("holds the Summary to three plain sentences: %s", (_name, text) => {
-		expect(capError(summary(text), "sentences")).toHaveLength(1);
-	});
+	];
+	it.each(SUMMARY_REFUSED)(
+		"holds the Summary to three plain sentences: %s",
+		(_name, text) => {
+			expect(capError(summary(text), "sentences")).toHaveLength(1);
+		},
+	);
 
 	it.each(["Why", "Problem", "What changed"])(
 		"applies the Summary cap to a second heading that reads as summary: %s",
@@ -4198,7 +4211,7 @@ describe("body caps (#5003)", () => {
 		);
 	const ALIGNMENT = "needs exactly one line";
 
-	it.each([
+	const ALIGNMENT_REFUSED: Array<[string, string | null]> = [
 		["a missing line", null],
 		["an unknown family", "Alignment: Config sprawl"],
 		[
@@ -4219,11 +4232,15 @@ describe("body caps (#5003)", () => {
 		["a bulleted line", "- Alignment: Env tunables"],
 		["a line inside a code fence", "```text\nAlignment: Env tunables\n```"],
 		["two lines", "Alignment: Env tunables\nAlignment: Closed vocabularies"],
-	])("refuses %s in the Alignment line", (_name, line) => {
-		expect(capError(alignment(line), ALIGNMENT)).toHaveLength(1);
-	});
+	];
+	it.each(ALIGNMENT_REFUSED)(
+		"refuses %s in the Alignment line",
+		(_name, line) => {
+			expect(capError(alignment(line), ALIGNMENT)).toHaveLength(1);
+		},
+	);
 
-	it.each([
+	const ALIGNMENT_ADMITTED: Array<[string, string]> = [
 		["one family", "Alignment: Env tunables"],
 		[
 			"two families",
@@ -4234,9 +4251,13 @@ describe("body caps (#5003)", () => {
 			"Alignment: none: this fixture touches no family.",
 		],
 		["a none with a 12 character reason", "Alignment: none: 123456789012"],
-	])("admits %s in the Alignment line", (_name, line) => {
-		expect(capError(alignment(line), ALIGNMENT)).toEqual([]);
-	});
+	];
+	it.each(ALIGNMENT_ADMITTED)(
+		"admits %s in the Alignment line",
+		(_name, line) => {
+			expect(capError(alignment(line), ALIGNMENT)).toEqual([]);
+		},
+	);
 
 	it("keeps the family names in docs/alignment-families.md only", () => {
 		const source = readFileSync(
