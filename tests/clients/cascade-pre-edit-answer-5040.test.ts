@@ -28,6 +28,7 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
+import { diagnosticsPublishedAtForPath } from "../../clients/lsp/client.js";
 import type { ReviewGraph } from "../../clients/review-graph/types.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { installLspService } from "../support/lsp-service-seam.js";
@@ -278,6 +279,40 @@ beforeEach(async () => {
 	(await import("../../clients/lsp/config.js"))._setServersForFileForTests(
 		mocks.getServersForFileWithConfig,
 	);
+});
+
+describe("the per-file publish stamp (#5040)", () => {
+	// The one owner of "when were this file's diagnostics last stored": the
+	// later of the push and pull stamps, which is exactly the `ts`
+	// `getAllDiagnostics()` reports for the path. `touchFile` reads it through
+	// the client accessor; `getAllDiagnostics` and `pruneDiagnostics` now read
+	// it too, so the two cannot drift.
+	function stampOf(state: {
+		push?: number;
+		pull?: number;
+	}): number | undefined {
+		return diagnosticsPublishedAtForPath(
+			{
+				pushDiagnosticTimestamps: new Map(
+					state.push === undefined ? [] : [["repo/a.py", state.push]],
+				),
+				documentPullDiagnosticTimestamps: new Map(
+					state.pull === undefined ? [] : [["repo/a.py", state.pull]],
+				),
+			} as unknown as Parameters<typeof diagnosticsPublishedAtForPath>[0],
+			"repo/a.py",
+		);
+	}
+
+	it("answers the newer of the push and pull stamps", () => {
+		expect(stampOf({ push: 1_000, pull: 2_000 })).toBe(2_000);
+		expect(stampOf({ push: 2_000, pull: 1_000 })).toBe(2_000);
+		expect(stampOf({ push: 1_500 })).toBe(1_500);
+	});
+
+	it("answers nothing for a path with no stored publication", () => {
+		expect(stampOf({})).toBeUndefined();
+	});
 });
 
 describe("touchFile reports the cached answer it reused (#5040)", () => {
