@@ -44,6 +44,7 @@ const workflow = yaml.load(
 	on: {
 		pull_request: { branches: string[]; paths?: string[] };
 		push: { branches: string[]; paths: string[] };
+		merge_group?: { types: string[] };
 	};
 	permissions: unknown;
 	concurrency: { group: string; "cancel-in-progress": unknown };
@@ -121,6 +122,13 @@ describe("hot-path latency workflow (#4363)", () => {
 		);
 		expect(classify?.run).toContain('--event "$EVENT_NAME"');
 		expect(classify?.run).toContain('--pr "$PR_NUMBER"');
+		// Recurrence (#3754, #5066): a required check that has no merge_group
+		// trigger never reports on the queue's commit and stalls the queue, and
+		// #5066's bot-PR dispatch census derives its targets from the trigger.
+		// The classify step has no `if`, so the script reads a merge_group event
+		// (hotpath=true, tests/scripts/ci-changed-files.test.ts) and times it.
+		expect(workflow.on.merge_group).toEqual({ types: ["checks_requested"] });
+		expect(classify?.if).toBeUndefined();
 		expect(job.permissions["pull-requests"]).toBe("read");
 		const timing = [
 			"Install dependencies",

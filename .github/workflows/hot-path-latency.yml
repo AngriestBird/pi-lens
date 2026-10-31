@@ -70,6 +70,13 @@ on:
       - "scripts/check-hot-path-latency.mjs"
       - "scripts/lib/latency-stats.mjs"
       - ".github/workflows/hot-path-latency.yml"
+  # #3754: a required check must also report on the merge queue's
+  # `gh-readonly-queue/...` commit (tests/config/merge-queue-workflows.test.ts),
+  # and #5066's bot-PR dispatch census derives its targets from this trigger.
+  # scripts/ci-changed-files.mjs reads a merge_group event as hotpath=true, so a
+  # queued PR is timed.
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch: {}
 
 permissions: {}
