@@ -190,6 +190,14 @@ export type DegradationKind =
 	| "cascade-pending-cap"
 	/** #4487: the pending neighbour-error record reached its cap. */
 	| "cascade-pending-neighbors-evicted"
+	/**
+	 * #5040: a cascade neighbour's only answer was a cache entry published BEFORE
+	 * the run's edit (a push-only server that never republishes a dependent). The
+	 * neighbour is now unconfirmed rather than clean; the subject is
+	 * `<serverId>:<path key>` and the record counts per session, so a repeated
+	 * exporter edit does not need a new kind to be visible.
+	 */
+	| "cascade-pre-edit-answer"
 	| "cascade-tier3-backlog-evicted"
 	/**
 	 * #3511: the change-log lock stayed held past its bounded wait (or its

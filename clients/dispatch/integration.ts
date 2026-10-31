@@ -32,7 +32,10 @@ import {
 } from "./dispatcher.js";
 import { spawnAbortScope } from "../safe-spawn.js";
 import { emitBounded } from "../bounded-telemetry.js";
-import { recordDegradationOnce } from "../degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
 import { FactStore, setFactStoreEvictionReporter } from "./fact-store.js";
 import { canWriteAnalysisRoot, resolveAnalysisRoot } from "../analysis-root.js";
 import { resolveLanguageRootForFile } from "../language-profile.js";
@@ -81,6 +84,7 @@ import type {
 	CascadeSectionLayout,
 	CascadeSkipReason,
 	CascadeUnconfirmed,
+	CascadeUnconfirmedReason,
 } from "../cascade-types.js";
 import { getDiagnosticTracker } from "../diagnostic-tracker.js";
 import type { GenerationHandle } from "../generation-guard.js";
@@ -649,21 +653,20 @@ function ensureCascadeTurnScope(turnSeq: number): void {
 }
 
 /**
- * #4486: a cached diagnostics entry is an observation of the state this
- * compute is asked about only when it was published after the compute
- * started. The pipeline starts the compute after the primary's dispatch
- * returned, and that dispatch awaited the primary's didChange, so anything
- * stamped later was computed against the edit. Erring late costs a touch;
- * erring early served a pre-edit clean as current (a 4 s old snapshot of a
- * neighbour the edit had broken). Replaces the 240 s TTL at all three
- * readers: the passive snapshot, the touch-error fallback and the degraded
- * fallback.
+ * #4486: an answer is an observation of the state this compute is asked about
+ * only when it was published after the compute started. The pipeline starts
+ * the compute after the primary's dispatch returned, and that dispatch awaited
+ * the primary's didChange, so anything stamped later was computed against the
+ * edit. Erring late costs a touch; erring early served a pre-edit clean as
+ * current (a 4 s old snapshot of a neighbour the edit had broken). Replaces the
+ * 240 s TTL at every reader: the passive snapshot, the touch-error fallback,
+ * the degraded fallback, and — #5040 — a touch's own reused answer.
  */
 function isPostEditObservation(
-	entry: { ts: number },
+	publishedAt: number,
 	cascadeStart: number,
 ): boolean {
-	return entry.ts > cascadeStart;
+	return publishedAt > cascadeStart;
 }
 
 /**
@@ -831,6 +834,52 @@ function isConfirmedTouch(rawDiags: TouchFileResult): boolean {
 		!readInconclusive(rawDiags) &&
 		touchCoverageGap(rawDiags).length === 0 &&
 		readBoundToCurrentDisk(rawDiags) !== false
+	);
+}
+
+/**
+ * #5040: the cached answer this touch reused instead of producing its own
+ * (`TouchFileResult.reusedAnswer` — a notify-skipped push server whose entry
+ * stood unchanged through the touch). Read off the wrapper, like every other
+ * flag here (#1179).
+ */
+function readReusedAnswer(
+	rawDiags: unknown,
+): { serverId: string; publishedAt: number } | undefined {
+	const reused = (
+		rawDiags as { reusedAnswer?: { serverId?: unknown; publishedAt?: unknown } }
+	)?.reusedAnswer;
+	return typeof reused?.serverId === "string" &&
+		typeof reused.publishedAt === "number"
+		? { serverId: reused.serverId, publishedAt: reused.publishedAt }
+		: undefined;
+}
+
+/**
+ * #5040: is this touch's answer older than the edit this cascade is about?
+ *
+ * A push-only server publishes for a dependent when ITS project model changes,
+ * not when we ask (jdtls republishes one importer of a broken exporter and
+ * never the other — PR #5035's wire capture). The touch of a neighbour sends
+ * nothing for unchanged content, so the only answer it can report is the entry
+ * the server already held; when that entry predates this run, nothing has
+ * re-asked the server since the exporter changed, and a clean verdict for it
+ * would be an all-clear for a dependent nobody re-checked. It is unconfirmed,
+ * by the same rule `isPostEditObservation` (#4486) already applies to the
+ * passive snapshot, the touch-error fallback and the degraded fallback.
+ *
+ * Not a disqualifier when the answer postdates the run: the server DID publish
+ * for this neighbour after the edit (rows 1-4 of the PR's state table), and the
+ * neighbour keeps whatever verdict it earned.
+ */
+function isPreEditAnswer(
+	rawDiags: TouchFileResult,
+	cascadeStart: number,
+): boolean {
+	const reused = readReusedAnswer(rawDiags);
+	return (
+		reused !== undefined &&
+		!isPostEditObservation(reused.publishedAt, cascadeStart)
 	);
 }
 
@@ -1959,21 +2008,36 @@ export async function computeCascadeForFile(
 		// #4487: the selected neighbours freshly observed by this run, clean
 		// or not (`CascadeRun.observedNeighborPaths`).
 		const observedPaths: string[] = [];
-		// #4485: selected neighbours that got no answer within their bound,
-		// by the server asked (`CascadeRun.unconfirmed`).
+		// #4485: selected neighbours the run does not cover, by the server asked
+		// and by WHY (`CascadeRun.unconfirmed`).
 		const unconfirmedByServer = new Map<
 			string,
-			{ waitMs: number; paths: string[] }
+			{
+				serverId: string;
+				reason: CascadeUnconfirmedReason;
+				waitMs: number;
+				paths: string[];
+			}
 		>();
 		const noteUnconfirmed = (
 			serverId: string,
+			reason: CascadeUnconfirmedReason,
 			waitMs: number,
 			neighborPath: string,
 		): void => {
-			const group = unconfirmedByServer.get(serverId) ?? { waitMs, paths: [] };
+			// The key carries the reason: one server can hold BOTH shapes for
+			// different neighbours in one run, and merging them would attribute one
+			// cause's paths to the other's sentence (#5040, defect shape 24).
+			const key = `${reason}:${serverId}`;
+			const group = unconfirmedByServer.get(key) ?? {
+				serverId,
+				reason,
+				waitMs,
+				paths: [],
+			};
 			group.waitMs = Math.max(group.waitMs, waitMs);
 			group.paths.push(neighborPath);
-			unconfirmedByServer.set(serverId, group);
+			unconfirmedByServer.set(key, group);
 		};
 		const policyCounts = {
 			suppressed: 0,
@@ -2051,7 +2115,7 @@ export async function computeCascadeForFile(
 				// observation of the edited state; an older one, whatever its age,
 				// falls through to the touch below.
 				const postEdit =
-					entry != null && isPostEditObservation(entry, cascadeStart);
+					entry != null && isPostEditObservation(entry.ts, cascadeStart);
 				// #1095: content binding is the INNER gate; post-edit stays the outer bound.
 				//   false     → the server's diagnostics were computed against a DIFFERENT
 				//               disk state (e.g. the PRE-fix content) — don't trust or
@@ -2334,6 +2398,7 @@ export async function computeCascadeForFile(
 									else recordTouch();
 									noteUnconfirmed(
 										touchedClient.serverId,
+										"no-answer",
 										SILENT_PUSH_WAIT_MS,
 										neighborPath,
 									);
@@ -2468,6 +2533,57 @@ export async function computeCascadeForFile(
 							durationMs,
 						} satisfies CascadeResult["neighbors"][number];
 					}
+					// #5040: the answer exists, but it predates this run's edit. A
+					// push-only server (jdtls) publishes for a dependent when ITS model
+					// changes, not when we ask, so a notify-skipped touch of unchanged
+					// content reports whatever the server last published — possibly from
+					// before the exporter changed. That is not an observation of the
+					// post-edit state, so it is neither an answer to display nor a
+					// confirmed clean: the neighbour is named unconfirmed and the run
+					// never reads `clean` for it (the same refusal the passive snapshot
+					// and both fallbacks already make, #4486).
+					const reusedAnswer = readReusedAnswer(rawDiags);
+					if (
+						isPreEditAnswer(rawDiags, cascadeStart) &&
+						reusedAnswer !== undefined
+					) {
+						const durationMs = Date.now() - neighborStart;
+						noteUnconfirmed(
+							reusedAnswer.serverId,
+							"pre-edit-answer",
+							0,
+							neighborPath,
+						);
+						// One counted record per server and path: the reason a run cannot
+						// answer for this neighbour is field evidence (is this server ever
+						// re-publishing its dependents?), so it is a count, not a
+						// once-per-session flag.
+						incrementDegradationCount({
+							kind: "cascade-pre-edit-answer",
+							subject: `${reusedAnswer.serverId}:${normalizeMapKey(neighborPath)}`,
+							reason: `no publication for this dependent since the edit, so the cached answer is ${Math.max(0, cascadeStart - reusedAnswer.publishedAt)} ms older than this run`,
+						});
+						logCascade({
+							phase: "neighbor_touch",
+							filePath,
+							neighborFile: neighborPath,
+							diagnosticCount: 0,
+							durationMs,
+							lspTouched: true,
+							lspServerCount: configuredServerCount,
+							coldSnapshot: isColdSnapshot,
+							metadata: {
+								preEditAnswer: true,
+								answerServerId: reusedAnswer.serverId,
+								answerPublishedAt: reusedAnswer.publishedAt,
+								cascadeStart,
+								answerAgeMs: cascadeStart - reusedAnswer.publishedAt,
+							},
+						});
+						// Not an answer (#240 doctrine): the degraded-fallback path below
+						// still has a chance to surface a post-edit passive snapshot.
+						return undefined;
+					}
 					// #1093/#571/#1095: a touch result is only a CONFIRMED observation of the
 					// neighbor's current on-disk state when it is neither `inconclusive` (the
 					// notify/diagnostics wait lapsed — e.g. the tight 1000ms cold-snapshot
@@ -2479,6 +2595,9 @@ export async function computeCascadeForFile(
 					// are folded into `isConfirmedTouch` so no gate below can miss one. A
 					// confirmed result reconciles and counts as this run's observation of
 					// the neighbour (#4487); an unconfirmed one does neither.
+					// #5040: the age axis is NOT folded in: it is refused above, in the
+					// branch that also records the ledger row, because it applies to the
+					// CLEAN claim and to the findings alike and returns before this read.
 					const confirmed = isConfirmedTouch(rawDiags);
 					const bindingRejected = readBoundToCurrentDisk(rawDiags) === false;
 					const inconclusive = readInconclusive(rawDiags);
@@ -2592,7 +2711,7 @@ export async function computeCascadeForFile(
 					// #4486: the same post-edit gate as the passive snapshot; a
 					// pre-edit entry is not this neighbour's current state.
 					const postEdit =
-						entry != null && isPostEditObservation(entry, cascadeStart);
+						entry != null && isPostEditObservation(entry.ts, cascadeStart);
 					// #1104: consult binding before trusting a post-edit fallback snapshot —
 					// MATCH #1100/#1095 semantics (false → skip, "unknown" → use, true →
 					// use). Without this, a failed active touch could still re-display a
@@ -2750,9 +2869,7 @@ export async function computeCascadeForFile(
 			passiveSnapshotHits + silentWaitTouches + coldTouches + noLspConfigured;
 		// #4485: the unanswered neighbours, by server (bounded by the selected
 		// slice). Any of them keeps the run from reading `no_neighbors`/`clean`.
-		const unconfirmedServers = [...unconfirmedByServer].map(
-			([serverId, group]) => ({ serverId, ...group }),
-		);
+		const unconfirmedServers = [...unconfirmedByServer.values()];
 		const unconfirmedCount = unconfirmedServers.reduce(
 			(sum, group) => sum + group.paths.length,
 			0,
@@ -2987,7 +3104,7 @@ function appendFallbackNeighbors(
 		// #4486: a cached entry from before the compute started describes the
 		// tree before the edit. Both injected runs of the forensic window came
 		// from here, under the 240 s TTL this replaced.
-		if (!isPostEditObservation(entry, cascadeStart)) continue;
+		if (!isPostEditObservation(entry.ts, cascadeStart)) continue;
 		// #1104: a post-edit entry is not automatically trustworthy — consult
 		// binding the same way the reconcile path (#1100) and the touch-error
 		// fallback above do. `false` → skip (a stale/pre-fix-edit snapshot whose

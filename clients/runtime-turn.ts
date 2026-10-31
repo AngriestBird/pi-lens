@@ -20,6 +20,7 @@ import type {
 	CascadeResult,
 	CascadeRun,
 	CascadeSkipReason,
+	CascadeUnconfirmedReason,
 } from "./cascade-types.js";
 import {
 	blockerPartitionFields,
@@ -2865,9 +2866,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const unconfirmedRuns = cascadeRuns.filter((r) => r.unconfirmed);
 	if (unconfirmedRuns.length > 0) {
 		const runOrder = new Map(cascadeRuns.map((r, i) => [r, i]));
+		// #5040: keyed by server AND reason, because one server can leave one
+		// neighbour unanswered and another holding a pre-edit answer in the same
+		// turn — merging the two would word one cause's paths with the other's
+		// sentence (defect shape 24).
 		const byServer = new Map<
 			string,
 			{
+				serverId: string;
+				reason: CascadeUnconfirmedReason;
 				waitMs: number;
 				primaries: Set<string>;
 				paths: Map<string, string>;
@@ -2886,7 +2893,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						(runOrder.get(observer) ?? -1) > (runOrder.get(run) ?? -1)
 					)
 						continue;
-					const bucket = byServer.get(group.serverId) ?? {
+					// A record from before #5040 carries no reason; it is the #4485
+					// no-answer shape it was written as.
+					const reason: CascadeUnconfirmedReason = group.reason ?? "no-answer";
+					const bucketKey = `${reason}:${group.serverId}`;
+					const bucket = byServer.get(bucketKey) ?? {
+						serverId: group.serverId,
+						reason,
 						waitMs: group.waitMs,
 						primaries: new Set<string>(),
 						paths: new Map<string, string>(),
@@ -2899,7 +2912,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					bucket.paths.set(nk, neighborDisplay);
 					bucket.raw.set(primaryDisplay, run.filePath);
 					bucket.raw.set(neighborDisplay, neighborPath);
-					byServer.set(group.serverId, bucket);
+					byServer.set(bucketKey, bucket);
 				}
 			}
 		}
@@ -2911,7 +2924,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		/** #4617: the files the lines name, as `capped` shows them. */
 		const unconfirmedNamed: string[] = [];
 		let pathCount = 0;
-		for (const [serverId, bucket] of byServer) {
+		for (const bucket of byServer.values()) {
+			const serverId = bucket.serverId;
 			const paths = [...bucket.paths.values()];
 			for (const display of [
 				...[...bucket.primaries].slice(0, 3),
@@ -2921,11 +2935,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 			pathCount += paths.length;
 			const within = bucket.waitMs > 0 ? ` within ${bucket.waitMs} ms` : "";
-			blocks.push(
-				`Cascade sent ${paths.length} dependent(s) of ${capped([...bucket.primaries], 3)} to ${serverId}, ` +
-					`but no answer arrived${within}; a clean cascade result does not cover them.\n` +
-					`  • ${serverId}: ${capped(paths, 5)}`,
-			);
+			const dependents = capped([...bucket.primaries], 3);
+			// #5040: one sentence per cause. A reused pre-edit answer DID arrive,
+			// so the no-answer wording would be false for it.
+			const cause =
+				bucket.reason === "pre-edit-answer"
+					? `Cascade asked ${serverId} about ${paths.length} dependent(s) of ${dependents}, ` +
+						`but its cached answer predates this edit; a clean cascade result does not cover them.`
+					: `Cascade sent ${paths.length} dependent(s) of ${dependents} to ${serverId}, ` +
+						`but no answer arrived${within}; a clean cascade result does not cover them.`;
+			blocks.push(`${cause}\n  • ${serverId}: ${capped(paths, 5)}`);
 		}
 		if (blocks.length > 0) {
 			const pendingAdvisory = withCarryLabel(
@@ -2940,7 +2959,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				phase: "cascade_unconfirmed_rendered",
 				filePath: cascadeLogFilePath,
 				metadata: {
-					servers: byServer.size,
+					// `servers` stays the distinct server count it was before the
+					// buckets were keyed by cause; `groups` counts the cause buckets.
+					servers: new Set([...byServer.values()].map((b) => b.serverId)).size,
+					groups: byServer.size,
 					paths: pathCount,
 					runs: unconfirmedRuns.length,
 				},

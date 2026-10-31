@@ -4089,7 +4089,12 @@ describe("computeCascadeForFile", () => {
 				expect(run.unconfirmed).toEqual({
 					count: 1,
 					servers: [
-						{ serverId: "typescript", waitMs: 1000, paths: [neighbor] },
+						{
+							serverId: "typescript",
+							reason: "no-answer",
+							waitMs: 1000,
+							paths: [neighbor],
+						},
 					],
 				});
 				expect(run.selectedNeighborPaths).toEqual([neighbor]);
