@@ -2676,12 +2676,13 @@ export class RuntimeCoordinator {
 	 * (fail closed) rather than being resolved against a guess.
 	 *
 	 * Both reads persist what they retire into the caller's own cwd cache, and
-	 * a session's records live in that session's cwd cache (pi fixes a
-	 * session's cwd), so each caller retires only its OWN session's records
-	 * (`of`, required): a sweep by another session at another cwd would write
-	 * the wrong project's cache and leave the owner's record refusing its next
-	 * commit (PR #5033 round 3, F1 and item 4). Another session's dead cite is
-	 * that session's own turn end or commit gate to retire.
+	 * each caller retires only its OWN session's records (`of`, required): the
+	 * acting session's own records, whose cache is the coordinator root's cache
+	 * or the session cwd's, whichever wrote them. A sweep by another session at
+	 * another cwd would write the wrong project's cache and leave the owner's
+	 * record refusing its next commit (PR #5033 round 3, F1 and item 4).
+	 * Another session's dead cite is that session's own turn end or commit gate
+	 * to retire.
 	 */
 	retireForeignRowsOfMissingFiles(of: {
 		sessionId: string | undefined;
