@@ -61,9 +61,19 @@ export function refreshSaveVerdictTable(
 	changed: boolean;
 	measured: string[];
 	kept: string[];
+	heldBack: SaveVerdictHeldBack[];
 	notInTable: string[];
 	reason?: string;
 };
+
+export interface SaveVerdictHeldBack {
+	server: string;
+	prior: string;
+	measured: string;
+	verdict: string;
+}
+
+export function describeHeldBack(held: SaveVerdictHeldBack): string;
 
 export interface SaveVerdictRow {
 	server: string;

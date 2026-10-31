@@ -20,6 +20,7 @@ import { listRefreshFlips } from "../../scripts/lib/refresh-flips.mjs";
 import {
 	classifySaveVerdict,
 	describeArm,
+	describeHeldBack,
 	fixturePolicy,
 	orderByNeed,
 	parseSaveVerdictRows,
@@ -441,6 +442,152 @@ describe("parseSaveVerdictRows / orderByNeed: a bounded run converges", () => {
 				(fx) => fx.lang,
 			).map((fx) => fx.lang),
 		).toEqual(["cmake", "go"]);
+	});
+});
+
+/**
+ * PR #4945's base rows, verbatim (base 0286dd96): the two settled `no` answers
+ * the 2026-10-30 refresh turned into `inconclusive`, evidence column and all.
+ */
+const EXPERT_BASE =
+	"| expert | `save` | no | Prior measurement: answers with no `didSave` once the seed is under `lib/`. Gated. | #4768 arms A, B, C; nightly run 39852672584 (answered on call 6, 10955 ms); `tests/fixtures/nightly-floors/expert-readiness.json` |";
+const FSHARP_BASE =
+	"| fsharp | `save+text` | no | Source: a save holds the source and refreshes code lenses; diagnostics come from open and change checks. Exempt: 0 findings in every run. | ionide/FsAutoComplete `8f011f1395a4`, `src/FsAutoComplete/LspServers/AdaptiveFSharpLspServer.fs` (`TextDocumentDidSave`); nightly run 39845687189 |";
+const REAL_DOC = [
+	"# LSP capability matrix",
+	"",
+	"| server | save as declared | publishes after save only | verdict | evidence |",
+	"|---|---|---|---|---|",
+	EXPERT_BASE,
+	FSHARP_BASE,
+	"| cmake | `save` | unknown | Unverified: not measured. | none |",
+	"",
+	"## Next section",
+	"",
+].join("\n");
+
+/** What the 2026-10-30 nightly measured for the two rows (PR #4945 head d54b073d). */
+const measureExpert = () =>
+	measure({
+		server: "expert",
+		fixture: { lang: "expert", lspGate: true },
+		arms: { noSave: arm(0), silence: arm(1, 3000), saveAlone: arm(0) },
+	});
+const measureFsharp = () =>
+	measure({
+		server: "fsharp",
+		save: "save+text",
+		fixture: { lang: "fsharp", lspGateExempt: "0 findings in every run" },
+		arms: { noSave: arm(0), saveAlone: arm(0) },
+	});
+
+describe("refreshSaveVerdictTable: a night with no answer keeps the last answer (#5060)", () => {
+	// Recurrence: PR #4945 (2026-10-30) rewrote expert and fsharp from a settled
+	// `no` to `inconclusive` and replaced their evidence with the probe command,
+	// against the #390 rule that a refresh never regresses a richer classification.
+	it("reproduces the nightly's measurement for both rows", () => {
+		expect(measureExpert()[SAVE_VERDICT_COLUMN]).toBe("inconclusive");
+		expect(measureExpert().verdict).toContain(
+			"1 finding(s) arrived in the untriggered window",
+		);
+		expect(measureFsharp()[SAVE_VERDICT_COLUMN]).toBe("inconclusive");
+		expect(measureFsharp().verdict).toContain("no arm published");
+	});
+
+	it("keeps expert and fsharp at `no` with their evidence", () => {
+		const result = refreshSaveVerdictTable(REAL_DOC, [
+			measureExpert(),
+			measureFsharp(),
+		]);
+		expect(result.text).toContain(EXPERT_BASE);
+		expect(result.text).toContain(FSHARP_BASE);
+		expect(result.text).not.toContain("| inconclusive |");
+		expect(result.changed).toBe(false);
+		expect(result.measured).toEqual([]);
+		expect(result.heldBack.map((h) => h.server)).toEqual(["expert", "fsharp"]);
+		// The held night is recorded: the prior answer and what this night saw.
+		expect(result.heldBack[0]).toMatchObject({
+			server: "expert",
+			prior: "no",
+			measured: "inconclusive",
+		});
+		expect(result.heldBack[0].verdict).toContain("untriggered window");
+		// The run log names the held night: the answer that stands and the one tonight.
+		expect(describeHeldBack(result.heldBack[0])).toMatch(
+			/^save-verdict: held back expert: kept "no", this night measured "inconclusive" — Measured: inconclusive — 1 finding\(s\) arrived in the untriggered window/,
+		);
+		expect(
+			listRefreshFlips(
+				{ [MATRIX_DOC]: REAL_DOC },
+				{ [MATRIX_DOC]: result.text },
+			),
+		).toEqual([]);
+	});
+
+	it("keeps a settled answer over `cannot measure` and over a spelling nobody planned", () => {
+		// The gate admits the settled answers and refuses everything else, so an
+		// input outside SAVE_VERDICT_VALUES cannot erase an answer either.
+		for (const value of ["cannot measure", "maybe", "No ", ""]) {
+			const result = refreshSaveVerdictTable(REAL_DOC, [
+				{ ...measureExpert(), [SAVE_VERDICT_COLUMN]: value },
+			]);
+			expect(result.text, value).toContain(EXPERT_BASE);
+			expect(
+				result.heldBack.map((h) => h.server),
+				value,
+			).toEqual(["expert"]);
+		}
+	});
+
+	it("still writes an inconclusive night over a row that held no answer", () => {
+		const unknown = refreshSaveVerdictTable(REAL_DOC, [
+			measure({
+				server: "cmake",
+				fixture: { lang: "cmake", lspGate: true },
+				arms: { noSave: arm(0), saveAlone: arm(0) },
+			}),
+		]);
+		expect(unknown.text).toContain("| cmake | `save` | inconclusive |");
+		expect(unknown.heldBack).toEqual([]);
+		const again = refreshSaveVerdictTable(unknown.text, [
+			measure({
+				server: "cmake",
+				fixture: { lang: "cmake", lspGate: true },
+				arms: { noSave: arm(0), silence: arm(2), saveAlone: arm(0) },
+			}),
+		]);
+		expect(again.text).toContain("untriggered window");
+		expect(again.heldBack).toEqual([]);
+	});
+
+	it("still replaces an older answer with a new one, and the flip stays visible", () => {
+		const flipped = refreshSaveVerdictTable(REAL_DOC, [
+			measure({
+				server: "expert",
+				fixture: { lang: "expert", lspGate: true },
+				arms: { noSave: arm(0), silence: arm(0), saveAlone: arm(2) },
+			}),
+		]);
+		expect(flipped.text).toContain("| expert | `save` | yes |");
+		expect(flipped.heldBack).toEqual([]);
+		const flips = listRefreshFlips(
+			{ [MATRIX_DOC]: REAL_DOC },
+			{ [MATRIX_DOC]: flipped.text },
+		);
+		expect(
+			flips.some((f) => f.includes("- | expert |") && f.includes("| no |")),
+		).toBe(true);
+		expect(
+			flips.some((f) => f.includes("+ | expert |") && f.includes("| yes |")),
+		).toBe(true);
+		const back = refreshSaveVerdictTable(flipped.text, [
+			measure({
+				server: "expert",
+				fixture: { lang: "expert", lspGate: true },
+				arms: { noSave: arm(3), saveAlone: arm(0) },
+			}),
+		]);
+		expect(back.text).toContain("| expert | `save` | no |");
 	});
 });
 
