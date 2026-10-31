@@ -392,6 +392,7 @@ describe("pushed findings — a deferred runner's answer reads the file each fin
 	// Recurrence: an ownership test that compared spellings as text would stop
 	// trusting the edited file itself, outside the root, when a runner spells it
 	// through a link.
+	// lane: Unit tests (ubuntu shards); the link spelling needs a POSIX symlink.
 	it.skipIf(process.platform === "win32")(
 		"treats a link spelling of the edited file as the edited file",
 		() => {
