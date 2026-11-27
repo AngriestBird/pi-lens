@@ -147,7 +147,9 @@ jobs:
   # first CI run on this change observes it (a ci.yml or checker edit is a
   # `formal` trigger).
   tla-shards:
-    name: TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+    name: >-
+      ${{ needs.changes.outputs.formal == 'false' && 'TLA+ models (formal unchanged)'
+      || format('TLA+ models (shard {0}/{1})', matrix.shard, strategy.job-total) }}
     needs: changes
     # #3801 (verify r2 V1): failed classification must not skip the model
     # shards. Empty `formal` output runs every config; only a proven 'false'
