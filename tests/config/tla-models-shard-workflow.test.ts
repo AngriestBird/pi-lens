@@ -110,7 +110,8 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		expect(shards.length).toBeGreaterThan(1);
 		expect(shard.strategy?.["fail-fast"]).toBe(false);
 		expect(shard.name).toBe(
-			"TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})",
+			"${{ needs.changes.outputs.formal == 'false' && 'TLA+ models (formal unchanged)' " +
+				"|| format('TLA+ models (shard {0}/{1})', matrix.shard, strategy.job-total) }}",
 		);
 		const run = shard.steps?.map((entry) => entry.run ?? "").join("\n") ?? "";
 		expect(run).toMatch(
