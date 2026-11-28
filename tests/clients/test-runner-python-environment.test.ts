@@ -161,6 +161,8 @@ beforeEach(() => {
 	// `.venv` rungs are planted on purpose and the gate is witnessed in
 	// `project-local-bin-trust.test.ts`.
 	setProjectTrustState("trusted");
+	// A host pytest must not fill a PATH rung the fixture left empty.
+	vi.stubEnv("PATH", isolatedPiLensHome);
 	originalVirtualEnv = process.env.VIRTUAL_ENV;
 	originalCondaPrefix = process.env.CONDA_PREFIX;
 	originalUvProjectEnvironment = process.env.UV_PROJECT_ENVIRONMENT;
@@ -172,6 +174,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	resetDegradationLedger();
 	restoreEnvironmentVariable("VIRTUAL_ENV", originalVirtualEnv);
 	restoreEnvironmentVariable("CONDA_PREFIX", originalCondaPrefix);
@@ -1283,11 +1286,9 @@ describe("pytest found on PATH with no pytest config (#5410 D2)", () => {
 	// no project environment the run then started a bare `python -m pytest`
 	// (spawn ENOENT on a host without `python`) instead of the pytest that
 	// detection found.
-	let originalPath: string | undefined;
 	let originalCwd: string;
 
 	beforeEach(() => {
-		originalPath = process.env.PATH;
 		originalCwd = process.cwd();
 		// The interpreter stand-in answers as a real interpreter without the
 		// pytest module does; every other command reports one passing test.
@@ -1304,8 +1305,6 @@ describe("pytest found on PATH with no pytest config (#5410 D2)", () => {
 
 	afterEach(() => {
 		process.chdir(originalCwd);
-		if (originalPath === undefined) delete process.env.PATH;
-		else process.env.PATH = originalPath;
 		safeSpawnAsync.mockReset();
 		safeSpawnAsync.mockImplementation(async () => ({
 			stdout: "1 passed in 0.01s\n",
@@ -1320,7 +1319,7 @@ describe("pytest found on PATH with no pytest config (#5410 D2)", () => {
 		const file = path.join(dir, "pytest");
 		fs.writeFileSync(file, "#!/bin/sh\necho '1 passed in 0.01s'\n");
 		fs.chmodSync(file, 0o755);
-		process.env.PATH = [dir, originalPath ?? ""].join(path.delimiter);
+		vi.stubEnv("PATH", dir);
 		return file;
 	}
 
@@ -1415,7 +1414,7 @@ describe("pytest found on PATH with no pytest config (#5410 D2)", () => {
 		fs.writeFileSync(path.join(bin, "pytest"), "#!/bin/sh\n", {
 			mode: 0o644,
 		});
-		process.env.PATH = [bin, "/nonexistent-5410"].join(path.delimiter);
+		vi.stubEnv("PATH", bin);
 
 		const target = new TestRunnerClient(false).getTestRunTarget(
 			project.testFile,
@@ -1438,7 +1437,7 @@ describe("pytest found on PATH with no pytest config (#5410 D2)", () => {
 			mode: 0o755,
 		});
 		process.chdir(base);
-		process.env.PATH = ["relbin", originalPath ?? ""].join(path.delimiter);
+		vi.stubEnv("PATH", "relbin");
 
 		await detectAndRun(project);
 

@@ -172,6 +172,16 @@ function write(relative: string, content: string): string {
 	return file;
 }
 
+function plantPytestInterpreter(): void {
+	write("pytest.ini", "[pytest]\n");
+	write(
+		process.platform === "win32"
+			? ".venv/Scripts/python.exe"
+			: ".venv/bin/python",
+		"",
+	);
+}
+
 /** One edited source with its companion test; the fake replays `fixture` for it. */
 function plant(name: string, fixture: string | undefined): string {
 	const src = write(`src/${name}.ts`, `export const ${name} = 1;\n`);
@@ -456,7 +466,7 @@ describe("TestRunnerClient parse verdict", () => {
 	});
 
 	it("pytest: a failing exit with no parsable summary is an error, not a clean zero", async () => {
-		write("pytest.ini", "[pytest]\n");
+		plantPytestInterpreter();
 		const test = write("test_a.py", "def test_a(): assert False\n");
 		fake.pytest = { stdout: "Traceback: internal error\n", status: 3 };
 		const detected = client.detectRunner(root, test);
@@ -472,13 +482,7 @@ describe("TestRunnerClient parse verdict", () => {
 describe("pytest: errors beside passes never read as passed (#5270)", () => {
 	/** An edited source with its `tests/test_<name>.py`; the fake replays `run`. */
 	function plantPython(name: string, run: PytestRun): string {
-		write("pytest.ini", "[pytest]\n");
-		write(
-			process.platform === "win32"
-				? ".venv/Scripts/python.exe"
-				: ".venv/bin/python",
-			"",
-		);
+		plantPytestInterpreter();
 		const src = write(`${name}.py`, "x = 1\n");
 		const test = write(`tests/test_${name}.py`, "def test_a(): pass\n");
 		fake.pytest = pytestRun(run);
