@@ -45,6 +45,9 @@ export declare function lintRefsRemainders(
 	fullBody: string,
 	options?: { title?: string; trackerIssues?: number[] },
 ): string[];
+export declare function parseAlignmentRules(
+	source: string,
+): Array<{ name: string; globs: string[]; needle: RegExp }>;
 export declare function lintClassSweep(
 	body?: string,
 	options?: { diff?: string },

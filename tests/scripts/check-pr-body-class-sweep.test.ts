@@ -6,6 +6,7 @@ import {
 	lintClassSweep,
 	lintLocalPrBody,
 	lintPrBody,
+	parseAlignmentRules,
 } from "../../scripts/check-pr-body.mjs";
 
 // #4273: a `## Class sweep` names the defect shape, quotes the search that
@@ -25,6 +26,227 @@ const pr4245Body = readBody("pr-4245-body.md");
 
 const section = (sweep: string) =>
 	`## Class sweep\n${sweep}\n\n## Observability\nRecorded.`;
+
+// #5076: self-reported none must not hide a new configuration deny key.
+describe("alignment diff truth (#5076)", () => {
+	const catalog = "| # | Family |\n| --- | --- |\n| 1 | Keys: deny keys |\n";
+	const rule = {
+		family: "Keys",
+		globs: ["clients/**/*.ts"],
+		needle: "disabled",
+	};
+	const fenced = (value: string) => `${catalog}\n~~~json\n${value}\n~~~\n`;
+	it.each([
+		["no selector block", catalog, /Missing alignment rules/],
+		[
+			"malformed JSON",
+			fenced("["),
+			/Invalid selector JSON in docs\/alignment-families\.md/,
+		],
+		["non-list", fenced("{}"), /Invalid alignment rules/],
+		["missing family", fenced("[]"), /Incomplete alignment rules/],
+		[
+			"duplicate family",
+			fenced(JSON.stringify([rule, rule])),
+			/Incomplete alignment rules/,
+		],
+		[
+			"unlisted family",
+			fenced(JSON.stringify([{ ...rule, family: "Other" }])),
+			/Invalid alignment rule/,
+		],
+		[
+			"empty glob",
+			fenced(JSON.stringify([{ ...rule, globs: [""] }])),
+			/Invalid alignment rule/,
+		],
+		[
+			"empty needle",
+			fenced(JSON.stringify([{ ...rule, needle: "" }])),
+			/Invalid alignment rule/,
+		],
+	] as const)("refuses a catalog with %s", (_label, source, reason) => {
+		expect(() => parseAlignmentRules(source)).toThrow(reason);
+	});
+
+	it("refuses none for an added deny key and names its actual line", () => {
+		const source =
+			'const LSP_KEY_DENY = {\n  disabledNewService: "array-union",\n};\n';
+		const diff =
+			'diff --git a/clients/config-schema.ts b/clients/config-schema.ts\n@@ -1,2 +1,3 @@\n const LSP_KEY_DENY = {\n+  disabledNewService: "array-union",\n };\n';
+		const body =
+			"## Summary\nChange config.\n## Tests\nTested.\n## Class sweep\nAlignment: none: no alignment changes\n## Observability\nNo new failure path; no record added.";
+		const result = lintPrBody(body, {
+			workingTree: true,
+			diff,
+			headFiles: new Map([["clients/config-schema.ts", source]]),
+		});
+		expect(result.errors.join("\n")).toContain("Turn-off and deny keys");
+		expect(result.errors.join("\n")).toContain("clients/config-schema.ts:2");
+	});
+
+	it.each([
+		[
+			"Path globs and their anchors",
+			"clients/dispatch/rule-policy.ts",
+			"\tignorePaths?: (string | RuleIgnoreScope)[];",
+		],
+		[
+			"Turn-off and deny keys",
+			"clients/config-schema.ts",
+			'\tdisabledServers: "array-union",',
+		],
+		[
+			"Config tiers and nested owners",
+			"clients/analysis-root.ts",
+			"export function resolveSessionConfigRoot(",
+		],
+		[
+			"Verdict and coverage wording",
+			"clients/dispatch/dispatcher.ts",
+			"function buildCoverageNotice(",
+		],
+		[
+			"Tool parameter shapes across pi tools and MCP tools",
+			"tools/lens-diagnostics.ts",
+			"\t\t\tpath: Type.Optional(",
+		],
+		[
+			"Closed vocabularies",
+			"clients/config-diagnostic-codes.ts",
+			"\tPILENS_CFG_0001:",
+		],
+		[
+			"Env tunables",
+			"clients/agent-nudge.ts",
+			'\t\t_enabledCache = process.env.PI_LENS_AGENT_NUDGE !== "0";',
+		],
+		[
+			"One object with different keys",
+			"clients/path-utils.ts",
+			"export function normalizeMapKey(filePath: string): string {",
+		],
+		[
+			"Tool config presence",
+			"clients/tool-policy.ts",
+			"\thasEslintConfig?: boolean;",
+		],
+	])("requires family %s for its registered code", (family, file, source) => {
+		expect(readFileSync(join(repositoryRoot, file), "utf8")).toContain(source);
+		const diff = `diff --git a/${file} b/${file}\n@@ -0,0 +1 @@\n+${source}\n`;
+		const result = lintPrBody(
+			"## Class sweep\nAlignment: none: no alignment changes",
+			{
+				workingTree: true,
+				diff,
+				headFiles: new Map([[file, `${source}\n`]]),
+			},
+		);
+		expect(result.errors.join("\n")).toContain(
+			`${family} required by ${file}:1`,
+		);
+	});
+
+	it("requires every matching family and accepts the complete list", () => {
+		const file = "tools/example.ts";
+		const source = "const params = { path: process.env.PI_LENS_TEST };";
+		const diff = `diff --git a/${file} b/${file}\n@@ -0,0 +1 @@\n+${source}\n`;
+		const options = {
+			workingTree: true,
+			diff,
+			headFiles: new Map([[file, `${source}\n`]]),
+		};
+		const partial = lintPrBody(
+			"## Class sweep\nAlignment: Env tunables",
+			options,
+		).errors.join("\n");
+		expect(partial).toContain(
+			"Tool parameter shapes across pi tools and MCP tools required",
+		);
+		expect(partial).not.toContain("Env tunables required");
+		const complete = lintPrBody(
+			"## Class sweep\nAlignment: Env tunables, Tool parameter shapes across pi tools and MCP tools",
+			options,
+		).errors.join("\n");
+		expect(complete).not.toContain(" required by ");
+	});
+
+	it.each([
+		["unreadable", undefined],
+		["mismatched", "const other = 1;\n"],
+	])("refuses an %s applicable post-image", (_label, source) => {
+		const file = "clients/config-schema.ts";
+		const diff = `diff --git a/${file} b/${file}\n@@ -0,0 +1 @@\n+const disabledNewService = [];\n`;
+		const headFiles = new Map([[file, source as string]]);
+		const errors = lintPrBody(
+			"## Class sweep\nAlignment: none: no alignment changes",
+			{ workingTree: true, diff, headFiles },
+		).errors.join("\n");
+		expect(errors).toContain(`Alignment: cannot read or verify ${file}`);
+	});
+
+	it.each(["docs/example.md", "clients/unrelated.ts"])(
+		"ignores a needle on unrelated path %s",
+		(file) => {
+			const source = "const disabledNewService = [];";
+			const diff = `diff --git a/${file} b/${file}\n@@ -0,0 +1 @@\n+${source}\n`;
+			const errors = lintPrBody(
+				"## Class sweep\nAlignment: none: no alignment changes",
+				{
+					workingTree: true,
+					diff,
+					headFiles: new Map([[file, `${source}\n`]]),
+				},
+			).errors.join("\n");
+			expect(errors).not.toContain("Turn-off and deny keys required");
+		},
+	);
+
+	it("ignores an existing matching line when another line is added", () => {
+		const file = "clients/config-schema.ts";
+		const source = "const disabledServers = [];\nconst unrelated = 1;\n";
+		const diff = `diff --git a/${file} b/${file}\n@@ -1 +1,2 @@\n const disabledServers = [];\n+const unrelated = 1;\n`;
+		const errors = lintPrBody(
+			"## Class sweep\nAlignment: none: no alignment changes",
+			{ workingTree: true, diff, headFiles: new Map([[file, source]]) },
+		).errors.join("\n");
+		expect(errors).not.toContain("Turn-off and deny keys required");
+	});
+
+	it.each([
+		["alias", "const alias = disabledServers;"],
+		["indirect call", "invoke(disabledServers);"],
+		["bound value", "const value = disabledServers; use(value);"],
+	])("detects a registered identifier in an %s", (_label, source) => {
+		const file = "clients/config-core/deny.ts";
+		const diff = `diff --git a/${file} b/${file}\n@@ -0,0 +1 @@\n+${source}\n`;
+		const body = "## Class sweep\nAlignment: none: no alignment changes";
+		const errors = lintPrBody(body, {
+			workingTree: true,
+			diff,
+			headFiles: new Map([[file, `${source}\n`]]),
+		}).errors.join("\n");
+		expect(errors).toContain(`Turn-off and deny keys required by ${file}:1`);
+	});
+
+	it.each([
+		["unrelated code", "const unrelated = 1;"],
+		["comment", "/*\ndisabledServers\n*/"],
+		["string", "const text = `\ndisabledServers\n`;"],
+	])("ignores %s", (_label, source) => {
+		const file = "clients/config-core/deny.ts";
+		const added = source
+			.split("\n")
+			.map((line) => `+${line}`)
+			.join("\n");
+		const diff = `diff --git a/${file} b/${file}\n@@ -0,0 +1,3 @@\n${added}\n`;
+		const errors = lintPrBody(
+			"## Class sweep\nAlignment: none: no alignment changes",
+			{ workingTree: true, diff, headFiles: new Map([[file, `${source}\n`]]) },
+		).errors.join("\n");
+		expect(errors).not.toContain("Turn-off and deny keys required");
+	});
+});
 
 describe("Class sweep shape and search (#4273)", () => {
 	it("fails #4248's changed-file population with a template pointer", () => {

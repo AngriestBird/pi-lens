@@ -308,6 +308,34 @@ function createOriginMasterFixture(
 	return directory;
 }
 
+// #5076: the diff's committed post-image, not a dirty worktree or a hunk-only
+// lexer, decides whether a new deny key contradicts the body.
+it("detects an added deny key through the real diff and post-image blob", () => {
+	const root = createOriginMasterFixture(undefined, {
+		path: "clients/config-schema.ts",
+		pre: ["const LSP_KEY_DENY = {", "};"],
+		post: [
+			"const LSP_KEY_DENY = {",
+			'  disabledNewService: "array-union",',
+			"};",
+		],
+		dirty: ["/*", '  disabledNewService: "array-union",', "};"],
+	});
+	try {
+		const diff = localDiff(root);
+		expect(diff).toContain("index ");
+		const result = lintPrBody(body, { diff, cwd: root, workingTree: true });
+		expect(result.errors.join("\n")).toContain(
+			"Turn-off and deny keys required by clients/config-schema.ts:2",
+		);
+		expect(result.errors.join("\n")).toContain(
+			'disabledNewService: "array-union"',
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 describe("flattened PR body repair", () => {
 	it("detects the clearly flattened real-world shape and repairs it", () => {
 		expect(lintPrBody(flattenedBody)).toMatchObject({ valid: false });
@@ -3218,14 +3246,15 @@ describe("PR body lint (#1844)", () => {
 		["declaration file", "tools/example.d.ts"],
 		["declaration module", "tools/example.d.mts"],
 	])("ignores runtime markers in a %s", (_name, file) => {
+		const diff = `diff --git a/${file} b/${file}\n+try { run(); } catch (error) { report(error); }`;
 		const result = lintLocalPrBody(
 			body.replace(
 				"The advisory check run is the record.",
 				"No new failure path; no record added.",
 			),
 			process.cwd(),
-			() =>
-				`diff --git a/${file} b/${file}\n+try { run(); } catch (error) { report(error); }`,
+			() => diff,
+			{ headFiles: postImageFromDiff(diff).headFiles },
 		);
 		expect(result).toEqual({ valid: true, errors: [] });
 	});

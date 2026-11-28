@@ -18,6 +18,27 @@ The family name is the text before the first colon in the Family column. Names c
 | 8 | One object with different keys: a file, finding, session, turn, runner run, LSP document or blocker keyed by two spellings, or by a key that is not stable across its life (raw vs normalized path, URI vs path, display text, list position, a per-session counter) | `clients/path-keyed-map.ts` (`PathKeyedMap`), `clients/path-utils.ts` (the normalizers), `clients/finding-identity.ts`, `docs/invariants/`, `docs/defect-shapes.md` shape 1 |
 | 9 | Tool config presence: whether tool X counts as configured for a file, answered by the tool policy (`hasXConfig` helpers), each runner's own gate, the formatter's explicit-config check and effective-config; where each looks, how far it walks, and what counts as config | `clients/tool-policy.ts` (`getLinterPolicyForCwd`, the `hasXConfig` helpers), `clients/dispatch/runners/`, `clients/formatters.ts`, `clients/effective-config.ts`; known divergences are #5408 |
 
+## Machine-readable start-from rules
+
+Each rule gives path globs and a positive JavaScript regular expression over
+comment-and-string-blanked added code. References used as aliases or arguments
+match; differently named concepts outside these selectors do not. These are
+start-from rules, not a complete semantic census of each family.
+
+```json
+[
+  {"family":"Path globs and their anchors","globs":["clients/file-utils.ts","clients/dispatch/rule-policy.ts","clients/dispatch/runners/yaml-rule-parser.ts","clients/tree-sitter-query-loader.ts"],"needle":"\\b(ignore|ignorePaths|ignores|ignore_paths)\\b"},
+  {"family":"Turn-off and deny keys","globs":["clients/config-core/deny.ts","clients/config-schema.ts","clients/tool-config.ts"],"needle":"\\b(disabled[A-Za-z0-9_]*|enabled|disable|select)\\b"},
+  {"family":"Config tiers and nested owners","globs":["clients/analysis-root.ts","clients/config-core/resolve.ts","clients/config-core/merge.ts"],"needle":"\\b(resolveSessionConfigRoot|mergeConfig|configOwner|merge)\\b"},
+  {"family":"Verdict and coverage wording","globs":["clients/dispatch/dispatcher.ts","clients/dispatch/runners/lsp.ts","tools/lens-diagnostics.ts","tools/lsp-diagnostics.ts"],"needle":"\\b(buildCoverageNotice|unconfirmed|unavailablePrimaries|unavailable)\\b"},
+  {"family":"Tool parameter shapes across pi tools and MCP tools","globs":["tools/**/*.ts","clients/mcp/**/*.ts"],"needle":"\\b(path|paths|scope|severity|wait)\\s*:"},
+  {"family":"Closed vocabularies","globs":["clients/config-diagnostic-codes.ts","clients/degradation-ledger.ts","tests/support/session-state-registry.ts"],"needle":"\\b(RUNNER_SKIP_REASONS|PILENS_CFG_[A-Z0-9_]+|DEGRADATION_CODES|kind)\\b"},
+  {"family":"Env tunables","globs":["clients/**/*.ts","tools/**/*.ts","index.ts"],"needle":"\\bPI_LENS_[A-Z0-9_]+\\b"},
+  {"family":"One object with different keys","globs":["clients/path-keyed-map.ts","clients/path-utils.ts","clients/finding-identity.ts"],"needle":"\\b(PathKeyedMap|normalizeMapKey|normalizeEphemeralMapKey|findingIdentity)\\b"},
+  {"family":"Tool config presence","globs":["clients/tool-policy.ts","clients/dispatch/runners/**/*.ts","clients/formatters.ts","clients/effective-config.ts"],"needle":"\\b(has[A-Za-z]+Config|getLinterPolicyForCwd)\\b"}
+]
+```
+
 ## What touches means
 
 A change touches a family when it adds or edits a member of that family. Naming a family does not ask for a fix; it tells the reviewer and the alignment routine which meanings this change could move. Moving a member to the meaning its siblings already use still counts as touching it. A change that touches no member writes `none: <reason>`, with a reason of at least 12 characters.

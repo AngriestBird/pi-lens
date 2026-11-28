@@ -4693,16 +4693,11 @@ function notesAdmitted(tokens) {
 }
 
 /**
- * The family names of `docs/alignment-families.md`: the text before the first
- * colon in the Family column of its table. A file with no such table throws,
- * so a gate that cannot read the list never reads a body as clean.
+ * Every name in the Family column must have exactly one diff selector.
  */
-function alignmentFamilies() {
-	const table = markdownTokens(
-		readFileSync(resolve(REPO_ROOT, ALIGNMENT_FAMILIES_PATH), "utf8"),
-	)
-		.map(({ token }) => token)
-		.find((token) => token.type === "table");
+export function parseAlignmentRules(source) {
+	const tokens = markdownTokens(source).map(({ token }) => token);
+	const table = tokens.find((token) => token.type === "table");
 	const names = (table?.rows ?? []).map((row) =>
 		String(row[1]?.text ?? "")
 			.split(":")[0]
@@ -4716,30 +4711,95 @@ function alignmentFamilies() {
 		throw new Error(
 			`${ALIGNMENT_FAMILIES_PATH} holds no readable family table`,
 		);
-	return names;
+	const block = tokens.find(
+		(token) => token.type === "code" && token.lang === "json",
+	);
+	if (!block) throw new Error("Missing alignment rules");
+	let entries;
+	try {
+		entries = JSON.parse(block.text);
+	} catch (cause) {
+		throw new Error(`Invalid selector JSON in ${ALIGNMENT_FAMILIES_PATH}`, {
+			cause,
+		});
+	}
+	if (!Array.isArray(entries)) throw new Error("Invalid alignment rules");
+	const rules = entries.map((rule) => {
+		if (
+			!rule ||
+			!names.includes(rule.family) ||
+			!Array.isArray(rule.globs) ||
+			!rule.globs.length ||
+			rule.globs.some((glob) => typeof glob !== "string" || !glob) ||
+			typeof rule.needle !== "string" ||
+			!rule.needle
+		)
+			throw new Error("Invalid alignment rule");
+		return {
+			name: rule.family,
+			globs: rule.globs,
+			needle: new RegExp(rule.needle),
+		};
+	});
+	if (
+		rules.length !== names.length ||
+		new Set(rules.map((rule) => rule.name)).size !== names.length
+	)
+		throw new Error("Incomplete alignment rules");
+	return rules;
 }
 
-/**
- * `### Class sweep` carries exactly one `Alignment:` line (#5026): the family
- * names the change touches, comma-separated and spelled as in
- * `docs/alignment-families.md`, or `none: <reason>` with a reason of at least
- * ALIGNMENT_NONE_MIN_REASON characters. Fail closed: anything else refuses,
- * a bare `none` and the template's own placeholder included.
- */
-function lintAlignmentLine(sweepLines) {
+function lintAlignmentLine(sweepLines, options = {}) {
 	const found = sweepLines
 		.map((line) => /^Alignment:(.*)$/.exec(line.trim())?.[1])
 		.filter((value) => value !== undefined);
-	const names = alignmentFamilies();
+	const rules = parseAlignmentRules(
+		readFileSync(resolve(REPO_ROOT, ALIGNMENT_FAMILIES_PATH), "utf8"),
+	);
+	const names = rules.map((rule) => rule.name);
 	const message = `PR body "Class sweep" needs exactly one line "Alignment: <family names, comma-separated>" or "Alignment: none: <reason of ${ALIGNMENT_NONE_MIN_REASON}+ characters>". Families: ${names.join("; ")}. See ${ALIGNMENT_FAMILIES_PATH}.`;
 	if (found.length !== 1) return [message];
 	const value = found[0].trim();
-	if (value.startsWith("none:"))
-		return value.slice(5).trim().length >= ALIGNMENT_NONE_MIN_REASON
-			? []
-			: [message];
-	const listed = value.split(",").map((name) => name.trim());
-	return listed.every((name) => names.includes(name)) ? [] : [message];
+	const none = value.startsWith("none:");
+	const listed = none ? [] : value.split(",").map((name) => name.trim());
+	if (
+		none
+			? value.slice(5).trim().length < ALIGNMENT_NONE_MIN_REASON
+			: !listed.every((name) => names.includes(name))
+	)
+		return [message];
+	const errors = [];
+	for (const file of parseRuntimeHunks(options.diff ?? "")) {
+		const applicable = rules.filter((rule) =>
+			rule.globs.some((glob) => matchGlob(glob, file.post)),
+		);
+		if (!file.added.size || !applicable.length) continue;
+		const source = headFileSource(file.post, {
+			...options,
+			postBlob: file.postBlob,
+		});
+		const sourceRows = typeof source === "string" ? sourceLines(source) : null;
+		if (
+			!sourceRows ||
+			[...file.added].some(([line, text]) => sourceRows[line - 1] !== text)
+		) {
+			errors.push(`Alignment: cannot read or verify ${file.post}`);
+			continue;
+		}
+		const lines = sourceLines(blankCommentsAndStrings(source).text);
+		for (const rule of applicable) {
+			if (listed.includes(rule.name)) continue;
+			for (const line of file.added.keys()) {
+				if (rule.needle.test(lines[line - 1])) {
+					errors.push(
+						`Alignment: ${rule.name} required by ${file.post}:${line}: ${file.added.get(line)}`,
+					);
+					break;
+				}
+			}
+		}
+	}
+	return errors;
 }
 
 function lintBodyBudgets(body) {
@@ -4891,6 +4951,7 @@ export function lintPrBody(body = "", options = {}) {
 						sweep.contentIndex,
 						nextSectionHeading(sweep)?.index ?? lines.length,
 					),
+					options,
 				),
 			);
 	}
